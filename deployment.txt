@@ -1,0 +1,351 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║  ADMIN REPORT GENERATOR — DEPLOYMENT GUIDE                                 ║
+║  Read this end-to-end before deploying. Written for a human operator or an ║
+║  AI agent with shell access to the target server.                         ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+Last updated: 2026-07-17
+
+
+────────────────────────────────────────────────────────────────────────────
+0. TL;DR (the 10-step happy path)
+────────────────────────────────────────────────────────────────────────────
+  1.  Install Python 3.11+ and (for prod) PostgreSQL.
+  2.  git clone <repo> && cd admin-report-generator
+  3.  Copy the 3 sensitive files from deploy/ into place (section 4).
+  4.  python -m venv webapp/.venv  &&  activate it.
+  5.  pip install -r webapp/requirements.txt
+  6.  Edit webapp/.env (SECRET_KEY, ALLOWED_HOSTS, POSTGRES_*).  (section 5)
+  7.  python webapp/manage.py migrate
+  8.  python webapp/manage.py createsuperuser        # first admin login
+  9.  python webapp/manage.py collectstatic --noinput
+  10. Run it (dev: runserver 0.0.0.0:8000 · prod: waitress, section 8) and put
+      a reverse proxy + DNS in front for the domain (section 9).
+
+If anything misbehaves, jump to section 12 (Troubleshooting).
+
+
+────────────────────────────────────────────────────────────────────────────
+1. WHAT THIS SYSTEM IS
+────────────────────────────────────────────────────────────────────────────
+A Django web app that lets administrators generate the "System Admin Report"
+(an .xlsx) from LIVE Prometheus metrics, annotate it (answer the flagged items,
+add comments), then download or e-mail it. It also keeps an audit history of
+every report and manages user roles.
+
+Two moving parts live in this repo:
+
+  webapp/        The Django project (this is what you run/serve).
+                 - config/    project settings, urls, wsgi
+                 - reports/   the single app: views, models, auth, services
+                 - templates/ , static/   the UI
+  send_report/   The REPORT ENGINE (imported by the webapp, also runnable on its
+                 own from the CLI). generate_report.py builds the xlsx;
+                 mail_report.py renders + sends the e-mail. The webapp adds
+                 send_report/ to sys.path (see webapp/config/settings.py →
+                 SEND_REPORT_DIR = <repo>/send_report) and does `import
+                 generate_report`. THE TWO FOLDERS MUST STAY SIBLINGS.
+
+Data sources at RUNTIME:
+  * Prometheus  — live metrics (queried on every form load). URL in config.ini.
+  * prometheus.yml (repo root) — the system→host TOPOLOGY the report is built
+    from. Read via config.ini [prometheus] yml = ../prometheus.yml.
+  * PostgreSQL — the app's own store: users, profiles, roles, report history,
+    e-mail recipients, runtime system config.
+  * SMTP (Office 365) — outbound mail for the e-mail feature.
+  * Org auth endpoint (vault …/api/auth) — validates staff logins (see sec. 10).
+  * Keycloak (optional) — role store; OFF by default (roles managed locally).
+
+
+────────────────────────────────────────────────────────────────────────────
+2. ARCHITECTURE / REQUEST FLOW (so you know what must be reachable)
+────────────────────────────────────────────────────────────────────────────
+  Browser ──HTTP──> [reverse proxy :443] ──> [Django/waitress :8000]
+                                                 │
+      login  ─────────────────────────────────> org auth endpoint (HTTPS)
+      load form / generate ──> queries ───────> Prometheus (HTTP)
+      reads topology ─────────────────────────> prometheus.yml (local file)
+      save history / users / roles ───────────> PostgreSQL
+      "Generate & e-mail" ────────────────────> SMTP (Office 365)
+
+The server therefore needs OUTBOUND network access to: Prometheus, the auth
+endpoint, SMTP, PostgreSQL, and (if enabled) Keycloak & Grafana.
+
+
+────────────────────────────────────────────────────────────────────────────
+3. PREREQUISITES
+────────────────────────────────────────────────────────────────────────────
+  * Python 3.11 – 3.13 (developed/tested on 3.13).
+  * pip / venv.
+  * PostgreSQL 13+ reachable from the app (production). SQLite is used
+    automatically ONLY as a dev fallback when POSTGRES_DB is unset — do not use
+    SQLite for production.
+  * OS packages: none special on Windows; on Linux the psycopg binary wheel
+    needs no libpq, and Pillow/openpyxl are pure-wheel.
+  * A service account to run the app (don't run as root/Administrator).
+  * For the public URL: DNS control for the hostname + a reverse proxy (IIS or
+    nginx) if you want ports 80/443 (section 9).
+  * Network egress to the hosts listed in section 2.
+
+
+────────────────────────────────────────────────────────────────────────────
+4. SENSITIVE FILES (from deploy/) — COPY THESE INTO PLACE FIRST
+────────────────────────────────────────────────────────────────────────────
+The GitHub repo intentionally does NOT contain secrets or internal topology.
+Those are delivered separately in the deploy/ folder (see deploy/PLACEMENT.txt).
+After cloning, copy them in. Committed *.sample files show the shape of each.
+
+  deploy/config.ini      ->  send_report/config.ini
+  deploy/prometheus.yml  ->  prometheus.yml            (repo root)
+  deploy/env.example     ->  webapp/.env               (then edit real values)
+
+  # from the repo root:
+  #   Linux/macOS
+  cp deploy/config.ini deploy/prometheus.yml .          # careful: prometheus.yml to root
+  cp deploy/config.ini      send_report/config.ini
+  cp deploy/prometheus.yml  prometheus.yml
+  cp deploy/env.example     webapp/.env
+  #   Windows PowerShell
+  Copy-Item deploy\config.ini      send_report\config.ini
+  Copy-Item deploy\prometheus.yml  prometheus.yml
+  Copy-Item deploy\env.example     webapp\.env
+
+If you don't have deploy/ yet, build the two runtime files from the samples:
+  cp config.sample.ini      send_report/config.ini    # then fill in real values
+  cp prometheus.sample.yml  prometheus.yml            # then add real targets
+
+Path facts (do not "fix" these unless you know why):
+  * send_report/config.ini is found automatically (DEFAULT_CONFIG = the file next
+    to generate_report.py).
+  * config.ini's `yml = ../prometheus.yml` resolves relative to send_report/, i.e.
+    to the REPO ROOT prometheus.yml. Keep it there.
+  * The report logo is send_report/logo.png (committed). The UI logo is
+    webapp/static/img/logo.png (committed).
+
+
+────────────────────────────────────────────────────────────────────────────
+5. ENVIRONMENT / SETTINGS (webapp/.env)
+────────────────────────────────────────────────────────────────────────────
+settings.py auto-loads webapp/.env at startup (real OS env vars win over it).
+Minimum production values:
+
+  DJANGO_SECRET_KEY   50+ random chars. Generate:
+        python -c "from django.core.management.utils import get_random_secret_key as g; print(g())"
+  DJANGO_DEBUG        0  (NEVER 1 in production)
+  DJANGO_ALLOWED_HOSTS   comma list incl. your domain, e.g.
+        admin-report.rbz.co.zw,localhost,127.0.0.1
+  POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_HOST / POSTGRES_PORT
+  REPORT_SNAPSHOT_TTL   optional, default 300 (seconds a snapshot stays valid)
+  KEYCLOAK_CLIENT_SECRET   only if you enable Keycloak (section 10)
+
+CSRF_TRUSTED_ORIGINS is derived automatically from DJANGO_ALLOWED_HOSTS
+(https+http for each non-local host); override with DJANGO_CSRF_TRUSTED_ORIGINS
+only if you need something custom.
+
+See deploy/env.example for the full, commented template.
+
+
+────────────────────────────────────────────────────────────────────────────
+6. PYTHON ENV + DEPENDENCIES
+────────────────────────────────────────────────────────────────────────────
+  # from repo root
+  python -m venv webapp/.venv
+  #   Linux/macOS:  source webapp/.venv/bin/activate
+  #   Windows:      webapp\.venv\Scripts\Activate.ps1
+  pip install --upgrade pip
+  pip install -r webapp/requirements.txt
+
+webapp/requirements.txt pins Django 5.1.x, openpyxl, PyYAML, Pillow, psycopg[binary].
+(send_report/requirements.txt is a subset for running the engine standalone.)
+
+
+────────────────────────────────────────────────────────────────────────────
+7. DATABASE
+────────────────────────────────────────────────────────────────────────────
+Create the Postgres DB + user first (example):
+  CREATE DATABASE admin_report;
+  CREATE USER admin_report WITH ENCRYPTED PASSWORD '...';
+  GRANT ALL PRIVILEGES ON DATABASE admin_report TO admin_report;
+  -- on PG 15+, also:  \c admin_report ;  GRANT ALL ON SCHEMA public TO admin_report;
+
+Then, with the venv active and webapp/.env in place:
+  python webapp/manage.py migrate
+
+Migrations are database-agnostic and also SEED data:
+  * 0004 seeds default e-mail recipients from config.ini [recipients].
+  * 0006 seeds the four roles (System Admin, Network Admin, Gov Systems Admin,
+    Administrator) as Django groups.
+  * 0008 backfills profiles for existing users.
+So a fresh `migrate` gives you a ready schema with roles + recipients.
+
+Create the first login (a Django superuser is always an app Administrator):
+  python webapp/manage.py createsuperuser
+
+NOTE: staff normally log in via the org auth endpoint (section 10); the
+superuser you create here is your break-glass local admin.
+
+
+────────────────────────────────────────────────────────────────────────────
+8. RUNNING THE APP
+────────────────────────────────────────────────────────────────────────────
+Collect static files (required when DEBUG=0):
+  python webapp/manage.py collectstatic --noinput      # -> webapp/staticfiles/
+
+DEV / smoke test (single-threaded, do NOT use for real traffic):
+  python webapp/manage.py runserver 0.0.0.0:8000
+  # 0.0.0.0 = listen on all interfaces so other machines can reach it.
+  # 127.0.0.1 would only be reachable from the server itself.
+
+PRODUCTION — Windows (recommended: waitress):
+  pip install waitress
+  # from webapp/ (so config.wsgi is importable):
+  cd webapp
+  ..\webapp\.venv\Scripts\python.exe -m waitress --listen=0.0.0.0:8000 config.wsgi:application
+  # Run it as a Windows Service (nssm) or an IIS site (see section 9) so it starts on boot.
+
+PRODUCTION — Linux (gunicorn example):
+  pip install gunicorn
+  cd webapp
+  gunicorn --bind 0.0.0.0:8000 --workers 3 config.wsgi:application
+  # Put it under systemd so it restarts on failure/boot.
+
+IMPORTANT — snapshot cache & multiple workers:
+  Between loading the form and hitting "generate", the metrics snapshot is held
+  in an in-process LocMemCache (see settings.py CACHES). With MORE THAN ONE
+  worker/process, the generate request may land on a worker that never saw the
+  snapshot -> "snapshot expired" errors. Options:
+    (a) Run a SINGLE worker (simplest; fine for this app's load), or
+    (b) Point CACHES at a shared backend (Redis/Memcached) so all workers share
+        snapshots. If you do (b), install the client and set the CACHES backend.
+
+
+────────────────────────────────────────────────────────────────────────────
+9. PUBLIC DOMAIN / HTTPS / DNS
+────────────────────────────────────────────────────────────────────────────
+Three things must line up for  https://admin-report.rbz.co.zw  to work:
+
+  (a) Django: DJANGO_ALLOWED_HOSTS includes the hostname (section 5). Done in .env.
+  (b) DNS: an A record  admin-report.rbz.co.zw -> this server's IP, added on the
+      internal DNS server. Without it the name resolves nowhere. (Not a Django task.)
+  (c) A listener on 80/443. runserver/waitress bind 8000; to serve the bare
+      domain you put a reverse proxy in front:
+
+  IIS (Windows):
+    - Install "URL Rewrite" + "Application Request Routing (ARR)".
+    - Create a site bound to the hostname on 443 (with the TLS cert).
+    - Reverse-proxy all paths to http://127.0.0.1:8000.
+    - OR host Django directly via the HttpPlatformHandler pointing at waitress.
+  nginx (Linux):
+    server {
+      listen 443 ssl;
+      server_name admin-report.rbz.co.zw;
+      ssl_certificate     /path/fullchain.pem;
+      ssl_certificate_key /path/privkey.pem;
+      location /static/ { alias /path/to/repo/webapp/staticfiles/; }
+      location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
+    }
+
+  When behind an HTTPS proxy, also set these in settings.py (or via env) so
+  Django knows it's secure:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    (and consider SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = True)
+  These are commented guidance — add them when you terminate TLS at a proxy.
+
+  Static files: with DEBUG=0 Django does NOT serve /static/ itself. Let the proxy
+  serve webapp/staticfiles/ (nginx block above), or add WhiteNoise to the app.
+
+
+────────────────────────────────────────────────────────────────────────────
+10. AUTHENTICATION & ROLES
+────────────────────────────────────────────────────────────────────────────
+Sign-in (config.ini [auth], enabled=true):
+  The app POSTs {"username","password"} as JSON to the org endpoint
+  (…/api/auth). HTTP 200 + a user object (containing `username`) = success;
+  403 = bad credentials. On success the Django user is created/updated (name,
+  e-mail, department, DN). The local Django ModelBackend is tried second, so
+  your createsuperuser 'admin' always works even if the endpoint is down.
+  To run fully local (no org endpoint), set [auth] enabled=false.
+
+Roles (four Django groups): System Admin, Network Admin, Gov Systems Admin,
+  Administrator. A user with NO role sees a "request a role" screen. An
+  Administrator (or Django superuser) sees the Roles console to grant them, and
+  gets the in-app notifications (hamburger red dot) for pending requests.
+
+Keycloak (config.ini [keycloak], OFF by default):
+  When enabled=true (and KEYCLOAK_CLIENT_SECRET set in env), roles are read from
+  Keycloak realm roles and mirrored into Django groups at login. Leave it OFF to
+  manage roles locally in the Administrator console / Django admin.
+
+
+────────────────────────────────────────────────────────────────────────────
+11. VERIFY THE DEPLOYMENT
+────────────────────────────────────────────────────────────────────────────
+  * python webapp/manage.py check           -> "no issues"
+  * python webapp/manage.py test reports     -> all tests pass (optional but good)
+  * Browse to the app, log in (superuser or org account).
+  * The dashboard should load with LIVE metrics (proves Prometheus + topology).
+      - If it errors capturing metrics, check config.ini [prometheus] url and
+        that prometheus.yml is at the repo root and readable.
+  * Generate & download a report -> you get an .xlsx.
+  * Open History -> the report appears with the correct local time (Africa/Harare).
+  * Generate & e-mail -> arrives from the SMTP from_address (proves SMTP).
+  * As Administrator, open the hamburger -> Notifications; the Roles console lists
+    any pending requests.
+
+
+────────────────────────────────────────────────────────────────────────────
+12. TROUBLESHOOTING
+────────────────────────────────────────────────────────────────────────────
+  "DisallowedHost / Invalid HTTP_HOST"     -> add the hostname to DJANGO_ALLOWED_HOSTS.
+  "CSRF verification failed" on login/POST  -> hostname missing from ALLOWED_HOSTS
+                                              (CSRF origins derive from it); over HTTPS
+                                              behind a proxy, set SECURE_PROXY_SSL_HEADER.
+  "snapshot expired" when generating        -> snapshot TTL lapsed (raise
+                                              REPORT_SNAPSHOT_TTL) OR you're running
+                                              multiple workers without a shared cache
+                                              (section 8).
+  Dashboard can't load metrics              -> Prometheus URL wrong/unreachable, or
+                                              prometheus.yml missing at repo root.
+  Report has no company logo                -> send_report/logo.png missing.
+  CSS/JS missing when DEBUG=0                -> run collectstatic and have the proxy
+                                              serve webapp/staticfiles/ (or add WhiteNoise).
+  E-mail rejected by Office 365 (5.7.60)    -> from_address must be a mailbox/alias the
+                                              SMTP `user` is allowed to "send as".
+  DB connection refused                     -> POSTGRES_* wrong, or PG not reachable;
+                                              app silently falls back to SQLite only if
+                                              POSTGRES_DB is UNSET.
+  Login always local, org users rejected    -> config.ini [auth] enabled=false, or the
+                                              auth endpoint unreachable / TLS failing
+                                              (verify_tls).
+
+
+────────────────────────────────────────────────────────────────────────────
+13. UPDATING AN EXISTING DEPLOYMENT
+────────────────────────────────────────────────────────────────────────────
+  git pull
+  webapp/.venv active:
+    pip install -r webapp/requirements.txt        # if deps changed
+    python webapp/manage.py migrate               # if models changed
+    python webapp/manage.py collectstatic --noinput
+  restart the app process (waitress/gunicorn/service).
+  Your webapp/.env, send_report/config.ini and prometheus.yml are git-ignored,
+  so a pull never clobbers them.
+
+
+────────────────────────────────────────────────────────────────────────────
+14. SECURITY CHECKLIST
+────────────────────────────────────────────────────────────────────────────
+  [ ] DEBUG=0 in production.
+  [ ] Fresh DJANGO_SECRET_KEY (not the insecure dev default).
+  [ ] webapp/.env, send_report/config.ini, prometheus.yml readable only by the
+      service account; never committed (already git-ignored).
+  [ ] Rotate the SMTP password and any credential that has ever been shared.
+  [ ] HTTPS only in front; set SESSION_COOKIE_SECURE / CSRF_COOKIE_SECURE.
+  [ ] Run as a non-privileged service account.
+  [ ] KEYCLOAK_CLIENT_SECRET (if used) in env, not in config.ini.
+============================================================================

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Report sent · Report Builder{% endblock %}
+
+{% block body %}
+<div class="container">
+  <div class="card"><div class="body" style="padding:26px">
+    <div class="chip green" style="margin-bottom:12px">✓ Sent</div>
+    <h2 style="margin:0 0 6px">Report e-mailed</h2>
+    <p style="color:var(--muted);margin:0 0 16px">
+      Sent to {{ recipients|join:", " }}{% if author %} · from {{ author }}{% endif %}.
+    </p>
+    <table class="hist" style="max-width:520px">
+      <tr><th style="width:120px">Subject</th><td>{{ subject }}</td></tr>
+      <tr><th>Attachment</th><td>{{ filename }}</td></tr>
+      <tr><th>Recipients</th><td>{{ recipients|join:", " }}</td></tr>
+    </table>
+    <div style="margin-top:20px;display:flex;gap:12px">
+      <a class="btn primary" href="{% url 'report_form' %}">New report</a>
+      <a class="btn ghost" href="{% url 'history' %}">View history</a>
+    </div>
+  </div></div>
+</div>
+{% endblock %}

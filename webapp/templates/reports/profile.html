@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}My profile · Report Builder{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:760px">
+
+  {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
+
+  <div class="section-label">My profile</div>
+
+  {# ---- read-only identity ---- #}
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <div class="grid2">
+      <div class="field"><span>Username</span><div class="ro">{{ user.get_username }}</div></div>
+      <div class="field"><span>Roles</span><div class="ro">
+        {% for r in roles %}<span class="chip green">{{ r }}</span> {% empty %}<span style="color:var(--muted)">none yet</span>{% endfor %}
+      </div></div>
+    </div>
+    {% if profile.distinguished_name %}
+    <div class="field" style="margin-top:12px"><span>Directory (DN)</span><div class="ro" style="font-size:12px">{{ profile.distinguished_name }}</div></div>
+    {% endif %}
+    <div class="field" style="margin-top:12px"><span>Source</span><div class="ro">{{ profile.get_source_display }}</div></div>
+  </div></div>
+
+  <form method="post">
+    {% csrf_token %}
+
+    {# ---- account (auth-adjacent) ---- #}
+    <div class="section-label">Account</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <div class="grid2">
+        <label class="field"><span>First name</span>{{ aform.first_name }}</label>
+        <label class="field"><span>Last name</span>{{ aform.last_name }}</label>
+      </div>
+      <label class="field" style="margin-top:12px"><span>Email (optional)</span>{{ aform.email }}
+        {% if aform.email.errors %}<div class="errornote">{{ aform.email.errors|striptags }}</div>{% endif %}
+      </label>
+    </div></div>
+
+    {# ---- profile details ---- #}
+    <div class="section-label">Details</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <div class="grid2">
+        <label class="field"><span>Employee ID</span>{{ pform.employee_id }}</label>
+        <label class="field"><span>Job title</span>{{ pform.job_title }}</label>
+        <label class="field"><span>Department</span>{{ pform.department }}</label>
+        <label class="field"><span>Office location</span>{{ pform.office_location }}</label>
+        <label class="field"><span>Phone</span>{{ pform.phone }}
+          {% if pform.phone.errors %}<div class="errornote">{{ pform.phone.errors|striptags }}</div>{% endif %}</label>
+        <label class="field"><span>Mobile</span>{{ pform.mobile }}
+          {% if pform.mobile.errors %}<div class="errornote">{{ pform.mobile.errors|striptags }}</div>{% endif %}</label>
+      </div>
+    </div></div>
+
+    {# ---- preferences ---- #}
+    <div class="section-label">Preferences</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <div class="grid2">
+        <label class="field"><span>Default report theme</span>{{ pform.default_report_theme }}</label>
+        <label class="field"><span>Page theme</span>{{ pform.page_theme }}</label>
+      </div>
+    </div></div>
+
+    <div style="display:flex;gap:10px;margin-top:4px">
+      <button class="btn primary" type="submit">Save profile</button>
+      <a class="btn ghost" href="{% url 'report_form' %}">Back</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

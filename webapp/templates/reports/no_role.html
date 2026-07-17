@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Request access · Report Builder{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:600px">
+  <div class="card"><div class="body" style="padding:34px 30px;text-align:center">
+    <img src="{% static 'img/logo.png' %}" alt="Reserve Bank of Zimbabwe" style="height:100px;width:auto;margin:0 auto 12px;display:block">
+    <div class="chip amber" style="margin-bottom:14px">Access pending</div>
+    <h2 style="margin:0 0 8px">No role assigned yet</h2>
+    <p style="margin:0 0 4px">
+      You’re signed in as <b>{{ user.get_full_name|default:user.get_username }}</b>, but your account
+      hasn’t been granted a role in the System Analyses Dashboard.
+    </p>
+    <p style="color:var(--muted);margin:0 0 20px">Request the role(s) you need — an <b>Administrator</b> will review it.</p>
+
+    <form method="post" style="text-align:left">
+      {% csrf_token %}
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:18px">
+        {% for r in roles %}
+        <label class="role-opt {% if r.pending %}is-pending{% endif %}">
+          <input type="checkbox" name="roles" value="{{ r.name }}" {% if r.pending %}checked disabled{% endif %}>
+          <span>{{ r.name }}</span>
+          {% if r.pending %}<span class="chip amber" style="margin-left:auto">Pending</span>{% endif %}
+        </label>
+        {% endfor %}
+      </div>
+      <div style="display:flex;gap:10px;justify-content:center">
+        <button class="btn primary" type="submit">Request access</button>
+        <button class="btn ghost" formmethod="post" formaction="{% url 'logout' %}">Sign out</button>
+      </div>
+    </form>
+  </div></div>
+</div>
+{% endblock %}

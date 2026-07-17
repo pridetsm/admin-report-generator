@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Problem · Report Builder{% endblock %}
+
+{% block body %}
+<div class="container">
+  <div class="card"><div class="body" style="padding:26px">
+    <h2 style="margin-top:0">{% if expired %}Snapshot expired{% else %}Couldn’t capture metrics{% endif %}</h2>
+    <p style="color:var(--muted)">{{ detail }}</p>
+    <a class="btn primary" href="{% url 'report_form' %}">Reload &amp; capture again</a>
+  </div></div>
+</div>
+{% endblock %}

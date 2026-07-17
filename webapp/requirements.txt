@@ -1,0 +1,6 @@
+# Report Builder webapp — pinned to majors that are known-good together.
+Django>=5.0,<5.2
+openpyxl>=3.1        # xlsx engine (shared with send_report/)
+PyYAML>=6           # topology parsing (prometheus.yml)
+Pillow>=10          # lets openpyxl embed the company logo in the report
+psycopg[binary]>=3.1  # PostgreSQL driver (production DB; SQLite used only as a dev fallback)

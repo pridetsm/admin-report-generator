@@ -1,0 +1,414 @@
+{% extends "base.html" %}
+{% block title %}System Analyses Dashboard · Admin Report Generator{% endblock %}
+
+{% block body %}
+<form method="post" action="{% url 'generate' %}" id="reportForm">
+{% csrf_token %}
+<input type="hidden" name="token" value="{{ token }}">
+
+{# ---- big snapshot countdown: fixed in the right gutter, top-aligned, independent of scroll ---- #}
+<div class="cd-margin" aria-hidden="true">
+  <div class="cd-margin-label">Snapshot expires</div>
+  <div class="cd-margin-time" id="countdown">{{ ttl_minutes }}:00</div>
+</div>
+
+<div class="container">
+
+  {# ---- snapshot banner ---- #}
+  <div class="snap">
+    <h1>System Analyses Dashboard</h1>
+    <div class="meta">Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }} · {{ snapshot.prom_url }}</div>
+    <div class="spacer" style="flex:1"></div>
+    {% if snapshot.grafana_url %}
+    <a class="btn ghost" href="{{ snapshot.grafana_url }}" target="_blank" rel="noopener"
+       title="Open the live, auto-refreshing Grafana dashboard">▸ Live Grafana ↗</a>
+    {% endif %}
+  </div>
+
+  {# ---- overview summary (same content the e-mail presents) ---- #}
+  <div class="card"><div class="body" style="padding-top:8px">
+    <div class="kpigroup">
+      <div class="lbl">At a glance</div>
+      <div class="kpis">
+        {% for k in snapshot.overview.glance %}
+        <div class="kpi {{ k.state }}"><b>{{ k.value }}</b><span>{{ k.label }}</span></div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="kpigroup">
+      <div class="lbl" style="color:var(--red)">● Needs immediate attention</div>
+      <div class="kpis">
+        {% for k in snapshot.overview.immediate %}
+        <div class="kpi {{ k.state }}"><b>{{ k.value }}</b><span>{{ k.label }}</span></div>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="kpigroup">
+      <div class="lbl" style="color:var(--amber)">● Needs attention</div>
+      <div class="kpis">
+        {% for k in snapshot.overview.watch %}
+        <div class="kpi {{ k.state }}"><b>{{ k.value }}</b><span>{{ k.label }}{% if k.sub %} · {{ k.sub }}{% endif %}</span></div>
+        {% endfor %}
+      </div>
+    </div>
+  </div></div>
+
+  {% for b in snapshot.overview.banners %}
+  <div class="banner {{ b.band }}">
+    <div class="head">{{ b.head }}</div>
+    {% if b.detail %}<div class="detail">{{ b.detail }}</div>{% endif %}
+  </div>
+  {% endfor %}
+
+  {# ---- report options ---- #}
+  <div class="section-label">Report options</div>
+  <div class="card">
+    <div class="body" style="padding-top:16px">
+      <label class="field">
+        <span>Signed by (author)</span>
+        <input type="text" name="author" value="{{ suggested_author }}" placeholder="Your name" autocomplete="name">
+        <span class="meta" style="margin-top:6px">Auto-filled from your profile — this name is signed on the report and attributes every comment. Edit only if signing on someone else's behalf.</span>
+      </label>
+      <div class="meta" style="margin-top:10px">Report theme: <b style="color:var(--ink)">{{ report_theme|title }}</b> · change it in <b>Settings</b> (☰).</div>
+      <input type="hidden" name="recipients" id="recipients" value="{{ suggested_recipients }}">
+    </div>
+  </div>
+
+  {# ---- per-system flagged items ---- #}
+  <div class="section-label">Systems needing attention</div>
+
+  {% for sys in snapshot.systems %}
+  <div class="card {% if sys.healthy %}collapsed{% endif %}" data-collapsible data-system="{{ sys.name }}">
+    <header>
+      <h2>{{ sys.name }}</h2>
+      {% if sys.healthy %}
+        <span class="sub">{{ sys.hosts }} host{{ sys.hosts|pluralize }}</span>
+      {% else %}
+        <span class="sub">
+          {% if sys.red %}<span class="chip red">{{ sys.red }} critical</span>{% endif %}
+          {% if sys.amber %}<span class="chip amber">{{ sys.amber }} warning</span>{% endif %}
+        </span>
+      {% endif %}
+      <div class="spacer"></div>
+      <span class="chev">▾</span>
+    </header>
+    <div class="body">
+      {% if sys.healthy %}
+        <div class="healthy-note"><span class="chip green">All clear</span> No critical or warning metrics on this system.</div>
+      {% else %}
+        {% for flag in sys.flags %}
+        <div class="flag" data-flag-key="{{ flag.key }}" data-flag-text="{{ flag.text }}">
+          <div class="bar {{ flag.band }}"></div>
+          <div class="txt"><span class="chip {{ flag.band }}">{{ flag.category }}</span> <span class="name">{{ flag.text }}</span></div>
+          <div class="seg" title="Does this need a fix?">
+            <input type="radio" id="fix-{{ forloop.parentloop.counter0 }}-{{ forloop.counter0 }}-y" name="fix__{{ forloop.parentloop.counter0 }}__{{ forloop.counter0 }}" value="Yes">
+            <label class="yes" for="fix-{{ forloop.parentloop.counter0 }}-{{ forloop.counter0 }}-y">Fix needed</label>
+            <input type="radio" id="fix-{{ forloop.parentloop.counter0 }}-{{ forloop.counter0 }}-n" name="fix__{{ forloop.parentloop.counter0 }}__{{ forloop.counter0 }}" value="No">
+            <label class="no" for="fix-{{ forloop.parentloop.counter0 }}-{{ forloop.counter0 }}-n">Resolved</label>
+          </div>
+        </div>
+        {% endfor %}
+      {% endif %}
+
+      <label class="field" style="margin-top:14px">
+        <span>Comment / reason for {{ sys.name }}</span>
+        <textarea name="comment__{{ forloop.counter0 }}" rows="2" placeholder="Optional note that appears in this system's Notes panel"></textarea>
+      </label>
+    </div>
+  </div>
+  {% endfor %}
+
+  {# ---- summary note ---- #}
+  <div class="section-label">Summary note</div>
+  <div class="card"><div class="body" style="padding-top:16px">
+    <label class="field">
+      <span>Overall summary (appears in the report's Summary Notes)</span>
+      <textarea name="summary_comment" rows="3" placeholder="Optional overall commentary for this snapshot"></textarea>
+    </label>
+  </div></div>
+
+</div>
+
+{# ---- sticky action bar ---- #}
+<div class="actionbar">
+  <div class="container-inner">
+    <div class="meta" style="color:var(--muted);font-size:13px">
+      Answers apply to these exact readings
+    </div>
+    <div class="spacer" style="flex:1"></div>
+    <a class="btn ghost" href="#" data-refresh>Refresh</a>
+    <button class="btn ghost" type="button" id="emailBtn">✉ Generate &amp; email</button>
+    <button class="btn primary" type="submit" name="action" value="download">⬇ Generate &amp; download</button>
+  </div>
+</div>
+</form>
+
+{# ---- forced-refresh popup (Android-style popup menu) ---- #}
+<div id="expirePopup" class="popup-backdrop" aria-hidden="true">
+  <div class="popup-menu" role="dialog" aria-modal="true" aria-labelledby="popup-title">
+    <div class="popup-head">
+      <div class="popup-icon">↻</div>
+      <div>
+        <div class="popup-title" id="popup-title">Snapshot expired</div>
+        <div class="popup-sub">These readings are {{ ttl_minutes }} minutes old. Refresh to capture the latest —
+          anything you’ve filled in is kept.</div>
+      </div>
+    </div>
+    <button type="button" class="popup-item" data-refresh>↻&nbsp; Refresh now</button>
+  </div>
+</div>
+
+{# ---- e-mail confirmation dialog (choose recipients + confirm) ---- #}
+<div id="emailConfirm" class="popup-backdrop" aria-hidden="true">
+  <div class="popup-menu" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="popup-head">
+      <div class="popup-icon" style="background:var(--panel-2);color:var(--accent)">✉</div>
+      <div>
+        <div class="popup-title" id="confirm-title">Send this report by e-mail?</div>
+        <div class="popup-sub">A <b id="confirmTheme">{{ report_theme }}</b> report will be generated and sent.</div>
+      </div>
+    </div>
+    <div class="field" style="padding:2px 6px 6px">
+      <span>Email report to</span>
+      <div class="dropdown" id="recipientsDropdown">
+        <button type="button" class="dropdown-btn" id="recipientsBtn">
+          <span id="recipientsLabel">Choose recipients</span><span class="caret">▾</span>
+        </button>
+        <div class="dropdown-menu" id="recipientsMenu">
+          {% for opt in recipient_options %}
+          <label class="dropdown-item">
+            <input type="checkbox" class="rec-check" value="{{ opt.email }}" {% if opt.checked %}checked{% endif %}>
+            <span>{{ opt.label }}</span>
+          </label>
+          {% empty %}
+          <div class="dropdown-empty">No saved addresses — add one below or manage the list.</div>
+          {% endfor %}
+          <div class="dropdown-add">
+            <input type="text" id="recExtra" placeholder="type an e-mail to add…" autocomplete="off">
+            <button type="button" id="recAddBtn" class="btn ghost" style="padding:6px 12px">Add</button>
+          </div>
+          <div id="recResults" class="rec-results" data-url="{% url 'recipient_search' %}"></div>
+        </div>
+      </div>
+      {% if user.is_staff %}
+      <div style="margin-top:7px;font-size:12px">
+        <a href="/admin/reports/emailrecipient/" target="_blank" rel="noopener">＋ Manage recipient list ↗</a>
+      </div>
+      {% endif %}
+    </div>
+    <div class="popup-actions">
+      <button type="button" class="btn ghost" data-confirm-cancel>Cancel</button>
+      <button type="button" class="btn primary" id="confirmSend">✉ Yes, send</button>
+    </div>
+  </div>
+</div>
+
+{# ---- toast notifications ---- #}
+<div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+<span id="ttlData" data-ttl="{{ ttl_seconds }}" data-remaining="{{ remaining_seconds }}" hidden></span>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("reportForm");
+  // "Generate & download" returns a file and keeps this page open — suppress the reload spinner for it.
+  var dlBtn = form ? form.querySelector('button[value="download"]') : null;
+  if (dlBtn) dlBtn.addEventListener("click", function () { if (window.skipSpinnerOnce) window.skipSpinnerOnce(); });
+  var recHidden = document.getElementById("recipients");
+  var recMenu = document.getElementById("recipientsMenu");
+  var recDropdown = document.getElementById("recipientsDropdown");
+  var recBtn = document.getElementById("recipientsBtn");
+  var recLabel = document.getElementById("recipientsLabel");
+  var emailBtn = document.getElementById("emailBtn");
+
+  // ---- toasts ----
+  var wrap = document.getElementById("toasts");
+  function toast(msg, kind) {
+    if (!wrap) return;
+    var t = document.createElement("div");
+    t.className = "toast " + (kind || "info");
+    t.textContent = msg;
+    wrap.appendChild(t);
+    requestAnimationFrame(function () { t.classList.add("show"); });
+    setTimeout(function () { t.classList.remove("show"); setTimeout(function () { t.remove(); }, 300); }, 7000);
+  }
+
+  // ---- recipients dropdown (choose who to e-mail) ----
+  function currentRecipients() {
+    return recMenu ? Array.prototype.map.call(recMenu.querySelectorAll(".rec-check:checked"), function (c) { return c.value; }) : [];
+  }
+  function syncEmail() { /* email button is always enabled — recipients are chosen in the dialog */ }
+  function syncRecipients() {
+    var list = currentRecipients();
+    if (recHidden) recHidden.value = list.join(", ");
+    if (recLabel) recLabel.textContent = list.length
+      ? (list.length + " recipient" + (list.length > 1 ? "s" : "") + " selected") : "Choose recipients";
+  }
+  function addRecipient(email, checked) {
+    email = (email || "").trim();
+    if (!email || !recMenu) return;
+    var existing = Array.prototype.filter.call(recMenu.querySelectorAll(".rec-check"),
+      function (c) { return c.value.toLowerCase() === email.toLowerCase(); })[0];
+    if (existing) { existing.checked = checked !== false; syncRecipients(); return; }
+    var lbl = document.createElement("label"); lbl.className = "dropdown-item";
+    var cb = document.createElement("input"); cb.type = "checkbox"; cb.className = "rec-check";
+    cb.value = email; cb.checked = checked !== false;
+    cb.addEventListener("change", syncRecipients);
+    var sp = document.createElement("span"); sp.textContent = email;
+    lbl.appendChild(cb); lbl.appendChild(sp);
+    recMenu.insertBefore(lbl, recMenu.querySelector(".dropdown-add"));
+    syncRecipients();
+  }
+  function applyRecipients(str) {   // restore a saved selection
+    if (!recMenu) return;
+    recMenu.querySelectorAll(".rec-check").forEach(function (c) { c.checked = false; });
+    (str || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean)
+      .forEach(function (e) { addRecipient(e, true); });
+    syncRecipients();
+  }
+  if (recMenu) recMenu.querySelectorAll(".rec-check").forEach(function (c) { c.addEventListener("change", syncRecipients); });
+  if (recBtn) recBtn.addEventListener("click", function (e) { e.stopPropagation(); recDropdown.classList.toggle("open"); });
+  document.addEventListener("click", function (e) { if (recDropdown && !recDropdown.contains(e.target)) recDropdown.classList.remove("open"); });
+  var recExtra = document.getElementById("recExtra"), recAddBtn = document.getElementById("recAddBtn");
+  if (recAddBtn) recAddBtn.addEventListener("click", function () { addRecipient(recExtra.value, true); recExtra.value = ""; clearResults(); recExtra.focus(); });
+  if (recExtra) recExtra.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addRecipient(recExtra.value, true); recExtra.value = ""; clearResults(); } });
+
+  // ---- live directory (AD/LDAP) type-ahead ----
+  var recResults = document.getElementById("recResults");
+  var searchUrl = recResults ? recResults.getAttribute("data-url") : null;
+  var searchTimer = null;
+  function clearResults() { if (recResults) recResults.innerHTML = ""; }
+  function runSearch(q) {
+    if (!searchUrl || !recResults) return;
+    fetch(searchUrl + "?q=" + encodeURIComponent(q), { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : { results: [] }; })
+      .then(function (d) {
+        clearResults();
+        (d.results || []).forEach(function (item) {
+          var b = document.createElement("button");
+          b.type = "button"; b.className = "rec-result"; b.textContent = item.label;
+          b.addEventListener("click", function () { addRecipient(item.email, true); recExtra.value = ""; clearResults(); });
+          recResults.appendChild(b);
+        });
+      })
+      .catch(function () {});
+  }
+  if (recExtra) recExtra.addEventListener("input", function () {
+    clearTimeout(searchTimer);
+    var q = recExtra.value.trim();
+    if (q.length < 2 || q.indexOf("@") > -1) { clearResults(); return; }   // an e-mail -> use Add instead
+    searchTimer = setTimeout(function () { runSearch(q); }, 250);
+  });
+
+  syncRecipients();
+
+  // ---- e-mail confirmation dialog (holds the recipient chooser) ----
+  var confirmPop = document.getElementById("emailConfirm"),
+      confirmSend = document.getElementById("confirmSend"),
+      confirmTheme = document.getElementById("confirmTheme");
+  if (emailBtn) emailBtn.addEventListener("click", function () {
+    var th = document.querySelector("input[name=theme]:checked");
+    if (confirmTheme && th) confirmTheme.textContent = th.value;
+    syncRecipients();
+    if (confirmPop) confirmPop.classList.add("show");
+  });
+  if (confirmSend) confirmSend.addEventListener("click", function () {
+    syncRecipients();
+    if (currentRecipients().length === 0) {
+      toast("Choose at least one recipient.", "info");
+      if (recDropdown) recDropdown.classList.add("open");
+      return;
+    }
+    var h = document.createElement("input"); h.type = "hidden"; h.name = "action"; h.value = "email";
+    form.appendChild(h);
+    confirmSend.disabled = true; confirmSend.textContent = "Sending…";
+    form.submit();
+  });
+  document.querySelectorAll("[data-confirm-cancel]").forEach(function (b) {
+    b.addEventListener("click", function () { if (confirmPop) confirmPop.classList.remove("show"); });
+  });
+
+  // ---- collect current inputs so a refresh doesn't lose them ----
+  function collect() {
+    var systems = {}, flagText = {};
+    document.querySelectorAll("[data-system]").forEach(function (card) {
+      var sys = card.getAttribute("data-system"), flags = {}, texts = {};
+      card.querySelectorAll("[data-flag-key]").forEach(function (row) {
+        var key = row.getAttribute("data-flag-key");
+        var picked = row.querySelector("input[type=radio]:checked");
+        if (picked) flags[key] = picked.value;
+        texts[key] = row.getAttribute("data-flag-text") || key;
+      });
+      var cmt = card.querySelector('textarea[name^="comment__"]');
+      systems[sys] = { comment: cmt ? cmt.value : "", flags: flags };
+      flagText[sys] = texts;
+    });
+    function val(sel) { var el = document.querySelector(sel); return el ? el.value : ""; }
+    var theme = document.querySelector("input[name=theme]:checked");
+    return { ts: Date.now(), author: val("input[name=author]"), recipients: val("input[name=recipients]"),
+             summary: val("textarea[name=summary_comment]"), theme: theme ? theme.value : "dark",
+             systems: systems, flagText: flagText };
+  }
+  function saveAndReload() {
+    try { localStorage.setItem("reportDraft", JSON.stringify(collect())); } catch (e) {}
+    window.location.href = window.location.pathname + "?fresh=1";   // force a fresh snapshot + reset the timer
+  }
+  document.querySelectorAll("[data-refresh]").forEach(function (b) {
+    b.addEventListener("click", function (e) { e.preventDefault(); saveAndReload(); });
+  });
+
+  // ---- restore inputs after a refresh + advise on what changed ----
+  (function restore() {
+    var raw; try { raw = localStorage.getItem("reportDraft"); } catch (e) { return; }
+    if (!raw) return;
+    try { localStorage.removeItem("reportDraft"); } catch (e) {}
+    var d; try { d = JSON.parse(raw); } catch (e) { return; }
+    if (!d || Date.now() - (d.ts || 0) > 3600000) return;   // ignore stale drafts (>1h)
+
+    var a = document.querySelector("input[name=author]"); if (a && d.author) a.value = d.author;
+    if (d.recipients) applyRecipients(d.recipients);
+    var s = document.querySelector("textarea[name=summary_comment]"); if (s && d.summary) s.value = d.summary;
+    if (d.theme) { var tr = document.querySelector('input[name=theme][value="' + d.theme + '"]'); if (tr) tr.checked = true; }
+    syncEmail();
+
+    var gone = [];
+    document.querySelectorAll("[data-system]").forEach(function (card) {
+      var sys = card.getAttribute("data-system"), saved = (d.systems || {})[sys];
+      if (!saved) return;
+      var cmt = card.querySelector('textarea[name^="comment__"]'); if (cmt && saved.comment) cmt.value = saved.comment;
+      var present = {};
+      card.querySelectorAll("[data-flag-key]").forEach(function (row) {
+        var key = row.getAttribute("data-flag-key"); present[key] = 1;
+        var ans = (saved.flags || {})[key];
+        if (ans === "Yes" || ans === "No") { var rad = row.querySelector('input[value="' + ans + '"]'); if (rad) rad.checked = true; }
+      });
+      Object.keys(saved.flags || {}).forEach(function (key) {   // answered items that vanished
+        if (!present[key]) gone.push(sys + ": “" + ((d.flagText[sys] || {})[key] || key) + "” is no longer flagged (back to normal).");
+      });
+    });
+    toast("Snapshot refreshed — your entries were kept.", "success");
+    gone.slice(0, 4).forEach(function (m) { toast(m, "info"); });
+    if (gone.length > 4) toast((gone.length - 4) + " more items are no longer flagged.", "info");
+  })();
+
+  // ---- countdown + expiry popup ----
+  // The deadline is anchored to the snapshot's capture time (server-provided "remaining"),
+  // so a plain page refresh CONTINUES the countdown instead of restarting it.
+  var el = document.getElementById("ttlData");
+  var ttl = el ? parseInt(el.getAttribute("data-ttl") || "300", 10) : 300;
+  var remaining = el ? parseInt(el.getAttribute("data-remaining") || String(ttl), 10) : ttl;
+  if (isNaN(remaining) || remaining < 0) remaining = ttl;
+  var deadline = Date.now() + remaining * 1000;
+  var cd = document.getElementById("countdown"), popup = document.getElementById("expirePopup");
+  function fmt(sec) { var m = Math.floor(sec / 60), s = sec % 60; return m + ":" + (s < 10 ? "0" : "") + s; }
+  function tick() {
+    var left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    if (cd) { cd.textContent = fmt(left); cd.classList.toggle("warn", left <= 60); }
+    if (left <= 0) { clearInterval(iv); if (popup) popup.classList.add("show"); }
+  }
+  tick();   // paint the correct remaining time immediately (no flash of the full TTL)
+  var iv = setInterval(tick, 1000);
+})();
+</script>
+{% endblock %}

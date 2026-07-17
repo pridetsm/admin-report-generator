@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}History · Admin Report Generator{% endblock %}
+
+{% block body %}
+<div class="container">
+  <div class="section-label">Recent reports <span style="text-transform:none;letter-spacing:0">— click a row to view</span></div>
+  <div class="card"><div class="body" style="padding:6px 18px">
+    {% if submissions %}
+    <table class="hist">
+      <thead><tr>
+        <th>Generated</th><th>By</th><th>Author</th><th>Theme</th><th>Delivery</th>
+        <th>Systems</th><th>Critical</th><th>Warning</th><th>Answered</th>
+      </tr></thead>
+      <tbody>
+      {% for s in submissions %}
+        <tr class="rowlink" data-href="{% url 'submission_detail' s.pk %}">
+          <td>{{ s.created_at|date:"d M Y, H:i" }}</td>
+          <td>{{ s.generated_by.get_username|default:"—" }}</td>
+          <td>{{ s.author|default:"—" }}</td>
+          <td>{{ s.get_theme_display }}</td>
+          <td>{% if s.delivery == "email" %}✉ {{ s.recipients }}{% else %}⬇ Download{% endif %}</td>
+          <td>{{ s.systems_count }}</td>
+          <td>{% if s.immediate_count %}<span class="chip red">{{ s.immediate_count }}</span>{% else %}0{% endif %}</td>
+          <td>{% if s.watch_count %}<span class="chip amber">{{ s.watch_count }}</span>{% else %}0{% endif %}</td>
+          <td>{{ s.flags_answered }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="color:var(--muted)">No reports generated yet.</p>
+    {% endif %}
+  </div></div>
+  <a class="btn primary" href="{% url 'report_form' %}">＋ New report</a>
+</div>
+{% endblock %}

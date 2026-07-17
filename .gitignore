@@ -1,0 +1,38 @@
+# ── Secrets & environment ─────────────────────────────────────────────
+# The deploy/ folder holds the real (sensitive) config that is copied into place
+# by hand at deploy time — it must NEVER be committed. See deployment.txt.
+/deploy/
+webapp/.env
+.env
+*.env
+
+# Real runtime config that lives at these paths once deployed (samples ARE committed):
+/send_report/config.ini
+/prometheus.yml
+
+# ── Python ────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Django ────────────────────────────────────────────────────────────
+db.sqlite3
+db.sqlite3-journal
+/webapp/staticfiles/
+*.log
+
+# ── OS / editor / misc dev artefacts ──────────────────────────────────
+.DS_Store
+Thumbs.db
+*.xlsx
+*.png
+!webapp/static/img/logo.png
+!send_report/logo.png
+Screenshot*.png
+example.png
+.claude/
+.idea/
+.vscode/

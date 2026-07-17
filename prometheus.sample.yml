@@ -1,0 +1,63 @@
+# ============================================================================
+#  prometheus.sample.yml — TOPOLOGY SAMPLE for the Admin Report Generator
+#
+#  Copy to the repo-root  prometheus.yml  and populate with your real targets.
+#  (The real file is delivered out-of-band in deploy/prometheus.yml and is NOT
+#   committed — it exposes internal host IPs.)
+#
+#  The report engine only reads `scrape_configs[].static_configs[]`, grouping
+#  hosts by their `system` label. Each target's labels drive the report:
+#     system  -> which system card the host appears under (required)
+#     display -> friendly host/component name in the report (optional)
+#     role    -> component role hint, e.g. app / db (optional)
+#  Targets whose system is empty/`unassigned`/`prometheus` are skipped.
+#
+#  This is a full, valid Prometheus config too — the app just ignores the parts
+#  it doesn't need (global, rule_files, scrape intervals, etc.).
+# ============================================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+rule_files:
+  - "alerts.yml"
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]        # system label absent -> ignored by the report
+
+  - job_name: "windows_exporter"
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels:
+          app: "windows"
+          system: "ExampleSystem"           # <- report groups this host under "ExampleSystem"
+          display: "ExampleSystem App"
+          role: "app"
+      - targets: ["10.0.0.12:9182"]
+        labels:
+          app: "windows"
+          system: "ExampleSystem"
+          display: "ExampleSystem DB"
+          role: "db"
+
+  - job_name: "node_exporter"
+    static_configs:
+      - targets: ["10.0.0.21:9100"]
+        labels:
+          app: "linux"
+          system: "AnotherSystem"
+          display: "AnotherSystem Node"
+
+  # Blackbox HTTP/SSL probes (optional) feed the "web encryption" and SSL-cert
+  # rollups. Keep the job_name containing "blackbox" so the engine recognises it.
+  - job_name: "blackbox_http"
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ["https://portal.example.org"]
+        labels:
+          system: "ExampleSystem"

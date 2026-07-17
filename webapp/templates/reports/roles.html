@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Roles · Report Builder{% endblock %}
+
+{% block body %}
+<div class="container">
+
+  {# ---- pending role requests ---- #}
+  <div class="section-label">Pending role requests {% if pending %}<span class="chip amber">{{ pending|length }}</span>{% endif %}</div>
+  <div class="card"><div class="body" style="padding:6px 18px">
+    {% if pending %}
+    <table class="hist">
+      <thead><tr><th>User</th><th>Requested role</th><th>When</th><th style="text-align:right">Decision</th></tr></thead>
+      <tbody>
+      {% for req in pending %}
+        <tr>
+          <td><b>{{ req.user.get_full_name|default:req.user.get_username }}</b> <span style="color:var(--muted)">({{ req.user.get_username }})</span></td>
+          <td><span class="chip green">{{ req.role }}</span></td>
+          <td>{{ req.created_at|date:"d M Y, H:i" }}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <form method="post" style="display:inline">{% csrf_token %}
+              <input type="hidden" name="action" value="decide">
+              <input type="hidden" name="request_id" value="{{ req.id }}">
+              <button class="btn ghost" name="decision" value="reject" style="padding:6px 12px">Reject</button>
+              <button class="btn primary" name="decision" value="approve" style="padding:6px 12px">Approve</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="color:var(--muted)">No pending requests.</p>
+    {% endif %}
+  </div></div>
+
+  {# ---- all users + their roles ---- #}
+  <div class="section-label">All users &amp; roles</div>
+  <div class="card"><div class="body" style="padding:6px 18px 14px">
+    <table class="hist">
+      <thead><tr><th>User</th><th>Email</th>{% for r in role_names %}<th style="text-align:center">{{ r }}</th>{% endfor %}<th></th></tr></thead>
+      <tbody>
+      {% for row in user_rows %}
+        <tr>
+          <td><b>{{ row.u.get_full_name|default:row.u.get_username }}</b><br><span style="color:var(--muted);font-size:12px">{{ row.u.get_username }}{% if row.u.is_superuser %} · superuser{% endif %}</span></td>
+          <td style="color:var(--muted)">{{ row.u.email|default:"—" }}</td>
+          {% for r in role_names %}
+          <td style="text-align:center"><input type="checkbox" name="roles" value="{{ r }}" form="uf-{{ row.u.id }}" {% if r in row.roles %}checked{% endif %}></td>
+          {% endfor %}
+          <td style="text-align:right">
+            <form method="post" id="uf-{{ row.u.id }}" style="margin:0">{% csrf_token %}
+              <input type="hidden" name="action" value="set_roles">
+              <input type="hidden" name="user_id" value="{{ row.u.id }}">
+              <button class="btn ghost" type="submit" style="padding:6px 12px">Save</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+
+</div>
+{% endblock %}

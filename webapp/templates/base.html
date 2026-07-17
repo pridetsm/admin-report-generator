@@ -1,0 +1,104 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Admin Report Generator{% endblock %}</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230e6e82'/><rect x='9' y='8' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='14' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='20' width='9' height='2.5' rx='1.2' fill='white'/></svg>">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body>
+{# full-page loading spinner, shown while a navigation / reload is in flight #}
+<div class="page-spinner" id="pageSpinner" aria-hidden="true"><div class="spinner"></div></div>
+{% if user.is_authenticated %}
+  <header class="topbar">
+    {# icon -> home #}
+    <a class="brand-icon" href="{% url 'report_form' %}" title="Home"><img src="{% static 'img/logo.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
+    {# title -> opens the navigation drawer #}
+    <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Admin Report Generator</button>
+    <div class="spacer"></div>
+
+    {# settings + notifications hamburger (red dot when there are unseen notifications) #}
+    <div class="navmenu" id="settingsMenu" data-seen-url="{% url 'mark_notifications_seen' %}">
+      <button class="iconbtn" id="settingsToggle" type="button" aria-label="Menu" aria-expanded="false">
+        ☰{% if notif_unseen %}<span class="reddot" id="notifDot" aria-label="Unseen notifications"></span>{% endif %}
+      </button>
+      <div class="navmenu-panel" role="menu">
+        {% if is_role_admin %}
+        <div class="nm-head">Notifications</div>
+        <div class="nm-notifs">
+          {% for n in notifications %}
+            <a href="{% url 'roles_console' %}" class="notif-item"><b>{{ n.who }}</b> requested <b>{{ n.role }}</b><span class="nm-sub">{{ n.when|date:"d M Y, H:i" }}</span></a>
+          {% empty %}
+            <div class="nm-empty">No new notifications</div>
+          {% endfor %}
+        </div>
+        {% endif %}
+        <div class="nm-head">Settings</div>
+        <div class="nm-block">
+          <div class="nm-label">Report theme</div>
+          <form method="post" action="{% url 'set_report_theme' %}" class="theme-choice">{% csrf_token %}
+            <button name="theme" value="dark" class="{% if report_theme != 'light' %}active{% endif %}">Dark</button>
+            <button name="theme" value="light" class="{% if report_theme == 'light' %}active{% endif %}">Light</button>
+          </form>
+        </div>
+        <button type="button" id="themeToggle" class="navmenu-item">Toggle page theme</button>
+      </div>
+    </div>
+
+    {# profile widget (name) -> profile dropdown #}
+    <div class="navmenu" id="profileMenu">
+      <button class="profile-widget" id="profileToggle" type="button" aria-label="Profile menu" aria-expanded="false">
+        <span class="avatar">{{ display_name.0|upper|default:"?" }}</span>
+        <span class="pw-name">{{ display_name|default:user.get_username }}</span>
+        <span class="pw-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="navmenu-panel" role="menu">
+        <div class="navmenu-user">
+          <div class="nm-name">{{ display_name|default:user.get_username }}</div>
+          <div class="nm-sub">@{{ user.get_username }}</div>
+        </div>
+        <a href="{% url 'profile' %}">My profile</a>
+        <form method="post" action="{% url 'logout' %}" class="navmenu-form">{% csrf_token %}
+          <button type="submit">Sign out</button>
+        </form>
+      </div>
+    </div>
+  </header>
+
+  {# ---- navigation drawer (opens from the app title) ---- #}
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <nav class="drawer" id="drawer" aria-label="Navigation" aria-hidden="true">
+    <div class="drawer-head">
+      <button class="iconbtn" id="drawerClose" type="button" aria-label="Close">‹</button>
+      <span class="drawer-user">{{ user.get_full_name|default:user.get_username }}</span>
+    </div>
+    <a href="{% url 'report_form' %}">System Analyses Dashboard</a>
+    <a href="{% url 'history' %}">History</a>
+    {% if is_role_admin %}
+    <a href="{% url 'roles_console' %}">Roles</a>
+    <a href="{% url 'system_settings' %}">Configuration</a>
+    {% endif %}
+  </nav>
+
+  {# ---- canvas back button: walks ONE level up the nav hierarchy (child -> parent -> home) ---- #}
+  {% if back_url %}
+  <a class="backnav" href="{{ back_url }}" title="Back to {{ back_label }}" aria-label="Back to {{ back_label }}">
+    <span class="backnav-arrow" aria-hidden="true">‹</span><span class="backnav-text">{{ back_label }}</span>
+  </a>
+  {% endif %}
+{% endif %}
+
+{% if messages %}
+  <div class="container" style="padding-bottom:0">
+    <ul class="messages">
+      {% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+{% block body %}{% endblock %}
+
+<script src="{% static 'js/app.js' %}"></script>
+</body>
+</html>

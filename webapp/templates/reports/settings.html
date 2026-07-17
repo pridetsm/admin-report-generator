@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Configuration · Admin Report Generator{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:720px">
+  {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
+
+  <div class="section-label">Configuration</div>
+  <div class="card"><div class="body" style="padding:18px">
+    <p style="margin:0 0 16px;color:var(--muted)">
+      Where the dashboard fetches its data. Changes take effect on the next capture (a refresh or
+      a new report re-fetches live from this Prometheus server). Leave a field blank to fall back
+      to the value in <code>config.ini</code>.
+    </p>
+    <form method="post">
+      {% csrf_token %}
+      <label class="field" style="margin-bottom:14px">
+        <span>Prometheus server URL</span>
+        {{ form.prometheus_url }}
+        {% if form.prometheus_url.errors %}<div class="errornote">{{ form.prometheus_url.errors|striptags }}</div>{% endif %}
+        <small style="color:var(--muted)">config.ini default: {{ config_prom }}</small>
+      </label>
+      <label class="field" style="margin-bottom:16px">
+        <span>Grafana dashboard URL</span>
+        {{ form.grafana_url }}
+        {% if form.grafana_url.errors %}<div class="errornote">{{ form.grafana_url.errors|striptags }}</div>{% endif %}
+        <small style="color:var(--muted)">config.ini default: {{ config_grafana|truncatechars:70 }}</small>
+      </label>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="btn primary" type="submit">Save settings</button>
+        <a class="btn ghost" href="{% url 'report_form' %}">Back</a>
+        {% if sc.updated_at %}<span style="color:var(--muted);font-size:12px;margin-left:auto">Last changed {{ sc.updated_at|date:"d M Y, H:i" }}{% if sc.updated_by %} by {{ sc.updated_by.get_username }}{% endif %}</span>{% endif %}
+      </div>
+    </form>
+  </div></div>
+</div>
+{% endblock %}
