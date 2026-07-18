@@ -140,6 +140,17 @@ class ReportBuilderFlow(TestCase):
         self.user.profile.refresh_from_db()
         self.assertEqual(self.user.profile.default_report_theme, "light")
 
+    def test_report_theme_ajax_returns_json_no_redirect(self):
+        # The Settings menu changes the theme via AJAX so the page never reloads
+        # (and the admin's captured form entries are preserved).
+        self.client.login(username="tester", password="pw12345!")
+        resp = self.client.post(reverse("set_report_theme"), {"theme": "light"},
+                                HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"ok": True, "theme": "light"})
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.default_report_theme, "light")
+
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_refresh_reuses_snapshot_but_fresh_forces_new(self, cap):
         self.client.login(username="tester", password="pw12345!")

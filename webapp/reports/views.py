@@ -294,6 +294,9 @@ def set_report_theme(request):
         prof = getattr(request.user, "profile", None) or UserProfile.objects.create(user=request.user)
         prof.default_report_theme = theme
         prof.save(update_fields=["default_report_theme", "updated_at"])
+    # AJAX (from the Settings menu) -> no page reload, so the admin's form entries survive.
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return JsonResponse({"ok": True, "theme": theme})
     return redirect(request.META.get("HTTP_REFERER") or "report_form")
 
 

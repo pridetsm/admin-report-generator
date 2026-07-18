@@ -67,6 +67,38 @@
     });
   });
 
+  // ---- report theme change WITHOUT a page reload (so form entries are NOT lost) ----
+  var themeChoice = document.querySelector(".theme-choice");
+  if (themeChoice) {
+    themeChoice.addEventListener("submit", function (e) { e.preventDefault(); });
+    themeChoice.querySelectorAll("button[name=theme]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.preventDefault();
+        var theme = btn.value;
+        fetch(themeChoice.getAttribute("action"), {
+          method: "POST",
+          headers: { "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": getCookie("csrftoken") || "" },
+          credentials: "same-origin",
+          body: new URLSearchParams({ theme: theme })
+        }).then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            if (!d || !d.ok) return;
+            // segmented control
+            themeChoice.querySelectorAll("button[name=theme]").forEach(function (b) {
+              b.classList.toggle("active", b.value === theme);
+            });
+            // any on-page labels that echo the current report theme
+            document.querySelectorAll("[data-report-theme-label]").forEach(function (el) {
+              el.textContent = theme.charAt(0).toUpperCase() + theme.slice(1);
+            });
+            document.querySelectorAll("[data-report-theme-value]").forEach(function (el) {
+              el.textContent = theme;
+            });
+          }).catch(function () {});
+      });
+    });
+  }
+
   // ---- full-page loading spinner on navigation / reload ----
   var spinner = document.getElementById("pageSpinner");
   var spinnerSafety = null;
