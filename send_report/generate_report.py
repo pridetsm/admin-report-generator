@@ -1555,8 +1555,10 @@ class ReportBuilder:
         anchor = self.ws.cell(by, nl + 1)
         anchor.alignment = Alignment(horizontal="left", vertical="center")
         ref = f"${get_column_letter(nl + 1)}${by}"
-        if self._first_by is None:
-            self._first_by = ref            # master: type the name here once
+        if self.author:                     # auto-filled name -> write it literally in EVERY card
+            anchor.value = self.author       # (robust: no formula/recalc dependency in any viewer)
+        elif self._first_by is None:
+            self._first_by = ref            # no author supplied: type once here, other cards mirror
         else:                               # every other system mirrors the master cell
             anchor.value = f'=IF({self._first_by}="","",{self._first_by})'
         self.ws.merge_cells(start_row=by, start_column=nl + 1, end_row=by, end_column=nr)
@@ -1666,7 +1668,9 @@ class ReportBuilder:
             self._cell(by, c, bg=Theme.CARD).border = field
         anchor = self.ws.cell(by, nl + 1)
         anchor.alignment = Alignment(horizontal="left", vertical="center")
-        if self._first_by is None:
+        if self.author:                     # auto-filled name -> write it literally
+            anchor.value = self.author
+        elif self._first_by is None:
             self._first_by = f"${get_column_letter(nl + 1)}${by}"
         else:
             anchor.value = f'=IF({self._first_by}="","",{self._first_by})'

@@ -178,6 +178,26 @@ class ReportBuilderFlow(TestCase):
         sub = ReportSubmission.objects.get()
         self.assertEqual(sub.author, "Pride Moyo, Systems Administrator")
 
+    def test_report_stamps_author_in_every_by_cell(self):
+        # Every "By" line in the .xlsx must carry the literal author name (not an Excel
+        # formula), so it shows in any viewer — not just Excel-with-recalc.
+        import io
+
+        import openpyxl
+
+        from reports.services import build_report
+        snap = _synthetic_snapshot("tok")
+        data = build_report(snap, theme="dark", author="Jane Doe, DBA",
+                            annotations={}, summary_comment="")
+        ws = openpyxl.load_workbook(io.BytesIO(data)).active
+        by_values = [
+            ws.cell(c.row, c.column + 1).value
+            for row in ws.iter_rows() for c in row
+            if isinstance(c.value, str) and c.value.strip() == "By"
+        ]
+        self.assertTrue(by_values, "report has no 'By' cells")
+        self.assertTrue(all(v == "Jane Doe, DBA" for v in by_values), by_values)
+
     def test_submission_detail_legacy_row(self):
         """A row saved before report_content existed still renders (falls back to annotations)."""
         self.client.login(username="tester", password="pw12345!")
