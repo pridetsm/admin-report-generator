@@ -197,6 +197,14 @@ LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'report_form'
 LOGOUT_REDIRECT_URL = 'login'
 
+# Session inactivity timeout: log an admin out after 15 minutes of no activity.
+# SESSION_SAVE_EVERY_REQUEST makes this a SLIDING (idle) timeout — every request
+# re-stamps the cookie's expiry, so the 15-minute clock only runs down while the
+# admin is idle; once it lapses the session is gone and login_required bounces them
+# back to the login page. Override with DJANGO_SESSION_TIMEOUT (seconds) if needed.
+SESSION_COOKIE_AGE = int(os.environ.get("DJANGO_SESSION_TIMEOUT", str(15 * 60)))   # 900s = 15 min
+SESSION_SAVE_EVERY_REQUEST = True
+
 # Org auth endpoint (JSON username/password) is tried first (no-op until config.ini [auth]
 # enabled=true), then the local ModelBackend — so the built-in 'admin' always still works.
 AUTHENTICATION_BACKENDS = [
