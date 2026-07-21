@@ -374,6 +374,22 @@ class ReportBuilderFlow(TestCase):
         web = [w for w in ov["watch"] if w["label"] == "Web encryption"][0]
         self.assertEqual(web["value"], "1 | 0")
 
+    def test_ldap_down_banner_lists_dependents(self):
+        """When the LDAP probe reports down, the overview gets a red, top banner naming the
+        dependent systems; up / unmonitored produce no LDAP banner."""
+        gcms = gr.System("GCMS", [gr.Component("App/DB", "10.100.247.23:9182")])
+
+        def store(ldap):
+            return gr.Store(disk={}, ram={}, cpu={}, cob=1200.0, swift=1.0, services={"GCMS": []},
+                            up={"10.100.247.23:9182": 1.0}, links={}, backups={}, ldap_up=ldap)
+
+        cfg = gr.Config()
+        down = build_overview(store(False), [gcms], cfg)["banners"]
+        self.assertTrue(down and down[0]["band"] == "red" and "LDAP" in down[0]["head"])  # first = top priority
+        self.assertIn("GCMS", down[0]["detail"])
+        for state in (True, None):   # up / not monitored -> no LDAP banner
+            self.assertFalse(any("LDAP" in b["head"] for b in build_overview(store(state), [gcms], cfg)["banners"]))
+
     def test_mark_notifications_seen(self):
         self.client.login(username="tester", password="pw12345!")
         resp = self.client.post(reverse("mark_notifications_seen"))

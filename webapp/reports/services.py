@@ -131,6 +131,12 @@ def build_overview(store, systems, cfg) -> dict:
     ]
 
     banners = []
+    # LDAP / auth service down — highest priority, listed first (mirrors the xlsx + email).
+    ldap_dependents = gr.ldap_alert(store, systems)
+    if ldap_dependents:
+        banners.append({"band": "red",
+                        "head": f"LDAP / auth service down — {len(ldap_dependents)} dependent system(s) affected",
+                        "detail": "Users cannot sign in to: " + ", ".join(ldap_dependents)})
     if nearfull:
         byhost: dict = {}
         for s, lbl, mp, used in nearfull:
@@ -269,7 +275,7 @@ def email_report(snapshot: Snapshot, data: bytes, *, recipients: List[str],
     if author:
         mailcfg["from_name"] = f"{author} · System Admin Report"   # who it's from, in the inbox
 
-    unreach, crit, warn, nodata = mr.analyse(snapshot._store, snapshot._systems)
+    unreach, crit, warn, nodata = mr.analyse(snapshot._store, snapshot._systems, cfg)
     html_body = mr.render_html(snapshot._store, snapshot._systems, unreach, crit, warn, nodata, mailcfg)
     text_body = mr.plain_summary(unreach, crit, warn, nodata)
     sev = (f"{len(unreach)} unreachable" if unreach else

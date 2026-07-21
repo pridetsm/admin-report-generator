@@ -79,6 +79,9 @@ class Config:
     chip_amber: int = 75           # per-cell chip thresholds (used % >= amber -> amber)
     chip_red: int = 90             # used % >= red -> red
     http_timeout: int = 20
+    # LDAP / auth service probe: the blackbox `probe_success` instance label that reports whether
+    # the authentication service (that GCMS, GMS, ... depend on) is up. Blank = not monitored.
+    ldap_target: str = "vault.rbz.co.zw:7272"
 
 
 HERE = Path(__file__).resolve().parent
@@ -101,6 +104,7 @@ def load_config(path=None) -> "Config":
             cfg.overview_threshold = r.getint("overview_threshold", cfg.overview_threshold)
             cfg.chip_amber = r.getint("chip_amber", cfg.chip_amber)
             cfg.chip_red = r.getint("chip_red", cfg.chip_red)
+            cfg.ldap_target = r.get("ldap_target", cfg.ldap_target).strip()
         if cp.has_section("logo"):
             g = cp["logo"]
             cfg.logo = g.get("path", cfg.logo)
@@ -330,7 +334,12 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
 
 # preferred display order (known systems first); anything else is appended A-Z
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
-                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme"]
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS"]
+
+# Systems that depend on the shared LDAP / authentication service — if LDAP is down these
+# systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
+# as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
+LDAP_DEPENDENTS = {"GCMS", "GMS"}
 # `system` label values that are not real systems
 SKIP_SYSTEMS = {"unassigned", "prometheus", ""}
 
@@ -428,6 +437,7 @@ class Store:
     up: Dict[str, float]                        # instance -> 1 reachable / 0 unreachable (Prometheus `up`)
     links: Dict[str, dict]                      # URL -> {up, code, ssl, cert_days, tls, duration} (blackbox HTTP probes)
     backups: Dict[str, dict]                    # instance -> {files, count, ok, ts} (textfile backup check)
+    ldap_up: Optional[bool] = None              # LDAP/auth probe: True up / False down / None not monitored
 
 
 # filters reused across every node_filesystem / windows_logical_disk query
@@ -483,6 +493,14 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     for r in prom.query("max by (instance) (up)"):
         up[r["labels"]["instance"]] = r["value"]
 
+    # ---- LDAP / auth service (blackbox probe on the auth endpoint) ------------
+    # True up / False down / None when not monitored (no probe target configured or no series).
+    ldap_up: Optional[bool] = None
+    if cfg.ldap_target:
+        rows = prom.query(f'probe_success{{instance="{cfg.ldap_target}"}}')
+        if rows:
+            ldap_up = max(r["value"] for r in rows) >= 1
+
     # ---- specials -------------------------------------------------------------
     cob = prom.scalar("cob_time")
     swift = prom.scalar("swift_transactions_total")
@@ -522,7 +540,7 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     # ---- backups (textfile collector: backup_file / _count / _success / _ts) ----
     backups = capture_backups(prom)
 
-    return Store(disk, ram, cpu, cob, swift, services, up, links, backups)
+    return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up)
 
 
 def _is_url(inst: Optional[str]) -> bool:
@@ -714,6 +732,20 @@ def unreachable(store: "Store", systems: List["System"]) -> List[Tuple[str, str,
        up==0 means the exporter isn't responding: host down or a network/connectivity issue."""
     return [(s.name, c.label, c.instance)
             for s in systems for c in s.components if is_unreachable(store, c.instance)]
+
+
+def ldap_alert(store: "Store", systems: List["System"]) -> Optional[List[str]]:
+    """If the LDAP / auth service is DOWN, the list of dependent systems to warn about; else None.
+
+    Only fires when the probe positively reports down (store.ldap_up is False) — never on an
+    unmonitored/absent signal (None). Lists the LDAP_DEPENDENTS that are IN this report's systems
+    so a scoped report names what's relevant; falls back to all known dependents if none are in
+    scope (LDAP being down still matters). Shared by all three report renderers.
+    """
+    if store.ldap_up is not False:          # True (up) or None (not monitored) -> no banner
+        return None
+    present = [s.name for s in systems if s.name in LDAP_DEPENDENTS]
+    return present or sorted(LDAP_DEPENDENTS)
 
 
 def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, str, str]]:
@@ -1156,6 +1188,17 @@ class ReportBuilder:
             return r
 
         banners: List[Tuple[str, str, str, str]] = []   # (band, headline, detail, explanation)
+
+        # 0) LDAP / authentication service down — highest priority, listed first. Every dependent
+        #    system can't authenticate users while the shared auth service is unreachable.
+        ldap_dependents = ldap_alert(store, systems)
+        if ldap_dependents:
+            banners.append((
+                "red",
+                f"LDAP / AUTH SERVICE DOWN  —  {len(ldap_dependents)} dependent system(s) affected",
+                "      ·      ".join(ldap_dependents),
+                "The shared LDAP / authentication service is not responding — users cannot sign in to "
+                "the systems that depend on it. Restore the auth service urgently."))
 
         # 1) imminent near-full disk — moved out of the tile band into a worded banner
         nearfull = disk_near_full(store, systems, self.cfg.chip_red)
