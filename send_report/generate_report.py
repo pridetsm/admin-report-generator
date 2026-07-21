@@ -534,6 +534,16 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
                                  comp_order.get(t[3], 999), t[3]))
         services[sysm.name] = rows
 
+    # ---- LDAP / auth dependency, shown as a service row under each dependent system ----
+    # Makes the dependency visible in-context (GCMS, GMS, ...). Status from the shared probe:
+    # DOWN only when the probe positively reports down; otherwise up (the system authenticates
+    # through it). Prepended so it sits at the top of the system's SYSTEM SERVICES.
+    if cfg.ldap_target:
+        for sysm in systems:
+            if sysm.name in LDAP_DEPENDENTS:
+                services.setdefault(sysm.name, []).insert(
+                    0, (f"LDAP / auth ({cfg.ldap_target})", ldap_up is not False, "system", sysm.name))
+
     # ---- web links (blackbox HTTP probes) -------------------------------------
     links = capture_links(prom)
 
