@@ -19,7 +19,7 @@
       the same one — it's only a heads-up, you can still include them.</p>
 
     <div class="sys-toolbar">
-      <label class="chk-pill"><input type="checkbox" id="selectAll" checked><span>All systems</span></label>
+      <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All systems</span></label>
       <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter systems…" autocomplete="off" aria-label="Filter systems">
       <span class="spacer" style="flex:1"></span>
       <span class="select-count" id="selectCountTop"></span>
@@ -27,8 +27,8 @@
 
     <div class="sys-grid" id="selectList">
       {% for s in select_systems %}
-      <label class="sys-tile checked" data-name="{{ s.name|lower }}">
-        <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}" checked>
+      <label class="sys-tile" data-name="{{ s.name|lower }}">
+        <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}">
         <span class="sys-mono" style="--mono-h:{{ s.mono_hue }}">{{ s.name.0|upper }}</span>
         <span class="sys-body">
           <span class="sys-name">{{ s.name }}</span>
