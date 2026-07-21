@@ -161,10 +161,30 @@ def build_overview(store, systems, cfg) -> dict:
     return {"glance": glance, "immediate": immediate, "watch": watch, "banners": banners}
 
 
-def capture_snapshot(token: str) -> Snapshot:
+def list_systems() -> List[dict]:
+    """The system name + host count from the topology (prometheus.yml) WITHOUT any live capture.
+    This is a plain file read, so the selection screen can be rendered on every landing without
+    touching Prometheus — the expensive capture is deferred until the admin actually proceeds."""
+    cfg = gr.load_config()
+    systems = gr.load_topology(cfg.prometheus_yml)
+    return [{"name": s.name, "hosts": len(s.components)} for s in systems]
+
+
+def _scope_links_to_systems(store, systems) -> None:
+    """Web links (blackbox HTTP probes) are captured GLOBALLY by the engine, independent of the
+    systems list. When a report is scoped to a subset, drop every link not owned by one of those
+    systems (per gr.assign_link — the same attribution the report itself uses) so link-derived
+    KPIs (Web encryption, SSL certs) and the report's link sections don't leak other systems'
+    endpoints. Mutates store.links in place."""
+    store.links = {u: d for u, d in store.links.items()
+                   if gr.assign_link(u, systems) is not None}
+
+
+def capture_snapshot(token: str, only: Optional[set] = None) -> Snapshot:
     """Load config + topology, capture a FRESH set of live metrics from Prometheus, and compute
-    the per-system flagged items. Called on every form load / refresh, so each capture is a real
-    re-fetch. Raises PrometheusUnavailable if the endpoint is unreachable."""
+    the per-system flagged items. `only` (a set of system names) scopes the capture to just those
+    systems — so we only pay for what the admin selected. Raises PrometheusUnavailable if the
+    endpoint is unreachable."""
     cfg = gr.load_config()
     # runtime overrides an Administrator set in the app (which Prometheus/Grafana to use)
     from .models import SystemConfig
@@ -174,12 +194,17 @@ def capture_snapshot(token: str) -> Snapshot:
     if sc.grafana_url:
         cfg.grafana = sc.grafana_url
     systems = gr.load_topology(cfg.prometheus_yml)
+    if only is not None:
+        want = {n for n in only}
+        systems = [s for s in systems if s.name in want]
     prom = gr.Prometheus(cfg.prom, cfg.http_timeout)
     try:
         prom.ping()
     except Exception as exc:                              # noqa: BLE001 — surfaced to the view
         raise PrometheusUnavailable(f"{cfg.prom}: {exc}") from exc
     store = gr.capture(prom, systems, cfg)
+    if only is not None:
+        _scope_links_to_systems(store, systems)
 
     svms: List[SystemVM] = []
     for sysm in systems:
@@ -201,7 +226,8 @@ def capture_snapshot(token: str) -> Snapshot:
 
 def build_report(snapshot: Snapshot, *, theme: str, author: str,
                  annotations: Dict[str, dict], summary_comment: str) -> bytes:
-    """Render the .xlsx (chosen theme) from the snapshot with the admin's inputs injected."""
+    """Render the .xlsx (chosen theme) from the snapshot with the admin's inputs injected.
+    The snapshot is already scoped to the admin's selected systems (see capture_snapshot)."""
     return gr.build_report_bytes(
         snapshot._store, snapshot._systems, snapshot._cfg,
         theme=theme if theme in gr.PALETTES else "dark",

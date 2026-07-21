@@ -23,7 +23,23 @@ from .models import ReportSubmission, RoleRequest, SystemConfig
 from .services import FlagVM, Snapshot, SystemVM, build_overview
 
 
-def _synthetic_snapshot(token: str) -> Snapshot:
+def _snapshot_from(systems, store, cfg, only, token):
+    """Build a Snapshot from engine systems, honouring an `only` set of names (mirrors
+    capture_snapshot's scoping) so the two-step select->capture flow is exercised for real."""
+    if only is not None:
+        systems = [s for s in systems if s.name in only]
+    svms = [SystemVM(s.name, len(s.components),
+                     [FlagVM(f.key, f.text, f.band, f.category)
+                      for f in gr.flagged_for_system(store, s, cfg)])
+            for s in systems]
+    return Snapshot(
+        token=token, captured_at=datetime.datetime(2026, 7, 17, 9, 0), prom_url=cfg.prom,
+        systems=svms, overview=build_overview(store, systems, cfg),
+        _store=store, _systems=systems, _cfg=cfg,
+    )
+
+
+def _synthetic_snapshot(token: str, only=None) -> Snapshot:
     cfg = gr.Config()
     sysm = gr.System("Efin", [gr.Component("DB", "10.0.201.3:9182")])
     store = gr.Store(
@@ -35,13 +51,25 @@ def _synthetic_snapshot(token: str) -> Snapshot:
         links={"https://x.rbz.co.zw": {"up": True, "cert_days": 200.0}},
         backups={},
     )
-    flags = [FlagVM(f.key, f.text, f.band, f.category)
-             for f in gr.flagged_for_system(store, sysm, cfg)]
-    return Snapshot(
-        token=token, captured_at=datetime.datetime(2026, 7, 17, 9, 0), prom_url=cfg.prom,
-        systems=[SystemVM("Efin", 1, flags)], overview=build_overview(store, [sysm], cfg),
-        _store=store, _systems=[sysm], _cfg=cfg,
+    return _snapshot_from([sysm], store, cfg, only, token)
+
+
+def _two_system_snapshot(token: str, only=None) -> Snapshot:
+    """Two systems (Efin flagged, Core healthy) so subset selection has something to exclude."""
+    cfg = gr.Config()
+    efin = gr.System("Efin", [gr.Component("DB", "10.0.201.3:9182")])
+    core = gr.System("Core", [gr.Component("APP", "10.0.202.4:9182")])
+    store = gr.Store(
+        disk={"10.0.201.3:9182": {"C:": {"used": 95.0, "free": 5.0, "size": 100.0}},
+              "10.0.202.4:9182": {"C:": {"used": 20.0, "free": 80.0, "size": 100.0}}},
+        ram={"10.0.201.3:9182": 82.0, "10.0.202.4:9182": 30.0},
+        cpu={"10.0.201.3:9182": 93.0, "10.0.202.4:9182": 10.0},
+        cob=None, swift=1.0,
+        services={"Efin": [("OracleSvc", False, "system", "Efin DB")], "Core": []},
+        up={"10.0.201.3:9182": 1.0, "10.0.202.4:9182": 1.0},
+        links={}, backups={},
     )
+    return _snapshot_from([efin, core], store, cfg, only, token)
 
 
 class ReportBuilderFlow(TestCase):
@@ -49,10 +77,36 @@ class ReportBuilderFlow(TestCase):
         self.user = get_user_model().objects.create_user("tester", password="pw12345!")
         self.user.groups.add(Group.objects.create(name="Report Users"))   # give them a role
 
+    def _open_report(self, systems):
+        """Drive the two-step flow: select systems -> capture -> return the report's token.
+
+        `systems` is the include_system value(s) posted from the selection screen.
+        """
+        resp = self.client.post(reverse("report"), {"include_system": systems}, follow=True)
+        m = re.search(r'name="token" value="(\w+)"', resp.content.decode())
+        return m.group(1) if m else None
+
     def test_form_requires_login(self):
         resp = self.client.get(reverse("report_form"))
         self.assertEqual(resp.status_code, 302)
         self.assertIn("/accounts/login/", resp["Location"])
+
+    def test_landing_is_selection_and_does_not_capture(self):
+        """The landing page lists systems from topology WITHOUT any Prometheus capture."""
+        self.client.login(username="tester", password="pw12345!")
+        with mock.patch("reports.views.capture_snapshot") as cap:
+            resp = self.client.get(reverse("report_form"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Efin")                 # a real system from prometheus.yml
+        self.assertContains(resp, "include_system")       # the selection checkboxes
+        cap.assert_not_called()                           # <-- no capture on the landing page
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_report_requires_prior_selection(self, _cap):
+        """GET /report/ without having chosen systems bounces back to selection."""
+        self.client.login(username="tester", password="pw12345!")
+        resp = self.client.get(reverse("report"))
+        self.assertRedirects(resp, reverse("report_form"))
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_full_generate_flow(self, _cap):
@@ -61,11 +115,9 @@ class ReportBuilderFlow(TestCase):
         self.user.profile.save()
         self.client.login(username="tester", password="pw12345!")
 
-        # 1) form renders with the flagged system + a token
-        resp = self.client.get(reverse("report_form"))
-        self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "Efin")
-        token = re.search(r'name="token" value="(\w+)"', resp.content.decode()).group(1)
+        # 1) selection -> capture -> report screen with the flagged system + a token
+        token = self._open_report("Efin")
+        self.assertIsNotNone(token)
 
         # 2) generate: answer the first flag "Yes", add a comment (theme comes from the setting)
         resp = self.client.post(reverse("generate"), {
@@ -97,8 +149,7 @@ class ReportBuilderFlow(TestCase):
     @mock.patch("mail_report.send_email")   # never touch real SMTP in a test
     def test_email_flow(self, mock_send, _cap):
         self.client.login(username="tester", password="pw12345!")
-        resp = self.client.get(reverse("report_form"))
-        token = re.search(r'name="token" value="(\w+)"', resp.content.decode()).group(1)
+        token = self._open_report("Efin")
 
         resp = self.client.post(reverse("generate"), {
             "token": token, "theme": "dark", "author": "K. Sindiso",
@@ -120,8 +171,7 @@ class ReportBuilderFlow(TestCase):
     def test_email_without_recipients_is_rejected(self):
         self.client.login(username="tester", password="pw12345!")
         with mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot):
-            resp = self.client.get(reverse("report_form"))
-            token = re.search(r'name="token" value="(\w+)"', resp.content.decode()).group(1)
+            token = self._open_report("Efin")
         resp = self.client.post(reverse("generate"), {
             "token": token, "theme": "dark", "action": "email", "recipients": "  ",
         })
@@ -156,13 +206,15 @@ class ReportBuilderFlow(TestCase):
         self.client.login(username="tester", password="pw12345!")
         pat = r'name="token" value="(\w+)"'
 
-        t1 = re.search(pat, self.client.get(reverse("report_form")).content.decode()).group(1)
-        # a plain refresh reuses the same snapshot (timer keeps running, no re-capture)
-        t2 = re.search(pat, self.client.get(reverse("report_form")).content.decode()).group(1)
+        # choose systems -> first capture, land on the report screen
+        t1 = self._open_report("Efin")
+        self.assertEqual(cap.call_count, 1)
+        # a plain revisit of the report reuses the same snapshot (timer keeps running)
+        t2 = re.search(pat, self.client.get(reverse("report")).content.decode()).group(1)
         self.assertEqual(t1, t2)
         self.assertEqual(cap.call_count, 1)
         # ?fresh=1 explicitly re-captures and mints a new token
-        t3 = re.search(pat, self.client.get(reverse("report_form"), {"fresh": "1"}).content.decode()).group(1)
+        t3 = re.search(pat, self.client.get(reverse("report"), {"fresh": "1"}).content.decode()).group(1)
         self.assertNotEqual(t1, t3)
         self.assertEqual(cap.call_count, 2)
 
@@ -172,8 +224,7 @@ class ReportBuilderFlow(TestCase):
         self.user.profile.job_title = "Systems Administrator"
         self.user.profile.save()
         self.client.login(username="tester", password="pw12345!")
-        token = re.search(r'name="token" value="(\w+)"',
-                          self.client.get(reverse("report_form")).content.decode()).group(1)
+        token = self._open_report("Efin")
         self.client.post(reverse("generate"), {"token": token})   # no author typed
         sub = ReportSubmission.objects.get()
         self.assertEqual(sub.author, "Pride Moyo, Systems Administrator")
@@ -214,8 +265,7 @@ class ReportBuilderFlow(TestCase):
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_generate_stores_content_and_detail_replays_it(self, _cap):
         self.client.login(username="tester", password="pw12345!")
-        token = re.search(r'name="token" value="(\w+)"',
-                          self.client.get(reverse("report_form")).content.decode()).group(1)
+        token = self._open_report("Efin")
         self.client.post(reverse("generate"), {
             "token": token, "author": "K. Sindiso",
             "summary_comment": "Incident window snapshot.",
@@ -244,6 +294,85 @@ class ReportBuilderFlow(TestCase):
         r = self.client.get(reverse("submission_detail", args=[sub.pk]))
         self.assertEqual(r.context["back_url"], reverse("history"))
         self.assertEqual(r.context["back_label"], "History")
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_two_system_snapshot)
+    def test_selection_scopes_capture_and_report(self, cap):
+        """Selecting a subset scopes the CAPTURE (only=names) and the audit row + content."""
+        self.client.login(username="tester", password="pw12345!")
+        # include ONLY Efin (Core unticked) -> capture is called with only={'Efin'}
+        token = self._open_report("Efin")
+        self.assertEqual(cap.call_args.kwargs.get("only"), {"Efin"})
+        self.client.post(reverse("generate"), {
+            "token": token, "author": "K. Sindiso",
+            "fix__0__0": "Yes", "comment__0": "DB team engaged.",
+        })
+        sub = ReportSubmission.objects.get()
+        self.assertEqual(sub.systems_count, 1)                       # not 2
+        names = [s["name"] for s in sub.report_content["systems"]]
+        self.assertEqual(names, ["Efin"])                           # Core excluded
+        self.assertNotIn("Core", sub.annotations)
+        # overview reflects the subset: one system, not two
+        self.assertEqual(sub.report_content["overview"]["glance"][0]["value"], 1)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_two_system_snapshot)
+    def test_selecting_all_systems_reports_all(self, _cap):
+        self.client.login(username="tester", password="pw12345!")
+        token = self._open_report(["Efin", "Core"])
+        self.client.post(reverse("generate"), {"token": token, "author": "K. Sindiso"})
+        sub = ReportSubmission.objects.get()
+        self.assertEqual(sub.systems_count, 2)
+        self.assertEqual({s["name"] for s in sub.report_content["systems"]}, {"Efin", "Core"})
+
+    def test_report_post_without_selection_returns_to_picker_without_capturing(self):
+        """Submitting the selection screen with nothing ticked never captures."""
+        self.client.login(username="tester", password="pw12345!")
+        with mock.patch("reports.views.capture_snapshot") as cap:
+            resp = self.client.post(reverse("report"), {}, follow=True)
+        self.assertRedirects(resp, reverse("report_form"))
+        cap.assert_not_called()
+        self.assertEqual(ReportSubmission.objects.count(), 0)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_two_system_snapshot)
+    def test_report_with_unknown_selection_returns_to_picker(self, _cap):
+        """A selection that matches no topology system captures empty -> back to the picker."""
+        self.client.login(username="tester", password="pw12345!")
+        resp = self.client.post(reverse("report"), {"include_system": "Nonexistent"}, follow=True)
+        self.assertRedirects(resp, reverse("report_form"))
+        self.assertEqual(ReportSubmission.objects.count(), 0)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_recently_reported_badge_appears(self, _cap):
+        """A system reported minutes ago is flagged on the selection screen (no capture needed)."""
+        self.client.login(username="tester", password="pw12345!")
+        ReportSubmission.objects.create(
+            generated_by=self.user, theme="dark", delivery="download", systems_count=1,
+            report_content={"systems": [{"name": "Efin"}]},
+        )
+        resp = self.client.get(reverse("report_form"))
+        self.assertEqual(resp.status_code, 200)
+        rep = {s["name"]: s["reported"] for s in resp.context["select_systems"]}
+        self.assertIsNotNone(rep["Efin"])                           # badge data present
+        self.assertEqual(rep["Efin"]["by"], "tester")
+
+    def test_scoped_capture_drops_other_systems_links(self):
+        """Web/cert KPIs must reflect only the selected systems — links captured globally by the
+        engine are dropped when they don't belong to a selected system."""
+        from reports.services import _scope_links_to_systems
+        efin = gr.System("Efin", [gr.Component("DB", "10.0.201.3:9182")])
+        store = gr.Store(
+            disk={}, ram={}, cpu={}, cob=None, swift=None, services={}, up={},
+            links={
+                "https://efin.rbz.co.zw": {"up": True, "cert_days": 200.0},
+                "http://cms.rbz.co.zw": {"up": True, "cert_days": None},
+            },
+            backups={},
+        )
+        _scope_links_to_systems(store, [efin])          # scope to Efin only
+        self.assertEqual(list(store.links), ["https://efin.rbz.co.zw"])   # CMS link dropped
+        # and the overview built from the scoped store counts only Efin's (1 https, 0 http)
+        ov = build_overview(store, [efin], gr.Config())
+        web = [w for w in ov["watch"] if w["label"] == "Web encryption"][0]
+        self.assertEqual(web["value"], "1 | 0")
 
     def test_mark_notifications_seen(self):
         self.client.login(username="tester", password="pw12345!")

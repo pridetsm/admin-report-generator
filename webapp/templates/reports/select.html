@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Choose systems · Admin Report Generator{% endblock %}
+
+{% block body %}
+<form method="post" action="{% url 'report' %}" id="selectForm">
+{% csrf_token %}
+
+<div class="container">
+  <div class="snap">
+    <h1>System Analyses Dashboard</h1>
+    <div class="meta">Choose the systems for this report — live metrics are captured only for what you pick.</div>
+  </div>
+
+  <div class="section-label">Systems to include</div>
+  <div class="card"><div class="body" style="padding-top:14px">
+    <p class="meta" style="margin:0 0 4px;line-height:1.5">Systems reported in the last
+      {{ recent_hours }} hour{{ recent_hours|pluralize }} carry a
+      <span class="badge-reported">↻ recently reported</span> flag so you can avoid re-reporting
+      the same one — it's only a heads-up, you can still include them.</p>
+
+    <div class="sys-toolbar">
+      <label class="chk-pill"><input type="checkbox" id="selectAll" checked><span>All systems</span></label>
+      <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter systems…" autocomplete="off" aria-label="Filter systems">
+      <span class="spacer" style="flex:1"></span>
+      <span class="select-count" id="selectCountTop"></span>
+    </div>
+
+    <div class="sys-grid" id="selectList">
+      {% for s in select_systems %}
+      <label class="sys-tile checked" data-name="{{ s.name|lower }}">
+        <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}" checked>
+        <span class="sys-mono" style="--mono-h:{{ s.mono_hue }}">{{ s.name.0|upper }}</span>
+        <span class="sys-body">
+          <span class="sys-name">{{ s.name }}</span>
+          <span class="sys-sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
+          {% if s.reported %}<span class="badge-reported" title="Reported by {{ s.reported.by|default:'—' }}">↻ reported {{ s.reported.at|timesince }} ago</span>{% endif %}
+        </span>
+        <span class="sys-tick" aria-hidden="true">✓</span>
+      </label>
+      {% empty %}
+      <div class="dropdown-empty">No systems found in the topology.</div>
+      {% endfor %}
+    </div>
+    <div class="muted" id="sysNoResults" hidden style="padding:14px 4px">No systems match your filter.</div>
+  </div></div>
+</div>
+
+{# ---- sticky action bar ---- #}
+<div class="actionbar">
+  <div class="container-inner">
+    <div class="meta" style="color:var(--muted);font-size:13px"><span id="selectCount"></span></div>
+    <div class="spacer" style="flex:1"></div>
+    <button class="btn primary" type="submit">Capture &amp; continue ▸</button>
+  </div>
+</div>
+</form>
+
+<div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("selectForm");
+  var tiles = Array.prototype.slice.call(document.querySelectorAll(".sys-tile"));
+  var checks = tiles.map(function (t) { return t.querySelector(".select-check"); });
+  var allBox = document.getElementById("selectAll");
+  var counts = [document.getElementById("selectCount"), document.getElementById("selectCountTop")];
+  var filter = document.getElementById("sysFilter");
+  var noResults = document.getElementById("sysNoResults");
+
+  function sync() {
+    var n = 0;
+    tiles.forEach(function (t) {
+      var on = t.querySelector(".select-check").checked;
+      t.classList.toggle("checked", on);
+      if (on) n++;
+    });
+    if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
+    counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
+  }
+  checks.forEach(function (c) { c.addEventListener("change", sync); });
+
+  if (allBox) allBox.addEventListener("change", function () {
+    checks.forEach(function (c) { c.checked = allBox.checked; });
+    sync();
+  });
+
+  if (filter) filter.addEventListener("input", function () {
+    var q = filter.value.trim().toLowerCase(), shown = 0;
+    tiles.forEach(function (t) {
+      var hit = !q || t.getAttribute("data-name").indexOf(q) > -1;
+      t.classList.toggle("hidden-by-filter", !hit);
+      if (hit) shown++;
+    });
+    if (noResults) noResults.hidden = shown > 0 || tiles.length === 0;
+  });
+
+  if (form) form.addEventListener("submit", function (e) {
+    if (!checks.some(function (c) { return c.checked; })) {
+      e.preventDefault();
+      window.alert("Select at least one system to include in the report.");
+    }
+  });
+
+  sync();
+})();
+</script>
+{% endblock %}

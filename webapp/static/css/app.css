@@ -393,6 +393,74 @@ table.hist tr:last-child td { border-bottom: 0; }
 @keyframes popin { from { transform: scale(.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
 
+/* ---- system-selection screen (Screen 1: the report picker) ---- */
+.sys-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 14px; }
+.chk-pill {
+  display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; border-radius: 999px;
+  border: 1px solid var(--line-strong); background: var(--panel-2); color: var(--ink);
+  font-weight: 600; font-size: 13.5px; cursor: pointer; user-select: none; white-space: nowrap;
+}
+.chk-pill:hover { border-color: var(--accent); }
+.chk-pill input { accent-color: var(--accent); width: 16px; height: 16px; }
+.sys-filter {
+  flex: 1; min-width: 150px; max-width: 300px; padding: 9px 12px;
+  border: 1px solid var(--line-strong); border-radius: 9px; background: var(--panel);
+  color: var(--ink); font: inherit; font-size: 13.5px;
+}
+.sys-filter:focus { outline: none; border-color: var(--accent); }
+.select-count { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+
+.sys-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(224px, 1fr)); gap: 10px; }
+.sys-tile {
+  position: relative; display: flex; align-items: center; gap: 12px;
+  padding: 12px 13px; border: 1px solid var(--line-strong); border-radius: 12px;
+  background: var(--panel); cursor: pointer;
+  transition: border-color .12s ease, opacity .12s ease, background .12s ease;
+}
+.sys-tile:hover { border-color: var(--accent); }
+.sys-tile > .select-check { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.sys-mono {
+  flex: none; width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center;
+  font-weight: 700; font-size: 16px;
+  /* per-letter hue (set inline as --mono-h); saturation/lightness are pinned so all 26 read as
+     one cohesive palette. Light-theme values here; dark overrides below. */
+  background: hsl(var(--mono-h, 200) 44% 90%);
+  color: hsl(var(--mono-h, 200) 52% 32%);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .sys-mono {
+    background: hsl(var(--mono-h, 200) 30% 23%);
+    color: hsl(var(--mono-h, 200) 48% 71%);
+  }
+}
+:root[data-theme="dark"] .sys-mono {
+  background: hsl(var(--mono-h, 200) 30% 23%);
+  color: hsl(var(--mono-h, 200) 48% 71%);
+}
+:root[data-theme="light"] .sys-mono {
+  background: hsl(var(--mono-h, 200) 44% 90%);
+  color: hsl(var(--mono-h, 200) 52% 32%);
+}
+.sys-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.sys-name { font-weight: 650; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sys-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.sys-tile .badge-reported { margin-top: 6px; align-self: flex-start; }
+.sys-tick {
+  flex: none; width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center;
+  border: 1.5px solid var(--line-strong); color: transparent; font-size: 13px; font-weight: 800;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+.sys-tile.checked { border-color: var(--accent); background: var(--panel-2); }
+.sys-tile.checked .sys-tick { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.sys-tile:not(.checked) { opacity: .6; }
+.sys-tile:not(.checked):hover { opacity: 1; }
+.sys-tile.hidden-by-filter { display: none; }
+
+.badge-reported {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
+  background: var(--amber-bg); color: var(--amber); font-size: 11px; font-weight: 600;
+}
+
 /* ---- toasts (bottom-center, above the action bar) ---- */
 .toast-wrap {
   position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 70;

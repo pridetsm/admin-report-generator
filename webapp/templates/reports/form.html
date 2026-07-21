@@ -17,8 +17,10 @@
   {# ---- snapshot banner ---- #}
   <div class="snap">
     <h1>System Analyses Dashboard</h1>
-    <div class="meta">Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }} · {{ snapshot.prom_url }}</div>
+    <div class="meta">Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }} · {{ snapshot.prom_url }}
+      · {{ selected_count }} system{{ selected_count|pluralize }} selected</div>
     <div class="spacer" style="flex:1"></div>
+    <a class="btn ghost" href="{% url 'report_form' %}" title="Go back to system selection">◂ Change systems</a>
     {% if snapshot.grafana_url %}
     <a class="btn ghost" href="{{ snapshot.grafana_url }}" target="_blank" rel="noopener"
        title="Open the live, auto-refreshing Grafana dashboard">▸ Live Grafana ↗</a>
@@ -233,6 +235,7 @@
     requestAnimationFrame(function () { t.classList.add("show"); });
     setTimeout(function () { t.classList.remove("show"); setTimeout(function () { t.remove(); }, 300); }, 7000);
   }
+  window.toast = toast;
 
   // ---- recipients dropdown (choose who to e-mail) ----
   function currentRecipients() {

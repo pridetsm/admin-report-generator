@@ -40,14 +40,50 @@ from .services import (
     default_recipients,
     default_report_filename,
     email_report,
+    list_systems,
     recipient_options,
 )
 
 _CACHE_PREFIX = "snapshot:"
 
+# A system counts as "recently reported" (heads-up badge on the selection dialog) if it
+# appeared in any report generated within this window. Advisory only — never blocks.
+_RECENT_REPORT_HOURS = 3
+
 
 def _cache_key(token: str) -> str:
     return f"{_CACHE_PREFIX}{token}"
+
+
+def _recently_reported(hours: int = _RECENT_REPORT_HOURS) -> dict:
+    """Which systems were included in a report within the last `hours` — a non-blocking
+    heads-up so an admin can avoid unknowingly re-reporting the same system. Returns
+    {system_name: {"at": datetime, "by": username}} for the MOST RECENT such report.
+
+    Submissions are ordered newest-first (Meta.ordering), so the first time a system name is
+    seen while iterating is its latest appearance.
+    """
+    since = timezone.now() - datetime.timedelta(hours=hours)
+    recent: dict = {}
+    for sub in (ReportSubmission.objects
+                .filter(created_at__gte=since).select_related("generated_by")):
+        names = [s.get("name") for s in (sub.report_content or {}).get("systems", []) if s.get("name")]
+        if not names:                       # legacy rows: fall back to annotation keys
+            names = list((sub.annotations or {}).keys())
+        who = sub.generated_by.get_username() if sub.generated_by else (sub.author or "")
+        for name in names:
+            recent.setdefault(name, {"at": sub.created_at, "by": who})
+    return recent
+
+
+def _mono_hue(name: str) -> int:
+    """A stable, well-spread hue (0-359) for a system's monogram tile, keyed by its FIRST LETTER
+    so the same initial always gets the same colour. The golden-angle stride keeps neighbouring
+    letters visually distinct; the template pins saturation/lightness so every hue reads as one
+    cohesive palette (varied colour, same family)."""
+    ch = (name or "?").strip()[:1].upper()
+    idx = (ord(ch) - 65) if "A" <= ch <= "Z" else (ord(ch) if ch else 0)
+    return int((idx * 137.508) % 360)
 
 
 def _profile_author(user) -> str:
@@ -65,26 +101,65 @@ def _profile_author(user) -> str:
 
 @login_required
 def report_form(request):
-    """Render the annotation form.
+    """Landing page: the lightweight SYSTEM-SELECTION screen.
 
-    A plain page refresh REUSES the snapshot captured earlier (kept in the session +
-    cache) so the countdown keeps running from the original capture time instead of
-    resetting.  A fresh snapshot is only taken when there is none, when the cached one
-    has expired, or when the caller explicitly asks (``?fresh=1`` — the "Refresh" action
-    and the auto-refresh that fires when the timer hits zero).
+    Deliberately does NO Prometheus capture — it lists systems straight from the topology
+    (a plain file read) so merely visiting, refreshing, or navigating back here is cheap.
+    The heavy live capture is deferred to ``report`` (below), which only runs once the admin
+    has picked systems and continued.
     """
+    recent = _recently_reported()
+    select_systems = [
+        {"name": s["name"], "hosts": s["hosts"], "reported": recent.get(s["name"]),
+         "mono_hue": _mono_hue(s["name"])}
+        for s in list_systems()
+    ]
+    return render(request, "reports/select.html", {
+        "select_systems": select_systems,
+        "recent_hours": _RECENT_REPORT_HOURS,
+    })
+
+
+@login_required
+def report(request):
+    """The report / annotation screen for the SELECTED systems.
+
+    POST (from the selection screen): record the chosen systems and redirect to GET
+    (Post/Redirect/Get, so a browser refresh never re-submits the selection).
+
+    GET: capture a live snapshot scoped to those systems and render the annotation form. A
+    plain refresh reuses the cached snapshot (countdown keeps running); ``?fresh=1`` (the
+    Refresh action / auto-refresh on expiry) forces a new scoped capture.
+    """
+    if request.method == "POST":
+        names = [n for n in request.POST.getlist("include_system") if n]
+        if not names:
+            messages.error(request, "Select at least one system to include in the report.")
+            return redirect("report_form")
+        request.session["report_systems"] = names
+        request.session.pop("snapshot_token", None)   # new selection -> fresh capture
+        return redirect("report")
+
+    names = request.session.get("report_systems")
+    if not names:                                     # arrived without choosing -> pick first
+        return redirect("report_form")
+
     force = request.GET.get("fresh") == "1"
     snapshot = None
     token = request.session.get("snapshot_token", "")
     if not force and token:
-        snapshot = cache.get(_cache_key(token))   # None if it lapsed
+        snapshot = cache.get(_cache_key(token))       # None if it lapsed
 
     if snapshot is None:
         token = uuid.uuid4().hex
         try:
-            snapshot = capture_snapshot(token)
+            snapshot = capture_snapshot(token, only=set(names))
         except PrometheusUnavailable as exc:
             return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+        if not snapshot.systems:                      # selection no longer in the topology
+            messages.error(request, "None of the selected systems were found. Please choose again.")
+            request.session.pop("report_systems", None)
+            return redirect("report_form")
         cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
         request.session["snapshot_token"] = token
 
@@ -92,9 +167,11 @@ def report_form(request):
     # captured_at is a naive datetime.now(); compare against the same clock.
     elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
     remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
     return render(request, "reports/form.html", {
         "snapshot": snapshot,
         "token": token,
+        "selected_count": len(snapshot.systems),
         "suggested_author": _profile_author(request.user),
         "suggested_recipients": default_recipients(),
         "recipient_options": recipient_options(),
@@ -141,6 +218,8 @@ def generate(request):
 
     # Rebuild annotations keyed by each flag's stable key. Fields are namespaced by the
     # system index and flag index in the snapshot, so we don't have to encode keys in HTML.
+    # The snapshot is ALREADY scoped to the admin's selected systems (capture_snapshot), so
+    # every system here belongs in the report.
     annotations: dict = {}
     for si, sysvm in enumerate(snapshot.systems):
         flags_ans = {}
