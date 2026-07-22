@@ -348,8 +348,12 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     prepared_by = (f" &nbsp;&middot;&nbsp; prepared by {html.escape(mail['author'])}"
                    if mail.get("author") else "")
     hosts = sum(len(s.components) for s in systems)
-    nsvc = sum(len(v) for v in store.services.values())
-    down = sum(1 for v in store.services.values() for row in v if not row[1])
+    nsvc = sum(len(v) for v in store.services.values()) + len(store.links)
+    # down = failed PromQL service checks + web links whose probe reports them DOWN (a down link
+    # is a down service; matches the link findings above). Keeps the KPI honest when e.g. an HTTPS
+    # endpoint with an untrusted cert fails its probe. 'up' default True mirrors the findings pass.
+    down = (sum(1 for v in store.services.values() for row in v if not row[1])
+            + sum(1 for d in store.links.values() if not d.get("up", True)))
     thr = int(mail.get("elevated", 85))                       # shared "over N%" level (config.ini)
     ram_hosts, _ = ram_pressure(store, systems, thr, thr)
     cpu_hosts, _ = cpu_pressure(store, systems, thr, thr)

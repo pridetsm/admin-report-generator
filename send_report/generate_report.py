@@ -355,7 +355,7 @@ LINK_CHECKS: Dict[str, List[str]] = {
     "rbzwebsite": ["www.rbz.co.zw"],                    # main site (no 'rbzwebsite' in URL)
     "bdtrs":      ["bdctrs.rbz.co.zw", "bdctrs"],       # domain is 'bdctrs' (extra c) -> won't name-match
     "gcms":       ["vault.rbz.co.zw", "vault"],         # GCMS web app lives at vault.rbz.co.zw (no 'gcms' in URL)
-    "frs":        ["10.100.245.150"],                   # FRS web app is served over plain HTTP at its IP (no 'frs' in URL)
+    "frs":        ["10.100.245.150"],                   # FRS web app: HTTPS at its IP with a self-signed/untrusted cert (no 'frs' in URL). Probe it with an insecure blackbox module (see prometheus.sample.yml) or it false-reports DOWN on TLS verify.
 }
 
 
@@ -744,6 +744,24 @@ def unreachable(store: "Store", systems: List["System"]) -> List[Tuple[str, str,
             for s in systems for c in s.components if is_unreachable(store, c.instance)]
 
 
+def links_down(store: "Store") -> int:
+    """Monitored web links whose blackbox probe reports them unreachable (probe_success=0).
+       Web links are rendered as a service class ('WEB LINKS') inside each system's card, so a
+       DOWN link is a DOWN service and must feed the overview 'SERVICES DOWN' count. Without
+       this, the overview can read 0 while a card shows a WEB LINK as DOWN — e.g. an HTTPS
+       endpoint whose untrusted/self-signed cert fails the probe's TLS verification. Reachability
+       only (cert expiry rolls up separately); missing 'up' -> down, matching _link_status."""
+    return sum(1 for d in store.links.values() if not d.get("up", False))
+
+
+def services_down(store: "Store") -> int:
+    """Total DOWN across BOTH service classes: PromQL service checks (store.services) AND web-link
+       probes (store.links). Single source of truth for the overview 'SERVICES DOWN' tile and the
+       e-mail KPI, so every renderer agrees with what the per-system cards show as DOWN."""
+    svc = sum(1 for v in store.services.values() for row in v if not row[1])
+    return svc + links_down(store)
+
+
 def ldap_alert(store: "Store", systems: List["System"]) -> Optional[List[str]]:
     """If the LDAP / auth service is DOWN, the list of dependent systems to warn about; else None.
 
@@ -1034,8 +1052,10 @@ class ReportBuilder:
         # section heading above the summary cards
         self._merge(7, 2, 12, "Summary", Theme.font(13, True, Theme.CYAN), bg=Theme.BG)
         hosts = sum(len(s.components) for s in systems)
-        nsvc = sum(len(v) for v in store.services.values())
-        down = sum(1 for v in store.services.values() for row in v if not row[1])
+        # SERVICES inventory counts BOTH classes shown on the cards: PromQL checks + web links,
+        # so the 'SERVICES DOWN' count (which now includes down links) can never exceed it.
+        nsvc = sum(len(v) for v in store.services.values()) + len(store.links)
+        down = services_down(store)   # PromQL service checks + down web-link probes (see services_down)
         thr = self.cfg.overview_threshold
         ram_hosts, ram_state = ram_pressure(store, systems, self.cfg.chip_amber, self.cfg.chip_red)
         cpu_hosts, cpu_state = cpu_pressure(store, systems, self.cfg.chip_amber, self.cfg.chip_red)

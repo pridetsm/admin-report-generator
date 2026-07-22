@@ -88,8 +88,8 @@ def build_overview(store, systems, cfg) -> dict:
     numbers match. Returned as plain dicts the template renders natively (theme-aware)."""
     thr = cfg.overview_threshold
     hosts = sum(len(s.components) for s in systems)
-    nsvc = sum(len(v) for v in store.services.values())
-    down = sum(1 for v in store.services.values() for row in v if not row[1])
+    nsvc = sum(len(v) for v in store.services.values()) + len(store.links)
+    down = gr.services_down(store)   # PromQL service checks + down web-link probes (see gr.services_down)
     ram_hosts, _ = gr.ram_pressure(store, systems, thr, thr)
     cpu_hosts, _ = gr.cpu_pressure(store, systems, thr, thr)
     dh_hosts, dh_disks, dh_state = gr.disk_high(store, systems, thr, cfg.chip_red)
