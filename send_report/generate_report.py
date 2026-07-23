@@ -355,7 +355,7 @@ LINK_CHECKS: Dict[str, List[str]] = {
     "rbzwebsite": ["www.rbz.co.zw"],                    # main site (no 'rbzwebsite' in URL)
     "bdtrs":      ["bdctrs.rbz.co.zw", "bdctrs"],       # domain is 'bdctrs' (extra c) -> won't name-match
     "gcms":       ["vault.rbz.co.zw", "vault"],         # GCMS web app lives at vault.rbz.co.zw (no 'gcms' in URL)
-    "frs":        ["10.100.245.150"],                   # FRS web app: HTTPS at its IP with a self-signed/untrusted cert (no 'frs' in URL). Probe it with an insecure blackbox module (see prometheus.sample.yml) or it false-reports DOWN on TLS verify.
+    "frs":        ["frs.rbz.co.zw", "10.100.245.150"],  # FRS web app at https://frs.rbz.co.zw (trusted Sectigo cert). Probe by HOSTNAME, not the bare IP: the cert's SAN is frs.rbz.co.zw with no IP SAN, so probing 10.100.245.150 fails TLS verification. IP kept here only to still attribute any stale IP-based series.
 }
 
 
