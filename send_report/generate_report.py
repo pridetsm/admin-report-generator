@@ -330,11 +330,20 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
             Service("InternalApi", host_up("10.100.240.116:9182"), kind="offered")],
     "intranet": [Service("Apache2", systemd("10.100.248.40:9100", "apache2.service", "forking")),
                  Service("MySQL",   systemd("10.100.248.40:9100", "mysql.service", "notify"))],
+    "frs": [Service("Apache2", systemd("10.100.245.150:9100", "apache2.service", "forking")),
+            Service("MySQL",   systemd("10.100.245.150:9100", "mysql.service", "notify"))],
+    "bsa": [Service("MSSQLSERVER",   win_service("MSSQLSERVER", "10.0.206.5:9182")),
+            Service("BSAv50Monitor", win_service("BSAv50Monitor", "10.0.206.5:9182")),
+            Service("BSAv50Parser",  win_service("BSAv50Parser", "10.0.206.5:9182")),
+            Service("Nginx Reverse Proxy", systemd("192.168.25.156:9100", "nginx.service", "forking")),
+            Service("Docker",             systemd("10.0.206.6:9100", "docker.service", "notify"))],
+    "collateralregistry": [Service("IIS (W3SVC)", win_service("W3SVC", "10.0.207.8:9182")),
+                           Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.207.9:9182"))],
 }
 
 # preferred display order (known systems first); anything else is appended A-Z
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
-                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS"]
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry"]
 
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
