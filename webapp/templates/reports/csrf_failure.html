@@ -1,0 +1,36 @@
+{% comment %}
+Deliberately standalone -- it extends nothing and loads no static asset. A CSRF failure
+often means the session lapsed, and this page must also render on a deployment where
+DEBUG=0 leaves /static/ unserved. Inline styles keep it readable either way.
+{% endcomment %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Session expired · Report Builder</title>
+  <style>
+    body { margin:0; font:15px/1.6 system-ui,"Segoe UI",Roboto,sans-serif;
+           background:#0f1115; color:#e6e8ec; display:flex; min-height:100vh;
+           align-items:center; justify-content:center; }
+    .card { max-width:560px; margin:24px; padding:30px 32px; border-radius:12px;
+            background:#171a21; border:1px solid #262b36; }
+    h1 { margin:0 0 10px; font-size:21px; }
+    p { color:#9aa3b2; margin:0 0 14px; }
+    .btn { display:inline-block; margin-top:8px; padding:9px 16px; border-radius:7px;
+           background:#0e6e82; color:#fff; text-decoration:none; font-weight:600; }
+    .btn:hover { background:#12879f; }
+    code { color:#7fb5c4; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Your session expired</h1>
+    <p>The page you submitted was loaded before your session was refreshed, so its security
+       token is no longer valid and the report was not generated. Nothing was lost —
+       start again and re-pick your systems.</p>
+    <p>If it keeps happening, check that your browser accepts cookies from this site.</p>
+    <a class="btn" href="{% url 'report_form' %}">Start a new report</a>
+    {% if reason %}<p style="margin-top:18px"><code>{{ reason }}</code></p>{% endif %}
+  </div>
+</body>
+</html>

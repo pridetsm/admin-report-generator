@@ -26,6 +26,17 @@
     return m ? decodeURIComponent(m[2]) : null;
   }
 
+  // A page rendered before the csrftoken cookie was rotated (Django rotates it on every
+  // login — and the 15-minute idle timeout means a re-login is common while a long
+  // selection/annotation form sits open) carries a token that no longer matches the cookie,
+  // which Django rejects with a bare "CSRF verification failed" 403. The cookie is always
+  // the current one, so re-stamp the hidden field from it at submit time.
+  document.addEventListener("submit", function (e) {
+    var field = e.target.querySelector && e.target.querySelector("input[name=csrfmiddlewaretoken]");
+    var cookie = getCookie("csrftoken");
+    if (field && cookie) field.value = cookie;
+  }, true);
+
   // ---- top-bar dropdowns: settings (+notifications) and profile (one open at a time) ----
   var menus = [
     ["settingsMenu", "settingsToggle"],

@@ -493,3 +493,13 @@ def roles_console(request):
     return render(request, "reports/roles.html", {
         "pending": pending, "user_rows": user_rows, "role_names": ROLE_NAMES,
     })
+
+
+def csrf_failure(request, reason="", template_name="reports/csrf_failure.html"):
+    """Replaces Django's bare yellow "CSRF verification failed" page (see CSRF_FAILURE_VIEW).
+
+    A rejected token here almost always means the admin's page went stale — the 15-minute
+    idle timeout logged them out and the re-login rotated the csrftoken cookie — so the
+    useful response is a way back to a fresh report, not a dead end.
+    """
+    return render(request, template_name, {"reason": reason}, status=403)

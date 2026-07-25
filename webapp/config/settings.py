@@ -75,6 +75,10 @@ if not CSRF_TRUSTED_ORIGINS:
         if _h not in ("localhost", "127.0.0.1", "0.0.0.0", "*"):
             CSRF_TRUSTED_ORIGINS += [f"https://{_h}", f"http://{_h}"]
 
+# Show our own "your session expired" page instead of Django's bare CSRF 403, which tells an
+# admin nothing and leaves them stranded mid-report.
+CSRF_FAILURE_VIEW = "reports.views.csrf_failure"
+
 # How long a captured snapshot stays valid between loading the form and generating the
 # report (seconds). Keeps the answers married to the exact numbers the admin reviewed.
 SNAPSHOT_TTL = int(os.environ.get("REPORT_SNAPSHOT_TTL", "300"))   # 5 minutes
