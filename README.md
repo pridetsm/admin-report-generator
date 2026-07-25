@@ -22,7 +22,9 @@ admin-report-generator/
 │   ├── mail_report.py       renders + sends the e-mail
 │   └── logo.png
 ├── config.sample.ini        sample engine config  (real one -> send_report/config.ini)
-├── prometheus.sample.yml    sample topology       (real one -> ./prometheus.yml)
+├── prometheus.sample.yml    sample topology for local dev only — production points
+│                            config.ini's `yml` setting straight at the real Prometheus
+│                            server's own scrape config instead (see deploy/PLACEMENT.txt)
 ├── deploy/                   SENSITIVE files, delivered out-of-band (git-ignored)
 └── deployment.txt           full deployment guide
 ```
@@ -56,10 +58,15 @@ Then open http://127.0.0.1:8000/ and log in.
   `DJANGO_ALLOWED_HOSTS`, `POSTGRES_*`, …
 - **Engine / data sources** → `send_report/config.ini` (Prometheus URL, Grafana
   link, SMTP, org auth, Keycloak). See [`config.sample.ini`](config.sample.ini).
-- **Topology** → `prometheus.yml` at the repo root (system→host mapping).
+- **Topology** → whatever file `[prometheus] yml` in `send_report/config.ini` points
+  at (system→host mapping). In production this points DIRECTLY at the real Prometheus
+  server's own scrape config (e.g. `C:\metrics\prometheus\prometheus.yml`) — Prometheus
+  and this app run on the same host, so there is exactly one topology file, no copied
+  snapshot to go stale. See [`deploy/PLACEMENT.txt`](deploy/PLACEMENT.txt).
 
 **Secrets are never committed.** `webapp/.env`, `send_report/config.ini`,
-`prometheus.yml` and the whole `deploy/` folder are git-ignored.
+`prometheus.yml` (if you're using a local copy for dev) and the whole `deploy/` folder
+are git-ignored.
 
 ## Tests
 

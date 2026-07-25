@@ -48,8 +48,13 @@ Two moving parts live in this repo:
 
 Data sources at RUNTIME:
   * Prometheus  — live metrics (queried on every form load). URL in config.ini.
-  * prometheus.yml (repo root) — the system→host TOPOLOGY the report is built
-    from. Read via config.ini [prometheus] yml = ../prometheus.yml.
+  * prometheus.yml — the system→host TOPOLOGY the report is built from. config.ini's
+    [prometheus] yml points DIRECTLY at the real Prometheus server's own scrape config
+    (e.g. C:\metrics\prometheus\prometheus.yml) — not a copy. Prometheus and this app
+    run on the same host, so there is exactly one topology file to edit; adding a
+    system there (and restarting the app process, since generate_report.py's per-
+    system service checks are only picked up on import) is the whole procedure. See
+    section 4 — do NOT reintroduce a separate repo-root/deploy copy, it WILL go stale.
   * PostgreSQL — the app's own store: users, profiles, roles, report history,
     e-mail recipients, runtime system config.
   * SMTP (Office 365) — outbound mail for the e-mail feature.
@@ -64,7 +69,7 @@ Data sources at RUNTIME:
                                                  │
       login  ─────────────────────────────────> org auth endpoint (HTTPS)
       load form / generate ──> queries ───────> Prometheus (HTTP)
-      reads topology ─────────────────────────> prometheus.yml (local file)
+      reads topology ─────────────────────────> Prometheus's own prometheus.yml (local file)
       save history / users / roles ───────────> PostgreSQL
       "Generate & e-mail" ────────────────────> SMTP (Office 365)
 
@@ -96,29 +101,36 @@ Those are delivered separately in the deploy/ folder (see deploy/PLACEMENT.txt).
 After cloning, copy them in. Committed *.sample files show the shape of each.
 
   deploy/config.ini      ->  send_report/config.ini
-  deploy/prometheus.yml  ->  prometheus.yml            (repo root)
   deploy/env.example     ->  webapp/.env               (then edit real values)
 
   # from the repo root:
   #   Linux/macOS
-  cp deploy/config.ini deploy/prometheus.yml .          # careful: prometheus.yml to root
   cp deploy/config.ini      send_report/config.ini
-  cp deploy/prometheus.yml  prometheus.yml
   cp deploy/env.example     webapp/.env
   #   Windows PowerShell
   Copy-Item deploy\config.ini      send_report\config.ini
-  Copy-Item deploy\prometheus.yml  prometheus.yml
   Copy-Item deploy\env.example     webapp\.env
 
-If you don't have deploy/ yet, build the two runtime files from the samples:
+If you don't have deploy/ yet, build the runtime config from the sample:
   cp config.sample.ini      send_report/config.ini    # then fill in real values
-  cp prometheus.sample.yml  prometheus.yml            # then add real targets
+
+There is no deploy/prometheus.yml and no repo-root prometheus.yml. config.ini's
+[prometheus] `yml` setting points straight at wherever the real Prometheus server
+keeps its own scrape config (Prometheus and this app share a host, so this just
+works — e.g. `yml = C:\metrics\prometheus\prometheus.yml`). This used to be a
+copied snapshot that had to be kept in sync by hand; it silently went stale (a
+system got added to the live Prometheus config but the copy never got updated,
+so it never showed up in reports) which is why the copy step was removed. If you
+only have prometheus.sample.yml and no live Prometheus reachable yet (local dev),
+copy the sample to a local file and point `yml` at that instead:
+  cp prometheus.sample.yml  prometheus.dev.yml   # then edit yml = prometheus.dev.yml
 
 Path facts (do not "fix" these unless you know why):
   * send_report/config.ini is found automatically (DEFAULT_CONFIG = the file next
     to generate_report.py).
-  * config.ini's `yml = ../prometheus.yml` resolves relative to send_report/, i.e.
-    to the REPO ROOT prometheus.yml. Keep it there.
+  * config.ini's `yml` path is resolved relative to send_report/ if relative, or
+    used as-is if absolute. In production it should be an ABSOLUTE path to the
+    live Prometheus server's own config file — see above.
   * The report logo is send_report/logo.png (committed). The UI logo is
     webapp/static/img/logo.png (committed).
 
@@ -290,7 +302,7 @@ Keycloak (config.ini [keycloak], OFF by default):
   * Browse to the app, log in (superuser or org account).
   * The dashboard should load with LIVE metrics (proves Prometheus + topology).
       - If it errors capturing metrics, check config.ini [prometheus] url and
-        that prometheus.yml is at the repo root and readable.
+        that the [prometheus] yml path is correct and readable by the service account.
   * Generate & download a report -> you get an .xlsx.
   * Open History -> the report appears with the correct local time (Africa/Harare).
   * Generate & e-mail -> arrives from the SMTP from_address (proves SMTP).
@@ -310,7 +322,16 @@ Keycloak (config.ini [keycloak], OFF by default):
                                               multiple workers without a shared cache
                                               (section 8).
   Dashboard can't load metrics              -> Prometheus URL wrong/unreachable, or
-                                              prometheus.yml missing at repo root.
+                                              config.ini [prometheus] yml points at a
+                                              missing/unreadable file.
+  Added a system to Prometheus but it's not -> config.ini's yml already points at the
+  showing up in the webapp                     live Prometheus config (single source of
+                                              truth, see section 1) so the topology
+                                              itself updates immediately; you also need
+                                              a SERVICE_CHECKS entry (and SYSTEM_ORDER)
+                                              for it in send_report/generate_report.py,
+                                              THEN restart the app process — that module
+                                              is only imported once at process start.
   Report has no company logo                -> send_report/logo.png missing.
   CSS/JS missing when DEBUG=0                -> run collectstatic and have the proxy
                                               serve webapp/staticfiles/ (or add WhiteNoise).
@@ -333,8 +354,9 @@ Keycloak (config.ini [keycloak], OFF by default):
     python webapp/manage.py migrate               # if models changed
     python webapp/manage.py collectstatic --noinput
   restart the app process (waitress/gunicorn/service).
-  Your webapp/.env, send_report/config.ini and prometheus.yml are git-ignored,
-  so a pull never clobbers them.
+  Your webapp/.env and send_report/config.ini are git-ignored, so a pull never
+  clobbers them. (There is no separate prometheus.yml to worry about — config.ini
+  points straight at the live Prometheus server's own config; see section 1.)
 
 
 ────────────────────────────────────────────────────────────────────────────
