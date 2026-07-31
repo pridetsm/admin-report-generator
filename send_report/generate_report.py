@@ -339,11 +339,13 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
             Service("Docker",             systemd("10.0.206.6:9100", "docker.service", "notify"))],
     "collateralregistry": [Service("IIS (W3SVC)", win_service("W3SVC", "10.0.207.8:9182")),
                            Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.207.9:9182"))],
+    "edms": [Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.206.11:9182")),
+             Service("IIS (W3SVC)", win_service("W3SVC", "10.0.206.12:9182"))],
 }
 
 # preferred display order (known systems first); anything else is appended A-Z
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
-                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry"]
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS"]
 
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
