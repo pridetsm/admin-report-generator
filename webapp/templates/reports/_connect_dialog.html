@@ -1,5 +1,3 @@
-{# ---- shared host connection dialog. Opened by any element marked `data-cx` and populated
-       from its attributes: system label address proto port os command paste reach ---- #}
 <style>
   .cxd { width:min(420px,94vw); padding:20px 20px 14px; }
   .cxd-head { padding:0 0 4px; }
@@ -79,7 +77,6 @@
     </div>
 
     <div class="cxd-foot">
-      <button type="button" class="btn primary" data-copy-from="cxdCommand">Copy command</button>
       <button type="button" class="btn ghost" data-cx-close>Close</button>
     </div>
   </div>
@@ -141,8 +138,9 @@
     lastFocus = el;
     dlg.classList.add("show");
     dlg.setAttribute("aria-hidden", "false");
-    var primary = dlg.querySelector(".btn.primary");
-    if (primary) { primary.focus(); }
+    // land on the command's Copy button — the reason the dialog was opened
+    var first = dlg.querySelector('[data-copy-from="cxdCommand"]');
+    if (first) { first.focus(); }
   }
 
   function close() {
@@ -167,7 +165,7 @@
     if (!text) { return; }
     var label = btn.textContent;
     var ok = function () {
-      btn.textContent = btn.classList.contains("cxd-cp") ? "Copied" : "Copied ✓";
+      btn.textContent = "Copied";
       btn.classList.add("done");
       setTimeout(function () { btn.textContent = label; btn.classList.remove("done"); }, 1800);
       say("Copied:  " + text);

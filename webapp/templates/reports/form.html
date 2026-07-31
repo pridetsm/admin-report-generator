@@ -17,7 +17,7 @@
   {# ---- snapshot banner ---- #}
   <div class="snap">
     <h1>System Analyses Dashboard</h1>
-    <div class="meta">Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }} · {{ snapshot.prom_url }}
+    <div class="meta">Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }}
       · {{ selected_count }} system{{ selected_count|pluralize }} selected</div>
     <div class="spacer" style="flex:1"></div>
     <a class="btn ghost" href="{% url 'report_form' %}" title="Go back to system selection">◂ Change systems</a>
@@ -69,15 +69,27 @@
       <label class="field">
         <span>Signed by (author)</span>
         <input type="text" name="author" value="{{ suggested_author }}" placeholder="Your name" autocomplete="name">
-        <span class="meta" style="margin-top:6px">Auto-filled from your profile — this name is signed on the report and attributes every comment. Edit only if signing on someone else's behalf.</span>
       </label>
-      <div class="meta" style="margin-top:10px">Report theme: <b style="color:var(--ink)" data-report-theme-label>{{ report_theme|title }}</b> · change it in <b>Settings</b> (☰).</div>
+      <div class="field" style="margin-top:14px">
+        <span>Report theme</span>
+        <div class="theme-choice" id="reportThemePick" data-url="{% url 'set_report_theme' %}">
+          <button type="button" name="theme" value="dark"
+                  class="{% if report_theme != 'light' %}active{% endif %}">Dark</button>
+          <button type="button" name="theme" value="light"
+                  class="{% if report_theme == 'light' %}active{% endif %}">Light</button>
+        </div>
+      </div>
       <input type="hidden" name="recipients" id="recipients" value="{{ suggested_recipients }}">
     </div>
   </div>
 
 {# ---- connect strip ---- #}
 <style>
+  /* app.css styles captions as `label.field > span`; the theme picker's wrapper is a div
+     (see the note on it), so mirror the caption rule for that case */
+  .field > span { display:block; font-size:12px; color:var(--muted); margin:0 0 5px 2px;
+                  text-transform:uppercase; letter-spacing:.4px; }
+
   /* ---- host chips ---- */
   .cxs { display:flex; align-items:center; gap:7px; flex-wrap:wrap;
          padding:2px 0 13px; margin-bottom:6px; border-bottom:1px solid var(--line); }
@@ -177,7 +189,6 @@
       {% endif %}
 
       <label class="field" style="margin-top:14px">
-        <span>Comment / reason for {{ sys.name }}</span>
         <textarea name="comment__{{ forloop.counter0 }}" rows="2" placeholder="Optional note that appears in this system's Notes panel"></textarea>
       </label>
     </div>
@@ -213,14 +224,12 @@
 <div id="expirePopup" class="popup-backdrop" aria-hidden="true">
   <div class="popup-menu" role="dialog" aria-modal="true" aria-labelledby="popup-title">
     <div class="popup-head">
-      <div class="popup-icon">↻</div>
       <div>
         <div class="popup-title" id="popup-title">Snapshot expired</div>
-        <div class="popup-sub">These readings are {{ ttl_minutes }} minutes old. Refresh to capture the latest —
-          anything you’ve filled in is kept.</div>
+        <div class="popup-sub">These readings are {{ ttl_minutes }} minutes old. Anything you’ve filled in is kept.</div>
       </div>
     </div>
-    <button type="button" class="popup-item" data-refresh>↻&nbsp; Refresh now</button>
+    <button type="button" class="popup-item" data-refresh>Refresh now</button>
   </div>
 </div>
 
@@ -302,6 +311,45 @@
     setTimeout(function () { t.classList.remove("show"); setTimeout(function () { t.remove(); }, 300); }, 7000);
   }
   window.toast = toast;
+
+  // ---- report theme (saved to the profile via AJAX, so form entries are not lost) ----
+  var themePick = document.getElementById("reportThemePick");
+  if (themePick) {
+    themePick.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[name=theme]");
+      if (!btn) return;
+      e.preventDefault();
+      var theme = btn.value;
+      fetch(themePick.getAttribute("data-url"), {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": getCookie("csrftoken") || "" },
+        credentials: "same-origin",
+        body: new URLSearchParams({ theme: theme })
+      }).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      }).then(function (d) {
+        if (!d || !d.ok) throw new Error("rejected");
+        themePick.querySelectorAll("button[name=theme]").forEach(function (b) {
+          b.classList.toggle("active", b.value === theme);
+        });
+        document.querySelectorAll("[data-report-theme-label]").forEach(function (el) {
+          el.textContent = theme.charAt(0).toUpperCase() + theme.slice(1);
+        });
+        document.querySelectorAll("[data-report-theme-value]").forEach(function (el) {
+          el.textContent = theme;
+        });
+        toast("Report theme set to " + theme + ".", "success");
+      }).catch(function (err) {
+        // never fail silently — that is what made this look "not working"
+        toast("Could not save the report theme (" + err.message + ").", "info");
+      });
+    });
+  }
+  function getCookie(name) {
+    var m = document.cookie.match(new RegExp("(^|; )" + name + "=([^;]*)"));
+    return m ? decodeURIComponent(m[2]) : null;
+  }
 
   // ---- recipients dropdown (choose who to e-mail) ----
   function currentRecipients() {

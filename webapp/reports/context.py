@@ -4,10 +4,34 @@
   * notifications  (pending role requests, for Administrators)
   * back-nav target  (the current page's PARENT in the nav hierarchy)
 """
+import os
+
+from django.conf import settings
 from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
 from .roles import is_role_admin
+
+
+def _asset_version() -> str:
+    """Cache-buster for app.js / app.css: the newest mtime among them.
+
+    Without it the browser keeps serving a stale app.js — the files carry only Last-Modified,
+    so an edit can sit unseen behind the cache and, worse, an OLD copy can keep running its
+    listeners alongside the new page's, producing changes that cancel each other out.
+    Recomputed per request: DEBUG edits take effect on a normal reload, and in production the
+    value only moves when a file actually changes.
+    """
+    newest = 0.0
+    for rel in ("js/app.js", "css/app.css"):
+        for base in list(getattr(settings, "STATICFILES_DIRS", [])) + [getattr(settings, "STATIC_ROOT", "")]:
+            if not base:
+                continue
+            try:
+                newest = max(newest, os.path.getmtime(os.path.join(str(base), rel)))
+            except OSError:
+                continue
+    return str(int(newest))
 
 # The navigation hierarchy: each page -> its parent page. The canvas Back button walks ONE
 # level up this tree (child -> parent -> ... -> home), rather than jumping straight home.
@@ -54,6 +78,7 @@ def role_flags(request):
         "notif_unseen": False,   # drives the red dot on the hamburger
         "back_url": back_url,    # parent page for the canvas Back button
         "back_label": back_label,
+        "asset_v": _asset_version(),   # ?v= on app.js/app.css so edits are never served stale
     }
     if user is not None and getattr(user, "is_authenticated", False):
         prof = getattr(user, "profile", None)
