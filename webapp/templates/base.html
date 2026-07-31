@@ -5,7 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Admin Report Generator{% endblock %}</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230e6e82'/><rect x='9' y='8' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='14' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='20' width='9' height='2.5' rx='1.2' fill='white'/></svg>">
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v={{ asset_v }}">
+  <script>
+    // Applied here in <head>, before first paint, so a saved dark theme never flashes light.
+    (function () {
+      var t = localStorage.getItem("pageTheme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    })();
+  </script>
+  <style>
+    /* Settings acts as a parent row; its children are indented under it with a spine so the
+       grouping is visible rather than implied by proximity alone. */
+    .nm-children { position: relative; padding-left: 10px; margin: 0 0 4px; }
+    .nm-children::before { content: ""; position: absolute; left: 14px; top: 3px; bottom: 3px;
+                           width: 1px; background: var(--line-strong); }
+    .navmenu-item.nm-child { padding-left: 26px; }
+  </style>
 </head>
 <body>
 {# full-page loading spinner, shown while a navigation / reload is in flight #}
@@ -34,15 +49,14 @@
           {% endfor %}
         </div>
         {% endif %}
+        {# Settings groups its children; report theme now lives in the report's own options #}
         <div class="nm-head">Settings</div>
-        <div class="nm-block">
-          <div class="nm-label">Report theme</div>
-          <form method="post" action="{% url 'set_report_theme' %}" class="theme-choice">{% csrf_token %}
-            <button name="theme" value="dark" class="{% if report_theme != 'light' %}active{% endif %}">Dark</button>
-            <button name="theme" value="light" class="{% if report_theme == 'light' %}active{% endif %}">Light</button>
-          </form>
+        <div class="nm-children">
+          {% if is_role_admin %}
+          <a href="{% url 'system_settings' %}" class="navmenu-item nm-child">Configuration</a>
+          {% endif %}
+          <button type="button" id="themeToggle" class="navmenu-item nm-child">Theme</button>
         </div>
-        <button type="button" id="themeToggle" class="navmenu-item">Toggle page theme</button>
       </div>
     </div>
 
@@ -78,7 +92,6 @@
     <a href="{% url 'history' %}">History</a>
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}">Roles</a>
-    <a href="{% url 'system_settings' %}">Configuration</a>
     {% endif %}
   </nav>
 
@@ -100,6 +113,40 @@
 
 {% block body %}{% endblock %}
 
-<script src="{% static 'js/app.js' %}"></script>
+<script>
+// Page theme toggle. Inline rather than in app.js so the label can never be stale relative
+// to the page — a cached app.js was leaving this button reading "Theme".
+(function () {
+  "use strict";
+  var root = document.documentElement;
+  var btn = document.getElementById("themeToggle");
+  if (!btn) { return; }
+
+  function current() {
+    return root.getAttribute("data-theme") ||
+      (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  }
+  // the label names what you'll GET: on dark it reads "Light Theme"
+  function relabel() {
+    var next = current() === "dark" ? "Light" : "Dark";
+    btn.textContent = next + " Theme";
+    btn.setAttribute("title", "Switch to the " + next.toLowerCase() + " theme");
+  }
+  btn.addEventListener("click", function () {
+    var next = current() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    localStorage.setItem("pageTheme", next);
+    relabel();
+  });
+  if (window.matchMedia) {   // follow the OS, but only while no explicit choice is stored
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    var onChange = function () { if (!root.getAttribute("data-theme")) relabel(); };
+    if (mq.addEventListener) { mq.addEventListener("change", onChange); }
+    else if (mq.addListener) { mq.addListener(onChange); }
+  }
+  relabel();
+})();
+</script>
+<script src="{% static 'js/app.js' %}?v={{ asset_v }}"></script>
 </body>
 </html>

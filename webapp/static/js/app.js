@@ -2,24 +2,6 @@
 (function () {
   "use strict";
 
-  // ---- page theme toggle (persists to localStorage; independent of the *report* theme) ----
-  var root = document.documentElement;
-  var saved = localStorage.getItem("pageTheme");
-  if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
-
-  function currentTheme() {
-    return root.getAttribute("data-theme") ||
-      (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  }
-  var toggle = document.getElementById("themeToggle");
-  if (toggle) {
-    toggle.addEventListener("click", function () {
-      var next = currentTheme() === "dark" ? "light" : "dark";
-      root.setAttribute("data-theme", next);
-      localStorage.setItem("pageTheme", next);
-    });
-  }
-
   // ---- csrf helper (for same-origin POSTs) ----
   function getCookie(name) {
     var m = document.cookie.match(new RegExp("(^|; )" + name + "=([^;]*)"));
@@ -77,38 +59,6 @@
       }
     });
   });
-
-  // ---- report theme change WITHOUT a page reload (so form entries are NOT lost) ----
-  var themeChoice = document.querySelector(".theme-choice");
-  if (themeChoice) {
-    themeChoice.addEventListener("submit", function (e) { e.preventDefault(); });
-    themeChoice.querySelectorAll("button[name=theme]").forEach(function (btn) {
-      btn.addEventListener("click", function (e) {
-        e.preventDefault();
-        var theme = btn.value;
-        fetch(themeChoice.getAttribute("action"), {
-          method: "POST",
-          headers: { "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": getCookie("csrftoken") || "" },
-          credentials: "same-origin",
-          body: new URLSearchParams({ theme: theme })
-        }).then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (d) {
-            if (!d || !d.ok) return;
-            // segmented control
-            themeChoice.querySelectorAll("button[name=theme]").forEach(function (b) {
-              b.classList.toggle("active", b.value === theme);
-            });
-            // any on-page labels that echo the current report theme
-            document.querySelectorAll("[data-report-theme-label]").forEach(function (el) {
-              el.textContent = theme.charAt(0).toUpperCase() + theme.slice(1);
-            });
-            document.querySelectorAll("[data-report-theme-value]").forEach(function (el) {
-              el.textContent = theme;
-            });
-          }).catch(function () {});
-      });
-    });
-  }
 
   // ---- full-page loading spinner on navigation / reload ----
   var spinner = document.getElementById("pageSpinner");

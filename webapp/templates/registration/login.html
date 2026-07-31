@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sign in · Report Builder</title>
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}?v={{ asset_v }}">
   <style>
     /* Password reveal. Edge/IE draw their own eye (::-ms-reveal) but only while the field has
        focus AND content, so it vanishes as you click away — suppress it and use our own button,
