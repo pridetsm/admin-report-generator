@@ -20,7 +20,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import Group
 from django.core.cache import cache
-from django.http import HttpResponse, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
@@ -28,6 +28,7 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
+from . import connect
 from .directory import search_directory
 from .forms import ProfileForm, SystemConfigForm, UserAccountForm
 from .models import ReportSubmission, RoleRequest, SystemConfig, UserProfile
@@ -117,6 +118,8 @@ def report_form(request):
     return render(request, "reports/select.html", {
         "select_systems": select_systems,
         "recent_hours": _RECENT_REPORT_HOURS,
+        "total_hosts": sum(s["hosts"] for s in select_systems),
+        "recent_count": sum(1 for s in select_systems if s["reported"]),
     })
 
 
@@ -167,6 +170,16 @@ def report(request):
     # captured_at is a naive datetime.now(); compare against the same clock.
     elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
     remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    # Per-system connect strip. Free: reuses the snapshot's own topology and `up` series, so
+    # no extra Prometheus call and the status shown matches the numbers on the page. Attached
+    # to each view model (the cache hands back a fresh unpickled copy per request, so this
+    # mutation is request-local).
+    hosts_by_system = connect.hosts_from_snapshot(snapshot._systems, snapshot._store)
+    # colour each chip by the worst flag on that host, taken from the flags this page renders
+    connect.attach_flag_severity(hosts_by_system, snapshot.systems)
+    for svm in snapshot.systems:
+        svm.connect_hosts = hosts_by_system.get(svm.name, [])
 
     return render(request, "reports/form.html", {
         "snapshot": snapshot,
@@ -352,6 +365,44 @@ def submission_detail(request, pk):
 def recipient_search(request):
     """Type-ahead recipient lookup against AD/LDAP (empty list if LDAP isn't configured)."""
     return JsonResponse({"results": search_directory(request.GET.get("q", ""))})
+
+
+@login_required
+def connect_index(request):
+    """The Connect inventory: every monitored host with a ready-to-use RDP / SSH launch.
+
+    No Prometheus capture — the topology is a file read and reachability is ONE `up` query,
+    so opening this page is cheap. Nothing here authenticates: see reports/connect.py for why
+    the credential prompt deliberately stays in the admin's own client.
+    """
+    systems = connect.inventory()
+    hosts = [h for s in systems for h in s["hosts"]]
+    return render(request, "reports/connect.html", {
+        "systems": systems,
+        "total_hosts": len(hosts),
+        "windows_hosts": sum(1 for h in hosts if h["os"] == "windows"),
+        "linux_hosts": sum(1 for h in hosts if h["os"] == "linux"),
+        # None anywhere means Prometheus itself was unreachable -> we say "unknown", not "down"
+        "reachability_unknown": any(h["reachable"] is None for h in hosts),
+        "unreachable": sum(1 for h in hosts if h["reachable"] is False),
+    })
+
+
+@login_required
+def connect_rdp(request):
+    """Serve a generated .rdp for one monitored host. Windows opens mstsc, and MSTSC prompts
+       for the credential — this response contains no password field by design.
+
+       The instance is validated against the topology (connect.find_host): a link that named
+       an arbitrary address would let someone hand a colleague an attacker-controlled RDP
+       target under this app's trusted URL."""
+    host = connect.find_host(request.GET.get("host", "").strip())
+    if not host or host["os"] != "windows":
+        raise Http404("not a monitored Windows host")
+    body = connect.rdp_file_text(host, username=request.GET.get("u", "").strip())
+    resp = HttpResponse(body, content_type="application/x-rdp")
+    resp["Content-Disposition"] = f'attachment; filename="{connect.rdp_filename(host)}"'
+    return resp
 
 
 @login_required

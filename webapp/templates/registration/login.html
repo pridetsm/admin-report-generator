@@ -5,6 +5,29 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Sign in · Report Builder</title>
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <style>
+    /* Password reveal. Edge/IE draw their own eye (::-ms-reveal) but only while the field has
+       focus AND content, so it vanishes as you click away — suppress it and use our own button,
+       which is always present and works in every browser. */
+    input[type="password"]::-ms-reveal,
+    input[type="password"]::-ms-clear { display: none; }
+
+    .pw-wrap { position: relative; display: block; }
+    .pw-wrap input { padding-right: 46px !important; }   /* keep text clear of the button */
+    .pw-eye {
+      position: absolute; top: 0; right: 0; height: 100%; width: 42px;
+      display: grid; place-items: center;
+      border: 0; background: transparent; padding: 0; margin: 0;
+      color: var(--muted); cursor: pointer; border-radius: 0 9px 9px 0;
+    }
+    .pw-eye:hover { color: var(--accent); }
+    .pw-eye:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .pw-eye svg { width: 19px; height: 19px; display: block; }
+    .pw-eye .off { display: none; }
+    .pw-eye[aria-pressed="true"] .on { display: none; }
+    .pw-eye[aria-pressed="true"] .off { display: block; }
+    .pw-eye[aria-pressed="true"] { color: var(--accent); }
+  </style>
 </head>
 <body>
 <div class="login-wrap">
@@ -18,12 +41,53 @@
       <label for="{{ form.username.id_for_label }}">Username</label>
       <input type="text" name="username" id="{{ form.username.id_for_label }}" autocomplete="username" autofocus required>
       <label for="{{ form.password.id_for_label }}">Password</label>
-      <input type="password" name="password" id="{{ form.password.id_for_label }}" autocomplete="current-password" required
-             style="width:100%;padding:10px 12px;border:1px solid var(--line-strong);border-radius:9px;background:var(--panel-2);color:var(--ink);font:inherit">
+      <span class="pw-wrap">
+        <input type="password" name="password" id="{{ form.password.id_for_label }}" autocomplete="current-password" required
+               style="width:100%;padding:10px 12px;border:1px solid var(--line-strong);border-radius:9px;background:var(--panel-2);color:var(--ink);font:inherit">
+        {# type="button" is essential — a bare <button> inside the form would submit it #}
+        <button type="button" class="pw-eye" id="pwEye" aria-pressed="false"
+                aria-controls="{{ form.password.id_for_label }}" aria-label="Show password"
+                title="Show password">
+          <svg class="on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>
+          </svg>
+          <svg class="off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+            <line x1="1" y1="1" x2="23" y2="23"></line>
+          </svg>
+        </button>
+      </span>
       <input type="hidden" name="next" value="{{ next }}">
       <button class="btn primary" type="submit">Sign in</button>
     </form>
   </div>
 </div>
+<script>
+(function () {
+  "use strict";
+  var eye = document.getElementById("pwEye");
+  if (!eye) { return; }
+  var input = document.getElementById(eye.getAttribute("aria-controls"));
+  if (!input) { eye.hidden = true; return; }
+
+  eye.addEventListener("click", function () {
+    var show = input.type === "password";
+    // keep the caret where it was — switching type resets it to the end in some browsers
+    var start = input.selectionStart, end = input.selectionEnd;
+    input.type = show ? "text" : "password";
+    eye.setAttribute("aria-pressed", show ? "true" : "false");
+    var label = show ? "Hide password" : "Show password";
+    eye.setAttribute("aria-label", label);
+    eye.setAttribute("title", label);
+    input.focus();
+    try { input.setSelectionRange(start, end); } catch (err) { /* not supported: ignore */ }
+  });
+
+  // never leave a password on screen after the form is submitted or the page is left
+  document.addEventListener("submit", function () { input.type = "password"; });
+})();
+</script>
 </body>
 </html>
