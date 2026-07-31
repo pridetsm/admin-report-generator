@@ -16,8 +16,15 @@ The script is fully self-contained: the system topology, the service checks and
 the visual theme are all declared below, so the only external dependency at run
 time is a reachable Prometheus endpoint.
 
+The same engine backs three callers, so they always agree:
+    • this CLI (scheduled runs / run.bat),
+    • mail_report.py --attach (the xlsx e-mailed with the daily snapshot),
+    • the Django Report Generator webapp (reports/services.py -> build_report_bytes).
+
     Usage:
         python generate_report.py
+        python generate_report.py --theme light --author "P. Moyo" --stamp
+        python generate_report.py --systems "RTGS,T24" --out scoped.xlsx
         python generate_report.py --prom http://10.100.248.249:9090 --out report.xlsx
 
     Requirements:
@@ -1824,6 +1831,22 @@ def build_report_bytes(store: "Store", systems: List[System], cfg: Config, *,
     return buffer.getvalue()
 
 
+def scope_links_to_systems(store: "Store", systems: List[System]) -> None:
+    """Web links (blackbox HTTP probes) are captured GLOBALLY, independent of the systems
+       list. When a report is scoped to a subset, drop every link not owned by one of those
+       systems (per assign_link — the same attribution the report itself uses) so the
+       link-derived KPIs (Web encryption, SSL certs) and the link sections don't leak other
+       systems' endpoints. Mutates store.links in place."""
+    store.links = {u: d for u, d in store.links.items() if assign_link(u, systems) is not None}
+
+
+def default_report_filename(theme: str = "dark", when: Optional[datetime.datetime] = None) -> str:
+    """The webapp's download name — date/time-stamped and theme-tagged, so a scheduled run
+       leaves a dated history instead of overwriting one file."""
+    when = when or datetime.datetime.now()
+    return f"System Admin Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
 # ============================================================================ #
 #  ENTRY POINT
 # ============================================================================ #
@@ -1833,6 +1856,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--prom", default=None, help="override Prometheus base URL")
     parser.add_argument("--grafana", default=None, help="override Grafana dashboard URL")
     parser.add_argument("--out", default=None, help="override output xlsx path")
+    # --- parity with the Report Generator webapp (reports/services.py) --------------------
+    parser.add_argument("--theme", default="dark", choices=sorted(PALETTES),
+                        help="report palette (default: dark)")
+    parser.add_argument("--author", default=None,
+                        help="name written into the master 'By' field, mirrored across every card")
+    parser.add_argument("--summary", default=None, help="free text for the Summary Notes box")
+    parser.add_argument("--systems", default=None,
+                        help="scope the report to these systems (comma-separated); default = all")
+    parser.add_argument("--stamp", action="store_true",
+                        help="write a date/time-stamped filename instead of overwriting --out")
     args = parser.parse_args(argv)
     cfg = load_config(args.config)
     if args.prom:
@@ -1840,7 +1873,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.grafana:
         cfg.grafana = args.grafana
     if args.out:
-        cfg.out = args.out
+        cfg.out = args.out if Path(args.out).is_absolute() else str(HERE / args.out)
+    if args.stamp:
+        cfg.out = str(Path(cfg.out).parent / default_report_filename(args.theme))
 
     print(f"[*] reading topology from {cfg.prometheus_yml} ...")
     try:
@@ -1848,7 +1883,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as exc:
         print(f"[!] could not read topology from {cfg.prometheus_yml}: {exc}", file=sys.stderr)
         return 2
-    print(f"    {len(systems)} systems: {', '.join(s.name for s in systems)}")
+
+    only = {n.strip() for n in (args.systems or "").split(",") if n.strip()}
+    if only:
+        known = {s.name for s in systems}
+        unknown = sorted(only - known)
+        if unknown:
+            print(f"[!] unknown system(s): {', '.join(unknown)}. Known: {', '.join(sorted(known))}",
+                  file=sys.stderr)
+            return 2
+        systems = [s for s in systems if s.name in only]
+    print(f"    {len(systems)} systems: {', '.join(s.name for s in systems)}"
+          + (" (scoped)" if only else ""))
 
     prom = Prometheus(cfg.prom, cfg.http_timeout)
     print(f"[*] connecting to Prometheus at {cfg.prom} ...")
@@ -1860,6 +1906,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print("[*] capturing metrics (disk, memory, services, COB, SWIFT) ...")
     store = capture(prom, systems, cfg)
+    if only:
+        scope_links_to_systems(store, systems)   # don't leak other systems' endpoints/certs
     hosts = sum(len(s.components) for s in systems)
     nsvc = sum(len(v) for v in store.services.values())
     nbk = sum(len(d.get("files") or []) for d in store.backups.values())
@@ -1868,10 +1916,13 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"cob={store.cob} swift={store.swift} "
           f"backup_hosts={len(store.backups)} backup_files={nbk}")
 
-    print("[*] rendering report ...")
-    builder = ReportBuilder(cfg)
-    builder.build(store, systems)
-    out = builder.save(cfg.out)
+    print(f"[*] rendering report ({args.theme} theme) ...")
+    # same code path the webapp uses (build_report_bytes) — palette swap + admin inputs — but
+    # saved to disk rather than streamed, so CLI and webapp output are identical.
+    with palette(args.theme):
+        builder = ReportBuilder(cfg, author=args.author, summary_comment=args.summary)
+        builder.build(store, systems)
+        out = builder.save(cfg.out)
     print(f"[+] saved -> {out}")
     return 0
 

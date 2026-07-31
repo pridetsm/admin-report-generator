@@ -76,6 +76,47 @@
     </div>
   </div>
 
+{# ---- connect strip ---- #}
+<style>
+  /* ---- host chips ---- */
+  .cxs { display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+         padding:2px 0 13px; margin-bottom:6px; border-bottom:1px solid var(--line); }
+  .cxs-label { font-size:11px; text-transform:uppercase; letter-spacing:.5px;
+               color:var(--muted); font-weight:700; margin-right:3px; }
+  .cxs-chip {
+    display:inline-flex; align-items:center; gap:8px; padding:6px 7px 6px 11px;
+    border-radius:999px; border:1px solid var(--line-strong); background:var(--panel-2);
+    color:var(--ink); font:inherit; font-size:12.5px; font-weight:600; cursor:pointer;
+    transition:border-color .13s ease, transform .13s ease, box-shadow .13s ease;
+  }
+  .cxs-chip:hover { border-color:var(--accent); transform:translateY(-1px);
+                    box-shadow:0 2px 8px rgba(0,0,0,.10); }
+  .cxs-chip:active { transform:translateY(0); }
+  .cxs-chip:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .cxs-nm { line-height:1; }
+  .cxs-tag { font-size:9.5px; letter-spacing:.5px; font-weight:800; color:var(--muted);
+             background:var(--panel); border:1px solid var(--line); border-radius:999px;
+             padding:3px 7px; line-height:1; }
+  .cxs-chip:hover .cxs-tag { color:var(--accent); border-color:var(--accent); }
+  .cxs-dot { width:7px; height:7px; border-radius:50%; background:var(--muted); flex:0 0 auto;
+             box-shadow:0 0 0 3px color-mix(in srgb, var(--muted) 18%, transparent); }
+  .cxs-dot.up   { background:var(--green); box-shadow:0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent); }
+  .cxs-dot.warn { background:var(--amber); box-shadow:0 0 0 3px color-mix(in srgb, var(--amber) 22%, transparent); }
+  .cxs-dot.bad  { background:var(--red);   box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 24%, transparent); }
+
+  /* a host carrying flags is tinted so the whole chip reads at a glance, not just the dot */
+  .cxs-chip.sev-amber { border-color:color-mix(in srgb, var(--amber) 55%, var(--line-strong));
+                        background:color-mix(in srgb, var(--amber-bg) 70%, var(--panel-2)); }
+  .cxs-chip.sev-red   { border-color:color-mix(in srgb, var(--red) 55%, var(--line-strong));
+                        background:color-mix(in srgb, var(--red-bg) 70%, var(--panel-2)); }
+  .cxs-chip.sev-amber:hover, .cxs-chip.sev-red:hover { border-color:var(--accent); }
+  .cxs-ct { font-size:9.5px; font-weight:800; line-height:1; min-width:15px; text-align:center;
+            padding:3px 4px; border-radius:999px; color:var(--panel); background:var(--muted); }
+  .cxs-chip.sev-amber .cxs-ct { background:var(--amber); color:#2a1e00; }
+  .cxs-chip.sev-red   .cxs-ct { background:var(--red);   color:#fff; }
+
+</style>
+
   {# ---- per-system flagged items ---- #}
   <div class="section-label">Systems needing attention</div>
 
@@ -95,6 +136,29 @@
       <span class="chev">▾</span>
     </header>
     <div class="body">
+      {% if sys.connect_hosts %}
+      <div class="cxs">
+        <span class="cxs-label">Connect</span>
+        {% for h in sys.connect_hosts %}
+          {% if h.protocol %}
+          <button type="button" class="cxs-chip{% if h.severity %} sev-{{ h.severity }}{% endif %}" data-cx
+                  {% if h.issues %}title="{{ h.issues|join:"  ·  " }}"{% endif %}
+                  data-system="{{ sys.name }}" data-label="{{ h.label }}"
+                  data-address="{{ h.address }}" data-proto="{{ h.protocol_label }}"
+                  data-port="{{ h.port }}" data-os="{{ h.os }}" data-command="{{ h.command }}"
+                  data-paste="{{ h.paste_target }}"
+                  data-sev="{{ h.severity|default:"" }}" data-issues="{{ h.issues|join:"|" }}"
+                  data-reach="{% if h.reachable %}up{% elif h.reachable is False %}down{% else %}unknown{% endif %}">
+            <span class="cxs-dot {% if h.severity == 'red' %}bad{% elif h.severity == 'amber' %}warn{% elif h.reachable %}up{% elif h.reachable is False %}bad{% endif %}"></span>
+            <span class="cxs-nm">{{ h.label }}</span>
+            {% if h.issues %}<span class="cxs-ct">{{ h.issues|length }}</span>{% endif %}
+            <span class="cxs-tag">{{ h.protocol_label }}</span>
+          </button>
+          {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+
       {% if sys.healthy %}
         <div class="healthy-note"><span class="chip green">All clear</span> No critical or warning metrics on this system.</div>
       {% else %}
@@ -159,6 +223,8 @@
     <button type="button" class="popup-item" data-refresh>↻&nbsp; Refresh now</button>
   </div>
 </div>
+
+{% include 'reports/_connect_dialog.html' %}
 
 {# ---- e-mail confirmation dialog (choose recipients + confirm) ---- #}
 <div id="emailConfirm" class="popup-backdrop" aria-hidden="true">

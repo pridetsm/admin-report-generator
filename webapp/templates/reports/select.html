@@ -2,13 +2,91 @@
 {% block title %}Choose systems · Admin Report Generator{% endblock %}
 
 {% block body %}
+{# ---- selection screen polish; scoped here so app.css stays untouched ---- #}
+<style>
+  /* app.css dims every UNSELECTED tile, which washes the whole grid out on arrival (nothing
+     is selected yet). Only dim once a selection actually exists, so "not chosen" reads as
+     contrast against what IS chosen rather than as a disabled page. */
+  .sys-tile:not(.checked) { opacity: 1; }
+  .sys-grid.has-selection .sys-tile:not(.checked) { opacity: .55; }
+  .sys-grid.has-selection .sys-tile:not(.checked):hover { opacity: 1; }
+
+  .sys-tile { align-items: flex-start; min-height: 66px;
+              transition: border-color .13s ease, opacity .13s ease, background .13s ease,
+                          transform .13s ease, box-shadow .13s ease; }
+  .sys-tile:hover { transform: translateY(-1px); box-shadow: 0 3px 12px rgba(0,0,0,.09); }
+  .sys-tile:active { transform: translateY(0); }
+  /* the real checkbox is visually hidden, so keyboard focus had nothing to show — surface it */
+  .sys-tile:focus-within { border-color: var(--accent);
+                           box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+  .sys-tile.checked { box-shadow: inset 0 0 0 1px var(--accent); }
+  /* One muted near-white tone for every monogram, replacing the per-letter hue palette in
+     app.css (--mono-h is simply ignored). Overrides the theme-specific rules there too, so
+     both light and dark land on the same quiet grey — legible in each, loud in neither. */
+  .sys-mono,
+  :root[data-theme="light"] .sys-mono,
+  :root[data-theme="dark"] .sys-mono {
+    background: color-mix(in srgb, var(--ink) 7%, var(--panel));
+    color: color-mix(in srgb, var(--ink) 42%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--ink) 11%, transparent);
+    transition: transform .13s ease, color .13s ease, background .13s ease;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .sys-mono {
+      background: color-mix(in srgb, var(--ink) 7%, var(--panel));
+      color: color-mix(in srgb, var(--ink) 42%, var(--panel));
+    }
+  }
+  /* the selected tile is the one that should read — lift its monogram out of the grey */
+  .sys-tile.checked .sys-mono {
+    transform: scale(.94);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .sys-tick { margin-top: 1px; }
+  .sys-body { gap: 1px; }
+
+  /* search field with an icon, and a clear button that appears once it has text */
+  .sys-search { position: relative; flex: 1; min-width: 170px; max-width: 320px; }
+  .sys-search .sys-filter { width: 100%; max-width: none; padding-left: 33px; padding-right: 30px; }
+  .sys-search-ico { position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+                    color: var(--muted); font-size: 13px; pointer-events: none; }
+  .sys-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+               border: 0; background: transparent; color: var(--muted); cursor: pointer;
+               font-size: 15px; line-height: 1; padding: 4px 6px; border-radius: 6px; }
+  .sys-clear:hover { color: var(--accent); background: var(--panel-2); }
+
+  .sys-stats { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
+  .sys-stat { font-size: 11.5px; font-weight: 650; color: var(--muted); background: var(--panel-2);
+              border: 1px solid var(--line); border-radius: 999px; padding: 4px 11px; }
+
+  .sel-pill { display: inline-flex; align-items: center; gap: 7px; font-size: 13px;
+              font-weight: 650; color: var(--muted); }
+  .sel-pill b { color: var(--accent); font-size: 15px; }
+  .sel-clear { border: 0; background: transparent; color: var(--muted); font: inherit;
+               font-size: 12.5px; text-decoration: underline; cursor: pointer; padding: 2px 4px; }
+  .sel-clear:hover { color: var(--accent); }
+
+  .sys-empty { display: grid; place-items: center; gap: 6px; padding: 34px 14px;
+               color: var(--muted); text-align: center; }
+  .sys-empty .big { font-size: 26px; opacity: .5; }
+</style>
+
 <form method="post" action="{% url 'report' %}" id="selectForm">
 {% csrf_token %}
 
 <div class="container">
-  <div class="snap">
-    <h1>System Analyses Dashboard</h1>
-    <div class="meta">Choose the systems for this report — live metrics are captured only for what you pick.</div>
+  <div class="snap" style="align-items:flex-start">
+    <div style="min-width:0">
+      <h1>System Analyses Dashboard</h1>
+      <div class="meta">Choose the systems for this report — live metrics are captured only for what you pick.</div>
+      <div class="sys-stats">
+        <span class="sys-stat">{{ select_systems|length }} system{{ select_systems|length|pluralize }}</span>
+        <span class="sys-stat">{{ total_hosts }} host{{ total_hosts|pluralize }}</span>
+        {% if recent_count %}<span class="sys-stat">{{ recent_count }} reported recently</span>{% endif %}
+      </div>
+    </div>
   </div>
 
   <div class="section-label">Systems to include</div>
@@ -20,7 +98,12 @@
 
     <div class="sys-toolbar">
       <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All systems</span></label>
-      <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter systems…" autocomplete="off" aria-label="Filter systems">
+      <span class="sys-search">
+        <span class="sys-search-ico" aria-hidden="true">⌕</span>
+        <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter systems…"
+               autocomplete="off" aria-label="Filter systems">
+        <button type="button" class="sys-clear" id="sysClear" hidden aria-label="Clear filter">×</button>
+      </span>
       <span class="spacer" style="flex:1"></span>
       <span class="select-count" id="selectCountTop"></span>
     </div>
@@ -38,17 +121,18 @@
         <span class="sys-tick" aria-hidden="true">✓</span>
       </label>
       {% empty %}
-      <div class="dropdown-empty">No systems found in the topology.</div>
+      <div class="sys-empty"><span class="big">⌸</span>No systems found in the topology.</div>
       {% endfor %}
     </div>
-    <div class="muted" id="sysNoResults" hidden style="padding:14px 4px">No systems match your filter.</div>
+    <div class="sys-empty" id="sysNoResults" hidden><span class="big">⌕</span>No systems match your filter.</div>
   </div></div>
 </div>
 
 {# ---- sticky action bar ---- #}
 <div class="actionbar">
   <div class="container-inner">
-    <div class="meta" style="color:var(--muted);font-size:13px"><span id="selectCount"></span></div>
+    <span class="sel-pill"><b id="selCountNum">0</b><span id="selectCount"></span></span>
+    <button type="button" class="sel-clear" id="selClear" hidden>Clear</button>
     <div class="spacer" style="flex:1"></div>
     <button class="btn primary" type="submit">Capture &amp; continue ▸</button>
   </div>
@@ -67,6 +151,10 @@
   var counts = [document.getElementById("selectCount"), document.getElementById("selectCountTop")];
   var filter = document.getElementById("sysFilter");
   var noResults = document.getElementById("sysNoResults");
+  var grid = document.getElementById("selectList");
+  var countNum = document.getElementById("selCountNum");
+  var selClear = document.getElementById("selClear");
+  var sysClear = document.getElementById("sysClear");
 
   function sync() {
     var n = 0;
@@ -77,6 +165,10 @@
     });
     if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
     counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
+    // only dim the unselected tiles once something IS selected
+    if (grid) grid.classList.toggle("has-selection", n > 0);
+    if (countNum) countNum.textContent = n;
+    if (selClear) selClear.hidden = n === 0;
   }
   checks.forEach(function (c) { c.addEventListener("change", sync); });
 
@@ -85,7 +177,12 @@
     sync();
   });
 
-  if (filter) filter.addEventListener("input", function () {
+  if (selClear) selClear.addEventListener("click", function () {
+    checks.forEach(function (c) { c.checked = false; });
+    sync();
+  });
+
+  function applyFilter() {
     var q = filter.value.trim().toLowerCase(), shown = 0;
     tiles.forEach(function (t) {
       var hit = !q || t.getAttribute("data-name").indexOf(q) > -1;
@@ -93,6 +190,16 @@
       if (hit) shown++;
     });
     if (noResults) noResults.hidden = shown > 0 || tiles.length === 0;
+    if (sysClear) sysClear.hidden = !q;
+  }
+  if (filter) {
+    filter.addEventListener("input", applyFilter);
+    filter.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && filter.value) { e.preventDefault(); filter.value = ""; applyFilter(); }
+    });
+  }
+  if (sysClear) sysClear.addEventListener("click", function () {
+    filter.value = ""; applyFilter(); filter.focus();
   });
 
   if (form) form.addEventListener("submit", function (e) {

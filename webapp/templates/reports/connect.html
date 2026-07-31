@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Connect · Admin Report Generator{% endblock %}
+
+{% block body %}
+{# ---- host inventory; each row opens the shared connection dialog ---- #}
+<style>
+  .cx-row { display:flex; align-items:center; gap:14px; padding:11px 4px; border-bottom:1px solid var(--line); }
+  .cx-row:last-child { border-bottom:0; }
+  .cx-id { min-width:0; flex:1 1 240px; }
+  .cx-name { font-weight:600; }
+  .cx-addr { color:var(--muted); font-size:12.5px; font-family:Consolas,ui-monospace,monospace; }
+  .cx-meta { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+  .cx-act { display:flex; align-items:center; gap:8px; flex:0 0 auto; margin-left:auto; }
+  .cx-os { font-size:11px; letter-spacing:.4px; text-transform:uppercase; font-weight:700;
+           padding:3px 8px; border-radius:999px; border:1px solid var(--line-strong); color:var(--muted); }
+  .cx-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .cx-dot.up { background:var(--green); } .cx-dot.down { background:var(--red); }
+  .cx-reach { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .cx-sys-head { display:flex; align-items:center; gap:10px; }
+  .cx-hint { color:var(--muted); font-size:12.5px; line-height:1.6; }
+  .cx-toolbar { display:flex; align-items:center; gap:12px; margin-bottom:6px; flex-wrap:wrap; }
+  .cx-filter { flex:1 1 220px; max-width:340px; padding:7px 11px; border:1px solid var(--line-strong);
+               border-radius:7px; background:var(--panel-2); color:var(--ink); font:inherit; }
+  .cx-hidden { display:none; }
+  @media (max-width:640px){ .cx-row{flex-wrap:wrap;gap:8px} .cx-act{margin-left:0;width:100%} }
+</style>
+
+<div class="container">
+  <div class="snap">
+    <h1>Connect</h1>
+    <div class="meta">Open a session on any monitored host. Your own Remote Desktop or SSH client
+      asks for the credentials — this page never handles them.</div>
+  </div>
+
+  <div class="section-label">Inventory</div>
+  <div class="card"><div class="body" style="padding-top:14px">
+    <p class="cx-hint" style="margin:0 0 12px">
+      {{ total_hosts }} host{{ total_hosts|pluralize }} —
+      {{ windows_hosts }} Windows (RDP) · {{ linux_hosts }} Linux (SSH).
+      {% if reachability_unknown %}
+        <b>Prometheus is unreachable, so live status is unknown</b> — connecting still works.
+      {% elif unreachable %}
+        <b>{{ unreachable }} not reporting to Prometheus.</b> They stay clickable on purpose: a host
+        can be reachable from your desk while its exporter is down.
+      {% else %}All hosts are reporting.{% endif %}
+    </p>
+
+    <div class="cx-toolbar">
+      <input type="text" id="cxFilter" class="cx-filter" placeholder="Filter by system, host or address…"
+             autocomplete="off" aria-label="Filter hosts">
+      <span class="muted" style="font-size:12.5px" id="cxCount"></span>
+    </div>
+  </div></div>
+
+  {% for s in systems %}
+  <div class="card cx-system" data-sys="{{ s.name|lower }}" style="margin-top:14px">
+    <header>
+      <div class="cx-sys-head">
+        <h2>{{ s.name }}</h2>
+        <span class="sub">{{ s.hosts|length }} host{{ s.hosts|length|pluralize }}</span>
+      </div>
+      <span class="spacer"></span>
+      {% if s.down_count %}<span class="chip red">{{ s.down_count }} not reporting</span>{% endif %}
+    </header>
+    <div class="body" style="padding-top:4px">
+      {% for h in s.hosts %}
+      <div class="cx-row" data-search="{{ s.name|lower }} {{ h.label|lower }} {{ h.address }}">
+        <div class="cx-id">
+          <div class="cx-name">{{ h.label }}</div>
+          <div class="cx-addr">{{ h.address }}</div>
+        </div>
+
+        <div class="cx-meta">
+          <span class="cx-os">{{ h.protocol_label }}</span>
+          {% if h.reachable is None %}
+            <span class="cx-dot" title="Prometheus unreachable"></span><span class="cx-reach">unknown</span>
+          {% elif h.reachable %}
+            <span class="cx-dot up"></span><span class="cx-reach">reporting</span>
+          {% else %}
+            <span class="cx-dot down"></span><span class="cx-reach">not reporting</span>
+          {% endif %}
+        </div>
+
+        <div class="cx-act">
+          {% if h.protocol %}
+            <button type="button" class="btn primary" data-cx
+                    data-system="{{ h.system }}" data-label="{{ h.label }}"
+                    data-address="{{ h.address }}" data-proto="{{ h.protocol_label }}"
+                    data-port="{{ h.port }}" data-os="{{ h.os }}" data-command="{{ h.command }}"
+                    data-paste="{{ h.paste_target }}"
+                    data-reach="{% if h.reachable %}up{% elif h.reachable is False %}down{% else %}unknown{% endif %}">
+              Connect ▸</button>
+          {% else %}
+            <span class="muted" style="font-size:12.5px">no shell protocol</span>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% empty %}
+  <div class="card"><div class="body"><p class="muted">No hosts found in the topology.</p></div></div>
+  {% endfor %}
+
+  <div class="muted" id="cxNoResults" hidden style="padding:16px 4px">No hosts match your filter.</div>
+
+  <div class="section-label sub" style="margin-top:26px">How this works</div>
+  <div class="card"><div class="body">
+    <p class="cx-hint" style="margin:0">
+      <b>Connect</b> opens a dialog with what you need to reach that host — the address and a
+      paste-ready command, each with a copy button. Paste it into the Run box (Windows) or a
+      terminal (Linux) and you're on.
+      <br><br>
+      It hands over a command rather than launching for you because a web page cannot start a
+      program on your PC — that is the browser's security model, not a limitation here. Remote
+      Desktop and ssh then ask for the credentials themselves, so saved credentials, smart cards
+      and Windows Hello all keep working and nothing sensitive is ever typed into this page.
+      <br><br>
+      Live status comes from Prometheus, which sees the network from the <i>server's</i> position —
+      not your desk. That is why a host that is "not reporting" is still clickable: the signal is a
+      hint, never a gate.
+    </p>
+  </div></div>
+</div>
+
+{% include 'reports/_connect_dialog.html' %}
+
+<div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var rows = Array.prototype.slice.call(document.querySelectorAll(".cx-row"));
+  var cards = Array.prototype.slice.call(document.querySelectorAll(".cx-system"));
+  var filter = document.getElementById("cxFilter");
+  var count = document.getElementById("cxCount");
+  var none = document.getElementById("cxNoResults");
+
+  function tally(n) { if (count) count.textContent = n + " of " + rows.length + " host" + (rows.length === 1 ? "" : "s"); }
+
+  if (filter) filter.addEventListener("input", function () {
+    var q = filter.value.trim().toLowerCase(), shown = 0;
+    rows.forEach(function (r) {
+      var hit = !q || r.getAttribute("data-search").indexOf(q) > -1;
+      r.classList.toggle("cx-hidden", !hit);
+      if (hit) shown++;
+    });
+    // hide a system card entirely once every one of its rows is filtered out
+    cards.forEach(function (c) {
+      var any = Array.prototype.slice.call(c.querySelectorAll(".cx-row"))
+        .some(function (r) { return !r.classList.contains("cx-hidden"); });
+      c.classList.toggle("cx-hidden", !any);
+    });
+    if (none) none.hidden = shown > 0;
+    tally(shown);
+  });
+
+  tally(rows.length);
+})();
+</script>
+{% endblock %}

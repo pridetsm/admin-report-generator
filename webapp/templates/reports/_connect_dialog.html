@@ -1,0 +1,195 @@
+{# ---- shared host connection dialog. Opened by any element marked `data-cx` and populated
+       from its attributes: system label address proto port os command paste reach ---- #}
+<style>
+  .cxd { width:min(420px,94vw); padding:20px 20px 14px; }
+  .cxd-head { padding:0 0 4px; }
+  .cxd-title { font-weight:700; font-size:16px; line-height:1.3; }
+  .cxd-sub { color:var(--muted); font-size:12.5px; margin-top:4px; display:flex;
+             align-items:center; gap:7px; flex-wrap:wrap; }
+  .cxd-state { display:inline-flex; align-items:center; gap:5px; font-weight:600; }
+  .cxd-dot { width:7px; height:7px; border-radius:50%; background:var(--muted); }
+  .cxd-dot.up { background:var(--green); }
+  .cxd-dot.down { background:var(--red); }
+  .cxd-sep { color:var(--line-strong); }
+
+  .cxd-issues { margin-top:15px; border-radius:9px; padding:11px 13px;
+                border:1px solid var(--line); background:var(--panel-2); }
+  .cxd-issues.red   { border-color:color-mix(in srgb, var(--red) 45%, transparent);   background:var(--red-bg); }
+  .cxd-issues.amber { border-color:color-mix(in srgb, var(--amber) 45%, transparent); background:var(--amber-bg); }
+  .cxd-issues-hd { font-size:12px; font-weight:700; margin-bottom:5px; }
+  .cxd-issues.red .cxd-issues-hd { color:var(--red); }
+  .cxd-issues.amber .cxd-issues-hd { color:var(--amber); }
+  .cxd-issues-list { margin:0; padding-left:17px; font-size:12px; line-height:1.65; color:var(--ink); }
+
+  .cxd-field { margin-top:16px; }
+  .cxd-cap { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px;
+             color:var(--muted); font-weight:700; margin-bottom:6px; }
+  .cxd-row { display:flex; align-items:stretch; border:1px solid var(--line-strong);
+             border-radius:9px; overflow:hidden; background:var(--panel-2); }
+  .cxd-val { flex:1; min-width:0; padding:11px 12px; font-family:Consolas,ui-monospace,monospace;
+             font-size:13px; color:var(--ink); overflow-x:auto; white-space:nowrap; line-height:1.4; }
+  .cxd-cp { flex:none; padding:0 15px; border:0; border-left:1px solid var(--line-strong);
+            background:transparent; color:var(--accent); font:inherit; font-size:12px;
+            font-weight:700; cursor:pointer; transition:background .12s ease, color .12s ease; }
+  .cxd-cp:hover { background:var(--panel); }
+  .cxd-cp.done { color:var(--green); }
+  .cxd-hint { font-size:12px; color:var(--muted); line-height:1.55; margin:8px 1px 0; }
+  .cxd-hint kbd { font-family:Consolas,monospace; font-size:11px; background:var(--panel-2);
+                  border:1px solid var(--line-strong); border-radius:4px; padding:1px 5px; }
+  .cxd-foot { display:flex; justify-content:flex-end; gap:9px; margin-top:18px;
+              border-top:1px solid var(--line); padding-top:13px; }
+</style>
+
+<div id="cxDialog" class="popup-backdrop" aria-hidden="true">
+  <div class="popup-menu cxd" role="dialog" aria-modal="true" aria-labelledby="cxdTitle">
+
+    <div class="cxd-head">
+      <div style="min-width:0">
+        <div class="cxd-title" id="cxdTitle">Host</div>
+        <div class="cxd-sub">
+          <span id="cxdKind">—</span>
+          <span class="cxd-sep">·</span>
+          <span id="cxdPort">—</span>
+          <span class="cxd-sep">·</span>
+          <span class="cxd-state"><i class="cxd-dot" id="cxdDot"></i><span id="cxdReach">—</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="cxd-issues" id="cxdIssues" hidden>
+      <div class="cxd-issues-hd" id="cxdIssuesHd">—</div>
+      <ul class="cxd-issues-list" id="cxdIssuesList"></ul>
+    </div>
+
+    <div class="cxd-field">
+      <div class="cxd-cap">Address</div>
+      <div class="cxd-row">
+        <div class="cxd-val" id="cxdAddress">—</div>
+        <button type="button" class="cxd-cp" data-copy-from="cxdAddress">Copy</button>
+      </div>
+    </div>
+
+    <div class="cxd-field">
+      <div class="cxd-cap" id="cxdCmdCap">Command</div>
+      <div class="cxd-row">
+        <div class="cxd-val" id="cxdCommand">—</div>
+        <button type="button" class="cxd-cp" data-copy-from="cxdCommand">Copy</button>
+      </div>
+      <div class="cxd-hint" id="cxdHint">—</div>
+    </div>
+
+    <div class="cxd-foot">
+      <button type="button" class="btn primary" data-copy-from="cxdCommand">Copy command</button>
+      <button type="button" class="btn ghost" data-cx-close>Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var dlg = document.getElementById("cxDialog");
+  if (!dlg) { return; }
+  var $ = function (id) { return document.getElementById(id); };
+  var say = function (m) { if (typeof window.toast === "function") { window.toast(m, "success"); } };
+  var lastFocus = null;
+
+  function open(el) {
+    var d = function (k) { return el.getAttribute("data-" + k) || ""; };
+    var isRdp = d("os") === "windows";
+    var reach = d("reach");
+
+    $("cxdTitle").textContent = d("system") + " · " + d("label");
+    $("cxdKind").textContent = (isRdp ? "Windows" : "Linux") + " · " + d("proto");
+    $("cxdPort").textContent = "port " + d("port");
+    $("cxdReach").textContent = reach === "up" ? "reporting"
+                              : (reach === "down" ? "not reporting" : "status unknown");
+    $("cxdDot").className = "cxd-dot" + (reach === "up" ? " up" : (reach === "down" ? " down" : ""));
+
+    // what is actually wrong on this host — the same flags the panel behind the dialog lists
+    var sev = d("sev");
+    var issues = d("issues") ? d("issues").split("|") : [];
+    var box = $("cxdIssues");
+    if (issues.length) {
+      box.className = "cxd-issues " + (sev === "red" ? "red" : "amber");
+      $("cxdIssuesHd").textContent = issues.length +
+        (sev === "red" ? " item(s) needing immediate attention" : " item(s) to watch");
+      var ul = $("cxdIssuesList");
+      ul.innerHTML = "";
+      issues.forEach(function (t) {
+        var li = document.createElement("li");
+        li.textContent = t;
+        ul.appendChild(li);
+      });
+      box.hidden = false;
+    } else {
+      box.hidden = true;
+    }
+
+    $("cxdAddress").textContent = d("address");
+    $("cxdCommand").textContent = d("command");
+    $("cxdCmdCap").textContent = isRdp ? "Run command" : "Terminal command";
+    $("cxdHint").innerHTML = isRdp
+      ? 'Press <kbd>Win</kbd>+<kbd>R</kbd>, paste, <kbd>Enter</kbd>. Remote Desktop asks for your credentials.'
+      : 'Paste into ' + (d("paste") || "a terminal") +
+        '. It asks for your password or uses your key.';
+
+    Array.prototype.forEach.call(dlg.querySelectorAll(".cxd-cp"), function (b) {
+      b.textContent = "Copy"; b.classList.remove("done");
+    });
+
+    lastFocus = el;
+    dlg.classList.add("show");
+    dlg.setAttribute("aria-hidden", "false");
+    var primary = dlg.querySelector(".btn.primary");
+    if (primary) { primary.focus(); }
+  }
+
+  function close() {
+    dlg.classList.remove("show");
+    dlg.setAttribute("aria-hidden", "true");
+    if (lastFocus) { lastFocus.focus(); lastFocus = null; }
+  }
+
+  function copyFallback(text, done) {      // plain http:// origins have no async clipboard API
+    var ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", "");
+    ta.style.position = "fixed"; ta.style.left = "-9999px";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); done(); }
+    catch (err) { window.prompt("Copy this:", text); }
+    ta.remove();
+  }
+
+  function copyFrom(btn) {
+    var src = $(btn.getAttribute("data-copy-from"));
+    var text = src ? src.textContent : "";
+    if (!text) { return; }
+    var label = btn.textContent;
+    var ok = function () {
+      btn.textContent = btn.classList.contains("cxd-cp") ? "Copied" : "Copied ✓";
+      btn.classList.add("done");
+      setTimeout(function () { btn.textContent = label; btn.classList.remove("done"); }, 1800);
+      say("Copied:  " + text);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok, function () { copyFallback(text, ok); });
+    } else {
+      copyFallback(text, ok);
+    }
+  }
+
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest) { return; }
+    var trigger = e.target.closest("[data-cx]");
+    if (trigger) { e.preventDefault(); open(trigger); return; }
+    if (e.target.closest("[data-cx-close]") || e.target === dlg) { close(); return; }
+    var cp = e.target.closest("[data-copy-from]");
+    if (cp) { e.preventDefault(); copyFrom(cp); }
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && dlg.classList.contains("show")) { close(); }
+  });
+})();
+</script>

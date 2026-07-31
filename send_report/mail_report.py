@@ -6,24 +6,35 @@ E-mail a brand-styled HTML snapshot of everything that needs attention, captured
 LIVE and DIRECTLY from Prometheus — plus a link to the Grafana Report Generator
 webapp where an admin can build and download the full report on demand.
 
-This script is SELF-CONTAINED: the Prometheus client, the system topology, the
+The e-mail body is SELF-CONTAINED: the Prometheus client, the system topology, the
 service checks and the analysis helpers are all copied in below (lifted from
-generate_report.py). It fetches straight from Prometheus and renders the e-mail
-preview itself — it does NOT build or attach an xlsx report.
+generate_report.py), so the link-only mode needs nothing but PyYAML.
+
+The XLSX report can also be attached (it is again — see --attach / --report). That
+path defers to generate_report.py, the one engine the Report Generator webapp uses,
+so the attachment matches what an admin would download from the webapp. When it is
+used, the capture is done ONCE through that engine and shared by the e-mail body and
+the workbook, so the two can never disagree. The Report Generator link stays in the
+e-mail either way — the attachment is the snapshot, the link is where an admin builds
+an annotated report on demand.
 
 Pipeline:
     1. read settings from config.ini ([smtp] / [recipients] / [prometheus] / [grafana])
     2. capture live metrics straight from Prometheus
     3. analyse -> unreachable / critical / warning / no-data findings
     4. render a responsive, brand-styled HTML e-mail (KPI strip + findings)
-    5. embed a link to the Grafana Report Generator webapp
-    6. send via Office365 SMTP  (only with --send; otherwise DRY-RUN preview)
+    5. build/attach the XLSX report (--attach or --report), if asked
+    6. embed a link to the Grafana Report Generator webapp
+    7. send via Office365 SMTP  (only with --send; otherwise DRY-RUN preview)
 
     Usage:
         python mail_report.py --to ops@rbz.co.zw,dba@rbz.co.zw          # dry-run preview
         python mail_report.py --to ops@rbz.co.zw --send                 # actually send
+        python mail_report.py --attach --send                           # + generate & attach the xlsx
+        python mail_report.py --attach --theme light --author "P. Moyo" --send
+        python mail_report.py --report "System Admin Report.xlsx" --send # attach an existing xlsx
 
-Requires: PyYAML (topology).  Python 3.8+.
+Requires: PyYAML (topology).  openpyxl + Pillow as well when attaching.  Python 3.8+.
 ==================================================================================
 """
 from __future__ import annotations
@@ -34,23 +45,28 @@ import datetime
 import html
 import json
 import math
+import os
 import re
 import smtplib
 import ssl
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-import generate_report as gr   # single source of truth for capture + analysis (send_report/ on sys.path)
+from typing import Callable, Dict, List, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "config.ini"
 
 # Grafana Report Generator webapp — admins open this to build the full report on demand.
 REPORT_GENERATOR_URL = "http://10.100.248.249:8000"
+
+# severity thresholds (mirror the report's chip colours)
+CRIT = 90      # used % >= CRIT  -> critical
+WARN = 75      # WARN <= used %  -> warning
 
 # brand palette for the e-mail (light theme, broadly compatible)
 NAVY, GOLD = "#0e2a47", "#c8a24b"
@@ -61,36 +77,44 @@ TINT = {RED: RED_T, AMBER: AMBER_T, GREEN: GREEN_T, NAVY: NAVY_T, MUTED: "#f1f2f
 
 
 # ============================================================================ #
-#  SHARED ENGINE  (imported from generate_report.py — one source of truth, no drift)
+#  CONFIGURATION  (copied from generate_report.py; report-building bits dropped)
 # ============================================================================ #
-# The Prometheus client, topology, capture and every analysis helper now live in
-# generate_report.py. Alias the names the e-mail rendering below uses so that code is
-# unchanged. Anything monitoring-related is fixed once, in generate_report.py, and both
-# the .xlsx/web report and this e-mail move together.
-Config = gr.Config
-Store = gr.Store
-Prometheus = gr.Prometheus
-load_config = gr.load_config
-load_topology = gr.load_topology
-capture = gr.capture
-capture_links = gr.capture_links
-capture_backups = gr.capture_backups
-disk_high = gr.disk_high
-disk_near_full = gr.disk_near_full
-ram_pressure = gr.ram_pressure
-cpu_pressure = gr.cpu_pressure
-cert_rollup = gr.cert_rollup
-is_unreachable = gr.is_unreachable
-backup_missing = gr.backup_missing
-backup_untracked = gr.backup_untracked
-backup_missing_band = gr.backup_missing_band
-ldap_alert = gr.ldap_alert
+@dataclass
+class Config:
+    prom: str = "http://10.100.248.249:9090"
+    grafana: str = (
+        "http://10.100.248.249:3000/d/05e1d489-469b-4557-a0e9-73d782b60e844/"
+        "system-admin-dashboard-green?orgId=1&from=now-5m&to=now&timezone=browser"
+        "&var-Filters=&refresh=30s"
+    )
+    prometheus_yml: str = "../prometheus.yml"   # topology source (system labels), just outside this folder
+    overview_threshold: int = 85   # headline "disk/ram usage over N%" counters
+    chip_amber: int = 75           # per-cell chip thresholds (used % >= amber -> amber)
+    chip_red: int = 90             # used % >= red -> red
+    http_timeout: int = 20
+    # LDAP / auth blackbox probe instance; blank = not monitored (no sign-in banner)
+    ldap_target: str = "vault.rbz.co.zw:7272"
 
-# Display / disk-near-full cut-offs for the e-mail rendering, tied to the engine defaults.
-# (analyse() classifies using the runtime cfg thresholds, so a config.ini override still moves
-# the actual pass/fail with the .xlsx/web report.)
-CRIT = gr.Config.chip_red      # 90
-WARN = gr.Config.chip_amber    # 75
+
+def load_config(path=None) -> "Config":
+    """Build a Config from config.ini, falling back to the dataclass defaults."""
+    cfg = Config()
+    cp = configparser.ConfigParser()
+    if cp.read(path or DEFAULT_CONFIG):
+        if cp.has_section("prometheus"):
+            cfg.prom = cp["prometheus"].get("url", cfg.prom)
+            cfg.prometheus_yml = cp["prometheus"].get("yml", cfg.prometheus_yml)
+        if cp.has_section("grafana"):
+            cfg.grafana = cp["grafana"].get("url", cfg.grafana)
+        if cp.has_section("report"):
+            r = cp["report"]
+            cfg.overview_threshold = r.getint("overview_threshold", cfg.overview_threshold)
+            cfg.chip_amber = r.getint("chip_amber", cfg.chip_amber)
+            cfg.chip_red = r.getint("chip_red", cfg.chip_red)
+            cfg.ldap_target = r.get("ldap_target", cfg.ldap_target).strip()
+    if not Path(cfg.prometheus_yml).is_absolute():
+        cfg.prometheus_yml = str((HERE / cfg.prometheus_yml).resolve())
+    return cfg
 
 
 # --------------------------------------------------------------------------- ini
@@ -117,16 +141,483 @@ def load_mail_config(ini_path) -> dict:
     }
 
 
+# ============================================================================ #
+#  PROMETHEUS CLIENT  (copied from generate_report.py)
+# ============================================================================ #
+class Prometheus:
+    """Minimal read-only client for the Prometheus HTTP API (instant queries)."""
+
+    def __init__(self, base: str, timeout: int = 20):
+        self.base = base.rstrip("/")
+        self.timeout = timeout
+
+    def query(self, expr: str) -> List[dict]:
+        body = urllib.parse.urlencode({"query": expr}).encode()
+        req = urllib.request.Request(self.base + "/api/v1/query", data=body)
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            payload = json.loads(resp.read().decode())
+        if payload.get("status") != "success":
+            raise RuntimeError(f"query failed: {payload.get('error', 'unknown error')}")
+        return [{"labels": s["metric"], "value": float(s["value"][1])}
+                for s in payload["data"]["result"]]
+
+    def scalar(self, expr: str) -> Optional[float]:
+        res = self.query(expr)
+        return res[0]["value"] if res else None
+
+    def ping(self) -> None:
+        self.query("vector(1)")
+
+
+# ============================================================================ #
+#  TOPOLOGY  (copied from generate_report.py — what to capture, grouped by system)
+# ============================================================================ #
+@dataclass
+class Component:
+    label: str
+    instance: str
+
+
+@dataclass
+class Service:
+    name: Optional[str]          # fixed display name ...
+    expr: str
+    name_label: Optional[str] = None   # ... or pull the name from this series label
+    kind: str = "system"         # "system" = keeps the platform running · "offered" = delivered to users
+    shorten: bool = True         # run the generic name tidier (off for T24 path-style names)
+    prefix: str = ""             # prepended to the per-series name — disambiguates rows
+    group: Optional[str] = None  # fixed component sub-group; None -> take it from each series' `display`
+
+
+SERVICE_KIND_ORDER = {"system": 0, "offered": 1}
+
+
+@dataclass
+class System:
+    name: str
+    components: List[Component]
+    services: List[Service] = field(default_factory=list)
+
+
+# -- small PromQL builders so the service table stays readable ----------------
+def win_service(name: str, inst: str) -> str:
+    return f'max by (name, display) (windows_service_state{{name="{name}", instance="{inst}"}})'
+
+
+def systemd(inst: str, name: str, type_: Optional[str] = None) -> str:
+    typ = f', type="{type_}"' if type_ else ""
+    return f'node_systemd_unit_state{{instance="{inst}", name="{name}", state="active"{typ}}}'
+
+
+def probe(inst: str) -> str:
+    return f'probe_success{{instance="{inst}"}}'
+
+
+def host_up(inst: str) -> str:
+    return f'up{{job="windows_exporter", instance="{inst}"}}'
+
+
+def _t24_label(name: str) -> str:
+    """Tidy a T24 TSA service path for display: drop the BNK/ product prefix."""
+    return name[4:] if name.startswith("BNK/") else name
+
+
+# -- service-health checks per system (PromQL); host topology is read from prometheus.yml.
+#    Keyed by NORMALISED system name (lower-case, alnum only).
+SERVICE_CHECKS: Dict[str, List[Service]] = {
+    "rtgs": [
+        Service(None, "jboss_status", name_label="name"),
+        Service(None, "fe_jboss_status", name_label="component"),
+        Service(None, "max by (service, display) (oracle_listener_instance_status)", name_label="service"),
+        Service("RTGS apache2 Service", systemd("10.100.246.70:9100", "apache2.service", "forking")),
+    ],
+    "rtgstest": [
+        Service("RTGS site", probe("https://rtgs.rbz.co.zw/"), kind="offered"),
+        Service("RTGS reverse Proxy", probe("10.100.246.70")),
+        Service("Apache2", systemd("10.100.249.67:9100", "apache2")),
+    ],
+    "temenos": [
+        Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.212.4:9182")),
+        Service(None, "t24_service_up", name_label="service", kind="offered", shorten=False),
+    ],
+    "efin": [
+        Service("Oracle DB Listener", win_service("OracleOraDB19Home1TNSListener", "10.0.201.3:9182")),
+        Service("EFINL service", win_service("OracleServiceEFINL", "10.0.201.3:9182")),
+        Service("EFINT service", win_service("OracleServiceEFINT", "10.0.201.3:9182")),
+        Service("DBARCL service", win_service("OracleServiceDBARCL", "10.0.201.3:9182")),
+        Service("DBARCT service", win_service("OracleServiceDBARCT", "10.0.201.3:9182")),
+        Service("RCUL service", win_service("OracleServiceRCUL", "10.0.201.3:9182")),
+    ],
+    "cms": [Service("CMS Service", systemd("10.100.248.10:9100", "currency.service", "simple"), kind="offered")],
+    "csd": [Service("InternalServiceHost", host_up("10.100.240.116:9182"), kind="offered"),
+            Service("InternalApi", host_up("10.100.240.116:9182"), kind="offered")],
+    "esf": [Service("ESF httpd Service", systemd("10.100.245.70:9100", "httpd.service"))],
+    "esfexec": [Service("ESFEXEC httpd Service", systemd("10.100.245.240:9100", "httpd.service"))],
+    "rbzwebsite": [Service("apache2 httpd Service", systemd("10.100.245.46:9100", "apache2.service"))],
+    "eagle": [Service("Eagle httpd Service", systemd("10.100.245.70:9100", "httpd.service"))],
+    "cepecs": [Service("InternalServiceHost", host_up("10.100.240.116:9182"), kind="offered"),
+               Service("InternalApi", host_up("10.100.240.116:9182"), kind="offered")],
+    "cebas": [Service("InternalServiceHost", host_up("10.100.240.116:9182"), kind="offered"),
+              Service("InternalApi", host_up("10.100.240.116:9182"), kind="offered")],
+    "crb": [Service("InternalServiceHost", host_up("10.100.240.116:9182"), kind="offered"),
+            Service("InternalApi", host_up("10.100.240.116:9182"), kind="offered")],
+    "intranet": [Service("Apache2", systemd("10.100.248.40:9100", "apache2.service", "forking")),
+                 Service("MySQL",   systemd("10.100.248.40:9100", "mysql.service", "notify"))],
+}
+
+# preferred display order (known systems first); anything else is appended A-Z
+SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle",
+                "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme"]
+# `system` label values that are not real systems
+SKIP_SYSTEMS = {"unassigned", "prometheus", ""}
+# systems whose users sign in through the LDAP / auth service (see cfg.ldap_target)
+LDAP_DEPENDENTS = {"GCMS", "GMS"}
+
+
+def _link_display(url: str) -> str:
+    """Compact label for a link row: host (+path), no scheme or trailing slash."""
+    return re.sub(r"^https?://", "", url, flags=re.IGNORECASE).rstrip("/")
+
+
+def _norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _component_label(display: Optional[str], role: Optional[str], system: str, instance: str) -> str:
+    """Human label for a host: prefer display (system prefix stripped), then role, then address."""
+    if display:
+        d = display
+        if d.lower().startswith(system.lower()):
+            d = d[len(system):].lstrip(" /-:·")
+        return d or display
+    if role:
+        return role.replace("-", " ").replace("_", " ").title()
+    return instance
+
+
+def load_topology(prometheus_yml: str) -> List[System]:
+    """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label)."""
+    import yaml  # PyYAML — see requirements.txt
+    with open(prometheus_yml, encoding="utf-8") as fh:
+        doc = yaml.safe_load(fh) or {}
+    grouped: Dict[str, List[Component]] = {}
+    for job in doc.get("scrape_configs", []) or []:
+        for sc in job.get("static_configs", []) or []:
+            labels = sc.get("labels", {}) or {}
+            system = (labels.get("system") or "").strip()
+            if system.lower() in SKIP_SYSTEMS:
+                continue
+            role, display = labels.get("role"), labels.get("display")
+            for target in sc.get("targets", []) or []:
+                grouped.setdefault(system, []).append(
+                    Component(_component_label(display, role, system, target), target))
+    order = {name: i for i, name in enumerate(SYSTEM_ORDER)}
+    names = sorted(grouped, key=lambda n: (order.get(n, len(order)), n))
+    return [System(name, grouped[name], SERVICE_CHECKS.get(_norm(name), [])) for name in names]
+
+
+# ============================================================================ #
+#  DATA CAPTURE  (copied from generate_report.py)
+# ============================================================================ #
+@dataclass
+class Store:
+    disk: Dict[str, Dict[str, dict]]            # instance -> mount -> {used, free, size}
+    ram: Dict[str, float]                       # instance -> used %
+    cpu: Dict[str, float]                       # instance -> busy % (100 - idle)
+    cob: Optional[float]
+    swift: Optional[float]
+    services: Dict[str, List[Tuple[str, bool, str, str]]]  # system -> [(name, is_up, kind, component)]
+    up: Dict[str, float]                        # instance -> 1 reachable / 0 unreachable (Prometheus `up`)
+    links: Dict[str, dict]                      # URL -> {up, code, ssl, cert_days, tls, duration}
+    backups: Dict[str, dict]                    # instance -> {files, count, ok, ts}
+    ldap_up: Optional[bool] = None              # LDAP/auth probe: True up / False down / None not monitored
+
+
+# filters reused across every node_filesystem / windows_logical_disk query
+_FS = 'fstype=~"ext.*|xfs|btrfs",mountpoint!~".*pod.*|.*container.*|^/snap/|^/var/snap"'
+_VOL = 'volume!~"HarddiskVolume.+"'
+_HASH = re.compile(r"[0-9a-f]{20,}")
+
+
+def _shorten(name: str) -> str:
+    for suffix in (" Service", " service"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    if len(name) > 17 and "." in name:        # collapse long dotted CI names
+        name = name.split(".")[-1]
+    return name
+
+
+def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
+    disk: Dict[str, Dict[str, dict]] = {}
+    ram: Dict[str, float] = {}
+
+    def index(result: List[dict], field_: str, key: Callable[[dict], Optional[str]]) -> None:
+        for row in result:
+            inst, k = row["labels"].get("instance"), key(row["labels"])
+            if inst and k is not None:
+                disk.setdefault(inst, {}).setdefault(k, {})[field_] = row["value"]
+
+    # ---- disk: uniform USED% / FREE GB / SIZE GB for linux + windows ----------
+    index(prom.query(f"100*(1-node_filesystem_avail_bytes{{{_FS}}}/node_filesystem_size_bytes{{{_FS}}})"),
+          "used", lambda m: m.get("mountpoint"))
+    index(prom.query(f"node_filesystem_avail_bytes{{{_FS}}}/1024/1024/1024"), "free", lambda m: m.get("mountpoint"))
+    index(prom.query(f"node_filesystem_size_bytes{{{_FS}}}/1024/1024/1024"), "size", lambda m: m.get("mountpoint"))
+    index(prom.query(f"100*(1-windows_logical_disk_free_bytes{{{_VOL}}}/windows_logical_disk_size_bytes{{{_VOL}}})"),
+          "used", lambda m: m.get("volume"))
+    index(prom.query(f"windows_logical_disk_free_bytes{{{_VOL}}}/1024/1024/1024"), "free", lambda m: m.get("volume"))
+    index(prom.query(f"windows_logical_disk_size_bytes{{{_VOL}}}/1024/1024/1024"), "size", lambda m: m.get("volume"))
+
+    # ---- memory: uniform RAM% for linux + windows ----------------------------
+    for r in prom.query("100*(1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes)"):
+        ram[r["labels"]["instance"]] = r["value"]
+    for r in prom.query("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)"):
+        ram[r["labels"]["instance"]] = r["value"]
+
+    # ---- cpu: uniform BUSY% (100 - idle, 5-min avg) for linux + windows ------
+    cpu: Dict[str, float] = {}
+    for r in prom.query('100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)'):
+        cpu[r["labels"]["instance"]] = r["value"]
+    for r in prom.query('100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100)'):
+        cpu[r["labels"]["instance"]] = r["value"]
+
+    # ---- reachability: Prometheus `up` per target (0 = scrape failed = unreachable) ----
+    up: Dict[str, float] = {}
+    for r in prom.query("max by (instance) (up)"):
+        up[r["labels"]["instance"]] = r["value"]
+
+    # ---- specials -------------------------------------------------------------
+    cob = prom.scalar("cob_time")
+    swift = prom.scalar("swift_transactions_total")
+
+    # ---- services -------------------------------------------------------------
+    services: Dict[str, List[Tuple[str, bool, str, str]]] = {}
+    for sysm in systems:
+        rows, seen = [], set()
+        comp_order = {c.label: i for i, c in enumerate(sysm.components)}   # topology order for sub-groups
+        for svc in sysm.services:
+            try:
+                result = prom.query(svc.expr)
+            except Exception:
+                result = []
+            for r in result:
+                name = r["labels"].get(svc.name_label) if svc.name_label else svc.name
+                if not name or _HASH.fullmatch(name):
+                    continue
+                name = _shorten(name) if svc.shorten else _t24_label(name)
+                name = svc.prefix + name
+                group = svc.group or r["labels"].get("display") or sysm.name
+                if (group, name) in seen:
+                    continue
+                seen.add((group, name))
+                rows.append((name, r["value"] >= 1, svc.kind, group))
+        rows.sort(key=lambda t: (SERVICE_KIND_ORDER.get(t[2], 99),
+                                 comp_order.get(t[3], 999), t[3]))
+        services[sysm.name] = rows
+
+    # ---- web links (blackbox HTTP probes) -------------------------------------
+    links = capture_links(prom)
+
+    # ---- backups (textfile collector: backup_file / _count / _success / _ts) ----
+    backups = capture_backups(prom)
+
+    # ---- LDAP / auth blackbox probe (drives the red sign-in banner) ------------
+    ldap_up: Optional[bool] = None
+    if cfg.ldap_target:
+        rows = prom.query(f'probe_success{{instance="{cfg.ldap_target}"}}')
+        if rows:
+            ldap_up = max(r["value"] for r in rows) >= 1
+
+    return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up)
+
+
+def _is_url(inst: Optional[str]) -> bool:
+    """A blackbox HTTP target (its `instance` is a URL) — not an ICMP-ping host."""
+    return bool(inst) and inst.lower().startswith(("http://", "https://"))
+
+
+def capture_links(prom: Prometheus) -> Dict[str, dict]:
+    """Per-URL reachability + SSL/TLS snapshot from the blackbox exporter."""
+    links: Dict[str, dict] = {}
+
+    def index(expr: str, field_: str, conv=lambda v: v) -> None:
+        try:
+            result = prom.query(expr)
+        except Exception:
+            result = []
+        for r in result:
+            inst = r["labels"].get("instance")
+            if _is_url(inst):
+                links.setdefault(inst, {})[field_] = conv(r["value"])
+
+    index("probe_success", "up", lambda v: v >= 1)
+    index("probe_http_status_code", "code", lambda v: int(v))
+    index("probe_http_ssl", "ssl", lambda v: v >= 1)
+    index("(probe_ssl_earliest_cert_expiry - time()) / 86400", "cert_days")
+    index("probe_duration_seconds", "duration")
+    try:
+        for r in prom.query("probe_tls_version_info"):
+            inst, ver = r["labels"].get("instance"), r["labels"].get("version")
+            if _is_url(inst) and ver:
+                links.setdefault(inst, {})["tls"] = ver
+    except Exception:
+        pass
+    return links
+
+
+def capture_backups(prom: Prometheus) -> Dict[str, dict]:
+    """Per-host backup snapshot from the textfile collector (backup_monitor scripts)."""
+    data: Dict[str, dict] = {}
+
+    def slot(inst: str) -> dict:
+        return data.setdefault(inst, {"files": [], "count": None, "ok": None, "ts": None})
+
+    def scan(expr: str, apply: Callable[[dict, dict], None]) -> None:
+        try:
+            result = prom.query(expr)
+        except Exception:
+            result = []
+        for r in result:
+            inst = r["labels"].get("instance")
+            if inst:
+                apply(slot(inst), r)
+
+    scan("backup_file", lambda d, r: d["files"].append(
+        (r["labels"].get("file", ""), r["labels"].get("day", ""), r["value"])))
+    scan("backup_file_count", lambda d, r: d.__setitem__("count", int(r["value"])))
+    scan("backup_check_success", lambda d, r: d.__setitem__("ok", r["value"] >= 1))
+    scan("backup_check_timestamp_seconds", lambda d, r: d.__setitem__("ts", r["value"]))
+
+    for d in data.values():
+        d["files"] = sorted((ft for ft in d["files"] if ft[0]),
+                            key=lambda ft: (0 if ft[1] == "today" else 1, ft[0]))
+    return data
+
+
+# ============================================================================ #
+#  PRESSURE / ANALYSIS METRICS  (copied from generate_report.py)
+# ============================================================================ #
+def disk_high(store: "Store", systems: List["System"], amber: int, red: int
+              ) -> Tuple[int, int, str]:
+    """EVERY disk over the elevated threshold, counting elevated (amber..red) and
+       near-full (>= red) together. Returns (hosts, disks, state)."""
+    hosts = disks = worst = 0
+    for s in systems:
+        for c in s.components:
+            high = [u for u in (d.get("used", 0)
+                    for d in store.disk.get(c.instance, {}).values()) if u > amber]
+            if high:
+                hosts += 1
+                disks += len(high)
+                worst = max(worst, max(high))
+    return hosts, disks, ("good" if disks == 0 else ("bad" if worst >= red else "warn"))
+
+
+def disk_near_full(store: "Store", systems: List["System"], red: int) -> List[Tuple[str, str, str, float]]:
+    """Every disk AT/OVER red% -> [(system, host, mount, used%)], worst first."""
+    out: List[Tuple[str, str, str, float]] = []
+    for s in systems:
+        for c in s.components:
+            for mp, dd in store.disk.get(c.instance, {}).items():
+                used = dd.get("used", 0)
+                if used >= red:
+                    out.append((s.name, c.label, mp, used))
+    out.sort(key=lambda t: -t[3])
+    return out
+
+
+def _usage_pressure(values: Dict[str, float], systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
+    """Hosts carrying a warning-or-worse marker (>= amber%) and the colour BAND of
+       their average usage. Returns (count, state)."""
+    vals = [values[c.instance] for s in systems for c in s.components
+            if values.get(c.instance, 0) >= amber]
+    if not vals:
+        return 0, "good"
+    return len(vals), ("bad" if (sum(vals) / len(vals)) >= red else "warn")
+
+
+def ram_pressure(store: "Store", systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
+    return _usage_pressure(store.ram, systems, amber, red)
+
+
+def cpu_pressure(store: "Store", systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
+    return _usage_pressure(store.cpu, systems, amber, red)
+
+
+def cert_rollup(store: "Store", horizon_days: int = 30) -> Tuple[List[Tuple[str, float]], List[Tuple[str, float]]]:
+    """SSL certificate expiry rollup across ALL monitored HTTPS endpoints.
+       Returns (expired, expiring), each a [(host, days)] list, soonest first."""
+    expired: List[Tuple[str, float]] = []
+    expiring: List[Tuple[str, float]] = []
+    for url, d in store.links.items():
+        if not url.lower().startswith("https"):
+            continue
+        cd = d.get("cert_days")
+        if cd is None:
+            continue
+        if cd < 0:
+            expired.append((_link_display(url), cd))
+        elif cd <= horizon_days:
+            expiring.append((_link_display(url), cd))
+    expired.sort(key=lambda t: t[1])
+    expiring.sort(key=lambda t: t[1])
+    return expired, expiring
+
+
+def is_unreachable(store: "Store", instance: str) -> bool:
+    """True when a configured target isn't reporting: up==0 OR no up series at all
+       (only trusted when up data exists for OTHER targets)."""
+    u = store.up.get(instance)
+    if u is not None:
+        return u < 1
+    return bool(store.up)
+
+
+def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, str, str]]:
+    """Reporting hosts with NO fresh backup -> [(system, host, reason)]."""
+    now = datetime.datetime.now()
+    tmid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    ymid = tmid - 86400
+    missing: List[Tuple[str, str, str]] = []
+    for s in systems:
+        for c in s.components:
+            d = store.backups.get(c.instance)
+            if d is None:
+                continue
+            fresh = any(mt and mt >= ymid for _n, _day, mt in (d.get("files") or []))
+            if not fresh:
+                missing.append((s.name, c.label,
+                                "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
+    return missing
+
+
+def backup_untracked(store: "Store", systems: List["System"]) -> List[str]:
+    """Systems where NO component reports the backup check at all -> [system names]."""
+    return [s.name for s in systems
+            if not any(c.instance in store.backups for c in s.components)]
+
+
+def backup_missing_band(count: int) -> str:
+    """Card state for the MISSING BACKUPS tile. No misses -> good. Yesterday Sunday
+       (today Monday) -> warn (pair straddles the non-work day). Else -> bad."""
+    if count == 0:
+        return "good"
+    yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+    return "warn" if yesterday.weekday() == 6 else "bad"
+
+
 # ---------------------------------------------------------------------- analysis
 Finding = Tuple[str, str, str, str]   # (system, component, item, detail)
 
 
-def analyse(store: Store, systems, cfg=None):
-    # Thresholds come from the config (chip_red / chip_amber), the SAME source the .xlsx/web
-    # report uses, so an override in config.ini [report] moves both reports together.
-    if cfg is None:
-        cfg = load_config()
-    crit, warn = cfg.chip_red, cfg.chip_amber
+def analyse(store: Store, systems, cfg: Optional["Config"] = None):
+    """Bucket every reading into unreachable / critical / warning / no-data.
+       `cfg` is optional: when supplied (the webapp passes it) the chip thresholds from
+       config.ini are used, otherwise the module CRIT/WARN defaults — which config.ini
+       mirrors, so both routes agree unless someone deliberately retunes them."""
+    crit_at = getattr(cfg, "chip_red", CRIT)
+    warn_at = getattr(cfg, "chip_amber", WARN)
     unreach: List[Finding] = []     # exporter not responding -> host/network down
     critical: List[Finding] = []
     warning: List[Finding] = []
@@ -145,16 +636,16 @@ def analyse(store: Store, systems, cfg=None):
             ram = store.ram.get(comp.instance)
             if ram is None:
                 nodata.append((sysm.name, comp.label, "memory", "no data — exporter up, metric missing"))
-            elif ram >= CRIT:
+            elif ram >= crit_at:
                 critical.append((sysm.name, comp.label, "RAM", f"{ram:.0f}% used"))
-            elif ram >= WARN:
+            elif ram >= warn_at:
                 warning.append((sysm.name, comp.label, "RAM", f"{ram:.0f}% used"))
             cpu = store.cpu.get(comp.instance)
             if cpu is None:
                 nodata.append((sysm.name, comp.label, "cpu", "no data — exporter up, metric missing"))
-            elif cpu >= CRIT:
+            elif cpu >= crit_at:
                 critical.append((sysm.name, comp.label, "CPU", f"{cpu:.0f}% busy"))
-            elif cpu >= WARN:
+            elif cpu >= warn_at:
                 warning.append((sysm.name, comp.label, "CPU", f"{cpu:.0f}% busy"))
             disks = store.disk.get(comp.instance, {})
             if not disks:
@@ -162,9 +653,9 @@ def analyse(store: Store, systems, cfg=None):
             for mount, dd in sorted(disks.items(), key=lambda kv: -kv[1].get("used", 0)):
                 used, free = dd.get("used", 0), dd.get("free")
                 detail = f"{used:.0f}% used" + (f", {free:.0f} GB free" if free is not None else "")
-                if used >= CRIT:
+                if used >= crit_at:
                     critical.append((sysm.name, comp.label, mount, detail))
-                elif used >= WARN:
+                elif used >= warn_at:
                     warning.append((sysm.name, comp.label, mount, detail))
     # ---- web links (blackbox HTTP probes): reachability + SSL cert expiry ----
     for url, d in getattr(store, "links", {}).items():
@@ -322,19 +813,100 @@ def _cob_block(store) -> str:
     )
 
 
+def _ldap_block(store, systems) -> str:
+    """RED callout when the LDAP / auth service is down — users can't sign in to the
+       dependent systems. Mirrors the xlsx + the webapp's highest-priority banner.
+       Only fires on a positive 'down' reading; an absent probe is never alarmed on."""
+    if getattr(store, "ldap_up", None) is not False:      # True (up) or None (not monitored)
+        return ""
+    present = [s.name for s in systems if s.name in LDAP_DEPENDENTS] or sorted(LDAP_DEPENDENTS)
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{RED_T};border-left:4px solid {RED};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{RED};">&#9888;&nbsp; '
+        f"LDAP / auth service down &mdash; {len(present)} dependent system(s) affected</div>"
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 0;">Users cannot sign in to: '
+        f'<b>{html.escape(", ".join(present))}</b>. <b>Treat as urgent.</b></div>'
+        "</div></td></tr>"
+    )
+
+
+def _cert_block(store) -> str:
+    """SSL certificate rollup callout — RED when anything has already expired, AMBER when
+       certs are inside the 30-day horizon. This is the banner the webapp shows and the
+       e-mail was missing, which is why an amber banner never appeared while only certs
+       were in trouble (the individual certs still list under Critical/Warning below)."""
+    expired, expiring = cert_rollup(store)
+    if not (expired or expiring):
+        return ""
+    red = bool(expired)
+    fg, bg = (RED, RED_T) if red else (AMBER, AMBER_T)
+    bits = ([f"{len(expired)} expired"] if expired else []) + \
+           ([f"{len(expiring)} expiring &#8804;30d"] if expiring else [])
+    lines = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(h)}</b>'
+        f'<span style="color:#555;"> &mdash; {label}</span></div>'
+        for h, label in ([(h, "<b>EXPIRED</b>") for h, _ in expired] +
+                         [(h, f"{d:.0f} day(s) left") for h, d in expiring])
+    )
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{bg};border-left:4px solid {fg};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{fg};">&#9888;&nbsp; '
+        f'SSL certs &mdash; {", ".join(bits)}</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">'
+        + ("An expired certificate breaks HTTPS for users. <b>Renew now.</b>" if red else
+           "These certificates renew soon. <b>Schedule the renewal before they lapse.</b>")
+        + f"</div>{lines}</div></td></tr>"
+    )
+
+
+def _attachment_block(mail) -> str:
+    """Callout naming the XLSX report attached to this e-mail. Only rendered when one is
+       actually attached — it sits ABOVE the Report Generator call-to-action, which stays
+       either way (the attachment is today's snapshot, the link builds one on demand)."""
+    name = mail.get("attachment_name")
+    if not name:
+        return ""
+    theme = mail.get("attachment_theme")
+    tag = f" &nbsp;&middot;&nbsp; {html.escape(theme)} theme" if theme else ""
+    return (
+        '<tr><td style="padding:20px 24px 0;">'
+        f'<div style="background:{GREEN_T};border-left:4px solid {GREEN};border-radius:4px;padding:13px 16px;">'
+        f'<div style="font-size:14px;font-weight:700;color:{GREEN};margin-bottom:5px;">'
+        "&#128206;&nbsp; The full report is attached</div>"
+        f'<div style="font-size:13px;color:#1f2733;line-height:1.6;">'
+        f'<b>{html.escape(name)}</b>{tag} &mdash; the complete System Admin Report '
+        "(Services / Memory / Disk / Backups per system, plus web links and SSL certs) "
+        "for the same snapshot summarised above.</div>"
+        "</div></td></tr>"
+    )
+
+
 def _report_generator_cta(mail) -> str:
-    """Call-to-action block: link admins to the Grafana Report Generator webapp to
-       build and download the full report on demand (replaces the old xlsx attachment)."""
-    url = html.escape(mail["report_url"], quote=True)
+    """Call-to-action block: link admins to the Grafana Report Generator webapp to build a
+       report on demand — annotated, themed and scoped to the systems they pick. Always
+       shown, attachment or not: the attachment is the unannotated daily snapshot."""
+    url = html.escape(mail.get("report_url") or REPORT_GENERATOR_URL, quote=True)
     link = (f'<a href="{url}" style="color:{NAVY};font-weight:700;text-decoration:underline;">'
             "Grafana Report Generator</a>")
+    if mail.get("attachment_name"):
+        heading = "Need to annotate or re-scope it?"
+        blurb = ("The attached report is an automated snapshot. To build one with your own "
+                 "sign-off &mdash; per-system answers, notes, an author and only the systems you "
+                 f"pick &mdash; go to the {link} and generate it on demand. "
+                 "Click the link below to open it.")
+    else:
+        heading = "Need the full report?"
+        blurb = ("This e-mail is a live snapshot preview. To build and download the complete "
+                 "System Admin Report (Services / Memory / Disk per system), go to the "
+                 f"{link} and generate it on demand. Click the link below to open it.")
     return (
         '<tr><td style="padding:20px 24px 4px;">'
         f'<div style="background:{NAVY_T};border-radius:8px;padding:16px 18px;">'
-        f'<div style="font-size:14px;font-weight:700;color:{NAVY};margin-bottom:6px;">Need the full report?</div>'
-        f'<div style="font-size:13px;color:#1f2733;line-height:1.6;">This e-mail is a live snapshot preview. '
-        f'To build and download the complete System Admin Report (Services / Memory / Disk per system), '
-        f'go to the {link} and generate it on demand. Click the link below to open it.</div>'
+        f'<div style="font-size:14px;font-weight:700;color:{NAVY};margin-bottom:6px;">{heading}</div>'
+        f'<div style="font-size:13px;color:#1f2733;line-height:1.6;">{blurb}</div>'
         f'<div style="margin-top:12px;"><a href="{url}" style="background:{NAVY};color:{GOLD};text-decoration:none;'
         f'font-weight:700;font-size:14px;padding:11px 20px;border-radius:6px;display:inline-block;">'
         "&#9658;&nbsp; Grafana Report Generator</a></div>"
@@ -348,12 +920,8 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     prepared_by = (f" &nbsp;&middot;&nbsp; prepared by {html.escape(mail['author'])}"
                    if mail.get("author") else "")
     hosts = sum(len(s.components) for s in systems)
-    nsvc = sum(len(v) for v in store.services.values()) + len(store.links)
-    # down = failed PromQL service checks + web links whose probe reports them DOWN (a down link
-    # is a down service; matches the link findings above). Keeps the KPI honest when e.g. an HTTPS
-    # endpoint with an untrusted cert fails its probe. 'up' default True mirrors the findings pass.
-    down = (sum(1 for v in store.services.values() for row in v if not row[1])
-            + sum(1 for d in store.links.values() if not d.get("up", True)))
+    nsvc = sum(len(v) for v in store.services.values())
+    down = sum(1 for v in store.services.values() for row in v if not row[1])
     thr = int(mail.get("elevated", 85))                       # shared "over N%" level (config.ini)
     ram_hosts, _ = ram_pressure(store, systems, thr, thr)
     cpu_hosts, _ = cpu_pressure(store, systems, thr, thr)
@@ -369,17 +937,9 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     n_http = sum(1 for u in store.links if u.lower().startswith("http://"))
     web_color = GREEN if n_http == 0 else (RED if n_http > n_https else AMBER)
 
-    # LDAP / auth service down — a dedicated top banner listing the dependent systems.
-    ldap_dependents = ldap_alert(store, systems)
-    ldap_banner = ""
-    if ldap_dependents:
-        ldap_banner = (
-            f'<tr><td style="background:{RED_T};border-bottom:1px solid #e6e8ec;padding:12px 24px;">'
-            f'<span style="color:{RED};font-weight:700;font-size:14px;">&#9679; LDAP / authentication service DOWN '
-            f'&mdash; {len(ldap_dependents)} dependent system(s) affected</span>'
-            f'<div style="font-size:12px;color:{MUTED};margin-top:3px;">Users cannot sign in to: '
-            f'{html.escape(", ".join(ldap_dependents))}. Restore the auth service urgently.</div>'
-            "</td></tr>")
+    # the closing note points at whichever full breakdown this e-mail actually carries
+    full_breakdown = ("see the attached report" if mail.get("attachment_name")
+                      else "generate the report from the Grafana Report Generator above")
 
     if unreach:
         banner_bg, banner_fg = RED_T, RED
@@ -421,8 +981,12 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     ]
     immediate_kpis = "".join(immediate_kpis)
     watch_kpis = "".join(watch_kpis)
-    body = (_disk_nearfull_block(store, systems)
+    # banner order mirrors the webapp (services.build_overview): LDAP first, then near-full,
+    # unreachable, certs, COB — highest-consequence first.
+    body = (_ldap_block(store, systems)
+            + _disk_nearfull_block(store, systems)
             + _unreachable_block(unreach)
+            + _cert_block(store)
             + _cob_block(store)
             + _section("Critical", crit, RED, RED_T)
             + _section("Warning", warn, AMBER, AMBER_T)
@@ -442,7 +1006,6 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     <div style="font-size:12px;color:#aebfd1;margin-top:3px;">Reserve Bank of Zimbabwe &nbsp;&middot;&nbsp; live snapshot &nbsp;&middot;&nbsp; {today}{prepared_by}</div>
   </td></tr>
 
-  {ldap_banner}
   <tr><td style="background:{banner_bg};border-bottom:1px solid #e6e8ec;padding:12px 24px;">
     <span style="color:{banner_fg};font-weight:700;font-size:14px;">&#9679; {headline}</span>
   </td></tr>
@@ -468,6 +1031,8 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
 
   {body}
 
+  {_attachment_block(mail)}
+
   {_report_generator_cta(mail)}
 
   <tr><td style="padding:14px 24px 22px;">
@@ -479,14 +1044,16 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     <div style="font-size:11px;color:{MUTED};line-height:1.6;">
       This is an automated, point-in-time snapshot captured live from Prometheus ({html.escape(mail.get('prom', '').split('//')[-1])}).
       Thresholds: warning &#8805;{WARN}% &middot; critical &#8805;{CRIT}%. For the full breakdown (Services / Memory / Disk per system),
-      generate the report from the Grafana Report Generator above. For live, auto-refreshing data use the Grafana dashboard.
+      {full_breakdown}. For live, auto-refreshing data use the Grafana dashboard.
     </div>
   </td></tr>
 
 </table></td></tr></table></body></html>"""
 
 
-def plain_summary(unreach, crit, warn, nodata, report_url) -> str:
+def plain_summary(unreach, crit, warn, nodata, report_url=None, attachment_name=None) -> str:
+    """The text/plain alternative. `report_url` and `attachment_name` are optional so
+       in-process callers (the webapp) can ask for the findings alone."""
     lines = ["System Admin Report — summary", ""]
     for title, items in (("UNREACHABLE", unreach), ("CRITICAL", crit),
                          ("WARNING", warn), ("NO DATA", nodata)):
@@ -496,19 +1063,31 @@ def plain_summary(unreach, crit, warn, nodata, report_url) -> str:
             lines.append("")
     if not (unreach or crit or warn or nodata):
         lines.append("All systems healthy.")
-    lines.append(f"Generate the full report at the Grafana Report Generator: {report_url}")
+    if attachment_name:
+        lines.append(f"Full report attached: {attachment_name}")
+    if report_url:
+        lines.append(f"Build an annotated report at the Grafana Report Generator: {report_url}")
     return "\n".join(lines)
 
 
 # -------------------------------------------------------------------------- send
+XLSX_MIME = ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
-               text_body: str) -> None:
+               text_body: str, attachment: Optional[Path] = None) -> None:
+    """Send the multipart/alternative e-mail, optionally with the XLSX report attached.
+       `attachment` is a path — its file NAME becomes the attachment name."""
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = f'{mail["from_name"]} <{mail["from_address"]}>'
     msg["To"] = ", ".join(recipients)
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
+    if attachment is not None:
+        path = Path(attachment)
+        maintype, subtype = XLSX_MIME if path.suffix.lower() == ".xlsx" else ("application", "octet-stream")
+        msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
     ctx = ssl.create_default_context()
     if mail["skip_verify"]:
         ctx.check_hostname = False
@@ -523,6 +1102,47 @@ def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
         srv.send_message(msg)
 
 
+# ----------------------------------------------------------------- report engine
+def load_engine():
+    """Import generate_report.py — the XLSX engine the Report Generator webapp also uses.
+       Returns the module, or None when it can't be loaded (missing openpyxl/Pillow, a
+       broken engine): the e-mail is the important part, so we degrade to link-only
+       rather than skip the send entirely."""
+    try:
+        sys.path.insert(0, str(HERE))          # works no matter where this is invoked from
+        import generate_report as engine
+        return engine
+    except Exception as exc:                   # noqa: BLE001 — any import failure degrades gracefully
+        print(f"[!] report engine unavailable ({exc.__class__.__name__}: {exc})", file=sys.stderr)
+        print("[!] sending WITHOUT the xlsx attachment — 'pip install -r requirements.txt' to fix.",
+              file=sys.stderr)
+        return None
+
+
+def capture_via_engine(engine, args) -> tuple:
+    """One capture through the engine, shared by the e-mail body and the workbook, so the
+       attachment and the summary above it describe the exact same instant. Returns
+       (cfg, systems, store) using the ENGINE's Config/System/Store — a superset of this
+       module's copies (it also carries ldap_up), so every helper here accepts them."""
+    cfg = engine.load_config(args.config)
+    if args.prom:
+        cfg.prom = args.prom
+    if args.grafana:
+        cfg.grafana = args.grafana
+    systems = engine.load_topology(cfg.prometheus_yml)
+    only = {n.strip() for n in (args.systems or "").split(",") if n.strip()}
+    if only:
+        systems = [s for s in systems if s.name in only]
+        if not systems:
+            raise SystemExit(f"[!] --systems matched nothing: {args.systems}")
+    prom = engine.Prometheus(cfg.prom, cfg.http_timeout)
+    prom.ping()
+    store = engine.capture(prom, systems, cfg)
+    if only:
+        engine.scope_links_to_systems(store, systems)
+    return cfg, systems, store
+
+
 # -------------------------------------------------------------------------- main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="E-mail a live Prometheus snapshot + a link to the Report Generator.")
@@ -534,6 +1154,21 @@ def main(argv=None) -> int:
     ap.add_argument("--report-url", default=None, help="override the report-generator webapp URL")
     ap.add_argument("--html-out", default=str(HERE / "email_preview.html"), help="dry-run preview path")
     ap.add_argument("--send", action="store_true", help="actually send (otherwise DRY-RUN preview only)")
+    # --- XLSX report attachment (generate_report.py — the engine the webapp uses) ---------
+    ap.add_argument("--attach", action="store_true",
+                    help="generate the XLSX report from this same snapshot and attach it")
+    ap.add_argument("--report", default=None, metavar="PATH",
+                    help="attach an EXISTING xlsx instead of generating one (e.g. from run.bat)")
+    ap.add_argument("--theme", default="dark", choices=("dark", "light"),
+                    help="palette for the generated report (default: dark)")
+    ap.add_argument("--author", default=None,
+                    help="name stamped into the report's 'By' field and the e-mail header")
+    ap.add_argument("--summary", default=None,
+                    help="free text for the report's Summary Notes box")
+    ap.add_argument("--systems", default=None,
+                    help="scope the snapshot to these systems (comma-separated); requires --attach")
+    ap.add_argument("--keep-report", default=None, metavar="PATH",
+                    help="also save the generated xlsx here (default: kept in dry-run, temporary when sending)")
     args = ap.parse_args(argv)
 
     # everything is sourced from config.ini; CLI flags only override
@@ -546,6 +1181,8 @@ def main(argv=None) -> int:
     mail = load_mail_config(args.config)
     if args.from_name:
         mail["from_name"] = args.from_name
+    if args.author:
+        mail["author"] = args.author
     mail["grafana"] = cfg.grafana
     mail["prom"] = cfg.prom
     mail["elevated"] = cfg.overview_threshold
@@ -555,42 +1192,98 @@ def main(argv=None) -> int:
     print(f"[*] From: {mail['from_name']} <{mail['from_address']}>")
     print(f"[*] Report generator link: {mail['report_url']}")
 
-    print(f"[*] reading topology from {cfg.prometheus_yml} ...")
-    systems = load_topology(cfg.prometheus_yml)
-
-    prom = Prometheus(cfg.prom, cfg.http_timeout)
-    print(f"[*] capturing live metrics from {cfg.prom} ...")
-    prom.ping()
-    store = capture(prom, systems, cfg)
+    # ---- capture -----------------------------------------------------------------------
+    # --attach routes the capture through the report engine so ONE snapshot feeds both the
+    # e-mail and the workbook; without it we stay on this module's self-contained copy,
+    # which needs nothing but PyYAML.
+    engine = load_engine() if args.attach else None
+    if engine is not None:
+        print(f"[*] capturing live metrics from {cfg.prom} via generate_report.py ...")
+        cfg, systems, store = capture_via_engine(engine, args)
+        mail["grafana"], mail["prom"] = cfg.grafana, cfg.prom
+        mail["elevated"] = cfg.overview_threshold
+    else:
+        if args.systems:
+            print("[!] --systems needs --attach (the report engine) — ignoring it.", file=sys.stderr)
+        print(f"[*] reading topology from {cfg.prometheus_yml} ...")
+        systems = load_topology(cfg.prometheus_yml)
+        prom = Prometheus(cfg.prom, cfg.http_timeout)
+        print(f"[*] capturing live metrics from {cfg.prom} ...")
+        prom.ping()
+        store = capture(prom, systems, cfg)
 
     unreach, crit, warn, nodata = analyse(store, systems, cfg)
     print(f"[*] findings: {len(unreach)} unreachable, {len(crit)} critical, "
           f"{len(warn)} warning, {len(nodata)} no-data")
 
-    sev = (f"{len(unreach)} unreachable" if unreach else
-           (f"{len(crit)} critical" if crit else (f"{len(warn)} warnings" if warn else "all healthy")))
-    subject = f"System Admin Report — {datetime.date.today():%d %b %Y} — {sev}"
-    html_body = render_html(store, systems, unreach, crit, warn, nodata, mail)
-    text_body = plain_summary(unreach, crit, warn, nodata, mail["report_url"])
+    # ---- the attachment ----------------------------------------------------------------
+    # Resolved BEFORE rendering: the body names the attachment, so it has to know.
+    attachment: Optional[Path] = None
+    tmpdir: Optional[str] = None
+    if args.report:
+        attachment = Path(args.report)
+        if not attachment.is_absolute():
+            attachment = HERE / attachment
+        if not attachment.is_file():
+            print(f"[!] --report not found: {attachment}", file=sys.stderr)
+            return 2
+        print(f"[*] attaching existing report: {attachment.name}")
+        mail["attachment_name"] = attachment.name
+    elif engine is not None:
+        print(f"[*] rendering report ({args.theme} theme) ...")
+        data = engine.build_report_bytes(store, systems, cfg, theme=args.theme,
+                                         author=args.author, summary_comment=args.summary)
+        name = engine.default_report_filename(args.theme)
+        if args.keep_report:
+            target = Path(args.keep_report)
+            attachment = target if target.is_absolute() else HERE / target
+            if attachment.is_dir():
+                attachment = attachment / name
+        elif not args.send:
+            attachment = HERE / name          # dry-run: leave it on disk so it can be inspected
+        else:
+            tmpdir = tempfile.mkdtemp(prefix="report_")
+            attachment = Path(tmpdir) / name
+        attachment.parent.mkdir(parents=True, exist_ok=True)
+        attachment.write_bytes(data)
+        print(f"[+] report -> {attachment}  ({len(data)/1024:.0f} KB)")
+        mail["attachment_name"] = attachment.name
+        mail["attachment_theme"] = args.theme
 
-    if not args.send:
-        Path(args.html_out).write_text(html_body, encoding="utf-8")
-        print(f"[DRY-RUN] no e-mail sent. preview -> {args.html_out}")
-        print(f"[DRY-RUN] would send '{subject}'")
-        print(f"[DRY-RUN] to: {recipients or '(none set — use --to)'}")
-        print("\n" + text_body)
+    try:
+        sev = (f"{len(unreach)} unreachable" if unreach else
+               (f"{len(crit)} critical" if crit else (f"{len(warn)} warnings" if warn else "all healthy")))
+        subject = f"System Admin Report — {datetime.date.today():%d %b %Y} — {sev}"
+        html_body = render_html(store, systems, unreach, crit, warn, nodata, mail)
+        text_body = plain_summary(unreach, crit, warn, nodata, mail["report_url"],
+                                  mail.get("attachment_name"))
+
+        if not args.send:
+            Path(args.html_out).write_text(html_body, encoding="utf-8")
+            print(f"[DRY-RUN] no e-mail sent. preview -> {args.html_out}")
+            print(f"[DRY-RUN] would send '{subject}'")
+            print(f"[DRY-RUN] to: {recipients or '(none set — use --to)'}")
+            print(f"[DRY-RUN] attachment: {attachment if attachment else '(none)'}")
+            print("\n" + text_body)
+            return 0
+
+        if not recipients:
+            print("[!] no recipients — set [recipients] to=... in config.ini, or pass --to", file=sys.stderr)
+            return 2
+        if not mail["enabled"]:
+            print("[!] smtp.enabled is false in the ini", file=sys.stderr)
+            return 2
+        print(f"[*] sending to {recipients} ...")
+        send_email(mail, recipients, subject, html_body, text_body, attachment)
+        print("[+] sent." + (f" (attached {attachment.name})" if attachment else ""))
         return 0
-
-    if not recipients:
-        print("[!] no recipients — set [recipients] to=... in config.ini, or pass --to", file=sys.stderr)
-        return 2
-    if not mail["enabled"]:
-        print("[!] smtp.enabled is false in the ini", file=sys.stderr)
-        return 2
-    print(f"[*] sending to {recipients} ...")
-    send_email(mail, recipients, subject, html_body, text_body)
-    print("[+] sent.")
-    return 0
+    finally:
+        if tmpdir:                            # only the temp copy we made ourselves
+            try:
+                attachment.unlink()
+                os.rmdir(tmpdir)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

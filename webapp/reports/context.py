@@ -13,6 +13,7 @@ from .roles import is_role_admin
 # level up this tree (child -> parent -> ... -> home), rather than jumping straight home.
 # report_form (home) has no parent, so it shows no Back button.
 _NAV_PARENT = {
+    "connect": "report_form",
     "history": "report_form",
     "submission_detail": "history",
     "roles_console": "report_form",
@@ -21,6 +22,7 @@ _NAV_PARENT = {
 }
 _NAV_LABEL = {
     "report_form": "Dashboard",
+    "connect": "Connect",
     "history": "History",
     "roles_console": "Roles",
     "system_settings": "Configuration",

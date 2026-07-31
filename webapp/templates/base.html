@@ -74,6 +74,7 @@
       <span class="drawer-user">{{ user.get_full_name|default:user.get_username }}</span>
     </div>
     <a href="{% url 'report_form' %}">System Analyses Dashboard</a>
+    <a href="{% url 'connect' %}">Connect</a>
     <a href="{% url 'history' %}">History</a>
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}">Roles</a>
