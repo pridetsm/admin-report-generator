@@ -274,6 +274,25 @@ SKIP_SYSTEMS = {"unassigned", "prometheus", ""}
 # systems whose users sign in through the LDAP / auth service (see cfg.ldap_target)
 LDAP_DEPENDENTS = {"GCMS", "GMS"}
 
+# BACKUP POLICY — how many calendar days old a host's newest backup may be and still count
+# as CURRENT. Default 1 = daily = today or yesterday, so nothing changes for the systems
+# that back up every day. A system on a slower cycle needs its interval here, else the days
+# between its runs are misreported as NO BACKUP. Keyed by the exporter instance publishing
+# backup_file. Mirror of the table in generate_report.py — keep the two in step.
+#   BSA: MSSQL full backup every 3rd day (see backup_monitor/check_backup_bsa.ps1 -MaxAgeDays).
+BACKUP_MAX_AGE_DAYS = {
+    "10.0.206.5:9182": 3,          # BSA Database
+}
+DEFAULT_BACKUP_MAX_AGE_DAYS = 1    # daily backup = today or yesterday
+
+
+def backup_cutoff(instance: str, now: datetime.datetime | None = None) -> float:
+    """Oldest mtime that still counts as a CURRENT backup for `instance` (unix seconds).
+       Midnight-based, matching how the backup_monitor scripts judge age."""
+    now = now or datetime.datetime.now()
+    tmid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return tmid - 86400 * BACKUP_MAX_AGE_DAYS.get(instance, DEFAULT_BACKUP_MAX_AGE_DAYS)
+
 
 def _link_display(url: str) -> str:
     """Compact label for a link row: host (+path), no scheme or trailing slash."""
@@ -575,17 +594,17 @@ def is_unreachable(store: "Store", instance: str) -> bool:
 
 
 def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, str, str]]:
-    """Reporting hosts with NO fresh backup -> [(system, host, reason)]."""
+    """Reporting hosts with NO fresh backup -> [(system, host, reason)].
+       Freshness is judged against each host's own backup policy (see backup_cutoff)."""
     now = datetime.datetime.now()
-    tmid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    ymid = tmid - 86400
     missing: List[Tuple[str, str, str]] = []
     for s in systems:
         for c in s.components:
             d = store.backups.get(c.instance)
             if d is None:
                 continue
-            fresh = any(mt and mt >= ymid for _n, _day, mt in (d.get("files") or []))
+            cutoff = backup_cutoff(c.instance, now)
+            fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
             if not fresh:
                 missing.append((s.name, c.label,
                                 "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))

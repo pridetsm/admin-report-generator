@@ -354,6 +354,32 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
                 "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS"]
 
+# BACKUP POLICY — how many calendar days old a host's newest backup may be and still count
+# as CURRENT. Almost every system backs up daily, so the default of 1 means "today or
+# yesterday" and nothing changes for them. A system on a slower cycle needs its interval
+# here, otherwise the days between its runs are misreported as NO BACKUP even though the
+# policy is being met. Keyed by the exporter instance that publishes backup_file (the same
+# instance the backup_monitor script writes its .prom on).
+#   BSA: MSSQL full backup runs every 3rd day (e.g. 30 Jul, then 2 Aug), never daily —
+#        set with -MaxAgeDays in backup_monitor/check_backup_bsa.ps1. Keep the two in step.
+BACKUP_MAX_AGE_DAYS = {
+    "10.0.206.5:9182": 3,          # BSA Database
+}
+DEFAULT_BACKUP_MAX_AGE_DAYS = 1    # daily backup = today or yesterday
+
+
+def backup_cutoff(instance: str, now: datetime.datetime | None = None) -> float:
+    """Oldest mtime that still counts as a CURRENT backup for `instance` (unix seconds).
+
+    Midnight-based, matching how the backup_monitor scripts judge age, so the verdict
+    doesn't drift with the time of day the report happens to run. Hosts absent from
+    BACKUP_MAX_AGE_DAYS get the daily default = yesterday-midnight, exactly as before.
+    """
+    now = now or datetime.datetime.now()
+    tmid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return tmid - 86400 * BACKUP_MAX_AGE_DAYS.get(instance, DEFAULT_BACKUP_MAX_AGE_DAYS)
+
+
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
@@ -796,20 +822,20 @@ def ldap_alert(store: "Store", systems: List["System"]) -> Optional[List[str]]:
 
 def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, str, str]]:
     """Reporting hosts with NO fresh backup -> [(system, host, reason)].
-       Freshness is re-judged from each file's mtime AT REPORT TIME (dated today or
-       yesterday), exactly as the per-system Backups panel does, so a frozen check
-       that stopped running correctly reads as missing. Hosts that don't run the
+       Freshness is re-judged from each file's mtime AT REPORT TIME, against that host's
+       own backup policy (see backup_cutoff — daily for nearly all, wider for systems that
+       don't run every day), exactly as the per-system Backups panel does, so a frozen
+       check that stopped running correctly reads as missing. Hosts that don't run the
        backup check at all are skipped (they produce no row)."""
     now = datetime.datetime.now()
-    tmid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    ymid = tmid - 86400
     missing: List[Tuple[str, str, str]] = []
     for s in systems:
         for c in s.components:
             d = store.backups.get(c.instance)
             if d is None:
                 continue
-            fresh = any(mt and mt >= ymid for _n, _day, mt in (d.get("files") or []))
+            cutoff = backup_cutoff(c.instance, now)
+            fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
             if not fresh:
                 missing.append((s.name, c.label,
                                 "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
@@ -865,14 +891,15 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
         if not up:
             loc = f"{group} · " if group and group != sysm.name else ""
             flags.append(Flag(f"service:{group}:{name}", f"{loc}{name} DOWN", "red", "service"))
-    # backups: a reporting host with no fresh file (freshness re-judged at report time)
+    # backups: a reporting host with no fresh file (freshness re-judged at report time,
+    # against that host's own backup policy — see backup_cutoff)
     now = datetime.datetime.now()
-    ymid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() - 86400
     for c in sysm.components:
         d = store.backups.get(c.instance)
         if d is None:
             continue
-        if not any(mt and mt >= ymid for _n, _day, mt in (d.get("files") or [])):
+        cutoff = backup_cutoff(c.instance, now)
+        if not any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or [])):
             reason = "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"
             flags.append(Flag(f"backup:{c.label}", f"{c.label} · {reason}", "red", "backup"))
     # untracked: no host on the system runs the backup check at all
@@ -1392,22 +1419,28 @@ class ReportBuilder:
 
         # backups: re-judge each file's freshness by its mtime AT REPORT TIME. The `day` label is
         # baked when the check runs, so it goes STALE if the check stops running (a frozen metric
-        # would otherwise still read "yesterday" days later). Anything older than yesterday is
-        # dropped; a host left with no fresh file = critical "NO BACKUP".
-        _tmid = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        # would otherwise still read "yesterday" days later). Anything past the host's backup
+        # policy window is dropped; a host left with no fresh file = critical "NO BACKUP".
+        _now  = datetime.datetime.now()
+        _tmid = _now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         _ymid = _tmid - 86400
         bk_files, bk_missing = [], []            # (filename, day, mtime)  /  (host, reason)
         for c in sysm.components:
             d = store.backups.get(c.instance)
             if d is None:
                 continue                         # host doesn't run the backup check -> no row
+            _cutoff = backup_cutoff(c.instance, _now)   # daily for most hosts; wider where policy says so
             fresh = []
             for name, _day, mtime in (d.get("files") or []):
                 if mtime and mtime >= _tmid:
                     fresh.append((name, "today", mtime))
                 elif mtime and mtime >= _ymid:
                     fresh.append((name, "yesterday", mtime))
-                # else: older than yesterday -> stale, does NOT count as a fresh backup
+                elif mtime and mtime >= _cutoff:
+                    # still current under a slower-than-daily policy: name the weekday rather
+                    # than calling it "yesterday", which it isn't (renders as PRESENT)
+                    fresh.append((name, datetime.datetime.fromtimestamp(mtime).strftime("%A").lower(), mtime))
+                # else: past the policy window -> stale, does NOT count as a fresh backup
             if fresh:
                 bk_files.extend(fresh)
             else:
