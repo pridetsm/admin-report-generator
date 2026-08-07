@@ -8,6 +8,7 @@ import datetime
 import io
 import json
 import re
+import time
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
@@ -17,6 +18,7 @@ from unittest import mock
 
 import generate_report as gr
 
+from . import folders
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
 from .models import ReportSubmission, RoleRequest, SystemConfig
@@ -639,3 +641,319 @@ class KeycloakRoleSync(TestCase):
         kc.sync_user_roles(u)
         self.assertEqual(set(u.groups.values_list("name", flat=True)),
                          {"Administrator", "Network Admin"})
+
+
+# ============================================================================ #
+#  FOLDER WATCH
+# ============================================================================ #
+def _series(metric, value, **labels):
+    labels["__name__"] = metric
+    return {"labels": labels, "value": float(value)}
+
+
+def _folder_series(*, name="PAYNET.IN", instance="10.0.212.3:9182", stale_files=0,
+                   oldest_age=60, path_found=1, job="windows_exporter"):
+    """One target's worth of exposition, exactly as the .prom + textfile collector deliver it.
+
+    `oldest_age` is the age AT THE MOMENT OF THE RUN, which is what this exporter publishes.
+    Pass 0 for a drained folder: with no total-file-count metric, a zero age is the only
+    signal that nothing is waiting."""
+    base = {"target": name, "instance": instance, "job": job, "display": "Temenos/T24 App"}
+    return [_series("t24_folder_checker_stale_files_count", stale_files, **base),
+            _series("t24_folder_checker_oldest_file_age_seconds", oldest_age, **base),
+            _series("t24_folder_checker_path_found", path_found, **base)]
+
+
+def _run_series(now, *, instance="10.0.212.3:9182", ago=30, success=1, job="windows_exporter"):
+    """The run-level metrics. They carry NO `target` label: they describe the run itself,
+    so they apply to every folder on that instance."""
+    base = {"instance": instance, "job": job, "display": "Temenos/T24 App"}
+    return [_series("t24_folder_checker_last_run_timestamp_seconds", now - ago, **base),
+            _series("t24_folder_checker_last_run_success", success, **base)]
+
+
+class FolderWatchVerdict(TestCase):
+    """The state machine on its own — it decides every colour on the screen."""
+
+    def _v(self, **kw):
+        args = dict(stale_files=0, has_files=True, readable=True, stale=False, run_ok=True)
+        args.update(kw)
+        return folders.verdict(**args)
+
+    def test_bands(self):
+        """The host draws the line, not this app: any file over its threshold is red, and
+        there is no amber because there is no second threshold to derive one from."""
+        self.assertEqual(self._v(stale_files=0), "green")
+        self.assertEqual(self._v(stale_files=1), "red")
+        self.assertEqual(self._v(stale_files=99), "red")
+
+    def test_empty_folder_is_idle_not_green(self):
+        """A drained folder is the healthy steady state, but it is NOT the same as
+        'files present and all fresh' — the grid distinguishes the two."""
+        self.assertEqual(self._v(has_files=False), "idle")
+
+    def test_unreadable_stale_and_failed_runs_are_unknown_never_green(self):
+        """The one thing this screen must never do is show green for a folder nobody is
+        looking at: a dead check keeps its .prom served, unchanged, forever."""
+        self.assertEqual(self._v(readable=False), "unknown")
+        self.assertEqual(self._v(stale=True), "unknown")
+        self.assertEqual(self._v(run_ok=False), "unknown")
+        self.assertEqual(self._v(has_files=False, stale=True), "unknown")
+        # a breach we cannot vouch for is unknown, NOT red — reporting a fault from a dead
+        # check is as wrong as reporting health from one
+        self.assertEqual(self._v(stale_files=5, stale=True), "unknown")
+
+
+class FolderWatchSnapshot(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("fw", password="pw12345!")
+        self.user.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="fw", password="pw12345!")
+
+    def _patch(self, series):
+        prom = mock.MagicMock()
+        prom.query.return_value = series
+        return mock.patch("reports.folders._prometheus", return_value=(prom, "http://prom:9090"))
+
+    def test_states_end_to_end(self):
+        now = time.time()
+        series = (_folder_series(name="FRESH.IN", oldest_age=30) +
+                  _folder_series(name="STUCK.IN", oldest_age=4000, stale_files=2) +
+                  _folder_series(name="DRAINED.OUT", oldest_age=0) +
+                  _folder_series(name="GONE.IN", oldest_age=0, path_found=0) +
+                  _run_series(now, ago=60))
+        with self._patch(series):
+            snap = folders.snapshot()
+        got = {f["name"]: f["state"] for f in snap["folders"]}
+        self.assertEqual(got, {"FRESH.IN": "green", "STUCK.IN": "red",
+                               "DRAINED.OUT": "idle", "GONE.IN": "unknown"})
+        self.assertEqual(snap["counts"]["red"], 1)
+        self.assertEqual(snap["worst_folder"]["name"], "STUCK.IN")
+        self.assertEqual(snap["total"], 4)
+
+    def test_age_keeps_running_after_the_run_that_measured_it(self):
+        """The exporter's age is frozen at the moment of the run. Recovering the mtime from
+        the run timestamp is what stops a jammed folder appearing to stop ageing between
+        checks — the whole reason this module does not trust the published age directly."""
+        now = time.time()
+        series = _folder_series(oldest_age=300) + _run_series(now, ago=120)
+        with self._patch(series):
+            snap = folders.snapshot()
+        f = snap["folders"][0]
+        self.assertEqual(f["age_at_run"], 300)             # what the host measured
+        self.assertAlmostEqual(f["age"], 420, delta=3)     # 300 + the 120s since
+        self.assertAlmostEqual(f["oldest_mtime"], now - 420, delta=3)
+
+    def test_stale_check_makes_every_folder_unknown(self):
+        now = time.time()
+        series = (_folder_series(name="PAYNET.IN", oldest_age=5) +
+                  _run_series(now, ago=folders.STALE_AFTER + 60))
+        with self._patch(series):
+            snap = folders.snapshot()
+        self.assertEqual(snap["folders"][0]["state"], "unknown")
+        self.assertTrue(snap["folders"][0]["stale"])
+        self.assertIn("not run recently", snap["folders"][0]["reason"])
+
+    def test_missing_run_timestamp_is_unknown(self):
+        """No proof of life at all -> unknown, not a green grid."""
+        with self._patch(_folder_series(oldest_age=5)):
+            snap = folders.snapshot()
+        self.assertEqual(snap["folders"][0]["state"], "unknown")
+
+    def test_failed_run_is_unknown_even_when_the_numbers_look_fine(self):
+        """last_run_success 0 means the run hit a problem, so its readings are not evidence
+        of anything — including of health."""
+        now = time.time()
+        with self._patch(_folder_series(oldest_age=5) + _run_series(now, ago=10, success=0)):
+            snap = folders.snapshot()
+        self.assertEqual(snap["folders"][0]["state"], "unknown")
+        self.assertFalse(snap["run_ok"])
+        self.assertIn("reported an error", snap["folders"][0]["reason"])
+
+    def test_double_scraped_host_yields_one_tile(self):
+        """10.0.212.3:9182 is scraped by BOTH windows_exporter and the hourly
+        swift_transactions job, so every textfile series on it arrives twice."""
+        now = time.time()
+        series = (_folder_series(oldest_age=30, job="windows_exporter") +
+                  _folder_series(oldest_age=30, job="swift_transactions") +
+                  _run_series(now, ago=30, job="windows_exporter") +
+                  _run_series(now, ago=3000, job="swift_transactions"))
+        with self._patch(series):
+            snap = folders.snapshot()
+        self.assertEqual(len(snap["folders"]), 1)
+        # the FRESHEST run timestamp wins, so the lagging hourly copy can't fake staleness
+        self.assertFalse(snap["folders"][0]["stale"])
+        self.assertEqual(snap["folders"][0]["state"], "green")
+
+    def test_same_folder_name_on_two_hosts_stays_separate(self):
+        now = time.time()
+        series = (_folder_series(instance="10.0.212.3:9182", oldest_age=30) +
+                  _folder_series(instance="10.0.212.9:9182", oldest_age=9999, stale_files=1) +
+                  _run_series(now, ago=10, instance="10.0.212.3:9182") +
+                  _run_series(now, ago=10, instance="10.0.212.9:9182"))
+        with self._patch(series):
+            snap = folders.snapshot()
+        self.assertEqual(len(snap["folders"]), 2)
+        self.assertEqual({f["state"] for f in snap["folders"]}, {"green", "red"})
+
+    def test_a_long_wait_under_the_hosts_limit_is_not_red(self):
+        """The age alone never decides anything. An outbound folder that legitimately holds
+        a file for an hour stays green as long as the host reports nothing over its limit."""
+        now = time.time()
+        series = _folder_series(name="SLOW.OUT", oldest_age=3600) + _run_series(now, ago=10)
+        with self._patch(series):
+            snap = folders.snapshot()
+        self.assertEqual(snap["folders"][0]["state"], "green")
+        self.assertGreater(snap["folders"][0]["age"], 3600)
+
+    def test_page_renders_a_tile_per_folder(self):
+        now = time.time()
+        series = (_folder_series(name="PAYNET.IN", oldest_age=4000, stale_files=1) +
+                  _folder_series(name="SWIFT.OUT", oldest_age=0) +
+                  _run_series(now, ago=30))
+        with self._patch(series):
+            resp = self.client.get(reverse("folder_watch_temenos"))
+        self.assertEqual(resp.status_code, 200)
+        body = resp.content.decode()
+        self.assertContains(resp, "PAYNET.IN")
+        self.assertContains(resp, "SWIFT.OUT")
+        self.assertEqual(body.count('class="fw-tile"'), 2)
+        self.assertIn('data-state="red"', body)
+        self.assertIn('data-state="idle"', body)
+
+    def test_no_metrics_explains_deployment_instead_of_an_empty_grid(self):
+        with self._patch([]):
+            resp = self.client.get(reverse("folder_watch_temenos"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "No folder metrics are being reported yet")
+        self.assertNotContains(resp, 'class="fw-tile"')
+
+    def test_prometheus_down_is_an_error_not_an_all_clear(self):
+        prom = mock.MagicMock()
+        prom.query.side_effect = OSError("connection refused")
+        with mock.patch("reports.folders._prometheus", return_value=(prom, "http://prom:9090")):
+            resp = self.client.get(reverse("folder_watch_temenos"))
+            data = self.client.get(reverse("folder_watch_data"))
+        self.assertEqual(resp.status_code, 502)
+        self.assertEqual(data.status_code, 502)
+        self.assertFalse(json.loads(data.content)["ok"])
+
+    def test_json_endpoint_carries_timestamps_for_the_live_tick(self):
+        """The browser re-ages tiles itself, so the payload must hand it the recovered
+        mtime — not a pre-computed age, which would freeze between polls."""
+        now = time.time()
+        series = _folder_series(oldest_age=100) + _run_series(now, ago=10)
+        with self._patch(series):
+            resp = self.client.get(reverse("folder_watch_data"))
+        payload = json.loads(resp.content)
+        f = payload["folders"][0]
+        self.assertIn("now", payload)
+        self.assertIn("stale_after", payload)
+        for key in ("oldest_mtime", "age_at_run", "checked_at", "stale_files",
+                    "readable", "run_ok"):
+            self.assertIn(key, f)
+
+    def test_run_timestamp_is_published_for_the_header(self):
+        """The page shows when the HOST last looked, which is a different fact from when the
+        page last refreshed. Both the poll payload and the first render need it."""
+        now = time.time()
+        series = _folder_series(oldest_age=100) + _run_series(now, ago=42)
+        with self._patch(series):
+            resp = self.client.get(reverse("folder_watch_data"))
+            page = self.client.get(reverse("folder_watch_temenos"))
+        payload = json.loads(resp.content)
+        self.assertAlmostEqual(payload["last_run"], now - 42, delta=3)
+        self.assertAlmostEqual(payload["since_last_run"], 42, delta=3)
+        self.assertTrue(payload["run_ok"])
+        # rendered server-side too, so the stamp is on screen before the first poll lands
+        self.assertContains(page, "last checked")
+        self.assertContains(page, payload["last_run_text"])
+        # exactly ONE readout of it — it used to be duplicated in the toolbar as well
+        self.assertNotContains(page, 'id="fwLastRun"')
+
+    def test_requires_login(self):
+        self.client.logout()
+        resp = self.client.get(reverse("folder_watch_temenos"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/accounts/login/", resp["Location"])
+
+    def test_back_nav_points_at_folder_watch_not_home(self):
+        """Temenos is a CHILD of Folder Watch, so Back walks one level up the tree."""
+        now = time.time()
+        with self._patch(_folder_series() + _run_series(now, ago=5)):
+            resp = self.client.get(reverse("folder_watch_temenos"))
+        self.assertContains(resp, "Back to Folder Watch")
+
+    def test_page_load_spinner_is_suppressed_here(self):
+        """The page reloads itself every minute; the global spinner would dim the screen
+        once a minute for a refresh nobody asked for."""
+        now = time.time()
+        with self._patch(_folder_series() + _run_series(now, ago=5)):
+            resp = self.client.get(reverse("folder_watch_temenos"))
+        self.assertNotContains(resp, 'id="pageSpinner"')
+        # ...but it is still there on an ordinary page
+        self.assertContains(self.client.get(reverse("history")), 'id="pageSpinner"')
+
+
+class FolderWatchDurations(TestCase):
+    """Ages read as a clock, not as a rounded unit: 2:12, never '2m'."""
+
+    def test_minutes_and_seconds(self):
+        self.assertEqual(folders._fmt_age(0), "0:00")
+        self.assertEqual(folders._fmt_age(42), "0:42")
+        self.assertEqual(folders._fmt_age(132), "2:12")
+        self.assertEqual(folders._fmt_age(3599), "59:59")
+
+    def test_hours_and_days_keep_the_seconds(self):
+        self.assertEqual(folders._fmt_age(3600), "1:00:00")
+        self.assertEqual(folders._fmt_age(4350), "1:12:30")
+        self.assertEqual(folders._fmt_age(97451), "1d 3:04:11")
+
+    def test_none_and_negatives(self):
+        self.assertEqual(folders._fmt_age(None), "—")
+        self.assertEqual(folders._fmt_age(-5), "0:00")
+
+
+class FolderWatchAccess(TestCase):
+    """Folder Watch and everything under it is System Admin only."""
+
+    def setUp(self):
+        self.other = get_user_model().objects.create_user("nofw", password="pw12345!")
+        self.other.groups.add(Group.objects.get(name="Network Admin"))
+        self.admin = get_user_model().objects.create_user("fwadm", password="pw12345!")
+        self.admin.groups.add(Group.objects.get(name="System Admin"))
+
+    def _patch(self, series):
+        prom = mock.MagicMock()
+        prom.query.return_value = series
+        return mock.patch("reports.folders._prometheus", return_value=(prom, "http://prom:9090"))
+
+    def test_another_role_is_turned_away_from_every_folder_url(self):
+        """Hiding the nav link is not access control — the URLs have to refuse too."""
+        self.client.login(username="nofw", password="pw12345!")
+        for name in ("folder_watch", "folder_watch_temenos"):
+            resp = self.client.get(reverse(name))
+            self.assertEqual(resp.status_code, 302, name)
+            self.assertIn(reverse("report_form"), resp["Location"], name)
+        self.assertEqual(self.client.get(reverse("folder_watch_data")).status_code, 403)
+
+    def test_nav_group_is_hidden_from_other_roles_and_shown_to_system_admin(self):
+        self.client.login(username="nofw", password="pw12345!")
+        self.assertNotContains(self.client.get(reverse("history")), "Folder Watch")
+
+        self.client.login(username="fwadm", password="pw12345!")
+        page = self.client.get(reverse("history"))
+        self.assertContains(page, "Folder Watch")
+        self.assertContains(page, reverse("folder_watch_temenos"))
+
+    def test_parent_page_lists_temenos(self):
+        self.client.login(username="fwadm", password="pw12345!")
+        resp = self.client.get(reverse("folder_watch"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Temenos")
+        self.assertContains(resp, reverse("folder_watch_temenos"))
+
+    def test_superuser_passes_without_the_group(self):
+        su = get_user_model().objects.create_superuser("root", password="pw12345!")
+        self.client.force_login(su)
+        self.assertEqual(self.client.get(reverse("folder_watch")).status_code, 200)
