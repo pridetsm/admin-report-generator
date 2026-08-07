@@ -28,11 +28,11 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
-from . import connect
+from . import connect, folders
 from .directory import search_directory
 from .forms import ProfileForm, SystemConfigForm, UserAccountForm
 from .models import ReportSubmission, RoleRequest, SystemConfig, UserProfile
-from .roles import ROLE_NAMES, is_role_admin
+from .roles import ROLE_NAMES, is_role_admin, is_system_admin
 from .services import (
     EmailNotConfigured,
     PrometheusUnavailable,
@@ -403,6 +403,54 @@ def connect_rdp(request):
     resp = HttpResponse(body, content_type="application/x-rdp")
     resp["Content-Disposition"] = f'attachment; filename="{connect.rdp_filename(host)}"'
     return resp
+
+
+@login_required
+def folder_watch(request):
+    """Folder Watch: the PARENT screen, listing the hosts that publish folder metrics.
+
+    One child today (Temenos). It is its own page rather than a redirect so the next host to
+    start publishing gets a tile here instead of a second top-level nav entry.
+    """
+    if not is_system_admin(request.user):
+        return redirect("report_form")
+    return render(request, "reports/folder_index.html", {})
+
+
+@never_cache   # a cached copy of this page would show yesterday's folder ages
+@login_required
+def folder_watch_temenos(request):
+    """Temenos: the T24 interface drop folders, each coloured by whether anything in one has
+    been waiting past the limit the host applies. One Prometheus query — no capture — so it
+    is cheap to leave open.
+
+    The page then keeps itself live on its own: the template hands the browser each folder's
+    oldest-file TIMESTAMP (not its age), so the tiles re-age every second and a folder turns
+    red the moment it crosses its limit, without waiting for the next poll.
+    """
+    if not is_system_admin(request.user):
+        return redirect("report_form")
+    try:
+        data = folders.snapshot()
+    except folders.FolderWatchUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    return render(request, "reports/folders.html", {"fw": data})
+
+
+@never_cache
+@login_required
+def folder_watch_data(request):
+    """The same snapshot as JSON — polled by the screen to pick up new scrapes.
+
+    A Prometheus outage answers 502 with a reason rather than an empty folder list: the page
+    keeps showing the last good grid, marked stale, instead of silently going all-clear.
+    """
+    if not is_system_admin(request.user):
+        return JsonResponse({"ok": False, "error": "forbidden"}, status=403)
+    try:
+        return JsonResponse(folders.snapshot())
+    except folders.FolderWatchUnavailable as exc:
+        return JsonResponse({"ok": False, "error": str(exc)}, status=502)
 
 
 @login_required

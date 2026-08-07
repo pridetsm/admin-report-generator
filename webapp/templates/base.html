@@ -20,11 +20,22 @@
     .nm-children::before { content: ""; position: absolute; left: 14px; top: 3px; bottom: 3px;
                            width: 1px; background: var(--line-strong); }
     .navmenu-item.nm-child { padding-left: 26px; }
+    /* Same spine treatment in the drawer, so a parent/child pair reads as a group there too. */
+    .drawer-children { position: relative; padding-left: 8px; }
+    .drawer-children::before { content: ""; position: absolute; left: 20px; top: 2px; bottom: 2px;
+                               width: 1px; background: var(--line-strong); }
+    .drawer .drawer-child { padding-left: 34px; font-size: 14px; }
   </style>
 </head>
 <body>
-{# full-page loading spinner, shown while a navigation / reload is in flight #}
+{% comment %}
+  Full-page loading spinner, shown while a navigation / reload is in flight.
+  A page that reloads itself on a timer overrides this block to empty: app.js binds to the
+  element and no-ops when it is absent, so dropping it here is the whole opt-out.
+{% endcomment %}
+{% block page_spinner %}
 <div class="page-spinner" id="pageSpinner" aria-hidden="true"><div class="spinner"></div></div>
+{% endblock %}
 {% if user.is_authenticated %}
   <header class="topbar">
     {# icon -> home #}
@@ -89,6 +100,16 @@
     </div>
     <a href="{% url 'report_form' %}">System Analyses Dashboard</a>
     <a href="{% url 'connect' %}">Connect</a>
+    {% comment %}
+      Folder Watch is a parent: one child today (Temenos), more as other hosts start
+      publishing folder metrics. System Admin only — the view enforces it too.
+    {% endcomment %}
+    {% if is_system_admin %}
+    <a href="{% url 'folder_watch' %}">Folder Watch</a>
+    <div class="drawer-children">
+      <a href="{% url 'folder_watch_temenos' %}" class="drawer-child">Temenos</a>
+    </div>
+    {% endif %}
     <a href="{% url 'history' %}">History</a>
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}">Roles</a>

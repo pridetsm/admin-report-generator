@@ -10,7 +10,7 @@ from django.conf import settings
 from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
-from .roles import is_role_admin
+from .roles import is_role_admin, is_system_admin
 
 
 def _asset_version() -> str:
@@ -38,6 +38,8 @@ def _asset_version() -> str:
 # report_form (home) has no parent, so it shows no Back button.
 _NAV_PARENT = {
     "connect": "report_form",
+    "folder_watch": "report_form",
+    "folder_watch_temenos": "folder_watch",
     "history": "report_form",
     "submission_detail": "history",
     "roles_console": "report_form",
@@ -47,6 +49,8 @@ _NAV_PARENT = {
 _NAV_LABEL = {
     "report_form": "Dashboard",
     "connect": "Connect",
+    "folder_watch": "Folder Watch",
+    "folder_watch_temenos": "Temenos",
     "history": "History",
     "roles_console": "Roles",
     "system_settings": "Configuration",
@@ -73,6 +77,7 @@ def role_flags(request):
     back_url, back_label = _back_nav(request)
     ctx = {
         "is_role_admin": admin,
+        "is_system_admin": is_system_admin(user),   # drives the Folder Watch nav group
         "notif_count": 0,
         "notifications": [],
         "notif_unseen": False,   # drives the red dot on the hamburger

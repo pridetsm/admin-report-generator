@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Folder Watch · Admin Report Generator{% endblock %}
+
+{% block body %}
+{% comment %}
+  Folder Watch — the parent screen.
+
+  One child today. It is a page rather than a redirect to Temenos because the moment a
+  second host starts publishing folder metrics it belongs here, next to the first, rather
+  than as another top-level entry in the drawer.
+{% endcomment %}
+<style>
+  .fi-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(260px, 1fr)); gap:16px; }
+  .fi-card {
+    display:block; padding:20px 22px; border:1px solid var(--line-strong); border-radius:14px;
+    background:var(--panel); color:var(--ink); text-decoration:none;
+    transition:transform .13s ease, border-color .13s ease;
+  }
+  .fi-card:hover { transform:translateY(-2px); border-color:var(--accent); }
+  .fi-card:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .fi-icon { font-size:26px; line-height:1; }
+  .fi-name { margin-top:10px; font-size:17px; font-weight:700; }
+  .fi-sub { margin-top:5px; color:var(--muted); font-size:13px; line-height:1.55; }
+  .fi-host { margin-top:11px; color:var(--muted); font-size:12px; font-family:Consolas, ui-monospace, monospace; }
+</style>
+
+<div class="container">
+  <div class="snap">
+    <h1>Folder Watch</h1>
+    <div class="meta">Interface drop folders, watched on the hosts that publish them.
+      A folder that stops draining is a consumer that has stopped running.</div>
+  </div>
+
+  <div class="fi-grid">
+    <a class="fi-card" href="{% url 'folder_watch_temenos' %}">
+      <div class="fi-icon" aria-hidden="true">📁</div>
+      <div class="fi-name">Temenos</div>
+      <div class="fi-sub">The T24 interface folders — SWIFT in and out, PAYNET and EFIN —
+        each coloured by whether anything in it has been waiting past the host's limit.</div>
+      <div class="fi-host">10.0.212.3 · T24 App</div>
+    </a>
+  </div>
+</div>
+{% endblock %}
