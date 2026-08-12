@@ -356,10 +356,10 @@
       <br><br>
       <b>Grey is healthy.</b> An empty interface folder means everything drained, which is the
       normal steady state. <b>Green</b> means files are waiting and all of them are fresh — work
-      in progress. <b>Amber</b> means the oldest has passed {{ fw.amber_seconds }} seconds and the
-      folder is drifting. <b>Red</b> means it has passed {{ fw.red_seconds }} seconds: the folder
-      is not busy, it is jammed, and the consumer that should be draining it has almost certainly
-      stopped.
+      in progress. <b>Amber</b> means the oldest has passed <b>{{ fw.amber_text }}</b> and the
+      folder is drifting. <b>Red</b> means it has passed <b>{{ fw.red_text }}</b>: the folder is
+      not busy, it is jammed, and the consumer that should be draining it has almost certainly
+      stopped. These are payment queues — a message that has sat that long has missed its window.
       <br><br>
       <b>Dashed and faded</b> is neither good nor bad — it means we are not being told. Either the
       path could not be found on the host, the scan reported an error or was cut short, the folder

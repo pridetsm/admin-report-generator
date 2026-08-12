@@ -652,7 +652,7 @@ def _series(metric, value, **labels):
 
 
 def _folder_series(*, name="PAYNET.IN", instance="10.0.212.3:9847", now=None, files=1,
-                   oldest_ago=60, newest_ago=None, exists=1, folder_up=1, scanned_ago=30,
+                   oldest_ago=20, newest_ago=None, exists=1, folder_up=1, scanned_ago=30,
                    size=2048, timed_out=0, over_amber=0, over_red=0, added_ago=45,
                    job="folder_exporter", source=None, via=None, destination=None,
                    fmt=None):
@@ -721,6 +721,18 @@ class FolderWatchVerdict(TestCase):
         self.assertEqual(self._v(age=1800), "red")
         self.assertEqual(self._v(age=99999), "red")
 
+    def test_the_configured_limits_are_one_and_two_minutes(self):
+        """These are payment queues: a message that has sat two minutes has missed its
+        window. Pinned because the figure is easy to loosen by accident, and because the
+        histogram buckets in folder_exporter.yml have to carry matching boundaries for the
+        "N past the limit" counts to remain answerable."""
+        self.assertEqual(folders.AMBER_SECONDS, 60)
+        self.assertEqual(folders.RED_SECONDS, 120)
+        v = folders.verdict(age=119, files=1, readable=True, stale=False)
+        self.assertEqual(v, "amber")
+        v = folders.verdict(age=120, files=1, readable=True, stale=False)
+        self.assertEqual(v, "red")
+
     def test_per_folder_limits_are_honoured(self):
         """An outbound folder that legitimately holds files needs its own limits, not a
         loosening of everybody's."""
@@ -774,7 +786,7 @@ class FolderWatchSnapshot(TestCase):
     def test_states_end_to_end(self):
         now = time.time()
         series = (_folder_series(name="FRESH.IN", now=now, oldest_ago=30) +
-                  _folder_series(name="AGEING.IN", now=now, oldest_ago=1000) +
+                  _folder_series(name="AGEING.IN", now=now, oldest_ago=90) +
                   _folder_series(name="STUCK.IN", now=now, files=3, oldest_ago=4000, over_red=2) +
                   _folder_series(name="DRAINED.OUT", now=now, files=0) +
                   _folder_series(name="GONE.IN", now=now, files=0, exists=0) +

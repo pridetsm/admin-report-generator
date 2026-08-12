@@ -88,10 +88,19 @@ import generate_report as gr   # from send_report/ (on sys.path)
 STALE_AFTER = 120
 
 # The age limits, in seconds. See "WHERE THE THRESHOLD LIVES NOW" above: these are the
-# only thresholds this screen has, and they match what folders.csv used to apply on the
-# host. RED is a fault; AMBER is the early warning that the folder is drifting toward one.
-AMBER_SECONDS = 900     # 15 minutes
-RED_SECONDS = 1800      # 30 minutes
+# only thresholds this screen has. RED is a fault; AMBER is the early warning that the
+# folder is drifting toward one.
+#
+# These are tight because these are payment queues: a message that has sat for two minutes
+# has missed its window, and the consumer that should have taken it is not running. Tight
+# limits are only tenable because the exporter scans every 10s and the page ages each tile
+# once a second off a published timestamp — a folder crosses into red within a second or
+# two of actually doing so, not at the next scrape.
+#
+# If you loosen these, add matching file_age_buckets_seconds entries in folder_exporter.yml
+# or the "N past the limit" counts in the detail dialog quietly stop being answerable.
+AMBER_SECONDS = 60      # 1 minute  — drifting
+RED_SECONDS = 120       # 2 minutes — a fault
 
 # Per-folder overrides, by the `target` label. An outbound or archive folder that
 # legitimately holds files for longer belongs here rather than having the shared limits
@@ -507,6 +516,10 @@ def snapshot() -> dict:
         "stale_after": STALE_AFTER,
         "amber_seconds": AMBER_SECONDS,
         "red_seconds": RED_SECONDS,
+        # Human-readable forms for the prose on the page: "passed 120 seconds" reads worse
+        # than "passed 2:00", and worse still once a limit is measured in hours.
+        "amber_text": _fmt_age(AMBER_SECONDS),
+        "red_text": _fmt_age(RED_SECONDS),
         "processed_window": PROCESSED_WINDOW,
         "processed_total": sum(f["processed"] or 0 for f in out),
         "folders": out,
