@@ -119,17 +119,31 @@ _WANTED = (
 )
 _QUERY = '{__name__=~"%s"} or up{job="folder_exporter"}' % "|".join(_WANTED)
 
-# Throughput: files that have LEFT each folder in the last 24 hours, which for a queue
-# folder is what "processed" means — inbound messages consumed by T24, outbound messages
-# collected by the interface.
+# Throughput: files that have LEFT each folder SINCE MIDNIGHT, which for a queue folder is
+# what "processed" means — inbound messages consumed by T24, outbound messages collected by
+# the interface. The figure resets with the working day, so it reads as "handled today".
 #
-# A rolling window rather than the raw counter. folder_files_removed_total counts from
-# exporter start, so a service restart would drop the figure to zero and a screen reading
-# "processed 4" after a reboot is worse than no figure at all. increase() spans resets
-# correctly, and 24h keeps the number steady rather than collapsing at midnight the way a
-# since-midnight count would.
-_PROCESSED_QUERY = 'increase(folder_files_removed_total[24h])'
-PROCESSED_WINDOW = "24h"
+# Still increase() rather than the raw counter: folder_files_removed_total runs from
+# exporter start, so a service restart mid-morning would drop the figure to near zero and a
+# payment queue reading "processed 4" at noon is worse than no figure at all. increase()
+# spans counter resets, so a restart costs nothing.
+#
+# The range is computed per query as the time since local midnight, so the count empties at
+# 00:00 and fills through the day.
+PROCESSED_WINDOW = "today"
+
+
+def _processed_query(now: Optional[float] = None) -> str:
+    """increase() over the window from local midnight to now.
+
+    Floored at 15s so the range is never [0s] — invalid PromQL — in the first moments of a
+    day. That floor reaches a few seconds back into yesterday, which can only matter for
+    files processed in the final seconds before midnight, and only for the first quarter
+    minute of the new day.
+    """
+    lt = time.localtime(now if now is not None else time.time())
+    since_midnight = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+    return "increase(folder_files_removed_total[%ds])" % max(15, since_midnight)
 
 _STATE_ORDER = {"red": 0, "amber": 1, "unknown": 2, "green": 3, "idle": 4}
 
@@ -234,6 +248,18 @@ def _over(buckets: Dict[float, float], total: Optional[float], limit: int) -> Op
     return max(0, int(round(total - buckets[limit])))
 
 
+def _path_of(r: dict) -> List[str]:
+    """The hops a message takes through this folder, in order.
+
+    A folder with no `via` gives a two-stop path rather than a three-stop one with an
+    empty middle: PAYNET feeds T24 directly, and drawing a hop there would assert a
+    translation layer that does not exist. A folder with no source/destination at all
+    gives an empty list, and the screen simply shows no path.
+    """
+    hops = [r.get("source") or "", r.get("via") or "", r.get("destination") or ""]
+    return [h for h in hops if h]
+
+
 def _processed_of(processed: Dict[tuple, float], instance: str, name: str):
     """Files that left this folder over the window, as a whole number.
 
@@ -261,6 +287,7 @@ def _collect(series: List[dict]) -> tuple:
             "oldest_mtime": None, "newest_mtime": None, "last_scan": None,
             "last_added": None, "added_total": None, "removed_total": None,
             "timed_out": False, "buckets": {}, "hist_total": None,
+            "source": "", "via": "", "destination": "", "format": "",
         })
 
     for s in series:
@@ -280,6 +307,12 @@ def _collect(series: List[dict]) -> tuple:
         if not name:
             continue
         r = row(instance, name)
+
+        # The message path, declared per folder in folder_exporter.yml and carried on
+        # every series. Read off whichever series arrives first — they all have it.
+        for k in ("source", "via", "destination", "format"):
+            if not r[k] and lbl.get(k):
+                r[k] = lbl[k]
 
         if metric == "folder_files":
             r["files"] = int(value)
@@ -332,7 +365,7 @@ def snapshot() -> dict:
     # or the range vector is empty, the grid still renders and the figure is simply absent.
     processed: Dict[tuple, float] = {}
     try:
-        for s in prom.query(_PROCESSED_QUERY):
+        for s in prom.query(_processed_query()):
             lbl = s.get("labels") or {}
             name = lbl.get("target")
             if name:
@@ -388,6 +421,14 @@ def snapshot() -> dict:
             "instance": instance,
             "host": host_names.get(instance, instance),
 
+            # the leg of the payment path this folder holds
+            "source": r["source"],
+            "via": r["via"],
+            "destination": r["destination"],
+            "format": (r["format"] or "").upper(),
+            "path": _path_of(r),
+            "path_text": " → ".join(_path_of(r)),
+
             # what is waiting
             "files": files,
             "has_files": has_files,
@@ -408,7 +449,7 @@ def snapshot() -> dict:
             "since_added": None if not last_added else int(now - last_added),
             "added_total": r["added_total"],
             "removed_total": r["removed_total"],
-            # files that left this folder in the last 24h — the throughput figure on the
+            # files that left this folder since midnight — the throughput figure on the
             # tile. None when the range query gave nothing, so the tile omits it rather
             # than showing a zero it cannot stand behind.
             "processed": _processed_of(processed, instance, name),
