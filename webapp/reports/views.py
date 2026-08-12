@@ -420,13 +420,15 @@ def folder_watch(request):
 @never_cache   # a cached copy of this page would show yesterday's folder ages
 @login_required
 def folder_watch_temenos(request):
-    """Temenos: the T24 interface drop folders, each coloured by whether anything in one has
-    been waiting past the limit the host applies. One Prometheus query — no capture — so it
-    is cheap to leave open.
+    """Temenos: the T24 interface drop folders, each coloured by how long its oldest file has
+    been waiting. One Prometheus query — no capture — so it is cheap to leave open.
 
     The page then keeps itself live on its own: the template hands the browser each folder's
     oldest-file TIMESTAMP (not its age), so the tiles re-age every second and a folder turns
     red the moment it crosses its limit, without waiting for the next poll.
+
+    Reads folder_exporter on :9847, which replaced the Task Scheduler script and textfile
+    collector this screen used to depend on.
     """
     if not is_system_admin(request.user):
         return redirect("report_form")
