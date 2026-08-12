@@ -2,9 +2,9 @@
 {% block title %}Temenos · Folder Watch · Admin Report Generator{% endblock %}
 
 {% comment %}
-  This page reloads itself every minute. The global spinner would then dim the screen once a
-  minute for a refresh nobody asked for, so it is dropped here — app.js binds to the element
-  and no-ops when it is missing.
+  This page updates itself in place and does not reload on a timer, so the global spinner
+  would only ever dim the screen for a navigation nobody asked for. It is dropped here —
+  app.js binds to the element and no-ops when it is missing.
 {% endcomment %}
 {% block page_spinner %}{% endblock %}
 
@@ -20,6 +20,10 @@
   Nothing here is a snapshot. The page is handed each folder's oldest-file
   TIMESTAMP, so the browser re-ages every tile once a second and a folder turns
   red the moment it crosses its own limit, rather than at the next poll.
+
+  Reads folder_exporter (job `folder_exporter`, :9847) — a service on the T24 app
+  server, not the old Task Scheduler script and textfile collector. See the module
+  docstring in reports/folders.py for what that changed and why.
 {% endcomment %}
 <style>
   /* Folder palettes. `back` is the sheet behind, `front` the flap the name sits on,
@@ -68,7 +72,7 @@
      that overlap; the tile grid is auto-fill and reflows, so it costs nothing to stay put. */
 
   /* Two live figures sit together in the header now that the description has moved out of it.
-     A hairline keeps "1:39 ago / last checked" from reading as one phrase with the next stat. */
+     A hairline keeps the update clock from reading as one phrase with the next stat. */
   .fw-statsep { width:1px; align-self:stretch; margin:1px 2px; background:var(--line-strong); }
 
   /* ---- toolbar: state pills double as filters ---- */
@@ -237,9 +241,12 @@
   <div class="snap">
     <h1>Temenos</h1>
     <span class="spacer" style="flex:1"></span>
-    {# When the HOST last looked — not when this page last refreshed. #}
-    <div class="stat" id="fwRunStat" title="When the folder check last ran on the host">
-      <b id="fwRunAgo">{{ fw.last_run_text }}</b><span id="fwRunAgoSub">last checked</span>
+    {% comment %}
+      Time since this page last pulled data. Purely client-side — it resets on every
+      successful poll and owes nothing to any timestamp in the payload.
+    {% endcomment %}
+    <div class="stat" id="fwRunStat" title="Time since this page last pulled fresh data">
+      <b id="fwRunAgo">0:00</b><span id="fwRunAgoSub">updated {{ fw.now_text }}</span>
     </div>
     <span class="fw-statsep" aria-hidden="true"></span>
     <div class="stat" id="fwHeadline"><b>—</b><span>oldest waiting</span></div>
@@ -252,6 +259,7 @@
   <div class="fw-toolbar">
     <button type="button" class="fw-pill" data-filter="all" aria-pressed="true">All <span class="n" data-count="all">{{ fw.total }}</span></button>
     <button type="button" class="fw-pill" data-filter="red" aria-pressed="false"><span class="swatch sw-red"></span>Too old <span class="n" data-count="red">{{ fw.counts.red }}</span></button>
+    <button type="button" class="fw-pill" data-filter="amber" aria-pressed="false"><span class="swatch sw-amber"></span>Ageing <span class="n" data-count="amber">{{ fw.counts.amber }}</span></button>
     <button type="button" class="fw-pill" data-filter="green" aria-pressed="false"><span class="swatch sw-green"></span>Fresh <span class="n" data-count="green">{{ fw.counts.green }}</span></button>
     <button type="button" class="fw-pill" data-filter="idle" aria-pressed="false"><span class="swatch sw-idle"></span>Drained <span class="n" data-count="idle">{{ fw.counts.idle }}</span></button>
     <button type="button" class="fw-pill" data-filter="unknown" aria-pressed="false"><span class="swatch sw-unknown"></span>Unknown <span class="n" data-count="unknown">{{ fw.counts.unknown }}</span></button>
@@ -261,22 +269,29 @@
 
   <div class="fw-grid" id="fwGrid">
     {% for f in fw.folders %}
-    {# The badge counts files OVER the host's threshold — this exporter publishes no total. #}
+    {% comment %}
+      The badge is the TOTAL number of files waiting — the previous exporter could only
+      report how many were over the limit, so a tile could never say how deep the queue was.
+
+      Anything spanning lines must use this block form. The hash-brace comment is
+      single-line only in Django, and a multi-line one is not treated as a comment at
+      all — it renders as literal text, which here meant once per tile.
+    {% endcomment %}
     <button type="button" class="fw-tile" data-key="{{ f.key }}" data-state="{{ f.state }}"
-            data-has-files="{% if f.stale_files %}1{% else %}0{% endif %}"
+            data-has-files="{% if f.files %}1{% else %}0{% endif %}"
             data-len="{% if f.name|length > 16 %}xlong{% elif f.name|length > 10 %}long{% else %}short{% endif %}"
             data-search="{{ f.name|lower }} {{ f.host|lower }}"
-            title="{{ f.name }} — last checked {{ f.checked_at_text }}">
+            title="{{ f.name }} — last scanned {{ f.checked_at_text }}">
       <span class="fw-ico-wrap">
         <svg class="fw-ico" viewBox="0 0 120 92" aria-hidden="true">
           <path class="back"  d="M6 26 q0-11 11-11 h23 q5 0 8 3.4 L54 25 h49 q11 0 11 11 v40 q0 11-11 11 H17 q-11 0-11-11 Z"/>
           <path class="front" d="M6 40 h108 v36 q0 11-11 11 H17 q-11 0-11-11 Z"/>
         </svg>
-        <span class="fw-count" data-count-el>{{ f.stale_files }}</span>
+        <span class="fw-count" data-count-el>{{ f.files }}</span>
         <span class="fw-name"><span>{{ f.name_wrap }}</span></span>
       </span>
       <span class="fw-sub" data-sub-el>
-        {% if not f.readable %}path missing{% elif f.stale %}check stale{% elif f.has_files %}{{ f.age_text }}{% else %}drained{% endif %}
+        {% if not f.readable %}path missing{% elif f.stale %}not scanning{% elif f.has_files %}{{ f.age_text }}{% else %}drained{% endif %}
       </span>
       {% if fw.hosts|length > 1 %}<span class="fw-host">{{ f.host }}</span>{% endif %}
     </button>
@@ -290,34 +305,45 @@
     <p class="fw-lead">How long the oldest file has been waiting in each watched folder.
       A folder that stops draining is a consumer that has stopped running.</p>
     <p class="fw-hint" style="margin:0">
-      Each folder is coloured by whether any file in it has been waiting past the age limit set
-      on the host. The host applies that limit itself and publishes the <b>result</b> — how many
-      files are over it — so this page holds no thresholds of its own and retuning one is an edit
-      on the server alone.
+      Each folder is coloured by how long its <b>oldest</b> file has been waiting. The number on
+      the folder tab is how many files are waiting in total; the figure underneath is the age of
+      the oldest one.
       <br><br>
       <b>Grey is healthy.</b> An empty interface folder means everything drained, which is the
-      normal steady state. <b>Green</b> means files are waiting and none of them is over the
-      limit — work in progress. <b>Red</b> means a file has been sitting past the limit: the
-      folder is not busy, it is jammed, and the consumer that should be draining it has almost
-      certainly stopped. There is no amber band, because the host publishes only the one
-      threshold — there is no second, earlier line to warn against.
+      normal steady state. <b>Green</b> means files are waiting and all of them are fresh — work
+      in progress. <b>Amber</b> means the oldest has passed {{ fw.amber_seconds }} seconds and the
+      folder is drifting. <b>Red</b> means it has passed {{ fw.red_seconds }} seconds: the folder
+      is not busy, it is jammed, and the consumer that should be draining it has almost certainly
+      stopped.
       <br><br>
       <b>Dashed and faded</b> is neither good nor bad — it means we are not being told. Either the
-      path could not be found on the host, the run reported an error, or the check itself has not
-      run recently. The textfile the host publishes is re-served unchanged until it is rewritten,
-      so a dead check would otherwise read as a permanently perfect folder. It is called out
-      rather than coloured in.
+      path could not be found on the host, the scan reported an error or was cut short, the folder
+      has not been scanned in the last {{ fw.stale_after }} seconds, or the exporter is not
+      answering at all. Prometheus keeps serving the last values it saw, so a stopped exporter
+      would otherwise read as a set of permanently perfect folders. It is called out rather than
+      coloured in.
       <br><br>
-      <b>Two clocks, and they mean different things.</b> <i>live</i>, by the toolbar heartbeat,
-      is this page still reaching the server. <b>Last checked</b>, at the top of the page, is the
-      host still looking at the folders — it counts up on its own and turns red once it passes
-      {{ fw.stale_after }} seconds. The page can be perfectly live while the readings behind it
-      are hours old, so that top figure is the one that says whether any of this is current.
+      <b>The page updates itself.</b> Every ten seconds it asks for fresh figures and repaints
+      in place — there is no page refresh, and nothing here needs one. The clock at the top
+      counts those ten seconds down and the grid ripples each time they land, so a glance tells
+      you a refresh has just happened or how long until the next. If that number keeps climbing
+      instead of resetting, this screen has lost the server, and the <i>live</i> heartbeat in
+      the toolbar turns red with it.
       <br><br>
-      The host measures each file's age at the moment it runs, and that number is frozen until
-      the next run. This page subtracts it from the run's own timestamp to recover when the file
-      actually arrived, then ages it from there once a second — so a folder crosses into red the
-      moment it truly does, not at the next check.
+      That is a different question from whether the <i>readings</i> are current, which is judged
+      per folder: a folder the exporter has stopped scanning turns dashed and lands under
+      Unknown on its own, no matter how healthy the header looks.
+      <br><br>
+      The exporter publishes each folder's oldest file as a <b>timestamp</b>, not an age, so this
+      page ages it once a second from a fixed point — a folder crosses into red the moment it
+      truly does, not at the next scan. Open any folder for the full detail: total waiting, how
+      many are past each limit, the size on disk, and when a file last arrived.
+      <br><br>
+      <span class="muted">The two limits are set in <code>reports/folders.py</code>
+      (<code>AMBER_SECONDS</code> / <code>RED_SECONDS</code>, with per-folder overrides). The
+      exporter publishes raw ages and counts rather than a verdict, because the same numbers also
+      feed the Prometheus alert rules and Grafana, which need the facts rather than this screen's
+      opinion of them.</span>
     </p>
     </div></div>
   </details>
@@ -326,11 +352,16 @@
   <div class="card"><div class="body">
     <p class="fw-none" style="padding:10px 0">
       <b>No folder metrics are being reported yet.</b><br><br>
-      Nothing on any monitored host is publishing <code>t24_folder_checker_*</code>. Check that the
-      folder checker is still scheduled on the T24 app server (10.0.212.3) and that its
-      <code>.prom</code> file is landing in the windows_exporter textfile directory. No Prometheus
-      change is needed; the metrics arrive through the textfile collector already scraped on that
-      host.
+      Nothing is publishing <code>folder_*</code>. In order, check that:
+      the <code>folder_exporter</code> service is running on the T24 app server
+      (<code>sc query folder_exporter</code> on 10.0.212.3);
+      it answers there (<code>http://localhost:9847/metrics</code>);
+      Prometheus can reach it across the network (port 9847 through the firewall);
+      and the <code>folder_exporter</code> job shows <b>UP</b> under Status › Targets.
+      <br><br>
+      Folders are listed in <code>folder_exporter.yml</code> next to the executable on that
+      server. Saving that file reloads the service on its own — no restart, and no Prometheus
+      change.
       <br><br>
       <span class="muted">Queried {{ fw.prom_url }}.</span>
     </p>
@@ -371,15 +402,31 @@
   var skew = data.now - (Date.now() / 1000);
   function serverNow() { return (Date.now() / 1000) + skew; }
 
+  /* A fixed 10s refresh. Long enough to read as a rhythm rather than a flicker, short
+     enough that the screen is never meaningfully behind. Each poll is a few KB off a
+     snapshot the exporter already holds in memory, so no disk is touched on the T24 box
+     to answer it. */
+  var POLL_MS = 10000;
+
+  // When this page last asked for data. Set by the initial render, then by every poll that
+  // lands — this is what the header clock counts from, and nothing else touches it.
+  var lastUpdate = data.now;
+  // Red past four missed refreshes: one dropped request is not worth alarming about.
+  var UPDATE_STALE_S = (POLL_MS / 1000) * 4;
+
   var byKey = {};
   function index(folders) { byKey = {}; folders.forEach(function (f) { byKey[f.key] = f; }); }
   index(data.folders);
 
   // ---- mirrors reports/folders.py: verdict() and _fmt_age(). Change one, change both. ----
-  function verdict(staleFiles, hasFiles, readable, stale, runOk) {
-    if (stale || !readable || !runOk) { return "unknown"; }
-    if (staleFiles > 0) { return "red"; }
-    if (!hasFiles) { return "idle"; }
+  /* Judged on the LIVE age, so a folder turns red the moment it truly crosses its limit
+     rather than at the next scrape. Each folder carries its own limits, because one
+     outbound folder may legitimately hold files far longer than an inbound queue. */
+  function verdict(age, files, readable, stale, scanOk, amberSeconds, redSeconds) {
+    if (stale || !readable || !scanOk) { return "unknown"; }
+    if (files <= 0) { return "idle"; }
+    if (age !== null && age >= redSeconds) { return "red"; }
+    if (age !== null && age >= amberSeconds) { return "amber"; }
     return "green";
   }
   function fmtAge(seconds) {
@@ -399,35 +446,40 @@
     var d = new Date(epoch * 1000);
     return d.toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
   }
-  /* The check runs every ~2 minutes, so a minute-resolution stamp makes two consecutive
-     runs look like one. Times on this page that name a RUN carry seconds. */
+  /* Folders are re-scanned every 30s, so a minute-resolution stamp makes two consecutive
+     scans look like one. Times on this page that name a SCAN carry seconds. */
   function fmtTime(epoch) {
     if (!epoch) { return "—"; }
     return new Date(epoch * 1000).toLocaleTimeString(undefined,
       { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
+  function fmtBytes(n) {
+    if (n === null || n === undefined) { return "—"; }
+    var u = ["B", "KB", "MB", "GB", "TB"], i = 0;
+    while (Math.abs(n) >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i === 0 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
+  }
 
-  /* Recompute one folder's live figures. `stale` is re-derived here too: if the check dies
-     while this page is open, the tiles must drift to unknown on their own rather than sit
-     on the last verdict the server happened to send.
+  /* Recompute one folder's live figures. `stale` is re-derived here too: if the exporter
+     stops scanning while this page is open, the tiles must drift to unknown on their own
+     rather than sit on the last verdict the server happened to send.
 
-     The age ticks off oldest_mtime, which folders.py reconstructed as
-     last_run_timestamp - oldest_file_age. The exporter's own age field is frozen at the
-     moment of the run; this one keeps moving, which is what a jammed folder actually does. */
+     The age ticks off oldest_mtime, which the exporter publishes directly as the oldest
+     file's modification time. It is a fixed point in the past, so subtracting it from now
+     keeps moving — which is exactly what a jammed folder does. */
   function live(f) {
     var now = serverNow();
     var age = f.oldest_mtime ? (now - f.oldest_mtime) : null;
-    var stale = !f.checked_at || (now - f.checked_at) > data.stale_after;
+    var stale = !f.checked_at || (now - f.checked_at) > data.stale_after || !f.reachable;
     return {
       age: age, stale: stale,
-      state: verdict(f.stale_files, f.has_files, f.readable, stale, f.run_ok)
+      state: verdict(age, f.files, f.readable, stale, f.scan_ok, f.amber_seconds, f.red_seconds)
     };
   }
 
   // ---- filtering ----
-  /* Held in sessionStorage because the page reloads itself every minute: without this, a
-     filter down to "Too old" would silently reset to All within the minute, which is worse
-     than not offering the filter at all. Session-scoped, so it does not outlive the tab. */
+  /* Held in sessionStorage so a filter survives the one reload this page still does — the
+     folder set changing on the host. Session-scoped, so it does not outlive the tab. */
   var STORE = "fwFilter";
   var saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(STORE) || "{}"); } catch (e) { saved = {}; }
@@ -441,8 +493,8 @@
     } catch (e) { /* private mode — the filter just won't survive the reload */ }
   }
 
-  /* "How to read this" is collapsed on every fresh visit, but if you opened it, the
-     once-a-minute reload must not shut it in your face mid-sentence. */
+  /* "How to read this" is collapsed on every fresh visit, but if you opened it, a reload
+     must not shut it in your face mid-sentence. */
   var helpEl = document.getElementById("fwHelp");
   if (helpEl) {
     if (saved.help) { helpEl.open = true; }
@@ -491,14 +543,14 @@
       }
 
       tile.setAttribute("data-state", v.state);
-      tile.setAttribute("data-has-files", f.stale_files > 0 ? "1" : "0");
+      tile.setAttribute("data-has-files", f.files > 0 ? "1" : "0");
       var countEl = tile.querySelector("[data-count-el]");
-      if (countEl) { countEl.textContent = f.stale_files; }
+      if (countEl) { countEl.textContent = f.files; }
       var sub = tile.querySelector("[data-sub-el]");
       if (sub) {
         sub.textContent = !f.readable ? "path missing"
-          : v.stale ? "check stale"
-          : f.has_files ? fmtAge(v.age)
+          : v.stale ? "not scanning"
+          : f.files > 0 ? fmtAge(v.age)
           : "drained";
       }
 
@@ -513,19 +565,24 @@
       if (n) { n.textContent = counts[p.getAttribute("data-filter")] || 0; }
     });
 
-    /* The run clock. This ticks off the same second timer as the tiles, so "3m ago" keeps
-       counting up on its own — a frozen "0s ago" on a dead check is exactly the lie the
-       stale rule exists to prevent. */
-    var runAge = data.last_run ? (serverNow() - data.last_run) : null;
-    var runStale = runAge === null || runAge > data.stale_after;
+    /* Time since this page last asked Prometheus for data. Counts 0 -> the poll interval
+       and resets, every time, so the number is a rhythm you can read at a glance rather
+       than something that jumps about.
+
+       It is not a statement about the DATA, and must not be turned into one. It used to
+       show the host's last run — necessary when the metrics came from a .prom file that a
+       scheduled task rewrote, because that file was re-served unchanged in between. The
+       exporter is a live service now and every folder carries its own scan time, so
+       whether the readings are stale is judged per folder: an unscanned folder turns
+       dashed-unknown on its own tile. Leave that job there and this number simple. */
+    var sinceUpdate = serverNow() - lastUpdate;
     if (runAgo) {
-      runAgo.textContent = data.last_run ? fmtAge(runAge) + " ago" : "never";
-      runAgoSub.textContent = data.last_run ? "checked " + fmtTime(data.last_run) : "never checked";
-      runStat.className = "stat" + (runStale ? " red" : "");
-      runStat.title = data.last_run
-        ? "The folder check last ran on the host at " + fmtClock(data.last_run) +
-          ". Readings on this page are from that run."
-        : "No run timestamp has ever been published.";
+      runAgo.textContent = fmtAge(sinceUpdate) + " ago";
+      runAgoSub.textContent = "updated " + fmtTime(lastUpdate);
+      runStat.className = "stat" + (sinceUpdate > UPDATE_STALE_S ? " red" : "");
+      runStat.title = "This page refreshes every " + Math.round(POLL_MS / 1000) +
+        " seconds. It last asked at " + fmtClock(lastUpdate) +
+        ". Whether a FOLDER's readings are stale is shown on the folder itself.";
     }
 
     if (headline) {
@@ -553,9 +610,13 @@
         h.textContent = counts.red + " folder" + (counts.red === 1 ? "" : "s") +
           " holding a file past its limit — nothing is draining " + worst.folder.name;
         var d = document.createElement("div"); d.className = "detail";
-        d.textContent = worst.folder.name + ": " + worst.folder.stale_files + " file" +
-          (worst.folder.stale_files === 1 ? "" : "s") + " past the limit, oldest " +
-          fmtAge(worst.age) + " · seen at " + fmtTime(worst.folder.checked_at) +
+        // Total waiting AND how many are over the line: the previous exporter could only
+        // report the second number, which made a deep queue and a single stuck file look alike.
+        var over = worst.folder.over_red;
+        d.textContent = worst.folder.name + ": " + worst.folder.files + " file" +
+          (worst.folder.files === 1 ? "" : "s") + " waiting" +
+          (over === null || over === undefined ? "" : ", " + over + " past the limit") +
+          ", oldest " + fmtAge(worst.age) + " · scanned " + fmtTime(worst.folder.checked_at) +
           (others > 0 ? "   ·   and " + others + " more" : "");
         div.appendChild(h); div.appendChild(d);
         banner.appendChild(div);
@@ -575,7 +636,7 @@
 
   var SUMMARY = {
     red: "A file has been waiting past this folder's limit — the consumer has stopped draining it.",
-    amber: "The oldest file here is approaching this folder's limit.",
+    amber: "The oldest file here is past the early-warning limit and heading for a fault.",
     green: "Files are waiting, and all of them are fresh.",
     idle: "Drained — nothing is waiting.",
     unknown: "Not being reported — treat these readings as unknown."
@@ -604,20 +665,49 @@
     dlgBody.innerHTML = "";
     row("Host", f.host + (f.instance && f.instance !== f.host ? "  ·  " + f.instance : ""));
     row("Path found", f.readable ? "yes" : "no — the folder could not be read");
-    row("Files past limit", String(f.stale_files));
-    if (f.oldest_mtime) {
-      // Both numbers, deliberately. The first is what the host measured and is now frozen;
-      // the second is what it has become since. Showing only one invites the wrong question.
+
+    /* Depth first, then how much of it is over the line. The old exporter published only
+       the second figure, so "3 files too old" could equally have meant 3 waiting or 300. */
+    if (f.files > 0) {
+      var breakdown = String(f.files) + " waiting";
+      if (f.over_red !== null && f.over_red !== undefined) {
+        breakdown += "   ·   " + f.over_red + " past " + fmtAge(f.red_seconds);
+      }
+      if (f.over_amber !== null && f.over_amber !== undefined) {
+        breakdown += "   ·   " + f.over_amber + " past " + fmtAge(f.amber_seconds);
+      }
+      row("Files", breakdown);
+      row("Size", f.size_text);
       row("Oldest file since", fmtClock(f.oldest_mtime));
-      row("Waiting for", fmtAge(v.age) + "   (was " + fmtAge(f.age_at_run) + " at the last run)");
+      row("Waiting for", fmtAge(v.age));
+      if (f.newest_mtime) {
+        row("Newest file", fmtClock(f.newest_mtime) +
+            "   (" + fmtAge(serverNow() - f.newest_mtime) + " old)");
+      }
     } else if (f.readable) {
-      row("Files waiting", "none at the last run");
+      row("Files", "none waiting — drained");
     }
-    row("Limit", "applied on the host — this page holds no thresholds of its own");
-    row("Last run", f.checked_at
+
+    /* Arrival is the other half of the story: a folder can be empty because it is being
+       drained promptly, or because nothing has arrived in it for six hours. Only one of
+       those is healthy, and the counters are the only way to tell them apart. */
+    if (f.last_added) {
+      row("Last arrival", fmtClock(f.last_added) +
+          "   (" + fmtAge(serverNow() - f.last_added) + " ago)");
+    } else {
+      row("Last arrival", "nothing has arrived since the exporter started");
+    }
+    if (f.added_total !== null && f.added_total !== undefined) {
+      row("Since exporter start", f.added_total + " arrived   ·   " + f.removed_total + " consumed");
+    }
+
+    row("Limits", "ageing at " + fmtAge(f.amber_seconds) + "   ·   too old at " + fmtAge(f.red_seconds));
+    row("Last scanned", f.checked_at
       ? fmtClock(f.checked_at) + "   (" + fmtAge(serverNow() - f.checked_at) + " ago)"
       : "never");
-    row("Run result", f.run_ok ? "completed without errors" : "reported an error");
+    row("Scan result", !f.reachable ? "the exporter is not answering"
+      : f.timed_out ? "cut short — figures may be incomplete"
+      : f.scan_ok ? "completed without errors" : "reported an error");
     row("Reading as of", fmtClock(serverNow()) + "   (this page, live)");
   }
 
@@ -631,7 +721,8 @@
   function closeDialog() {
     openKey = null;
     dlg.classList.remove("show");
-    if (refreshDue) { window.location.reload(); }   // the refresh we held back
+    // Nothing to resume: the page no longer reloads itself on a timer, and the tiles
+    // behind the dialog have been repainting live the whole time it was open.
   }
 
   grid.addEventListener("click", function (e) {
@@ -650,30 +741,37 @@
   function keysOf(folders) { return folders.map(function (f) { return f.key; }).sort().join("|"); }
   var shape = keysOf(data.folders);
 
+  /* The clock and the wave both mark ONE event: this page asked Prometheus for data and
+     got an answer. Every successful poll, on a fixed cadence — so the clock always counts
+     0 -> POLL_MS and the grid always ripples at the same moment.
+
+     That predictability is the point. Glance at the number and you know a refresh has just
+     happened, or how long until the next one. Tying either to whether the DATA changed
+     makes both stutter — the reading is the same rhythm whether or not a file moved. */
+
   function poll() {
     fetch("{% url 'folder_watch_data' %}", { headers: { "X-Requested-With": "XMLHttpRequest" } })
       .then(function (r) { if (!r.ok) { throw new Error("HTTP " + r.status); } return r.json(); })
       .then(function (fresh) {
-        // folders.csv changed on the host — the grid's tiles no longer match the data.
-        // Rebuilding the DOM here would duplicate the server's markup in two places, so
-        // we take the one reload this costs instead.
+        // folder_exporter.yml changed on the host — the grid's tiles no longer match the
+        // data. Rebuilding the DOM here would duplicate the server's markup in two places,
+        // so we take the one reload this costs instead. This is now the ONLY thing that
+        // reloads the page.
         if (keysOf(fresh.folders) !== shape) { window.location.reload(); return; }
         skew = fresh.now - (Date.now() / 1000);
-        // carry the new run stamp across, or the header would keep counting up from the
-        // first page load and report every check as overdue
-        data.last_run = fresh.last_run;
-        data.run_ok = fresh.run_ok;
         index(fresh.folders);
         failures = 0;
         live_el.classList.remove("is-down");
         live_txt.textContent = "live";
+        lastUpdate = fresh.now;     // the clock restarts: we just refreshed
         paint();
-        playWave();          // only on a refresh that actually landed
+        playWave();                 // and the grid says so
       })
       .catch(function (err) {
         failures++;
         live_el.classList.add("is-down");
-        // The tiles keep ageing on purpose: a file we cannot re-read is still that old.
+        // The tiles keep ageing on purpose: a file we cannot re-read is still that old,
+        // and the header clock keeps counting up, which is how a stalled page shows itself.
         live_txt.textContent = "not refreshing (" + failures + ")";
       });
   }
@@ -714,23 +812,19 @@
     }, WAVE_TRAVEL_MS + WAVE_CYCLE_MS + 60);
   }
 
-  // ---- whole-page auto refresh, once a minute ----
-  /* The 30s poll already refreshes the DATA; this refreshes the PAGE, so a template or nav
-     change lands on a screen nobody touches for days without anyone having to press F5.
-     Deferred while the detail dialog is open — a reload that closes a dialog mid-read is
-     the page arguing with the operator. */
-  var REFRESH_MS = 60000;
-  var refreshDue = false;
-  function autoRefresh() {
-    if (openKey) { refreshDue = true; return; }   // retry when the dialog closes
-    window.location.reload();
-  }
-  setInterval(autoRefresh, REFRESH_MS);
+  /* There is deliberately NO whole-page auto refresh.
+     The poll updates every figure on the screen in place, so a reload was only ever there
+     to pick up template changes on a display nobody touches — and it cost a flash, a lost
+     scroll position and a dialog closing itself mid-read. The page now reloads for exactly
+     one reason: the set of folders changed on the host, so the server-rendered tiles no
+     longer match the data. If a code change needs to reach a wall display, refresh it once
+     by hand. */
 
   paint();
-  playWave();          // the minute reload arrives as a fresh load, so this covers it too
+  playWave();          // one wave on load, so the grid announces itself
   setInterval(paint, 1000);
-  setInterval(poll, 30000);
+
+  setInterval(poll, POLL_MS);   // declared at the top, alongside the clock it drives
 })();
 </script>
 {% endblock %}

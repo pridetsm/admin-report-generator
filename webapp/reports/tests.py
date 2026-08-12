@@ -651,57 +651,97 @@ def _series(metric, value, **labels):
     return {"labels": labels, "value": float(value)}
 
 
-def _folder_series(*, name="PAYNET.IN", instance="10.0.212.3:9182", stale_files=0,
-                   oldest_age=60, path_found=1, job="windows_exporter"):
-    """One target's worth of exposition, exactly as the .prom + textfile collector deliver it.
+def _folder_series(*, name="PAYNET.IN", instance="10.0.212.3:9847", now=None, files=1,
+                   oldest_ago=60, newest_ago=None, exists=1, folder_up=1, scanned_ago=30,
+                   size=2048, timed_out=0, over_amber=0, over_red=0, added_ago=45,
+                   job="folder_exporter"):
+    """One folder's worth of exposition as folder_exporter publishes it.
 
-    `oldest_age` is the age AT THE MOMENT OF THE RUN, which is what this exporter publishes.
-    Pass 0 for a drained folder: with no total-file-count metric, a zero age is the only
-    signal that nothing is waiting."""
+    Note what this can express that the old textfile exposition could not: a file COUNT
+    independent of the ages, and absolute TIMESTAMPS rather than ages frozen at run time.
+    `files=0` is a genuinely drained folder — it no longer has to be inferred from a
+    zero age.
+
+    over_amber/over_red drive the age histogram, whose buckets sit at the module's limits.
+    """
+    now = time.time() if now is None else now
     base = {"target": name, "instance": instance, "job": job, "display": "Temenos/T24 App"}
-    return [_series("t24_folder_checker_stale_files_count", stale_files, **base),
-            _series("t24_folder_checker_oldest_file_age_seconds", oldest_age, **base),
-            _series("t24_folder_checker_path_found", path_found, **base)]
+    out = [
+        _series("folder_files", files, **base),
+        _series("folder_exists", exists, **base),
+        _series("folder_up", folder_up, **base),
+        _series("folder_size_bytes", size, **base),
+        _series("folder_last_scan_timestamp_seconds", now - scanned_ago, **base),
+        _series("folder_scan_timed_out", timed_out, **base),
+        _series("folder_files_added_total", 12, **base),
+        _series("folder_files_removed_total", 11, **base),
+    ]
+    if files > 0 and oldest_ago is not None:
+        out.append(_series("folder_oldest_file_timestamp_seconds", now - oldest_ago, **base))
+        newest = oldest_ago if newest_ago is None else newest_ago
+        out.append(_series("folder_newest_file_timestamp_seconds", now - newest, **base))
+    if added_ago is not None:
+        out.append(_series("folder_last_file_added_timestamp_seconds", now - added_ago, **base))
+
+    # Cumulative histogram: bucket(le) counts files at or under that age.
+    out.append(_series("folder_file_age_seconds_count", files, **base))
+    out.append(_series("folder_file_age_seconds_bucket", files - over_amber,
+                       le=str(folders.AMBER_SECONDS), **base))
+    out.append(_series("folder_file_age_seconds_bucket", files - over_red,
+                       le=str(folders.RED_SECONDS), **base))
+    return out
 
 
-def _run_series(now, *, instance="10.0.212.3:9182", ago=30, success=1, job="windows_exporter"):
-    """The run-level metrics. They carry NO `target` label: they describe the run itself,
-    so they apply to every folder on that instance."""
-    base = {"instance": instance, "job": job, "display": "Temenos/T24 App"}
-    return [_series("t24_folder_checker_last_run_timestamp_seconds", now - ago, **base),
-            _series("t24_folder_checker_last_run_success", success, **base)]
+def _exporter_up(*, instance="10.0.212.3:9847", value=1, job="folder_exporter"):
+    """`up` for the exporter itself — the proof Prometheus is still reaching it."""
+    return [_series("up", value, instance=instance, job=job)]
 
 
 class FolderWatchVerdict(TestCase):
     """The state machine on its own — it decides every colour on the screen."""
 
     def _v(self, **kw):
-        args = dict(stale_files=0, has_files=True, readable=True, stale=False, run_ok=True)
+        args = dict(age=60, files=1, readable=True, stale=False, scan_ok=True,
+                    amber_seconds=900, red_seconds=1800)
         args.update(kw)
         return folders.verdict(**args)
 
     def test_bands(self):
-        """The host draws the line, not this app: any file over its threshold is red, and
-        there is no amber because there is no second threshold to derive one from."""
-        self.assertEqual(self._v(stale_files=0), "green")
-        self.assertEqual(self._v(stale_files=1), "red")
-        self.assertEqual(self._v(stale_files=99), "red")
+        """Judged on the live age against this folder's own two limits."""
+        self.assertEqual(self._v(age=60), "green")
+        self.assertEqual(self._v(age=899), "green")
+        self.assertEqual(self._v(age=900), "amber")     # inclusive at the boundary
+        self.assertEqual(self._v(age=1799), "amber")
+        self.assertEqual(self._v(age=1800), "red")
+        self.assertEqual(self._v(age=99999), "red")
+
+    def test_per_folder_limits_are_honoured(self):
+        """An outbound folder that legitimately holds files needs its own limits, not a
+        loosening of everybody's."""
+        self.assertEqual(self._v(age=2000, amber_seconds=3600, red_seconds=7200), "green")
+        self.assertEqual(self._v(age=4000, amber_seconds=3600, red_seconds=7200), "amber")
 
     def test_empty_folder_is_idle_not_green(self):
         """A drained folder is the healthy steady state, but it is NOT the same as
         'files present and all fresh' — the grid distinguishes the two."""
-        self.assertEqual(self._v(has_files=False), "idle")
+        self.assertEqual(self._v(files=0), "idle")
 
-    def test_unreadable_stale_and_failed_runs_are_unknown_never_green(self):
+    def test_a_drained_folder_is_idle_even_with_a_stale_oldest_timestamp(self):
+        """The count decides emptiness now, not the age. Under the old exposition this had
+        to be inferred from a zero age, so a folder emptied between runs could still be
+        judged on the age of a file that was no longer there."""
+        self.assertEqual(self._v(files=0, age=99999), "idle")
+
+    def test_unreadable_stale_and_failed_scans_are_unknown_never_green(self):
         """The one thing this screen must never do is show green for a folder nobody is
-        looking at: a dead check keeps its .prom served, unchanged, forever."""
+        looking at: Prometheus keeps serving the last values it saw."""
         self.assertEqual(self._v(readable=False), "unknown")
         self.assertEqual(self._v(stale=True), "unknown")
-        self.assertEqual(self._v(run_ok=False), "unknown")
-        self.assertEqual(self._v(has_files=False, stale=True), "unknown")
+        self.assertEqual(self._v(scan_ok=False), "unknown")
+        self.assertEqual(self._v(files=0, stale=True), "unknown")
         # a breach we cannot vouch for is unknown, NOT red — reporting a fault from a dead
-        # check is as wrong as reporting health from one
-        self.assertEqual(self._v(stale_files=5, stale=True), "unknown")
+        # exporter is as wrong as reporting health from one
+        self.assertEqual(self._v(age=99999, stale=True), "unknown")
 
 
 class FolderWatchSnapshot(TestCase):
@@ -717,109 +757,175 @@ class FolderWatchSnapshot(TestCase):
 
     def test_states_end_to_end(self):
         now = time.time()
-        series = (_folder_series(name="FRESH.IN", oldest_age=30) +
-                  _folder_series(name="STUCK.IN", oldest_age=4000, stale_files=2) +
-                  _folder_series(name="DRAINED.OUT", oldest_age=0) +
-                  _folder_series(name="GONE.IN", oldest_age=0, path_found=0) +
-                  _run_series(now, ago=60))
+        series = (_folder_series(name="FRESH.IN", now=now, oldest_ago=30) +
+                  _folder_series(name="AGEING.IN", now=now, oldest_ago=1000) +
+                  _folder_series(name="STUCK.IN", now=now, files=3, oldest_ago=4000, over_red=2) +
+                  _folder_series(name="DRAINED.OUT", now=now, files=0) +
+                  _folder_series(name="GONE.IN", now=now, files=0, exists=0) +
+                  _exporter_up())
         with self._patch(series):
             snap = folders.snapshot()
         got = {f["name"]: f["state"] for f in snap["folders"]}
-        self.assertEqual(got, {"FRESH.IN": "green", "STUCK.IN": "red",
+        self.assertEqual(got, {"FRESH.IN": "green", "AGEING.IN": "amber", "STUCK.IN": "red",
                                "DRAINED.OUT": "idle", "GONE.IN": "unknown"})
         self.assertEqual(snap["counts"]["red"], 1)
+        self.assertEqual(snap["counts"]["amber"], 1)
         self.assertEqual(snap["worst_folder"]["name"], "STUCK.IN")
-        self.assertEqual(snap["total"], 4)
+        self.assertEqual(snap["total"], 5)
 
-    def test_age_keeps_running_after_the_run_that_measured_it(self):
-        """The exporter's age is frozen at the moment of the run. Recovering the mtime from
-        the run timestamp is what stops a jammed folder appearing to stop ageing between
-        checks — the whole reason this module does not trust the published age directly."""
+    def test_age_ticks_from_the_published_timestamp(self):
+        """The exporter publishes the oldest file's mtime, so the age is a live subtraction
+        rather than something reconstructed from a run timestamp."""
         now = time.time()
-        series = _folder_series(oldest_age=300) + _run_series(now, ago=120)
+        series = _folder_series(now=now, oldest_ago=420) + _exporter_up()
         with self._patch(series):
             snap = folders.snapshot()
         f = snap["folders"][0]
-        self.assertEqual(f["age_at_run"], 300)             # what the host measured
-        self.assertAlmostEqual(f["age"], 420, delta=3)     # 300 + the 120s since
+        self.assertAlmostEqual(f["age"], 420, delta=3)
         self.assertAlmostEqual(f["oldest_mtime"], now - 420, delta=3)
 
-    def test_stale_check_makes_every_folder_unknown(self):
+    def test_total_and_over_limit_counts_are_both_reported(self):
+        """The headline gain over the old exposition: how deep the queue is AND how much of
+        it is past the line, instead of only the second number."""
         now = time.time()
-        series = (_folder_series(name="PAYNET.IN", oldest_age=5) +
-                  _run_series(now, ago=folders.STALE_AFTER + 60))
+        series = _folder_series(now=now, files=9, oldest_ago=4000,
+                                over_amber=5, over_red=3) + _exporter_up()
         with self._patch(series):
             snap = folders.snapshot()
-        self.assertEqual(snap["folders"][0]["state"], "unknown")
-        self.assertTrue(snap["folders"][0]["stale"])
-        self.assertIn("not run recently", snap["folders"][0]["reason"])
+        f = snap["folders"][0]
+        self.assertEqual(f["files"], 9)
+        self.assertEqual(f["over_red"], 3)
+        self.assertEqual(f["over_amber"], 5)
 
-    def test_missing_run_timestamp_is_unknown(self):
+    def test_over_limit_is_none_when_no_bucket_matches_the_limit(self):
+        """Without a histogram bucket at the limit there is no honest answer, so the field
+        is None rather than a number derived from the wrong boundary."""
+        now = time.time()
+        series = [s for s in _folder_series(now=now, files=4, oldest_ago=100)
+                  if s["labels"].get("le") != str(folders.RED_SECONDS)]
+        with self._patch(series + _exporter_up()):
+            snap = folders.snapshot()
+        self.assertIsNone(snap["folders"][0]["over_red"])
+        self.assertEqual(snap["folders"][0]["files"], 4)
+
+    def test_stale_scan_makes_that_folder_unknown(self):
+        """Freshness is per folder now, so one folder that stopped being scanned does not
+        drag the others down with it — and cannot hide behind them either."""
+        now = time.time()
+        series = (_folder_series(name="PAYNET.IN", now=now, oldest_ago=5,
+                                 scanned_ago=folders.STALE_AFTER + 60) +
+                  _folder_series(name="EFIN.IN", now=now, oldest_ago=5, scanned_ago=10) +
+                  _exporter_up())
+        with self._patch(series):
+            snap = folders.snapshot()
+        states = {f["name"]: f["state"] for f in snap["folders"]}
+        self.assertEqual(states, {"PAYNET.IN": "unknown", "EFIN.IN": "green"})
+        stalled = [f for f in snap["folders"] if f["name"] == "PAYNET.IN"][0]
+        self.assertTrue(stalled["stale"])
+        self.assertIn("not been scanned recently", stalled["reason"])
+
+    def test_header_reports_when_fresh_data_last_arrived(self):
+        """"Last scanned" is a ticking clock, and a reader takes that to mean "how long since
+        new data landed" — so the NEWEST scan wins and the figure returns to zero on every
+        scrape. Using the oldest made it start a whole interval above zero and never reset."""
+        now = time.time()
+        series = (_folder_series(name="A.IN", now=now, scanned_ago=10) +
+                  _folder_series(name="B.IN", now=now, scanned_ago=140) +
+                  _exporter_up())
+        with self._patch(series):
+            snap = folders.snapshot()
+        self.assertAlmostEqual(snap["last_run"], now - 10, delta=3)
+
+    def test_a_single_stalled_folder_still_shows_despite_a_fresh_header(self):
+        """The safety property the old 'oldest scan' header was protecting: it must survive
+        the change. B.IN stopped being scanned, so its tile is unknown even though the
+        header reads current off A.IN."""
+        now = time.time()
+        series = (_folder_series(name="A.IN", now=now, scanned_ago=5) +
+                  _folder_series(name="B.IN", now=now,
+                                 scanned_ago=folders.STALE_AFTER + 60) +
+                  _exporter_up())
+        with self._patch(series):
+            snap = folders.snapshot()
+        states = {f["name"]: f["state"] for f in snap["folders"]}
+        self.assertEqual(states["B.IN"], "unknown")
+        self.assertEqual(snap["counts"]["unknown"], 1)
+        self.assertLess(now - snap["last_run"], 10)     # header itself reads fresh
+
+    def test_missing_scan_timestamp_is_unknown(self):
         """No proof of life at all -> unknown, not a green grid."""
-        with self._patch(_folder_series(oldest_age=5)):
+        series = [s for s in _folder_series()
+                  if s["labels"]["__name__"] != "folder_last_scan_timestamp_seconds"]
+        with self._patch(series + _exporter_up()):
             snap = folders.snapshot()
         self.assertEqual(snap["folders"][0]["state"], "unknown")
 
-    def test_failed_run_is_unknown_even_when_the_numbers_look_fine(self):
-        """last_run_success 0 means the run hit a problem, so its readings are not evidence
-        of anything — including of health."""
+    def test_exporter_down_makes_every_folder_unknown(self):
+        """up == 0 means Prometheus is serving values it can no longer refresh."""
         now = time.time()
-        with self._patch(_folder_series(oldest_age=5) + _run_series(now, ago=10, success=0)):
+        with self._patch(_folder_series(now=now, oldest_ago=5) + _exporter_up(value=0)):
+            snap = folders.snapshot()
+        self.assertEqual(snap["folders"][0]["state"], "unknown")
+        self.assertFalse(snap["exporter_up"])
+        self.assertIn("not answering", snap["folders"][0]["reason"])
+
+    def test_failed_scan_is_unknown_even_when_the_numbers_look_fine(self):
+        """folder_up 0 means that scan hit a problem, so its readings are not evidence of
+        anything — including of health."""
+        now = time.time()
+        with self._patch(_folder_series(now=now, oldest_ago=5, folder_up=0) + _exporter_up()):
             snap = folders.snapshot()
         self.assertEqual(snap["folders"][0]["state"], "unknown")
         self.assertFalse(snap["run_ok"])
         self.assertIn("reported an error", snap["folders"][0]["reason"])
 
-    def test_double_scraped_host_yields_one_tile(self):
-        """10.0.212.3:9182 is scraped by BOTH windows_exporter and the hourly
-        swift_transactions job, so every textfile series on it arrives twice."""
+    def test_timed_out_scan_is_unknown_and_says_so(self):
+        """A scan cut short returns partial data: fewer files than are really there, which
+        would read as a folder that had just drained."""
         now = time.time()
-        series = (_folder_series(oldest_age=30, job="windows_exporter") +
-                  _folder_series(oldest_age=30, job="swift_transactions") +
-                  _run_series(now, ago=30, job="windows_exporter") +
-                  _run_series(now, ago=3000, job="swift_transactions"))
-        with self._patch(series):
+        with self._patch(_folder_series(now=now, oldest_ago=5, timed_out=1) + _exporter_up()):
             snap = folders.snapshot()
-        self.assertEqual(len(snap["folders"]), 1)
-        # the FRESHEST run timestamp wins, so the lagging hourly copy can't fake staleness
-        self.assertFalse(snap["folders"][0]["stale"])
-        self.assertEqual(snap["folders"][0]["state"], "green")
+        self.assertEqual(snap["folders"][0]["state"], "unknown")
+        self.assertIn("cut short", snap["folders"][0]["reason"])
 
     def test_same_folder_name_on_two_hosts_stays_separate(self):
         now = time.time()
-        series = (_folder_series(instance="10.0.212.3:9182", oldest_age=30) +
-                  _folder_series(instance="10.0.212.9:9182", oldest_age=9999, stale_files=1) +
-                  _run_series(now, ago=10, instance="10.0.212.3:9182") +
-                  _run_series(now, ago=10, instance="10.0.212.9:9182"))
+        series = (_folder_series(instance="10.0.212.3:9847", now=now, oldest_ago=30) +
+                  _folder_series(instance="10.0.212.9:9847", now=now, oldest_ago=9999) +
+                  _exporter_up(instance="10.0.212.3:9847") +
+                  _exporter_up(instance="10.0.212.9:9847"))
         with self._patch(series):
             snap = folders.snapshot()
         self.assertEqual(len(snap["folders"]), 2)
         self.assertEqual({f["state"] for f in snap["folders"]}, {"green", "red"})
 
-    def test_a_long_wait_under_the_hosts_limit_is_not_red(self):
-        """The age alone never decides anything. An outbound folder that legitimately holds
-        a file for an hour stays green as long as the host reports nothing over its limit."""
+    def test_per_folder_threshold_override_applies(self):
         now = time.time()
-        series = _folder_series(name="SLOW.OUT", oldest_age=3600) + _run_series(now, ago=10)
-        with self._patch(series):
-            snap = folders.snapshot()
-        self.assertEqual(snap["folders"][0]["state"], "green")
-        self.assertGreater(snap["folders"][0]["age"], 3600)
+        series = _folder_series(name="SLOW.OUT", now=now, oldest_ago=3600) + _exporter_up()
+        with mock.patch.dict(folders.THRESHOLDS, {"SLOW.OUT": (7200, 14400)}, clear=False):
+            with self._patch(series):
+                snap = folders.snapshot()
+        f = snap["folders"][0]
+        self.assertEqual(f["state"], "green")
+        self.assertGreaterEqual(f["age"], 3600)
+        self.assertEqual(f["red_seconds"], 14400)
 
     def test_page_renders_a_tile_per_folder(self):
         now = time.time()
-        series = (_folder_series(name="PAYNET.IN", oldest_age=4000, stale_files=1) +
-                  _folder_series(name="SWIFT.OUT", oldest_age=0) +
-                  _run_series(now, ago=30))
+        series = (_folder_series(name="PAYNET.IN", now=now, files=4, oldest_ago=4000, over_red=1) +
+                  _folder_series(name="ALLIANCE.OUT_MX", now=now, files=0) +
+                  _exporter_up())
         with self._patch(series):
             resp = self.client.get(reverse("folder_watch_temenos"))
         self.assertEqual(resp.status_code, 200)
         body = resp.content.decode()
         self.assertContains(resp, "PAYNET.IN")
-        self.assertContains(resp, "SWIFT.OUT")
+        self.assertContains(resp, "ALLIANCE.OUT_MX")
         self.assertEqual(body.count('class="fw-tile"'), 2)
         self.assertIn('data-state="red"', body)
         self.assertIn('data-state="idle"', body)
+        # the badge is the TOTAL waiting, which the old exposition could not supply
+        self.assertIn(">4</span>", body)
 
     def test_no_metrics_explains_deployment_instead_of_an_empty_grid(self):
         with self._patch([]):
@@ -839,37 +945,99 @@ class FolderWatchSnapshot(TestCase):
         self.assertFalse(json.loads(data.content)["ok"])
 
     def test_json_endpoint_carries_timestamps_for_the_live_tick(self):
-        """The browser re-ages tiles itself, so the payload must hand it the recovered
-        mtime — not a pre-computed age, which would freeze between polls."""
+        """The browser re-ages tiles itself, so the payload must hand it the oldest file's
+        TIMESTAMP — not a pre-computed age, which would freeze between polls. It also needs
+        each folder's own limits, since the browser re-runs the verdict locally."""
         now = time.time()
-        series = _folder_series(oldest_age=100) + _run_series(now, ago=10)
+        series = _folder_series(now=now, oldest_ago=100) + _exporter_up()
         with self._patch(series):
             resp = self.client.get(reverse("folder_watch_data"))
         payload = json.loads(resp.content)
         f = payload["folders"][0]
         self.assertIn("now", payload)
         self.assertIn("stale_after", payload)
-        for key in ("oldest_mtime", "age_at_run", "checked_at", "stale_files",
-                    "readable", "run_ok"):
+        for key in ("oldest_mtime", "checked_at", "files", "readable", "scan_ok",
+                    "reachable", "amber_seconds", "red_seconds"):
             self.assertIn(key, f)
 
-    def test_run_timestamp_is_published_for_the_header(self):
-        """The page shows when the HOST last looked, which is a different fact from when the
-        page last refreshed. Both the poll payload and the first render need it."""
+    def test_header_clock_is_client_side_and_owes_nothing_to_the_payload(self):
+        """The header clock counts from when THIS PAGE last pulled data, so it resets on
+        every poll. It used to show the host's last run — necessary when the metrics came
+        from a .prom file that was re-served unchanged between scheduled runs, and
+        misleading now that the exporter is a live service.
+
+        The payload's `now` is the only thing it may anchor to. Whether a folder's readings
+        are stale stays a per-folder judgement, which the tiles carry.
+        """
         now = time.time()
-        series = _folder_series(oldest_age=100) + _run_series(now, ago=42)
+        series = _folder_series(now=now, oldest_ago=100, scanned_ago=42) + _exporter_up()
         with self._patch(series):
-            resp = self.client.get(reverse("folder_watch_data"))
             page = self.client.get(reverse("folder_watch_temenos"))
-        payload = json.loads(resp.content)
-        self.assertAlmostEqual(payload["last_run"], now - 42, delta=3)
-        self.assertAlmostEqual(payload["since_last_run"], 42, delta=3)
-        self.assertTrue(payload["run_ok"])
-        # rendered server-side too, so the stamp is on screen before the first poll lands
-        self.assertContains(page, "last checked")
-        self.assertContains(page, payload["last_run_text"])
-        # exactly ONE readout of it — it used to be duplicated in the toolbar as well
-        self.assertNotContains(page, 'id="fwLastRun"')
+        body = page.content.decode()
+        # counts from the render, not from any scan timestamp
+        self.assertIn('<b id="fwRunAgo">0:00</b>', body)
+        self.assertIn("lastUpdate = data.now", body)
+        # the scan timestamp must NOT drive it any more
+        self.assertNotIn("serverNow() - data.last_run", body)
+        self.assertNotIn("last checked", body)
+        # The header's red threshold comes from the page's own rhythm, not the payload.
+        self.assertIn("var UPDATE_STALE_S = (POLL_MS / 1000) * 4;", body)
+        self.assertIn("sinceUpdate > UPDATE_STALE_S", body)
+        # ...but PER-FOLDER staleness still uses the backend value, and must keep doing so:
+        # that is the judgement about the readings, which is a different question entirely.
+        self.assertIn("> data.stale_after", body)
+
+    def test_the_refresh_indicators_are_a_fixed_rhythm_on_every_poll(self):
+        """The clock and the wave both mark one thing: the page asked for data and got an
+        answer. Both fire on EVERY successful poll, on a fixed cadence, so the number counts
+        0 -> the poll interval and the grid ripples at the same moment, every time.
+
+        Gating either on whether the DATA changed makes both stutter — the refresh happened
+        on the same rhythm whether or not a file moved, and a user reading the number needs
+        to know when the next one is due, not how lively the folders have been.
+        """
+        now = time.time()
+        with self._patch(_folder_series(now=now) + _exporter_up()):
+            body = self.client.get(reverse("folder_watch_temenos")).content.decode()
+        self.assertIn("var POLL_MS = 10000;", body)
+        # both reset unconditionally in the success path, not behind a data-changed guard
+        success = re.search(r'live_txt\.textContent = "live";(.*?)\}\)', body, re.S).group(1)
+        self.assertIn("lastUpdate = fresh.now", success)
+        self.assertIn("playWave()", success)
+        # the data-signature gate is gone entirely
+        self.assertNotIn("signature(", body)
+        self.assertNotIn("next !== sig", body)
+
+    def test_the_page_does_not_reload_itself_on_a_timer(self):
+        """Values arrive by poll and are repainted in place. The only reload left is the
+        folder set changing on the host, which invalidates the server-rendered tiles."""
+        now = time.time()
+        with self._patch(_folder_series(now=now) + _exporter_up()):
+            body = self.client.get(reverse("folder_watch_temenos")).content.decode()
+        self.assertNotIn("REFRESH_MS", body)
+        self.assertNotIn("autoRefresh", body)
+        self.assertNotIn("refreshDue", body)      # would throw once its declaration went
+        self.assertEqual(body.count("window.location.reload()"), 1)
+        self.assertIn("keysOf(fresh.folders) !== shape", body)
+
+    def test_no_template_comment_text_reaches_the_screen(self):
+        """A {# #} comment is SINGLE-LINE in Django. Written across two lines it is not a
+        comment at all — it renders as literal text, and inside the tile loop that put a
+        paragraph of developer prose on every folder. Anything spanning lines must use
+        {% comment %}. This asserts on the text a user can actually read, with script and
+        style blocks stripped, so ordinary JS comments do not trip it."""
+        now = time.time()
+        with self._patch(_folder_series(now=now) + _exporter_up()):
+            resp = self.client.get(reverse("folder_watch_temenos"))
+        body = resp.content.decode()
+        visible = re.sub(r"<script.*?</script>", "", body, flags=re.S)
+        visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        for leak in ("{#", "#}", "endcomment", "{% comment"):
+            self.assertNotIn(leak, visible, f"template comment syntax leaked: {leak}")
+        # the prose of every comment block in the template must stay out of the page
+        self.assertNotIn("previous exporter", visible)
+        self.assertNotIn("muscle memory", visible)
 
     def test_requires_login(self):
         self.client.logout()
@@ -880,15 +1048,15 @@ class FolderWatchSnapshot(TestCase):
     def test_back_nav_points_at_folder_watch_not_home(self):
         """Temenos is a CHILD of Folder Watch, so Back walks one level up the tree."""
         now = time.time()
-        with self._patch(_folder_series() + _run_series(now, ago=5)):
+        with self._patch(_folder_series(now=now) + _exporter_up()):
             resp = self.client.get(reverse("folder_watch_temenos"))
         self.assertContains(resp, "Back to Folder Watch")
 
     def test_page_load_spinner_is_suppressed_here(self):
-        """The page reloads itself every minute; the global spinner would dim the screen
-        once a minute for a refresh nobody asked for."""
+        """The page repaints in place rather than reloading, so the global spinner would
+        only ever dim the screen for a navigation nobody asked for."""
         now = time.time()
-        with self._patch(_folder_series() + _run_series(now, ago=5)):
+        with self._patch(_folder_series(now=now) + _exporter_up()):
             resp = self.client.get(reverse("folder_watch_temenos"))
         self.assertNotContains(resp, 'id="pageSpinner"')
         # ...but it is still there on an ordinary page
