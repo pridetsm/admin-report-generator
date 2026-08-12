@@ -143,6 +143,11 @@
   .fw-tile[data-has-files="1"] .fw-count { display:inline-flex; }
 
   .fw-sub { font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; margin-top:3px; }
+  /* Throughput, under the waiting figure. Deliberately quieter than .fw-sub: the age of
+     the oldest file is what the screen is FOR, and a number that competes with it for
+     attention would blunt the one reading that matters from across the room. */
+  .fw-proc { font-size:10.5px; color:var(--muted); opacity:.8; font-variant-numeric:tabular-nums; }
+  .fw-proc:empty { display:none; }
   .fw-host { font-size:10.5px; color:var(--muted); opacity:.75; }
 
   /* ---- states ---- */
@@ -293,6 +298,7 @@
       <span class="fw-sub" data-sub-el>
         {% if not f.readable %}path missing{% elif f.stale %}not scanning{% elif f.has_files %}{{ f.age_text }}{% else %}drained{% endif %}
       </span>
+      <span class="fw-proc" data-proc-el>{% if f.processed != None %}processed {{ f.processed }}{% endif %}</span>
       {% if fw.hosts|length > 1 %}<span class="fw-host">{{ f.host }}</span>{% endif %}
     </button>
     {% endfor %}
@@ -307,7 +313,11 @@
     <p class="fw-hint" style="margin:0">
       Each folder is coloured by how long its <b>oldest</b> file has been waiting. The number on
       the folder tab is how many files are waiting in total; the figure underneath is the age of
-      the oldest one.
+      the oldest one, and <b>processed</b> is how many files have left the folder in the last
+      {{ fw.processed_window }} — messages consumed by T24 on an inbound folder, or collected by
+      the interface on an outbound one. Read together they say whether a queue is deep because
+      it is busy or because it has stopped: a folder handling hundreds an hour with two waiting
+      is healthy; the same two waiting with nothing processed is jammed.
       <br><br>
       <b>Grey is healthy.</b> An empty interface folder means everything drained, which is the
       normal steady state. <b>Green</b> means files are waiting and all of them are fresh — work
@@ -553,6 +563,13 @@
           : f.files > 0 ? fmtAge(v.age)
           : "drained";
       }
+      var proc = tile.querySelector("[data-proc-el]");
+      if (proc) {
+        // Empty rather than "processed 0" when the figure is unavailable — the CSS hides
+        // an empty node, so a folder we cannot measure simply does not carry the line.
+        proc.textContent = (f.processed === null || f.processed === undefined)
+          ? "" : "processed " + f.processed.toLocaleString();
+      }
 
       var hit = (filter === "all" || v.state === filter) &&
                 (!query || tile.getAttribute("data-search").indexOf(query) > -1);
@@ -696,6 +713,10 @@
           "   (" + fmtAge(serverNow() - f.last_added) + " ago)");
     } else {
       row("Last arrival", "nothing has arrived since the exporter started");
+    }
+    if (f.processed !== null && f.processed !== undefined) {
+      row("Processed", f.processed.toLocaleString() + " in the last " + f.processed_window +
+          "   (files that left this folder)");
     }
     if (f.added_total !== null && f.added_total !== undefined) {
       row("Since exporter start", f.added_total + " arrived   ·   " + f.removed_total + " consumed");

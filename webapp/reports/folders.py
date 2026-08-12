@@ -119,6 +119,18 @@ _WANTED = (
 )
 _QUERY = '{__name__=~"%s"} or up{job="folder_exporter"}' % "|".join(_WANTED)
 
+# Throughput: files that have LEFT each folder in the last 24 hours, which for a queue
+# folder is what "processed" means — inbound messages consumed by T24, outbound messages
+# collected by the interface.
+#
+# A rolling window rather than the raw counter. folder_files_removed_total counts from
+# exporter start, so a service restart would drop the figure to zero and a screen reading
+# "processed 4" after a reboot is worse than no figure at all. increase() spans resets
+# correctly, and 24h keeps the number steady rather than collapsing at midnight the way a
+# since-midnight count would.
+_PROCESSED_QUERY = 'increase(folder_files_removed_total[24h])'
+PROCESSED_WINDOW = "24h"
+
 _STATE_ORDER = {"red": 0, "amber": 1, "unknown": 2, "green": 3, "idle": 4}
 
 
@@ -222,6 +234,19 @@ def _over(buckets: Dict[float, float], total: Optional[float], limit: int) -> Op
     return max(0, int(round(total - buckets[limit])))
 
 
+def _processed_of(processed: Dict[tuple, float], instance: str, name: str):
+    """Files that left this folder over the window, as a whole number.
+
+    increase() extrapolates at the edges of the range, so it returns a float that can sit
+    a little under or over the true count and can even be marginally negative on a sparse
+    series. Round it, and floor at zero: "processed -0.3" would be nonsense on a tile.
+    """
+    v = processed.get((instance, name))
+    if v is None:
+        return None
+    return max(0, int(round(v)))
+
+
 def _collect(series: List[dict]) -> tuple:
     """Fold the flat series list into {(instance, target): {...}}, plus {instance: up}
     and {instance: display name}."""
@@ -303,6 +328,18 @@ def snapshot() -> dict:
     except Exception as exc:                # noqa: BLE001 — surfaced to the view
         raise FolderWatchUnavailable(f"{prom_url}: {exc}") from exc
 
+    # Throughput is a nice-to-have, not the point of the screen: if this range query fails
+    # or the range vector is empty, the grid still renders and the figure is simply absent.
+    processed: Dict[tuple, float] = {}
+    try:
+        for s in prom.query(_PROCESSED_QUERY):
+            lbl = s.get("labels") or {}
+            name = lbl.get("target")
+            if name:
+                processed[(lbl.get("instance", ""), name)] = s.get("value")
+    except Exception:                       # noqa: BLE001 — deliberately non-fatal
+        pass
+
     now = time.time()
     raw, exporter_up, host_names = _collect(series)
 
@@ -371,6 +408,11 @@ def snapshot() -> dict:
             "since_added": None if not last_added else int(now - last_added),
             "added_total": r["added_total"],
             "removed_total": r["removed_total"],
+            # files that left this folder in the last 24h — the throughput figure on the
+            # tile. None when the range query gave nothing, so the tile omits it rather
+            # than showing a zero it cannot stand behind.
+            "processed": _processed_of(processed, instance, name),
+            "processed_window": PROCESSED_WINDOW,
 
             # health
             "readable": r["readable"],
@@ -424,6 +466,8 @@ def snapshot() -> dict:
         "stale_after": STALE_AFTER,
         "amber_seconds": AMBER_SECONDS,
         "red_seconds": RED_SECONDS,
+        "processed_window": PROCESSED_WINDOW,
+        "processed_total": sum(f["processed"] or 0 for f in out),
         "folders": out,
         "counts": counts,
         "total": len(out),

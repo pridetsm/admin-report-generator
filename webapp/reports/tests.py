@@ -750,9 +750,19 @@ class FolderWatchSnapshot(TestCase):
         self.user.groups.add(Group.objects.get(name="System Admin"))
         self.client.login(username="fw", password="pw12345!")
 
-    def _patch(self, series):
+    def _patch(self, series, processed=None):
+        """`processed` maps folder name -> files that left it over the window, answering
+        the second (range) query. None means that query returns nothing, which is the case
+        the tile has to survive without showing a zero it cannot stand behind."""
         prom = mock.MagicMock()
-        prom.query.return_value = series
+
+        def answer(expr):
+            if expr.startswith("increase("):
+                return [_series("", v, target=n, instance="10.0.212.3:9847")
+                        for n, v in (processed or {}).items()]
+            return series
+
+        prom.query.side_effect = answer
         return mock.patch("reports.folders._prometheus", return_value=(prom, "http://prom:9090"))
 
     def test_states_end_to_end(self):
@@ -986,6 +996,65 @@ class FolderWatchSnapshot(TestCase):
         # ...but PER-FOLDER staleness still uses the backend value, and must keep doing so:
         # that is the judgement about the readings, which is a different question entirely.
         self.assertIn("> data.stale_after", body)
+
+    def test_processed_counts_files_that_left_over_the_window(self):
+        """Throughput is what separates "deep because busy" from "deep because stopped".
+        It comes from increase() over a rolling window rather than the raw counter, which
+        counts from exporter start and would drop to zero after any service restart."""
+        now = time.time()
+        series = (_folder_series(name="PAYNET.IN", now=now) +
+                  _folder_series(name="EFIN.IN", now=now) + _exporter_up())
+        with self._patch(series, processed={"PAYNET.IN": 531.4, "EFIN.IN": 0.0}):
+            snap = folders.snapshot()
+        got = {f["name"]: f["processed"] for f in snap["folders"]}
+        self.assertEqual(got, {"PAYNET.IN": 531, "EFIN.IN": 0})   # rounded to whole files
+        self.assertEqual(snap["processed_total"], 531)
+        self.assertEqual(snap["processed_window"], folders.PROCESSED_WINDOW)
+
+    def test_processed_is_absent_rather_than_zero_when_unavailable(self):
+        """A folder we cannot measure must not read "processed 0" — that is a claim that
+        nothing has been handled, which is exactly the alarming case."""
+        now = time.time()
+        with self._patch(_folder_series(name="PAYNET.IN", now=now) + _exporter_up()):
+            snap = folders.snapshot()
+        self.assertIsNone(snap["folders"][0]["processed"])
+        # ...and the tile carries no line at all, rather than an empty-looking one.
+        # Checked against the MARKUP with scripts stripped: the source contains the string
+        # "processed 0" in a comment explaining this very rule.
+        with self._patch(_folder_series(name="PAYNET.IN", now=now) + _exporter_up()):
+            body = self.client.get(reverse("folder_watch_temenos")).content.decode()
+        markup = re.sub(r"<script.*?</script>", "", body, flags=re.S)
+        self.assertNotIn("processed 0", markup)
+        self.assertIn('<span class="fw-proc" data-proc-el></span>', markup)
+
+    def test_a_failing_throughput_query_does_not_break_the_grid(self):
+        """Throughput is a nice-to-have. If that query fails the folders must still render:
+        losing a secondary figure cannot be allowed to take out the whole screen."""
+        now = time.time()
+        series = _folder_series(name="PAYNET.IN", now=now) + _exporter_up()
+        prom = mock.MagicMock()
+
+        def answer(expr):
+            if expr.startswith("increase("):
+                raise RuntimeError("range query failed")
+            return series
+
+        prom.query.side_effect = answer
+        with mock.patch("reports.folders._prometheus",
+                        return_value=(prom, "http://prom:9090")):
+            snap = folders.snapshot()
+        self.assertEqual(len(snap["folders"]), 1)
+        self.assertEqual(snap["folders"][0]["state"], "green")
+        self.assertIsNone(snap["folders"][0]["processed"])
+
+    def test_negative_extrapolation_from_increase_is_floored(self):
+        """increase() extrapolates at the range edges and can return a small negative on a
+        sparse series. "processed -1" would be nonsense on a tile."""
+        now = time.time()
+        with self._patch(_folder_series(name="PAYNET.IN", now=now) + _exporter_up(),
+                         processed={"PAYNET.IN": -0.4}):
+            snap = folders.snapshot()
+        self.assertEqual(snap["folders"][0]["processed"], 0)
 
     def test_the_refresh_indicators_are_a_fixed_rhythm_on_every_poll(self):
         """The clock and the wave both mark one thing: the page asked for data and got an
