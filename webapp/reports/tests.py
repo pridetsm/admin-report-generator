@@ -654,7 +654,8 @@ def _series(metric, value, **labels):
 def _folder_series(*, name="PAYNET.IN", instance="10.0.212.3:9847", now=None, files=1,
                    oldest_ago=60, newest_ago=None, exists=1, folder_up=1, scanned_ago=30,
                    size=2048, timed_out=0, over_amber=0, over_red=0, added_ago=45,
-                   job="folder_exporter"):
+                   job="folder_exporter", source=None, via=None, destination=None,
+                   fmt=None):
     """One folder's worth of exposition as folder_exporter publishes it.
 
     Note what this can express that the old textfile exposition could not: a file COUNT
@@ -666,6 +667,11 @@ def _folder_series(*, name="PAYNET.IN", instance="10.0.212.3:9847", now=None, fi
     """
     now = time.time() if now is None else now
     base = {"target": name, "instance": instance, "job": job, "display": "Temenos/T24 App"}
+    # The message-path labels ride on every series, exactly as folder_exporter emits them.
+    for k, v in (("source", source), ("via", via), ("destination", destination),
+                 ("format", fmt)):
+        if v:
+            base[k] = v
     out = [
         _series("folder_files", files, **base),
         _series("folder_exists", exists, **base),
@@ -997,10 +1003,58 @@ class FolderWatchSnapshot(TestCase):
         # that is the judgement about the readings, which is a different question entirely.
         self.assertIn("> data.stale_after", body)
 
-    def test_processed_counts_files_that_left_over_the_window(self):
+    def test_message_path_is_read_from_the_exporter_labels(self):
+        """source/via/destination are declared per folder in folder_exporter.yml and ride on
+        every series, so a jammed folder can name the flow that has stopped."""
+        now = time.time()
+        series = _folder_series(name="ALLIANCE.IN_MT", now=now, source="RTGS",
+                                via="SWIFT", destination="T24", fmt="mt") + _exporter_up()
+        with self._patch(series):
+            snap = folders.snapshot()
+        f = snap["folders"][0]
+        self.assertEqual(f["path"], ["RTGS", "SWIFT", "T24"])
+        self.assertEqual(f["path_text"], "RTGS → SWIFT → T24")
+        self.assertEqual(f["format"], "MT")          # upper-cased for the tab badge
+
+    def test_a_direct_feed_has_two_stops_not_an_empty_hop(self):
+        """PAYNET feeds T24 with no translation layer. Drawing a hop there would assert a
+        SWIFT leg that does not exist, so the absent `via` collapses out of the path."""
+        now = time.time()
+        series = _folder_series(name="PAYNET.IN", now=now, source="PAYNET",
+                               destination="T24") + _exporter_up()
+        with self._patch(series):
+            snap = folders.snapshot()
+        f = snap["folders"][0]
+        self.assertEqual(f["path"], ["PAYNET", "T24"])
+        self.assertEqual(f["path_text"], "PAYNET → T24")
+        self.assertEqual(f["format"], "")            # no format badge on this tile
+
+    def test_a_folder_with_no_path_labels_renders_without_one(self):
+        """The labels are optional: a folder that predates them, or one somebody adds in a
+        hurry, must still get a tile rather than an empty arrow."""
+        now = time.time()
+        with self._patch(_folder_series(name="SOMETHING.IN", now=now) + _exporter_up()):
+            snap = folders.snapshot()
+        self.assertEqual(snap["folders"][0]["path"], [])
+        self.assertEqual(snap["folders"][0]["path_text"], "")
+
+    def test_the_path_is_rendered_and_searchable_on_the_tile(self):
+        now = time.time()
+        series = (_folder_series(name="ALLIANCE.IN_MT", now=now, source="RTGS", via="SWIFT",
+                                 destination="T24", fmt="mt") + _exporter_up())
+        with self._patch(series):
+            body = self.client.get(reverse("folder_watch_temenos")).content.decode()
+        self.assertIn('<span class="fw-fmt">MT</span>', body)
+        self.assertIn('class="fw-path"', body)
+        for hop in ("RTGS", "SWIFT", "T24"):
+            self.assertIn(hop, body)
+        # typing a flow name in the filter box has to narrow to it
+        self.assertRegex(body, r'data-search="[^"]*rtgs → swift → t24[^"]*"')
+
+    def test_processed_counts_files_that_left_since_midnight(self):
         """Throughput is what separates "deep because busy" from "deep because stopped".
-        It comes from increase() over a rolling window rather than the raw counter, which
-        counts from exporter start and would drop to zero after any service restart."""
+        It comes from increase() rather than the raw counter, which runs from exporter start
+        and would drop to near zero after any mid-day service restart."""
         now = time.time()
         series = (_folder_series(name="PAYNET.IN", now=now) +
                   _folder_series(name="EFIN.IN", now=now) + _exporter_up())
@@ -1009,7 +1063,23 @@ class FolderWatchSnapshot(TestCase):
         got = {f["name"]: f["processed"] for f in snap["folders"]}
         self.assertEqual(got, {"PAYNET.IN": 531, "EFIN.IN": 0})   # rounded to whole files
         self.assertEqual(snap["processed_total"], 531)
-        self.assertEqual(snap["processed_window"], folders.PROCESSED_WINDOW)
+        self.assertEqual(snap["processed_window"], "today")
+
+    def test_the_processed_window_starts_at_local_midnight(self):
+        """The count has to empty with the working day, so the range is the time since
+        local midnight rather than a rolling 24h."""
+        # 14:30:20 -> 52220s since midnight
+        t = time.mktime(time.struct_time((2026, 8, 12, 14, 30, 20, 0, 0, -1)))
+        self.assertEqual(folders._processed_query(t),
+                         "increase(folder_files_removed_total[52220s])")
+        # one second past midnight: floored, never [0s], which is invalid PromQL
+        t0 = time.mktime(time.struct_time((2026, 8, 12, 0, 0, 1, 0, 0, -1)))
+        self.assertEqual(folders._processed_query(t0),
+                         "increase(folder_files_removed_total[15s])")
+        # and just before midnight it spans nearly the whole day
+        t23 = time.mktime(time.struct_time((2026, 8, 12, 23, 59, 59, 0, 0, -1)))
+        self.assertEqual(folders._processed_query(t23),
+                         "increase(folder_files_removed_total[86399s])")
 
     def test_processed_is_absent_rather_than_zero_when_unavailable(self):
         """A folder we cannot measure must not read "processed 0" — that is a claim that

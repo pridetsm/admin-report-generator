@@ -142,7 +142,26 @@
   }
   .fw-tile[data-has-files="1"] .fw-count { display:inline-flex; }
 
+  /* Message format, on the tab opposite the file count. IN_MT and IN_MX are the same leg
+     of the same path and differ only by this, so without it two tiles read as duplicates. */
+  .fw-fmt {
+    position:absolute; top:3%; right:7%; padding:1px 5px; border-radius:4px;
+    background:var(--panel); border:1px solid var(--line-strong); color:var(--muted);
+    font-size:9.5px; font-weight:700; letter-spacing:.06em; line-height:1.5;
+  }
+  .fw-fmt:empty { display:none; }
+
   .fw-sub { font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; margin-top:3px; }
+  /* Where the messages in this folder are going. Quiet, and on one line: the grid's value
+     is that every tile is the same shape, so a path that wrapped on some folders and not
+     others would cost more in raggedness than it gained in detail. The dialog has room for
+     the full thing. */
+  .fw-path {
+    max-width:100%; font-size:9.5px; color:var(--muted); opacity:.7; letter-spacing:.02em;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .fw-path:empty { display:none; }
+  .fw-path .hop { opacity:.5; padding:0 1px; }
   /* Throughput, under the waiting figure. Deliberately quieter than .fw-sub: the age of
      the oldest file is what the screen is FOR, and a number that competes with it for
      attention would blunt the one reading that matters from across the room. */
@@ -285,20 +304,26 @@
     <button type="button" class="fw-tile" data-key="{{ f.key }}" data-state="{{ f.state }}"
             data-has-files="{% if f.files %}1{% else %}0{% endif %}"
             data-len="{% if f.name|length > 16 %}xlong{% elif f.name|length > 10 %}long{% else %}short{% endif %}"
-            data-search="{{ f.name|lower }} {{ f.host|lower }}"
-            title="{{ f.name }} — last scanned {{ f.checked_at_text }}">
+            data-search="{{ f.name|lower }} {{ f.host|lower }} {{ f.path_text|lower }} {{ f.format|lower }}"
+            title="{{ f.name }}{% if f.path_text %} — {{ f.path_text }}{% endif %}{% if f.format %} ({{ f.format }}){% endif %} — last scanned {{ f.checked_at_text }}">
       <span class="fw-ico-wrap">
         <svg class="fw-ico" viewBox="0 0 120 92" aria-hidden="true">
           <path class="back"  d="M6 26 q0-11 11-11 h23 q5 0 8 3.4 L54 25 h49 q11 0 11 11 v40 q0 11-11 11 H17 q-11 0-11-11 Z"/>
           <path class="front" d="M6 40 h108 v36 q0 11-11 11 H17 q-11 0-11-11 Z"/>
         </svg>
         <span class="fw-count" data-count-el>{{ f.files }}</span>
+        <span class="fw-fmt">{{ f.format }}</span>
         <span class="fw-name"><span>{{ f.name_wrap }}</span></span>
       </span>
       <span class="fw-sub" data-sub-el>
         {% if not f.readable %}path missing{% elif f.stale %}not scanning{% elif f.has_files %}{{ f.age_text }}{% else %}drained{% endif %}
       </span>
       <span class="fw-proc" data-proc-el>{% if f.processed != None %}processed {{ f.processed }}{% endif %}</span>
+      {% comment %}
+        Rendered server-side and left alone by the repaint: the path is configuration from
+        folder_exporter.yml, not telemetry, so it cannot change without a deploy.
+      {% endcomment %}
+      <span class="fw-path">{% for hop in f.path %}{% if not forloop.first %}<span class="hop">→</span>{% endif %}{{ hop }}{% endfor %}</span>
       {% if fw.hosts|length > 1 %}<span class="fw-host">{{ f.host }}</span>{% endif %}
     </button>
     {% endfor %}
@@ -313,11 +338,21 @@
     <p class="fw-hint" style="margin:0">
       Each folder is coloured by how long its <b>oldest</b> file has been waiting. The number on
       the folder tab is how many files are waiting in total; the figure underneath is the age of
-      the oldest one, and <b>processed</b> is how many files have left the folder in the last
-      {{ fw.processed_window }} — messages consumed by T24 on an inbound folder, or collected by
-      the interface on an outbound one. Read together they say whether a queue is deep because
-      it is busy or because it has stopped: a folder handling hundreds an hour with two waiting
-      is healthy; the same two waiting with nothing processed is jammed.
+      the oldest one, and <b>processed</b> is how many files have left the folder <b>since
+      midnight</b> — messages consumed by T24 on an inbound folder, or collected by the interface
+      on an outbound one. It empties at 00:00 and fills through the working day, so first thing
+      in the morning a low number is the new day, not a fault. Read together with the waiting
+      count it says whether a queue is deep because it is busy or because it has stopped: a
+      folder that has handled hundreds today with two waiting is healthy; the same two waiting
+      with nothing processed is jammed.
+      <br><br>
+      <b>The line under each folder is the message path</b> — where what is sitting in it came
+      from and where it is going, so a stuck folder names the flow that has stopped rather than
+      just a directory. T24 and RTGS only speak through the SWIFT Alliance translation layer, so
+      those legs read <i>RTGS → SWIFT → T24</i>; PAYNET and EFIN feed T24 directly and show two
+      stops, not an invented hop. The badge on the tab is the message format: <b>MT</b> and
+      <b>MX</b> folders are the same leg of the same path and would otherwise be indistinguishable.
+      The filter box searches paths too, so typing <i>rtgs</i> narrows to that flow.
       <br><br>
       <b>Grey is healthy.</b> An empty interface folder means everything drained, which is the
       normal steady state. <b>Green</b> means files are waiting and all of them are fresh — work
@@ -668,7 +703,7 @@
 
   function fillDialog(f) {
     var v = live(f);
-    dlgTitle.textContent = f.name;
+    dlgTitle.textContent = f.path_text || f.name;
     dlgSub.textContent = f.reason || SUMMARY[v.state] || "";
     dlgIcon.textContent = v.state === "red" ? "⛔" : v.state === "amber" ? "⏳"
       : v.state === "unknown" ? "❔" : "📁";
@@ -680,7 +715,13 @@
       : v.state === "green" ? "var(--green)" : "var(--muted)";
 
     dlgBody.innerHTML = "";
+    /* The message path first: when a folder is jammed, "what is stuck and where was it
+       going" is the question, and the answer belongs above the mechanics. */
+    if (f.path_text) {
+      row("Message path", f.path_text + (f.format ? "   ·   " + f.format + " format" : ""));
+    }
     row("Host", f.host + (f.instance && f.instance !== f.host ? "  ·  " + f.instance : ""));
+    row("Folder", f.name);
     row("Path found", f.readable ? "yes" : "no — the folder could not be read");
 
     /* Depth first, then how much of it is over the line. The old exporter published only
@@ -715,8 +756,8 @@
       row("Last arrival", "nothing has arrived since the exporter started");
     }
     if (f.processed !== null && f.processed !== undefined) {
-      row("Processed", f.processed.toLocaleString() + " in the last " + f.processed_window +
-          "   (files that left this folder)");
+      row("Processed today", f.processed.toLocaleString() +
+          "   (files that have left this folder since midnight)");
     }
     if (f.added_total !== null && f.added_total !== undefined) {
       row("Since exporter start", f.added_total + " arrived   ·   " + f.removed_total + " consumed");
