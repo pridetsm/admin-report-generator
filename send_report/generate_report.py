@@ -348,11 +348,13 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
                            Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.207.9:9182"))],
     "edms": [Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.206.11:9182")),
              Service("IIS (W3SVC)", win_service("W3SVC", "10.0.206.12:9182"))],
+    "ebis": [Service("IIS (W3SVC)", win_service("W3SVC", "10.0.207.20:9182")),
+             Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.207.21:9182"))],
 }
 
 # preferred display order (known systems first); anything else is appended A-Z
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
-                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS"]
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS", "EBIS"]
 
 # BACKUP POLICY — how many calendar days old a host's newest backup may be and still count
 # as CURRENT. Almost every system backs up daily, so the default of 1 means "today or
