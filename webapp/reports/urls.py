@@ -13,6 +13,7 @@ urlpatterns = [
     path("folders/temenos/data/", views.folder_watch_data, name="folder_watch_data"),
     path("network/", views.network_dashboard, name="network_dashboard"),
     path("network/core-switch/", views.network_report, name="network_report"),
+    path("network/generate/", views.network_generate, name="network_generate"),
     path("history/", views.history, name="history"),
     path("history/<int:pk>/", views.submission_detail, name="submission_detail"),
     path("recipients/search/", views.recipient_search, name="recipient_search"),

@@ -1,8 +1,21 @@
 {% extends "base.html" %}
-{% block title %}System Analyses Dashboard · Admin Report Generator{% endblock %}
+{% block title %}{{ dash_title }} · Admin Report Generator{% endblock %}
 
 {% block body %}
-<form method="post" action="{% url 'generate' %}" id="reportForm">
+{% comment %}
+  One screen, two estates. The systems flow and the network flow build the SAME Snapshot of
+  the same view-models, so this template renders both — a device is a "system" and its faults
+  are its flags.
+
+  What differs is only the NOUNS and three URLs, passed in by the view: dash_title, subject,
+  picker_url, generate_url. They matter more than they look: a network admin reading "System
+  Analyses Dashboard · 1 system selected" above a switch, with a "Change systems" button that
+  walks them into the systems picker, is being shown someone else's screen.
+
+  data-system and the fields named comment__/fix__ keep their names — they are wire format,
+  not prose, and renaming them would break the draft restore in this page's own script.
+{% endcomment %}
+<form method="post" action="{{ generate_url|default:generate_default }}" id="reportForm">
 {% csrf_token %}
 <input type="hidden" name="token" value="{{ token }}">
 
@@ -16,11 +29,11 @@
 
   {# ---- snapshot banner ---- #}
   <div class="snap">
-    <h1>System Analyses Dashboard</h1>
+    <h1>{{ dash_title }}</h1>
     <div class="meta">Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }}
-      · {{ selected_count }} system{{ selected_count|pluralize }} selected</div>
+      · {{ selected_count }} {{ subject }}{{ selected_count|pluralize }} selected</div>
     <div class="spacer" style="flex:1"></div>
-    <a class="btn ghost" href="{% url 'report_form' %}" title="Go back to system selection">◂ Change systems</a>
+    <a class="btn ghost" href="{{ picker_url }}" title="Go back to {{ subject }} selection">◂ Change {{ subject }}s</a>
     {% if snapshot.grafana_url %}
     <a class="btn ghost" href="{{ snapshot.grafana_url }}" target="_blank" rel="noopener"
        title="Open the live, auto-refreshing Grafana dashboard">▸ Live Grafana ↗</a>
@@ -130,7 +143,7 @@
 </style>
 
   {# ---- per-system flagged items ---- #}
-  <div class="section-label">Systems needing attention</div>
+  <div class="section-label">{{ subject|capfirst }}s needing attention</div>
 
   {% for sys in snapshot.systems %}
   <div class="card {% if sys.healthy %}collapsed{% endif %}" data-collapsible data-system="{{ sys.name }}">
@@ -172,7 +185,7 @@
       {% endif %}
 
       {% if sys.healthy %}
-        <div class="healthy-note"><span class="chip green">All clear</span> No critical or warning metrics on this system.</div>
+        <div class="healthy-note"><span class="chip green">All clear</span> No critical or warning metrics on this {{ subject }}.</div>
       {% else %}
         {% for flag in sys.flags %}
         <div class="flag" data-flag-key="{{ flag.key }}" data-flag-text="{{ flag.text }}">
@@ -189,7 +202,7 @@
       {% endif %}
 
       <label class="field" style="margin-top:14px">
-        <textarea name="comment__{{ forloop.counter0 }}" rows="2" placeholder="Optional note that appears in this system's Notes panel"></textarea>
+        <textarea name="comment__{{ forloop.counter0 }}" rows="2" placeholder="Optional note that appears in this {{ subject }}'s Notes panel"></textarea>
       </label>
     </div>
   </div>

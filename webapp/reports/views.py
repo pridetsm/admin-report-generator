@@ -24,6 +24,7 @@ from django.core.exceptions import ValidationError
 from django.core.cache import cache
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_POST
@@ -155,10 +156,16 @@ def network_dashboard(request):
         devices = network.device_inventory()
     except network.NetworkUnavailable as exc:
         return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    # A device already chosen means a report is open — surfaced the same way the systems
+    # picker surfaces one, so the only way forward is not "start again and lose the answers".
+    open_keys = request.session.get("network_devices") or []
+    by_key = {d["key"]: d for d in devices}
     return render(request, "reports/network_select.html", {
-        "devices": devices,
-        "device_count": len(devices),
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
+        "total_interfaces": sum(d["iface_count"] for d in devices),
         "reachable_count": sum(1 for d in devices if d["reachable"]),
+        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
     })
 
 
@@ -294,6 +301,10 @@ def report(request):
         svm.connect_hosts = hosts_by_system.get(svm.name, [])
 
     return render(request, "reports/form.html", {
+        "generate_default": reverse("generate"),
+        "dash_title": "System Analyses Dashboard",
+        "subject": "system",
+        "picker_url": reverse("report_form"),
         "snapshot": snapshot,
         "token": token,
         "selected_count": len(snapshot.systems),
@@ -570,20 +581,143 @@ def folder_watch_data(request):
 @never_cache
 @login_required
 def network_report(request):
-    """Network Admin Report — phase 1.
+    """The Network Admin Report for the SELECTED devices.
 
-    Renders what the SNMP job actually collects and states plainly what it does not. The
-    empty panels are the point: an Errors section that is blank because nothing counts
-    errors must not read as "no errors", which on the question the admins actually asked
-    would be a false all-clear.
+    Mirrors the systems flow deliberately. POST (from the device picker) records the choice
+    and redirects to GET — Post/Redirect/Get, so a browser refresh never re-submits the
+    selection — and GET renders the report scoped to those devices.
+
+    Arriving with no selection sends the admin to the picker rather than quietly reporting on
+    everything: which devices a report covers is the admin's statement, not a default.
     """
     if not is_network_admin(request.user):
         return redirect("report_form")
-    try:
-        data = network.collect()
-    except network.NetworkUnavailable as exc:
-        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
-    return render(request, "reports/network_report.html", {"n": data})
+
+    if request.method == "POST":
+        keys = [k for k in request.POST.getlist("include_device") if k]
+        known = {d["key"] for d in network.DEVICES}
+        keys = [k for k in keys if k in known]
+        if not keys:
+            messages.error(request, "Select at least one device to include in the report.")
+            return redirect("network_dashboard")
+        request.session["network_devices"] = keys
+        request.session.pop("network_token", None)   # new selection -> fresh capture
+        return redirect("network_report")
+
+    keys = request.session.get("network_devices")
+    if not keys:
+        return redirect("network_dashboard")
+
+    force = request.GET.get("fresh") == "1"
+    snapshot = None
+    token = request.session.get("network_token", "")
+    if not force and token:
+        snapshot = cache.get(_cache_key(token))
+
+    if snapshot is None:
+        token = uuid.uuid4().hex
+        try:
+            snapshot = network.capture_snapshot(token, only=set(keys))
+        except network.NetworkUnavailable as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+        if not snapshot.systems:                # the selection no longer resolves
+            messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+            request.session.pop("network_devices", None)
+            return redirect("network_dashboard")
+        cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+        request.session["network_token"] = token
+
+    # The SAME annotation screen the systems report uses. One device is one "system" and its
+    # faults are its flags, so the template needs no network special-casing — which is the
+    # point: an admin who has written a system report already knows how to write this one.
+    return render(request, "reports/form.html", {
+        "snapshot": snapshot,
+        "token": token,
+        "selected_count": len(snapshot.systems),
+        "suggested_author": _profile_author(request.user),
+        "recipient_opts": recipient_options(),
+        "default_recipients": default_recipients(),
+        "default_filename": network.network_report_filename(
+            getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
+        "remaining_seconds": settings.SNAPSHOT_TTL,
+        "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        # the shared screen's nouns and destinations, so a network admin is not handed the
+        # systems screen with a switch on it
+        "dash_title": "Network Analyses Dashboard",
+        "subject": "device",
+        "picker_url": reverse("network_dashboard"),
+        "generate_url": reverse("network_generate"),
+        "generate_default": reverse("generate"),
+    })
+
+
+@login_required
+@require_POST
+def network_generate(request):
+    """Build the Network Admin Report from the reviewed snapshot — the systems generate flow,
+    for network gear. Answers are namespaced the same way (fix__<device>__<flag>), so the
+    shared form template needs no branch."""
+    if not is_network_admin(request.user):
+        return redirect("report_form")
+
+    token = request.POST.get("token", "") or request.session.get("network_token", "")
+    snapshot = cache.get(_cache_key(token)) if token else None
+    if snapshot is None:
+        messages.error(request, "That snapshot has expired. Capture a fresh one.")
+        return redirect("network_report")
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        # falls back to the admin's saved preference, then dark — the same order the systems
+        # flow uses, so the two reports never disagree about what "no choice" means
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    annotations: dict = {}
+    for si, sysvm in enumerate(snapshot.systems):
+        answers = {}
+        for fi, flag in enumerate(sysvm.flags):
+            ans = request.POST.get(f"fix__{si}__{fi}", "")
+            if ans in ("Yes", "No"):
+                answers[flag.key] = ans
+        comment = request.POST.get(f"comment__{si}", "").strip()
+        if answers or comment:
+            annotations[sysvm.name] = {"flags": answers, "comment": comment}
+
+    data = network.build_report(snapshot, theme=theme, author=author,
+                                annotations=annotations, summary_comment=summary_comment)
+    filename = network.network_report_filename(theme, timezone.localtime())
+
+    # Frozen exactly as presented, so History replays it without touching Prometheus.
+    report_content = {
+        "overview": snapshot.overview,
+        "systems": [{
+            "name": s.name, "hosts": s.hosts,
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category,
+                       "answer": annotations.get(s.name, {}).get("flags", {}).get(f.key, "")}
+                      for f in s.flags],
+            "comment": annotations.get(s.name, {}).get("comment", ""),
+        } for s in snapshot.systems],
+    }
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        annotations=annotations, report_content=report_content,
+        immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
+        summary_comment=summary_comment,
+    )
+    # The snapshot is spent: the next report starts from fresh metrics, never from numbers
+    # the admin has already signed off.
+    cache.delete(_cache_key(token))
+    request.session.pop("network_token", None)
+
+    resp = HttpResponse(
+        data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
 
 
 @login_required

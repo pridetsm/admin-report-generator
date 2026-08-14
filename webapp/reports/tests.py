@@ -324,6 +324,18 @@ class ReportBuilderFlow(TestCase):
         self.assertEqual(self.client.get(reverse("report")).status_code, 200)
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_the_systems_screen_keeps_its_own_nouns(self, _cap):
+        """The two flows share one template, so a change made for one must not rename the
+        other's screen."""
+        self.client.login(username="tester", password="pw12345!")
+        self._open_report("Efin")
+        body = self.client.get(reverse("report")).content.decode()
+        self.assertIn("System Analyses Dashboard", body)
+        self.assertIn("system selected", body)
+        self.assertIn("Systems needing attention", body)
+        self.assertIn('href="%s" title="Go back to system selection"' % reverse("report_form"), body)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_back_returns_to_an_open_report_not_to_the_picker(self, _cap):
         """Home is the system PICKER. Walking the plain tree took an admin who stepped into
         History mid-report out to a screen whose only offer was to start again — and picking
@@ -1341,30 +1353,49 @@ class FolderWatchAccess(TestCase):
 #  the part a reader can be misled by. A panel that is empty because nothing measures
 #  it must never be readable as a clean bill of health.
 # =============================================================================== #
-def _snmp_series(up=3, down=2):
+#: the real core switch target. Fixtures use it so scoping — which matches on `instance`
+#: against the DEVICES inventory — resolves the same way it does in production.
+_DEV_TARGET = "10.100.210.253"
+
+
+def _snmp_series(up=3, down=2, instance=_DEV_TARGET):
     """ifOperStatus shaped like snmp_exporter's if_mib output: ifIndex only, and ifDescr
     present but EMPTY, which is what the real device actually returns."""
     oper = []
     for i in range(up):
         oper.append({"labels": {"ifIndex": str(i + 1), "ifDescr": "",
-                                "instance": "10.0.0.1", "system": "RBZ Network"}, "value": 1.0})
+                                "instance": instance, "system": "RBZ Network"}, "value": 1.0})
     for i in range(down):
         oper.append({"labels": {"ifIndex": str(100 + i), "ifDescr": "",
-                                "instance": "10.0.0.1", "system": "RBZ Network"}, "value": 2.0})
+                                "instance": instance, "system": "RBZ Network"}, "value": 2.0})
     return oper
+
+
+def _stamp(series, instance=_DEV_TARGET):
+    """Put `instance` on rate series, as Prometheus does.
+
+    Rates are keyed by (instance, ifIndex) because ifIndex is only unique WITHIN a device —
+    keying on it alone would blend two switches' port 1 the moment a second is onboarded.
+    """
+    for r in series or []:
+        r["labels"].setdefault("instance", instance)
+    return series or []
 
 
 def _snmp_prom(oper, rin=None, rout=None):
     """A Prometheus whose answers depend on which query it is asked."""
+    rin, rout = _stamp(rin), _stamp(rout)
     prom = mock.MagicMock()
 
     def q(expr):
         if expr == "ifOperStatus":
             return oper
         if expr.startswith("rate(ifInOctets"):
-            return rin or []
+            return rin
         if expr.startswith("rate(ifOutOctets"):
-            return rout or []
+            return rout
+        if expr.startswith("up{"):
+            return [{"labels": {"instance": _DEV_TARGET}, "value": 1.0}]
         return [{"labels": {}, "value": 1.0}]        # vector(1) reachability probe
 
     prom.query.side_effect = q
@@ -1383,7 +1414,7 @@ class NetworkReportCollection(TestCase):
         """IF-MIB has seven states. 'lowerLayerDown' is not the same fault as 'down', and a
         report rendering both as the word 'down' sends someone to check the wrong cable."""
         oper = _snmp_series(up=1, down=0)
-        oper.append({"labels": {"ifIndex": "9", "instance": "10.0.0.1"}, "value": 7.0})
+        oper.append({"labels": {"ifIndex": "9", "instance": _DEV_TARGET}, "value": 7.0})
         with _snmp_prom(oper):
             d = network.collect()
         self.assertEqual([i["status_text"] for i in d["down_ports"]], ["lower layer down"])
@@ -1465,7 +1496,13 @@ class NetworkReportCollection(TestCase):
 
 
 class NetworkReportPage(TestCase):
-    """What the admin actually reads."""
+    """The report screen is the SAME screen the systems flow uses.
+
+    One device is one "system" and its faults are its flags, so reports/form.html renders
+    both. These tests are about the network content reaching that screen intact — above all
+    the measurement caveats, which must travel as findings rather than being lost with the
+    standalone page they used to live on.
+    """
 
     def setUp(self):
         self.user = get_user_model().objects.create_user("netadm", password="pw12345!")
@@ -1476,72 +1513,85 @@ class NetworkReportPage(TestCase):
         rin = [{"labels": {"ifIndex": "1"}, "value": 90000000.0}]
         rout = [{"labels": {"ifIndex": "1"}, "value": 40000000.0}]
         with _snmp_prom(_snmp_series(up=3, down=2), rin=rin, rout=rout):
+            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
             resp = self.client.get(reverse("network_report"))
         self.assertEqual(resp.status_code, 200)
         return resp.content.decode()
 
-    def test_every_requested_metric_appears_even_when_uncollected(self):
-        """The admins named fifteen metrics. Dropping the twelve we cannot collect would
-        make the report look complete; each one gets a card and a state instead."""
+    def test_it_renders_the_systems_annotation_screen(self):
+        """Not a parallel screen that will drift — literally the same template."""
+        rin = [{"labels": {"ifIndex": "1"}, "value": 9000.0}]
+        with _snmp_prom(_snmp_series(), rin=rin):
+            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+            resp = self.client.get(reverse("network_report"))
+        self.assertTemplateUsed(resp, "reports/form.html")
+
+    def test_the_device_is_named_as_the_subject(self):
+        self.assertIn("Core Switch", self._body())
+
+    def test_it_submits_to_the_network_generator(self):
+        """The shared template differs between the two flows in exactly one thing."""
         body = self._body()
-        self.assertEqual(body.count('class="nw-card is-'), len(network.CATALOGUE))
-        for m in network.CATALOGUE:
-            # names carry "&" ("Temperature & fans"), which Django escapes on the way out
-            self.assertIn(escape(m["name"]), body)
+        self.assertIn('action="%s"' % reverse("network_generate"), body)
+        self.assertNotIn('action="%s"' % reverse("generate"), body)
 
-    def test_uncollected_metrics_say_so_in_words_not_only_in_colour(self):
+    def test_ports_that_are_not_up_are_raised_as_a_watch_item_not_an_incident(self):
+        """Without ifAdminStatus a shut port looks exactly like a failed one, and on a
+        311-port switch most are simply unused. Calling that an incident daily is how a
+        report teaches people to ignore it."""
         body = self._body()
-        self.assertEqual(body.count("Not collected"),
-                         sum(1 for m in network.CATALOGUE if m["state"] == "missing"))
+        self.assertIn("interfaces are not up", body)
+        self.assertIn("admin status is not collected", body)
 
-    def test_every_uncollected_metric_says_what_it_would_take(self):
-        """'Not collected' on its own is a dead end. Each card carries the actual next
-        step, which is also what keeps the phase-2 list honest."""
-        for m in network.CATALOGUE:
-            if m["state"] != "live":
-                self.assertTrue(m.get("needs"), m["name"])
-
-    def test_the_32_bit_counter_caveat_is_stated_on_the_traffic_panel(self):
+    def test_the_counter_width_caveat_travels_as_a_finding(self):
         """The admins asked for ifHCInOctets by name and are not getting it. A throughput
-        figure presented without that caveat is a wrong number wearing a confident face."""
+        figure without that caveat is a wrong number wearing a confident face — so it is a
+        flagged item on the report, not a footnote on a page that no longer exists."""
         body = self._body()
+        self.assertIn("under-reported", body)
         self.assertIn("ifHCInOctets", body)
-        self.assertIn("floor, not a measurement", body)
 
-    def test_down_ports_are_not_presented_as_faults(self):
-        """Without ifAdminStatus a deliberately-shut port is indistinguishable from a
-        failed one, so the count must not be handed over as a fault total."""
-        self.assertIn("not necessarily", self._body())
-
-    def test_no_utilisation_percentage_is_claimed_anywhere(self):
-        """ifHighSpeed is not collected, so there is no capacity to be a percentage OF, and
-        any utilisation FIGURE on this page would be invented. Naming the concept is fine
-        and necessary — the phase-2 table has to say that collecting port speed is what
-        would enable it — so this looks for a number wearing the units, not the word."""
+    def test_the_uncollected_metrics_are_reported_as_a_finding(self):
         body = self._body()
-        self.assertFalse(re.search(r"[\d.]+\s*%\s*utilisation", body, re.I))
-        self.assertFalse(re.search(r"[\d.]+\s*%\s*utilization", body, re.I))
-        # and the absence is stated outright rather than left to be noticed
-        self.assertIn("No percentage utilisation appears anywhere", body)
+        self.assertIn("not collected", body)
+        missing = sum(1 for m in network.CATALOGUE if m["state"] == "missing")
+        self.assertIn(f"{missing} of {len(network.CATALOGUE)} requested metrics", body)
 
-    def test_the_chart_is_also_readable_as_numbers(self):
+    def test_nothing_is_flagged_that_is_not_measured(self):
+        """No band is invented for a metric that is not polled — an amber row for "CPU
+        unknown" would put a fault on screen that no measurement supports."""
+        with _snmp_prom(_snmp_series(up=2, down=0)):
+            snap = network.capture_snapshot("t", only={"core-switch"})
+        keys = {f.key for f in snap.systems[0].flags}
+        for never in ("cpu", "memory", "temperature", "psu", "bgp", "wifi"):
+            self.assertNotIn(never, keys)
+
+    def test_the_screen_speaks_of_devices_not_systems(self):
+        """The shared template is the systems screen. Handed to a network admin unchanged it
+        read "System Analyses Dashboard · 1 system selected" above a switch — someone else's
+        screen with their device on it."""
         body = self._body()
-        self.assertIn("Show as a table", body)
-        self.assertIn("Inbound", body)          # legend, so identity is never colour alone
+        self.assertIn("Network Analyses Dashboard", body)
+        self.assertNotIn("System Analyses Dashboard", body)
+        self.assertIn("1 device selected", body)
+        self.assertIn("Devices needing attention", body)
+
+    def test_change_selection_returns_to_the_device_picker(self):
+        """It pointed at the systems picker, which would have walked a network admin into
+        another role's screen — and one that cannot start a network report."""
+        body = self._body()
+        self.assertIn('href="%s" title="Go back to device selection"' % reverse("network_dashboard"), body)
+        self.assertNotIn('href="%s" title="Go back to' % reverse("report_form"), body)
 
     def test_no_template_comment_text_reaches_the_screen(self):
         """Django's {# #} is SINGLE-LINE. Spanning it across lines renders it as visible
-        prose, which has already shipped to this UI once. Anything multi-line uses
-        {% comment %}. Asserts on text a user can read, with script/style stripped."""
+        prose, which has already shipped to this UI once."""
         body = self._body()
         visible = re.sub(r"<script.*?</script>", "", body, flags=re.S)
         visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
         visible = re.sub(r"<[^>]+>", " ", visible)
         for leak in ("{#", "#}", "endcomment", "comment %}"):
             self.assertNotIn(leak, visible, "template comment syntax leaked: " + leak)
-        for prose in ("false all-clear", "honest headline", "Bar geometry belongs here"):
-            self.assertNotIn(prose, visible)
-
 
 class NetworkReportAccess(TestCase):
     """The report is for the people who run the network gear."""
@@ -2190,28 +2240,63 @@ class NetworkDevicePicker(TestCase):
             return self.client.get(reverse("network_dashboard"))
 
     def test_it_lists_exactly_the_one_device_monitored_today(self):
+        """A SELECTION tile, matching the systems picker — the two dashboards ask the same
+        question of different inventories, so they are the same screen."""
         resp = self._get()
-        self.assertEqual(resp.content.decode().count("dev-tile"), 2)   # class + style rule
+        body = resp.content.decode()
+        self.assertEqual(body.count('name="include_device"'), len(network.DEVICES))
         self.assertContains(resp, "Core Switch")
-        self.assertContains(resp, "10.100.210.253")
+        self.assertContains(resp, _DEV_TARGET)
 
-    def test_the_tile_opens_that_device_s_report(self):
-        self.assertContains(self._get(), reverse("network_report"))
+    def test_it_submits_to_the_report(self):
+        """Select, then continue — the systems flow exactly."""
+        body = self._get().content.decode()
+        self.assertIn('action="%s"' % reverse("network_report"), body)
+        self.assertIn("Capture &amp; continue", body)
 
-    def test_a_responding_device_shows_its_link_count(self):
-        resp = self._get(up=1.0, ifaces=4)
-        self.assertContains(resp, "Responding")
-        self.assertContains(resp, "4 of 4 links up")
+    def test_it_is_structurally_the_systems_picker(self):
+        """Same screen, different inventory. Asserted on the pieces rather than a screenshot:
+        header card, stat pills, section label, select-all, filter, running count, tile
+        anatomy, sticky action bar and the empty-filter row."""
+        body = self._get().content.decode()
+        for piece in ('class="snap"', "sys-stats", "Devices to include", "chk-pill",
+                      "sys-filter", "selectCountTop", "sys-mono", "sys-tick",
+                      "sysNoResults", "actionbar", "sel-pill"):
+            self.assertIn(piece, body, f"{piece} missing — the two pickers have diverged")
+
+    def _grid(self, **kw):
+        """Just the tile grid. The stylesheet block names the same classes, so asserting on
+        the whole page would pass on a CSS rule and prove nothing about the markup."""
+        body = self._get(**kw).content.decode()
+        return body[body.find('id="selectList"'):body.find('id="sysNoResults"')]
+
+    def test_a_healthy_device_carries_no_state_badge(self):
+        """The badge sits in the slot the systems tiles use for "recently reported" and only
+        appears when something is wrong, so a healthy grid looks exactly like that one."""
+        self.assertNotIn("badge-state", self._grid())
+
+    def test_an_unreachable_device_says_so_on_its_tile(self):
+        self.assertIn("not responding", self._grid(up=0.0))
+
+    def test_submitting_nothing_is_stopped_before_the_post(self):
+        """The systems picker guards its own submit; this one does too, in the same words."""
+        self.assertContains(self._get(), "Select at least one device")
+
+    def test_a_responding_device_shows_its_interface_count(self):
+        """The sub-line carries the count, exactly where a system tile carries "5 hosts"."""
+        grid = self._grid(up=1.0, ifaces=4)
+        self.assertIn("4 interfaces", grid)
+        self.assertNotIn("badge-state", grid)      # healthy: no badge
 
     def test_a_device_that_fails_its_scrape_says_so(self):
-        self.assertContains(self._get(up=0.0), "Not responding")
+        self.assertIn("not responding", self._grid(up=0.0))
 
     def test_never_scraped_is_not_rendered_as_down(self):
         """`up == 0` means Prometheus tried and failed; no `up` at all means it never tried.
         Rendering them alike sends someone to check a cable over a missing scrape config."""
-        resp = self._get(up=None)
-        self.assertContains(resp, "Not scraped")
-        self.assertNotContains(resp, "Not responding")
+        grid = self._grid(up=None)
+        self.assertIn("not scraped", grid)
+        self.assertNotIn("not responding", grid)
 
 
 class NetworkDeviceIsNotASystem(TestCase):
@@ -2300,7 +2385,13 @@ class DrawerCurrentIndicator(TestCase):
 
     def _drawer(self, url_name, role):
         self.client.post(reverse("role_select"), {"role": role})
-        body = self.client.get(reverse(url_name)).content.decode()
+        if url_name == "network_report":
+            # the report covers a SELECTION, so it bounces to the picker without one
+            with _snmp_prom(_snmp_series()):
+                self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+                body = self.client.get(reverse(url_name)).content.decode()
+        else:
+            body = self.client.get(reverse(url_name)).content.decode()
         return body[body.find('id="drawer"'):body.find("</nav>")]
 
     def test_exactly_one_entry_is_marked_current(self):
@@ -2423,6 +2514,32 @@ class BrandBackCaret(TestCase):
         _, pill = self._caret("history", "System Admin")
         self.assertIn("has-back", pill)
 
+    def test_no_picker_class_is_left_without_a_rule(self):
+        """The network picker reused select.html's markup while its styles were still inline
+        in that template, so every shared class resolved to nothing: stat pills rendered as
+        run-together text, the resume bar as loose prose, the search icon adrift of its box.
+
+        Nothing errors when a class has no rule — the page just looks wrong — so this asserts
+        that every class either template puts on the page is actually defined somewhere.
+        """
+        import pathlib
+
+        css = (pathlib.Path(settings.BASE_DIR) / "static" / "css" / "app.css").read_text(encoding="utf-8")
+        defined = set(re.findall(r"\.([a-z][a-z0-9-]*)", css))
+
+        self.client.login(username="caret", password="pw12345!")
+        for role, url_name in (("Network Admin", "network_dashboard"),
+                               ("System Admin", "report_form")):
+            self.client.post(reverse("role_select"), {"role": role})
+            with _snmp_prom(_snmp_series()):
+                body = self.client.get(reverse(url_name)).content.decode()
+            page = body[body.find('<div class="container"'):]
+            inline = set(re.findall(r"\.([a-z][a-z0-9-]*)",
+                                    "".join(re.findall(r"<style>(.*?)</style>", body, re.S))))
+            used = {c for attr in re.findall(r'class="([^"]+)"', page) for c in attr.split()}
+            missing = sorted(u for u in used if u not in defined and u not in inline)
+            self.assertEqual(missing, [], f"{url_name}: classes with no CSS rule: {missing}")
+
     def test_the_stylesheet_does_not_rely_on_has(self):
         import pathlib
 
@@ -2430,3 +2547,264 @@ class BrandBackCaret(TestCase):
         # strip comments first: the rationale for avoiding :has() naturally mentions it
         code = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
         self.assertNotIn(":has(", code)
+
+
+class NetworkReportFlow(TestCase):
+    """Select devices, then report on them — the systems flow, for network gear.
+
+    The point of these tests is that the report covers what the admin CHOSE. Which devices a
+    report covers is the admin's statement about their own estate, not a default the app
+    picked for them.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("netflow", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="netflow", password="pw12345!")
+
+    def test_choosing_a_device_redirects_rather_than_rendering(self):
+        """Post/Redirect/Get, as the systems picker does — a browser refresh on the report
+        must never re-submit the selection."""
+        with _snmp_prom(_snmp_series()):
+            resp = self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+        self.assertRedirects(resp, reverse("network_report"), fetch_redirect_response=False)
+        self.assertEqual(self.client.session["network_devices"], ["core-switch"])
+
+    def test_the_report_needs_a_selection_first(self):
+        """Arriving with nothing chosen sends the admin to the picker rather than quietly
+        reporting on every device."""
+        with _snmp_prom(_snmp_series()):
+            resp = self.client.get(reverse("network_report"))
+        self.assertRedirects(resp, reverse("network_dashboard"), fetch_redirect_response=False)
+
+    def test_submitting_nothing_is_refused(self):
+        resp = self.client.post(reverse("network_report"), {}, follow=True)
+        self.assertContains(resp, "Select at least one device")
+        self.assertIsNone(self.client.session.get("network_devices"))
+
+    def test_an_unknown_device_key_is_discarded(self):
+        """The key is checked against the inventory, so a hand-edited form cannot widen the
+        report to something that is not monitored."""
+        resp = self.client.post(reverse("network_report"),
+                                {"include_device": "not-a-device"}, follow=True)
+        self.assertContains(resp, "Select at least one device")
+        self.assertIsNone(self.client.session.get("network_devices"))
+
+    def test_the_report_covers_only_the_chosen_device(self):
+        """Scoping is on the `instance` label, so a report naming the core switch cannot
+        quietly include another device sharing the SNMP job."""
+        oper = _snmp_series(up=2, down=0)
+        oper += [{"labels": {"ifIndex": "1", "instance": "10.0.0.99"}, "value": 1.0},
+                 {"labels": {"ifIndex": "2", "instance": "10.0.0.99"}, "value": 1.0}]
+        with _snmp_prom(oper):
+            data = network.collect(only={"core-switch"})
+        self.assertEqual(data["devices"], [_DEV_TARGET])
+        self.assertEqual(data["iface_count"], 2)
+
+    def test_rates_do_not_blend_two_devices_ports(self):
+        """ifIndex is unique only WITHIN a device. Keyed on it alone, a second switch's port 1
+        would land on the first switch's port 1 the day it is onboarded."""
+        oper = [{"labels": {"ifIndex": "1", "instance": _DEV_TARGET}, "value": 1.0}]
+        rin = [{"labels": {"ifIndex": "1", "instance": "10.0.0.99"}, "value": 1000.0}]
+        with _snmp_prom(oper, rin=rin):
+            data = network.collect(only={"core-switch"})
+        self.assertIsNone(data["interfaces"][0]["in_bps"])   # the other device's rate, ignored
+
+
+class NetworkGenerate(TestCase):
+    """Generating the report — the systems flow, for network gear."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("netgen", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="netgen", password="pw12345!")
+
+    def _open(self):
+        with _snmp_prom(_snmp_series(up=3, down=2)):
+            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+            body = self.client.get(reverse("network_report")).content.decode()
+        return re.search(r'name="token" value="([^"]+)"', body).group(1)
+
+    def test_it_returns_a_real_xlsx(self):
+        resp = self.client.post(reverse("network_generate"),
+                                {"token": self._open(), "author": "P. Moyo"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp["Content-Type"],
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("Network Admin Report", resp["Content-Disposition"])
+        self.assertGreater(len(resp.content), 4000)
+        self.assertTrue(resp.content.startswith(b"PK"))      # a real zip container
+
+    def test_the_answers_are_recorded_against_the_device(self):
+        token = self._open()
+        self.client.post(reverse("network_generate"), {
+            "token": token, "author": "P. Moyo",
+            "summary_comment": "Phase 1 review.",
+            "fix__0__0": "No", "comment__0": "Unused access ports.",
+        })
+        sub = ReportSubmission.objects.latest("id")
+        self.assertEqual(sub.author, "P. Moyo")
+        self.assertEqual(sub.summary_comment, "Phase 1 review.")
+        self.assertIn("Core Switch", sub.annotations)
+        self.assertEqual(sub.annotations["Core Switch"]["comment"], "Unused access ports.")
+        self.assertEqual([s["name"] for s in sub.report_content["systems"]], ["Core Switch"])
+
+    def test_the_snapshot_is_spent_once_reported(self):
+        """The next report starts from fresh metrics, never from numbers already signed off."""
+        token = self._open()
+        self.client.post(reverse("network_generate"), {"token": token, "author": "P. Moyo"})
+        again = self.client.post(reverse("network_generate"),
+                                 {"token": token, "author": "P. Moyo"}, follow=True)
+        self.assertContains(again, "expired")
+
+    def test_a_system_admin_cannot_generate_a_network_report(self):
+        other = get_user_model().objects.create_user("sysgen", password="pw12345!")
+        other.groups.add(Group.objects.get(name="System Admin"))
+        self.client.logout()
+        self.client.login(username="sysgen", password="pw12345!")
+        resp = self.client.post(reverse("network_generate"), {"token": "x"})
+        self.assertEqual(resp.status_code, 302)
+
+    def _xlsx(self, **post):
+        body = {"token": self._open(), "author": "P. Moyo"}
+        body.update(post)
+        return self.client.post(reverse("network_generate"), body)
+
+    def _sheet(self, content):
+        import io
+        from openpyxl import load_workbook
+        return load_workbook(io.BytesIO(content)).active
+
+    def test_the_workbook_is_painted_from_the_engine_palette(self):
+        """Not a second set of colours that drifts. The build swaps gr.PALETTES the same way
+        the systems build does, so "dark" means one thing in this app."""
+        for theme in ("dark", "light"):
+            ws = self._sheet(self._xlsx(theme=theme).content)
+            pal = gr.PALETTES[theme]
+            fills = {ws.cell(r, 1).fill.fgColor.rgb for r in range(1, 12)}
+            for key in ("BG", "CARD", "HDR"):
+                self.assertIn(str(pal[key]), fills, f"{theme}: {key} missing from the canvas")
+            self.assertEqual(ws.cell(1, 1).font.color.rgb, str(pal["CYAN"]))
+
+    def test_the_two_themes_are_actually_different(self):
+        dark = self._sheet(self._xlsx(theme="dark").content).cell(1, 1).fill.fgColor.rgb
+        light = self._sheet(self._xlsx(theme="light").content).cell(1, 1).fill.fgColor.rgb
+        self.assertNotEqual(dark, light)
+
+    def test_the_canvas_is_painted_rather_than_left_white(self):
+        """On the dark theme an unpainted sheet frames the report in white and the whole
+        thing reads as broken."""
+        ws = self._sheet(self._xlsx(theme="dark").content)
+        self.assertEqual(ws.cell(2, 6).fill.fgColor.rgb, str(gr.PALETTES["dark"]["BG"]))
+
+    def test_the_theme_is_named_in_the_filename_as_it_is_for_systems(self):
+        self.assertIn("(light).xlsx", self._xlsx(theme="light")["Content-Disposition"])
+        self.assertIn("(dark).xlsx", self._xlsx(theme="dark")["Content-Disposition"])
+
+    def test_the_theme_is_recorded_on_the_audit_row(self):
+        self._xlsx(theme="light")
+        self.assertEqual(ReportSubmission.objects.latest("id").theme, "light")
+
+    def test_an_unknown_theme_falls_back_rather_than_erroring(self):
+        resp = self._xlsx(theme="chartreuse")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(ReportSubmission.objects.latest("id").theme, "dark")
+
+    def test_no_theme_posted_uses_the_admins_saved_preference(self):
+        """Same order the systems flow uses, so the two never disagree about what "no
+        choice" means."""
+        prof = self.u.profile
+        prof.default_report_theme = "light"
+        prof.save()
+        self._xlsx()
+        self.assertEqual(ReportSubmission.objects.latest("id").theme, "light")
+
+    def test_the_workbook_states_how_to_read_its_numbers(self):
+        """A spreadsheet outlives the screen it was made on, and these figures are wrong in a
+        specific, knowable way. The caveats have to be inside the artifact."""
+        import io
+        from openpyxl import load_workbook
+
+        resp = self.client.post(reverse("network_generate"),
+                                {"token": self._open(), "author": "P. Moyo"})
+        wb = load_workbook(io.BytesIO(resp.content))
+        text = " ".join(str(c.value) for row in wb.active.iter_rows() for c in row if c.value)
+        self.assertIn("FLOOR", text)
+        self.assertIn("ifHighSpeed", text)
+        self.assertIn("ifAdminStatus", text)
+
+
+class NetworkOpenReportParity(TestCase):
+    """Continuing an open report behaves the same in both estates.
+
+    Both pickers DISCARD the answers already typed if you re-select on them, so every part of
+    "you have one open" has to work the same way — the resume bar, the Back button, and the
+    snapshot being retired when a new selection is made.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("parity", password="pw12345!")
+        for r in ("System Admin", "Network Admin"):
+            self.u.groups.add(Group.objects.get(name=r))
+        self.client.login(username="parity", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": "Network Admin"})
+
+    def _open(self):
+        with _snmp_prom(_snmp_series()):
+            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+            self.client.get(reverse("network_report"))
+
+    def _picker(self):
+        with _snmp_prom(_snmp_series()):
+            return self.client.get(reverse("network_dashboard")).content.decode()
+
+    def test_the_resume_bar_appears_once_a_report_is_open(self):
+        self.assertNotIn("You have a report open", self._picker())
+        self._open()
+        body = self._picker()
+        self.assertIn("You have a report open", body)
+        self.assertIn("Continue that report", body)
+        self.assertIn("Core Switch", body)
+
+    def test_the_resume_bar_outlives_the_snapshot(self):
+        """Gated on the cached token as well, the bar vanished the moment the snapshot lapsed
+        — stranding the admin on the one screen that discards their answers."""
+        self._open()
+        session = self.client.session
+        session.pop("network_token")          # snapshot expired; the selection remains
+        session.save()
+        self.assertIn("You have a report open", self._picker())
+
+    def test_re_selecting_retires_the_previous_snapshot(self):
+        """Otherwise a second run silently reports the FIRST selection's numbers."""
+        self._open()
+        first = self.client.session["network_token"]
+        with _snmp_prom(_snmp_series()):
+            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+        self.assertIsNone(self.client.session.get("network_token"))
+        with _snmp_prom(_snmp_series()):
+            self.client.get(reverse("network_report"))
+        self.assertNotEqual(self.client.session["network_token"], first)
+
+    def test_back_returns_to_the_open_report(self):
+        """The picker is how the report was started; the report is what the admin was doing.
+        Back retraces the second."""
+        self._open()
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertIn('class="backnav" href="%s"' % reverse("network_report"), body)
+
+    def test_back_never_lands_on_another_role_s_dashboard(self):
+        """The nav tree is rooted at the SYSTEMS dashboard, so without a role-aware fallback a
+        network admin's Back led to a screen that is not in their menu."""
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertIn('class="backnav" href="%s"' % reverse("network_dashboard"), body)
+        self.assertNotIn('class="backnav" href="%s"' % reverse("report_form"), body)
+
+    def test_the_systems_flow_is_untouched(self):
+        """The rule is per-estate: a system admin's open report still wins for them."""
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        session = self.client.session
+        session["report_systems"] = ["Efin"]
+        session.save()
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertIn('class="backnav" href="%s"' % reverse("report"), body)

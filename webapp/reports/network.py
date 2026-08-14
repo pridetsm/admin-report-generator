@@ -192,8 +192,17 @@ def _iface_label(labels: Dict[str, str]) -> str:
     return f"ifIndex {idx}"
 
 
-def collect() -> dict:
+def collect(only: Optional[set] = None) -> dict:
+    """Gather the report. `only` is a set of DEVICE KEYS, scoping it to the admin's choice.
+
+    Scoping happens on the `instance` label rather than by filtering after the fact, so a
+    report that says it covers the core switch cannot quietly include a second device that
+    happens to share the SNMP job.
+    """
     prom, prom_url = _prometheus()
+    wanted = None
+    if only is not None:
+        wanted = {d["target"] for d in DEVICES if d["key"] in only}
 
     def q(expr):
         try:
@@ -207,8 +216,21 @@ def collect() -> dict:
         raise NetworkUnavailable(f"{prom_url}: {exc}") from exc
 
     oper = q("ifOperStatus")
-    rate_in = {r["labels"].get("ifIndex"): r["value"] * 8 for r in q(f"rate(ifInOctets[{RATE_WINDOW}])")}
-    rate_out = {r["labels"].get("ifIndex"): r["value"] * 8 for r in q(f"rate(ifOutOctets[{RATE_WINDOW}])")}
+    if wanted is not None:
+        oper = [r for r in oper if r["labels"].get("instance") in wanted]
+    def _rates(expr):
+        # Keyed by (instance, ifIndex): ifIndex is only unique WITHIN a device, so keying on
+        # it alone would blend two switches' port 1 the moment a second device is onboarded.
+        out = {}
+        for r in q(expr):
+            inst = r["labels"].get("instance")
+            if wanted is not None and inst not in wanted:
+                continue
+            out[(inst, r["labels"].get("ifIndex"))] = r["value"] * 8
+        return out
+
+    rate_in = _rates(f"rate(ifInOctets[{RATE_WINDOW}])")
+    rate_out = _rates(f"rate(ifOutOctets[{RATE_WINDOW}])")
 
     devices = sorted({r["labels"].get("instance", "") for r in oper if r["labels"].get("instance")})
     system = next((r["labels"].get("system") for r in oper if r["labels"].get("system")), "")
@@ -216,10 +238,10 @@ def collect() -> dict:
     interfaces = []
     for r in oper:
         lbl = r["labels"]
-        idx = lbl.get("ifIndex")
+        idx = (lbl.get("instance"), lbl.get("ifIndex"))
         status = int(r["value"])
         interfaces.append({
-            "index": idx,
+            "index": lbl.get("ifIndex"),
             "name": _iface_label(lbl),
             "device": lbl.get("instance", ""),
             # IF-MIB ifOperStatus: 1 up, 2 down, 3 testing, 4 unknown, 5 dormant,
@@ -286,6 +308,9 @@ def collect() -> dict:
         "rate_window": RATE_WINDOW,
         "devices": devices,
         "device_count": len(devices),
+        # the inventory entries actually covered, so the report can name them
+        "device_rows": [d for d in DEVICES
+                        if (only is None or d["key"] in only) and d["target"] in set(devices)],
         "system": system,
         "interfaces": interfaces,
         "iface_count": len(interfaces),
@@ -379,3 +404,329 @@ def device_inventory() -> list:
                         iface_count=counts.get(t, 0),
                         iface_up=ups.get(t, 0)))
     return out
+
+
+# =======================================================================================
+#  The Network Admin Report as a SNAPSHOT — the same shape the systems flow uses.
+#
+#  The systems report renders reports/form.html from a Snapshot of SystemVMs, each carrying
+#  FlagVMs. Rather than write a second annotation screen, the network flow builds the same
+#  objects from network data and renders the same template: one device is one "system", its
+#  faults are its flags. The admin gets the identical screen with network names in it.
+#
+#  The flags below are derived ONLY from what is actually collected. Nothing here invents a
+#  band for a metric that is not polled — an amber row for "CPU unknown" would put a fault on
+#  screen that no measurement supports.
+# =======================================================================================
+def _device_flags(dev: dict, data: dict) -> list:
+    """The flagged items for one device, worst first.
+
+    `band` is "red" (immediate) or "amber" (watch), matching the systems report exactly so
+    the counts, chips and colours all behave without special-casing.
+    """
+    from .services import FlagVM
+
+    flags = []
+    ifaces = [i for i in data["interfaces"] if i["device"] == dev["target"]]
+
+    if not dev.get("known"):
+        flags.append(FlagVM("snmp_unscraped", f"{dev['name']} has never been scraped by Prometheus",
+                            "red", "unreachable"))
+    elif not dev.get("reachable"):
+        flags.append(FlagVM("snmp_down", f"{dev['name']} is not answering SNMP", "red", "unreachable"))
+
+    down = [i for i in ifaces if not i["up"]]
+    if down:
+        # AMBER, not red. Without ifAdminStatus a deliberately shut port looks exactly like a
+        # failed one, and on a 311-port switch most of these are simply unused. Calling that
+        # an incident every day is how a report teaches people to ignore it.
+        flags.append(FlagVM(
+            "links_down",
+            f"{len(down)} of {len(ifaces)} interfaces are not up "
+            f"(admin status is not collected, so shut ports cannot be told from failed ones)",
+            "amber", "service"))
+
+    # The counter-width problem is a defect in the MEASUREMENT, and belongs on the report as
+    # one — an admin reading these numbers has to know they are a floor.
+    if data.get("wrap_seconds"):
+        flags.append(FlagVM(
+            "counter_width",
+            f"Throughput is under-reported: the 32-bit octet counters wrap about every "
+            f"{data['wrap_seconds']}s at the current peak of {data['peak_bps_text']}. "
+            f"Poll ifHCInOctets/ifHCOutOctets to fix it.",
+            "amber", "untracked"))
+
+    missing = [m["name"] for m in CATALOGUE if m["state"] == "missing"]
+    if missing:
+        flags.append(FlagVM(
+            "metrics_missing",
+            f"{len(missing)} of {len(CATALOGUE)} requested metrics are not collected: "
+            + ", ".join(missing[:4]) + ("…" if len(missing) > 4 else ""),
+            "amber", "untracked"))
+    return flags
+
+
+def _network_overview(data: dict, devices: list) -> dict:
+    """The at-a-glance / immediate / watch bands, in the shape reports/form.html renders.
+
+    Same three-band layout as the systems overview so the screen is genuinely the same one,
+    with the rows that a network estate actually has.
+    """
+    unreachable = [d for d in devices if d.get("known") and not d.get("reachable")]
+    unscraped = [d for d in devices if not d.get("known")]
+    down = data["down_count"]
+    missing = sum(1 for m in CATALOGUE if m["state"] == "missing")
+    bad = lambda n: "good" if not n else "bad"
+    warn = lambda n: "good" if not n else "warn"
+    return {
+        "glance": [
+            {"label": "Devices", "value": len(devices), "state": "info"},
+            {"label": "Interfaces", "value": data["iface_count"], "state": "info"},
+            {"label": "Links up", "value": data["up_count"], "state": "info"},
+            {"label": "Carrying traffic", "value": data["carrying_count"], "state": "info"},
+            {"label": "Throughput in", "value": data["total_in_text"], "state": "info"},
+        ],
+        "immediate": [
+            {"label": "Not responding", "value": len(unreachable), "state": bad(len(unreachable))},
+            {"label": "Never scraped", "value": len(unscraped), "state": bad(len(unscraped))},
+        ],
+        "watch": [
+            {"label": "Links not up", "value": down, "sub": "interfaces", "state": warn(down)},
+            {"label": "Metrics not collected", "value": missing,
+             "sub": f"of {len(CATALOGUE)} requested", "state": warn(missing)},
+            {"label": "Counter width", "value": "32-bit", "sub": "under-reports throughput",
+             "state": "warn"},
+        ],
+        "banners": [],
+    }
+
+
+def capture_snapshot(token: str, only: Optional[set] = None):
+    """A Snapshot of the selected network devices, interchangeable with the systems one.
+
+    Raises NetworkUnavailable when Prometheus cannot be reached, mirroring
+    services.capture_snapshot raising PrometheusUnavailable — the view handles them the same.
+    """
+    import datetime
+
+    from .services import Snapshot, SystemVM
+
+    data = collect(only=only)
+    rows = data["device_rows"] or [d for d in DEVICES if only is None or d["key"] in only]
+    inv = {d["target"]: d for d in device_inventory() if only is None or d["key"] in only}
+
+    svms = []
+    for dev in rows:
+        live = inv.get(dev["target"], dict(dev, known=False, reachable=False))
+        svms.append(SystemVM(name=dev["name"],
+                             hosts=len([i for i in data["interfaces"] if i["device"] == dev["target"]]),
+                             flags=_device_flags(live, data)))
+
+    snap = Snapshot(
+        token=token,
+        captured_at=datetime.datetime.now(),
+        prom_url=data["prom_url"],
+        systems=svms,
+        overview=_network_overview(data, list(inv.values())),
+    )
+    # carried for the report screen and for generation; the systems flow parks its engine
+    # objects on the same attributes.
+    snap._store = data
+    snap._systems = rows
+    return snap
+
+
+def network_report_filename(theme: str = "dark", when=None) -> str:
+    """Named like the systems report, theme and all, so the two sit together in a folder."""
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Network Admin Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
+def build_report(snapshot, *, theme: str = "dark", author: str,
+                 annotations: dict, summary_comment: str) -> bytes:
+    """Render the network report as .xlsx, in the SAME theme as the systems report.
+
+    Written directly rather than through gr.build_report_bytes: that builder reads the
+    engine's Store — node_exporter disks, windows services, certificates — none of which a
+    switch has, and feeding it a fabricated Store to borrow the layout would mean inventing
+    the very fields this report exists to say are missing.
+
+    The COLOURS, though, are not reinvented. They come from gr.PALETTES via gr.palette(), the
+    same swap the systems build uses, so "dark" and "light" mean exactly one thing in this app
+    and an adjustment to either palette reaches both reports without being copied across.
+    """
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    if theme not in gr.PALETTES:
+        theme = "dark"
+
+    with gr.palette(theme):
+        T = gr.Theme
+        # openpyxl wants RRGGBB; the engine stores its colours as 00RRGGBB
+        rgb = lambda c: str(c)[-6:]
+        BG, CARD, HDR = rgb(T.BG), rgb(T.CARD), rgb(T.HDR)
+        BORDER, INK, GREY = rgb(T.BORDER), rgb(T.WHITE), rgb(T.GREY)
+        CYAN, SUB = rgb(T.CYAN), rgb(T.SUB)
+        CHIP = {k: (rgb(v[0]), rgb(v[1])) for k, v in T.CHIP.items()}
+
+        edge = Side(style="thin", color=BORDER)
+        box = Border(left=edge, right=edge, top=edge, bottom=edge)
+        page = PatternFill("solid", fgColor=BG)
+        card = PatternFill("solid", fgColor=CARD)
+        head = PatternFill("solid", fgColor=HDR)
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Network Admin Report"
+        ws.sheet_view.showGridLines = False
+        ws.sheet_properties.tabColor = CYAN
+        for col, width in zip("ABCDEF", (34, 15, 62, 12, 34, 4)):
+            ws.column_dimensions[col].width = width
+
+        LAST = 6
+
+        def paint(row):
+            """Fill the row with the page colour.
+
+            The canvas is painted rather than left to Excel's default white: on the dark
+            theme an unpainted sheet frames the report in white and the whole thing reads as
+            broken. The systems report paints for the same reason.
+            """
+            for c in range(1, LAST + 1):
+                ws.cell(row, c).fill = page
+
+        r = 1
+        paint(r)
+        ws.cell(r, 1, "NETWORK ADMIN REPORT").font = Font(bold=True, size=16, color=CYAN)
+        r += 1
+        paint(r)
+        ws.cell(r, 1, snapshot.captured_at.strftime("Captured %d %b %Y at %H:%M")).font = Font(color=SUB, size=10)
+        r += 1
+        paint(r)
+        ws.cell(r, 1, f"By {author}").font = Font(color=SUB, size=10)
+        r += 1
+        paint(r)
+        r += 1
+
+        def band(title, rows):
+            nonlocal r
+            paint(r)
+            ws.cell(r, 1, title.upper()).font = Font(bold=True, size=10, color=INK)
+            for c in range(1, LAST):
+                ws.cell(r, c).fill = head
+                ws.cell(r, c).border = box
+            r += 1
+            for item in rows:
+                paint(r)
+                for c in range(1, LAST):
+                    ws.cell(r, c).fill = card
+                ws.cell(r, 1, item["label"]).font = Font(color=GREY, size=10)
+                v = ws.cell(r, 2, item["value"])
+                v.font = Font(bold=True, size=10,
+                              color={"bad": CHIP["red"][0], "warn": CHIP["amber"][0],
+                                     "good": CHIP["green"][0]}.get(item.get("state"), INK))
+                if item.get("sub"):
+                    ws.cell(r, 3, item["sub"]).font = Font(color=SUB, size=9)
+                r += 1
+            paint(r)
+            r += 1
+
+        ov = snapshot.overview or {}
+        band("At a glance", ov.get("glance", []))
+        band("Immediate attention", ov.get("immediate", []))
+        band("Watch list", ov.get("watch", []))
+
+        for sysvm in snapshot.systems:
+            paint(r)
+            ws.cell(r, 1, sysvm.name.upper()).font = Font(bold=True, size=12, color=CYAN)
+            ws.cell(r, 2, f"{sysvm.hosts} interfaces").font = Font(color=SUB, size=10)
+            r += 1
+
+            paint(r)
+            for label, col in (("Finding", 1), ("Band", 2), ("Detail", 3),
+                               ("Fixed?", 4), ("Comment", 5)):
+                h = ws.cell(r, col, label)
+                h.font = Font(bold=True, size=9, color=SUB)
+                h.fill = head
+                h.border = box
+            r += 1
+
+            ann = annotations.get(sysvm.name, {})
+            if not sysvm.flags:
+                paint(r)
+                ws.cell(r, 1, "No findings — every collected metric is within limits").font = Font(
+                    color=CHIP["green"][0], size=10)
+                r += 1
+            for flag in sysvm.flags:
+                paint(r)
+                fg, bgc = CHIP["red" if flag.band == "red" else "amber"]
+                for col in range(1, 6):
+                    cell = ws.cell(r, col)
+                    cell.fill = card
+                    cell.border = box
+                ws.cell(r, 1, flag.key).font = Font(color=GREY, size=10)
+                b = ws.cell(r, 2, "Immediate" if flag.band == "red" else "Watch")
+                b.font = Font(bold=True, size=10, color=fg)
+                b.fill = PatternFill("solid", fgColor=bgc)
+                d = ws.cell(r, 3, flag.text)
+                d.font = Font(color=INK, size=10)
+                d.alignment = Alignment(wrap_text=True, vertical="top")
+                ws.cell(r, 4, ann.get("flags", {}).get(flag.key, "")).font = Font(size=10, color=INK)
+                r += 1
+            if ann.get("comment"):
+                paint(r)
+                for col in range(1, 6):
+                    ws.cell(r, col).fill = card
+                ws.cell(r, 1, "Comment").font = Font(bold=True, size=9, color=SUB)
+                cm = ws.cell(r, 3, ann["comment"])
+                cm.font = Font(color=INK, size=10)
+                cm.alignment = Alignment(wrap_text=True, vertical="top")
+                r += 1
+            paint(r)
+            r += 1
+
+        if summary_comment:
+            paint(r)
+            ws.cell(r, 1, "SUMMARY").font = Font(bold=True, size=10, color=INK)
+            r += 1
+            paint(r)
+            sc = ws.cell(r, 1, summary_comment)
+            sc.font = Font(color=INK, size=10)
+            sc.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+            r += 2
+
+        # The caveats belong IN the artifact. A spreadsheet outlives the screen it was made on,
+        # and these numbers are wrong in a specific, knowable way its reader has to be told.
+        paint(r)
+        ws.cell(r, 1, "HOW TO READ THESE NUMBERS").font = Font(bold=True, size=10, color=INK)
+        r += 1
+        for line in (
+            "Throughput is a FLOOR, not a measurement: only 32-bit octet counters are polled "
+            "and every counter wrap loses traffic.",
+            "No percentage utilisation appears anywhere - port speed (ifHighSpeed) is not "
+            "collected, so there is no capacity to compare against.",
+            "Interfaces are identified by index because ifDescr is not collected.",
+            "Ports that are not up cannot be told apart from ports an admin deliberately shut "
+            "(ifAdminStatus is not collected).",
+        ):
+            paint(r)
+            cell = ws.cell(r, 1, "• " + line)
+            cell.font = Font(color=SUB, size=9)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+            ws.row_dimensions[r].height = 26
+            r += 1
+
+        # a painted margin below the content, so the themed canvas does not stop mid-page
+        for _ in range(8):
+            paint(r)
+            r += 1
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

@@ -10,7 +10,7 @@ from django.conf import settings
 from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
-from .roles import (ROLE_PAGES, active_role, effective_roles, held_roles,
+from .roles import (ROLE_HOME, ROLE_PAGES, active_role, effective_roles, held_roles,
                     is_network_admin, is_role_admin, is_system_admin)
 
 
@@ -58,6 +58,7 @@ _NAV_LABEL = {
     "folder_watch": "Folder Watch",
     "folder_watch_temenos": "Temenos",
     "network_dashboard": "Network Analyses",
+    "role_empty": "Home",
     "network_report": "Core Switch",
     "history": "History",
     "roles_console": "Roles",
@@ -106,11 +107,37 @@ def _back_nav(request):
     parent = _NAV_PARENT.get(name)
     if not parent:
         return None, None
-    if parent == "report_form" and request.session.get("report_systems"):
-        try:
-            return reverse("report"), "Report"
-        except NoReverseMatch:
-            pass
+    scope = effective_roles(request)
+
+    # An OPEN REPORT outranks the tree, for whichever estate the admin is working in. Both
+    # pickers discard the answers already typed if you re-select on them, so Back must
+    # retrace the report rather than the screen it was started from.
+    if parent in ("report_form", "network_dashboard"):
+        if "Network Admin" in scope and request.session.get("network_devices"):
+            try:
+                return reverse("network_report"), "Report"
+            except NoReverseMatch:
+                pass
+        # An empty scope means the user holds no catalogue role at all — the pre-picker
+        # world. They keep the original behaviour rather than being narrowed out of it.
+        if request.session.get("report_systems") and (not scope or "System Admin" in scope):
+            try:
+                return reverse("report"), "Report"
+            except NoReverseMatch:
+                pass
+
+    # Never send anyone to a screen their own role does not show. The tree is rooted at the
+    # SYSTEMS dashboard, so without this a network admin's Back led to a systems screen that
+    # is not in their menu — the tree describing the app, not the role using it.
+    if parent == "report_form" and scope and "System Admin" not in scope:
+        home = ROLE_HOME.get(active_role(request))
+        if home and home != "report_form":
+            try:
+                return reverse(home), _NAV_LABEL.get(home, "Back")
+            except NoReverseMatch:
+                pass
+        return None, None
+
     try:
         return reverse(parent), _NAV_LABEL.get(parent, "Back")
     except NoReverseMatch:

@@ -2,96 +2,196 @@
 {% block title %}Network Analyses Dashboard{% endblock %}
 
 {% comment %}
-  The network admin's landing screen — the counterpart to the System Analyses Dashboard.
+  The network admin's landing screen — a structural mirror of reports/select.html.
 
-  It reuses .sys-grid / .sys-tile from app.css deliberately. The two dashboards answer the
-  same question about different inventories ("which of these am I looking at?"), so they
-  should not look like two different products; a network admin who has seen the systems
-  picker already knows how this works.
+  Same header card, same stat pills, same "…to include" section, same toolbar (select-all,
+  filter, running count), same tile anatomy (monogram, name, sub-line, optional badge, tick),
+  same sticky action bar, same submit guard. Only the inventory and its nouns differ: systems
+  and hosts there, devices and interfaces here.
 
-  One tile today. It stays a picker rather than redirecting straight to the report because
-  the grid is where the firewall and the wireless controller land when they are onboarded,
-  and a screen that quietly grows a list is easier to follow than one that appears from
-  nowhere the day a second device arrives.
+  Kept as a separate file rather than branching select.html because the two screens read the
+  same but do not share a data shape — select.html speaks of hosts and recency, this one of
+  interfaces and reachability. A single template carrying both would be a thicket of {% if %}
+  for the sake of avoiding a file.
 {% endcomment %}
 
 {% block body %}
 <style>
-  /* A device tile carries live state, which a system tile does not, so it is taller and
-     stacks. Everything else is inherited from .sys-tile so the two pickers stay siblings. */
-  .dev-tile { flex-direction:column; align-items:flex-start; gap:0; min-height:132px;
-              text-decoration:none; color:inherit; padding:15px 16px; }
-  .dev-top { display:flex; align-items:center; gap:12px; width:100%; }
-  .dev-name { font-size:14.5px; font-weight:640; }
-  .dev-kind { font-size:11.5px; color:var(--muted); margin-top:2px; }
-  .dev-meta { margin-top:auto; padding-top:12px; width:100%; font-size:12px; color:var(--muted);
-              display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-  .dev-target { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
-
-  /* State is never colour alone — the dot always sits beside its word. */
-  .dev-state { display:inline-flex; align-items:center; gap:5px; font-weight:600; }
-  .dev-dot { width:8px; height:8px; border-radius:50%; flex:none; }
-  .dev-state.ok   { color:#1f8a5c; }  .dev-state.ok   .dev-dot { background:#1f8a5c; }
-  .dev-state.bad  { color:#b03a28; }  .dev-state.bad  .dev-dot { background:#b03a28; }
-  .dev-state.unk  { color:#78899a; }  .dev-state.unk  .dev-dot { background:#78899a; }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) .dev-state.ok  { color:#5fd39c; }
-    :root:not([data-theme="light"]) .dev-state.ok  .dev-dot { background:#5fd39c; }
-    :root:not([data-theme="light"]) .dev-state.bad { color:#f08b76; }
-    :root:not([data-theme="light"]) .dev-state.bad .dev-dot { background:#f08b76; }
+  /* Only addition to the shared picker styling: a state badge in the same slot the systems
+     tiles use for "recently reported". It appears ONLY when something is wrong, so a healthy
+     grid looks exactly like the systems one. */
+  .badge-state {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    background: var(--red-bg); color: var(--red);
   }
-  [data-theme="dark"] .dev-state.ok  { color:#5fd39c; }
-  [data-theme="dark"] .dev-state.ok  .dev-dot { background:#5fd39c; }
-  [data-theme="dark"] .dev-state.bad { color:#f08b76; }
-  [data-theme="dark"] .dev-state.bad .dev-dot { background:#f08b76; }
-
-  .nd-note { margin:18px 0 0; font-size:12px; color:var(--muted); line-height:1.65; }
+  .badge-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge-state.unk { background: var(--panel-2); color: var(--muted); }
 </style>
 
-<div class="container" style="max-width:1180px">
+<form method="post" action="{% url 'network_report' %}" id="selectForm">
+{% csrf_token %}
 
-  <div class="section-label" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
-    <span>Network Analyses Dashboard</span>
-    <span style="font-weight:400;color:var(--muted);font-size:12px">
-      {{ device_count }} device{{ device_count|pluralize }} monitored ·
-      {{ reachable_count }} responding
-    </span>
+<div class="container">
+  <div class="snap" style="align-items:flex-start">
+    <div style="min-width:0">
+      <h1>Network Analyses Dashboard</h1>
+      <div class="meta">Choose the devices for this report — live metrics are captured only for what you pick.</div>
+      <div class="sys-stats">
+        <span class="sys-stat">{{ devices|length }} device{{ devices|length|pluralize }}</span>
+        <span class="sys-stat">{{ total_interfaces }} interface{{ total_interfaces|pluralize }}</span>
+        {% if unreachable_count %}<span class="sys-stat">{{ unreachable_count }} not responding</span>{% endif %}
+      </div>
+    </div>
   </div>
 
-  <div class="sys-grid">
-    {% for d in devices %}
-    <a class="sys-tile dev-tile" href="{% url d.report %}">
-      <span class="dev-top">
-        <span class="sys-mono" style="--mono-h:210">{{ d.name.0|upper }}</span>
-        <span>
-          <span class="dev-name">{{ d.name }}</span>
-          <span class="dev-kind">{{ d.kind }} · SNMP {{ d.module }}</span>
-        </span>
+  {% if open_report %}
+  {% comment %}
+    A report is already open. This screen is the picker, so without this the only way forward
+    is to choose devices again — which clears the snapshot token and discards answers already
+    typed. Landing here throws nothing away; this makes the way back visible and says plainly
+    what starting again would cost.
+  {% endcomment %}
+  <div class="resume-bar">
+    <div class="resume-text">
+      <b>You have a report open</b>
+      <span>{{ open_report|join:", " }} — your answers are still there.</span>
+    </div>
+    <a class="btn primary" href="{% url 'network_report' %}">Continue that report</a>
+  </div>
+  <p class="meta" style="margin:-4px 2px 14px">Choosing devices below starts a new report and
+    discards the open one.</p>
+  {% endif %}
+
+  <div class="section-label">Devices to include</div>
+  <div class="card"><div class="body" style="padding-top:14px">
+    <p class="meta" style="margin:0 0 4px;line-height:1.5">Only devices with SNMP enabled and
+      added as a Prometheus target appear here — the firewall, wireless controller and routers
+      each need onboarding before they can be reported on.</p>
+
+    <div class="sys-toolbar">
+      <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All devices</span></label>
+      <span class="sys-search">
+        <span class="sys-search-ico" aria-hidden="true">⌕</span>
+        <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter devices…"
+               autocomplete="off" aria-label="Filter devices">
+        <button type="button" class="sys-clear" id="sysClear" hidden aria-label="Clear filter">×</button>
       </span>
-      <span class="dev-meta">
-        {% if not d.known %}
+      <span class="spacer" style="flex:1"></span>
+      <span class="select-count" id="selectCountTop"></span>
+    </div>
+
+    <div class="sys-grid" id="selectList">
+      {% for d in devices %}
+      <label class="sys-tile" data-name="{{ d.name|lower }} {{ d.target }}">
+        <input type="checkbox" class="select-check" name="include_device" value="{{ d.key }}">
+        <span class="sys-mono" style="--mono-h:{{ d.mono_hue }}">{{ d.name.0|upper }}</span>
+        <span class="sys-body">
+          <span class="sys-name">{{ d.name }}</span>
+          <span class="sys-sub">{{ d.iface_count }} interface{{ d.iface_count|pluralize }}</span>
+          {% if not d.known %}
           {% comment %}
-            No `up` series at all is not the same answer as up == 0. One means Prometheus has
-            never scraped this target, the other means it tried and failed, and rendering
-            them alike would send someone to check a cable over a missing scrape config.
+            No `up` series at all is a different answer from up == 0: one means Prometheus has
+            never scraped this target, the other that it tried and failed. Rendering them alike
+            sends someone to check a cable over a missing scrape config.
           {% endcomment %}
-          <span class="dev-state unk"><span class="dev-dot"></span>Not scraped</span>
-        {% elif d.reachable %}
-          <span class="dev-state ok"><span class="dev-dot"></span>Responding</span>
-          <span>· {{ d.iface_up }} of {{ d.iface_count }} links up</span>
-        {% else %}
-          <span class="dev-state bad"><span class="dev-dot"></span>Not responding</span>
-        {% endif %}
-        <span class="dev-target" style="margin-left:auto">{{ d.target }}</span>
-      </span>
-    </a>
-    {% endfor %}
-  </div>
-
-  <p class="nd-note">
-    Only the core switch is polled today. The firewall, wireless controller and routers each
-    need SNMP enabled and adding as a target before they can appear here.
-  </p>
-
+          <span class="badge-state unk" title="Prometheus has no scrape for this target"><span class="dot"></span>not scraped</span>
+          {% elif not d.reachable %}
+          <span class="badge-state" title="The target is not answering SNMP"><span class="dot"></span>not responding</span>
+          {% endif %}
+        </span>
+        <span class="sys-tick" aria-hidden="true">✓</span>
+      </label>
+      {% empty %}
+      <div class="sys-empty"><span class="big">⌸</span>No network devices are being monitored yet.</div>
+      {% endfor %}
+    </div>
+    <div class="sys-empty" id="sysNoResults" hidden><span class="big">⌕</span>No devices match your filter.</div>
+  </div></div>
 </div>
+
+{% comment %} ---- sticky action bar ---- {% endcomment %}
+<div class="actionbar">
+  <div class="container-inner">
+    <span class="sel-pill"><b id="selCountNum">0</b><span id="selectCount"></span></span>
+    <button type="button" class="sel-clear" id="selClear" hidden>Clear</button>
+    <div class="spacer" style="flex:1"></div>
+    <button class="btn primary" type="submit">Capture &amp; continue ▸</button>
+  </div>
+</div>
+</form>
+
+<div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("selectForm");
+  var tiles = Array.prototype.slice.call(document.querySelectorAll(".sys-tile"));
+  var checks = tiles.map(function (t) { return t.querySelector(".select-check"); });
+  var allBox = document.getElementById("selectAll");
+  var counts = [document.getElementById("selectCount"), document.getElementById("selectCountTop")];
+  var filter = document.getElementById("sysFilter");
+  var noResults = document.getElementById("sysNoResults");
+  var grid = document.getElementById("selectList");
+  var countNum = document.getElementById("selCountNum");
+  var selClear = document.getElementById("selClear");
+  var sysClear = document.getElementById("sysClear");
+
+  function sync() {
+    var n = 0;
+    tiles.forEach(function (t) {
+      var on = t.querySelector(".select-check").checked;
+      t.classList.toggle("checked", on);
+      if (on) n++;
+    });
+    if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
+    counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
+    // only dim the unselected tiles once something IS selected
+    if (grid) grid.classList.toggle("has-selection", n > 0);
+    if (countNum) countNum.textContent = n;
+    if (selClear) selClear.hidden = n === 0;
+  }
+  checks.forEach(function (c) { c.addEventListener("change", sync); });
+
+  if (allBox) allBox.addEventListener("change", function () {
+    checks.forEach(function (c) { c.checked = allBox.checked; });
+    sync();
+  });
+
+  if (selClear) selClear.addEventListener("click", function () {
+    checks.forEach(function (c) { c.checked = false; });
+    sync();
+  });
+
+  function applyFilter() {
+    var q = filter.value.trim().toLowerCase(), shown = 0;
+    tiles.forEach(function (t) {
+      var hit = !q || t.getAttribute("data-name").indexOf(q) > -1;
+      t.classList.toggle("hidden-by-filter", !hit);
+      if (hit) shown++;
+    });
+    if (noResults) noResults.hidden = shown > 0 || tiles.length === 0;
+    if (sysClear) sysClear.hidden = !q;
+  }
+  if (filter) {
+    filter.addEventListener("input", applyFilter);
+    filter.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && filter.value) { e.preventDefault(); filter.value = ""; applyFilter(); }
+    });
+  }
+  if (sysClear) sysClear.addEventListener("click", function () {
+    filter.value = ""; applyFilter(); filter.focus();
+  });
+
+  if (form) form.addEventListener("submit", function (e) {
+    if (!checks.some(function (c) { return c.checked; })) {
+      e.preventDefault();
+      window.alert("Select at least one device to include in the report.");
+    }
+  });
+
+  sync();
+})();
+</script>
 {% endblock %}
