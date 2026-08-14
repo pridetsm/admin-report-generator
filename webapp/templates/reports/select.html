@@ -11,7 +11,8 @@
   .sys-grid.has-selection .sys-tile:not(.checked) { opacity: .55; }
   .sys-grid.has-selection .sys-tile:not(.checked):hover { opacity: 1; }
 
-  .sys-tile { align-items: flex-start; min-height: 66px;
+  /* stretch, so a tile fills the equal-height row its grid gives it */
+  .sys-tile { align-items: flex-start; min-height: 66px; height: 100%;
               transition: border-color .13s ease, opacity .13s ease, background .13s ease,
                           transform .13s ease, box-shadow .13s ease; }
   .sys-tile:hover { transform: translateY(-1px); box-shadow: 0 3px 12px rgba(0,0,0,.09); }
@@ -71,6 +72,17 @@
   .sys-empty { display: grid; place-items: center; gap: 6px; padding: 34px 14px;
                color: var(--muted); text-align: center; }
   .sys-empty .big { font-size: 26px; opacity: .5; }
+
+  /* open-report bar: an offer, not a warning — nothing has gone wrong, there is simply
+     somewhere else you probably meant to be. */
+  .resume-bar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    margin: 0 0 10px; padding: 13px 16px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--accent);
+  }
+  .resume-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .resume-text b { font-size: 14px; }
+  .resume-text span { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
 </style>
 
 <form method="post" action="{% url 'report' %}" id="selectForm">
@@ -88,6 +100,24 @@
       </div>
     </div>
   </div>
+
+  {% if open_report %}
+  {% comment %}
+    A report is already open. This screen is the picker, so without this the only way
+    forward is to choose systems again — which clears the snapshot token and discards
+    answers already typed. Landing here does not throw anything away; this simply makes
+    the way back visible, and says plainly what starting again would cost.
+  {% endcomment %}
+  <div class="resume-bar">
+    <div class="resume-text">
+      <b>You have a report open</b>
+      <span>{{ open_report|join:", " }} — your answers are still there.</span>
+    </div>
+    <a class="btn primary" href="{% url 'report' %}">Continue that report</a>
+  </div>
+  <p class="meta" style="margin:-4px 2px 14px">Choosing systems below starts a new report and
+    discards the open one.</p>
+  {% endif %}
 
   <div class="section-label">Systems to include</div>
   <div class="card"><div class="body" style="padding-top:14px">

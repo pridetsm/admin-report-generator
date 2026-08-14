@@ -31,6 +31,10 @@ Thumbs.db
 *.png
 !webapp/static/img/logo.png
 !send_report/logo.png
+# The header mark is a SHIPPED asset, not a screenshot: without it the deployed app has no
+# manifest entry for it and the header breaks. Same for the design references it came from.
+!webapp/static/img/brand-mark.png
+!webapp/design-assets/*.png
 Screenshot*.png
 example.png
 .claude/

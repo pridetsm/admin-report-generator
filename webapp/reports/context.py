@@ -59,12 +59,27 @@ _NAV_LABEL = {
 
 
 def _back_nav(request):
-    """(url, label) of the current page's parent, or (None, None) at the root / unknown page."""
+    """(url, label) of the current page's parent, or (None, None) at the root / unknown page.
+
+    One exception to the static tree: while a report is OPEN, pages whose parent is the
+    home screen send you back to that report instead.
+
+    Home is the system PICKER, so the plain tree walked an admin who stepped into History
+    mid-report out to a screen whose only offer was to start again — and choosing systems
+    there clears the snapshot token, discarding the answers they had already typed. The
+    report is what they were doing; the picker is how they began it, and Back should
+    retrace the first, not the second.
+    """
     match = getattr(request, "resolver_match", None)
     name = getattr(match, "url_name", None) if match else None
     parent = _NAV_PARENT.get(name)
     if not parent:
         return None, None
+    if parent == "report_form" and request.session.get("report_systems"):
+        try:
+            return reverse("report"), "Report"
+        except NoReverseMatch:
+            pass
     try:
         return reverse(parent), _NAV_LABEL.get(parent, "Back")
     except NoReverseMatch:

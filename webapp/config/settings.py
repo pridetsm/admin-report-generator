@@ -87,7 +87,7 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # How long a captured snapshot stays valid between loading the form and generating the
 # report (seconds). Keeps the answers married to the exact numbers the admin reviewed.
-SNAPSHOT_TTL = int(os.environ.get("REPORT_SNAPSHOT_TTL", "300"))   # 5 minutes
+SNAPSHOT_TTL = int(os.environ.get("REPORT_SNAPSHOT_TTL", "600"))   # 10 minutes
 
 
 # Application definition

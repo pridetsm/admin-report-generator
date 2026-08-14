@@ -38,10 +38,16 @@
 {% endblock %}
 {% if user.is_authenticated %}
   <header class="topbar">
-    {# icon -> home #}
-    <a class="brand-icon" href="{% url 'report_form' %}" title="Home"><img src="{% static 'img/logo.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
-    {# title -> opens the navigation drawer #}
-    <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Admin Report Generator</button>
+    {% comment %}
+      The brand reads as ONE pill: mark + wordmark on a single rounded surface. Underneath
+      it stays two controls, because they do different things — the mark goes home, the
+      wordmark opens the drawer — and merging them would cost a navigation route to save a
+      rectangle.
+    {% endcomment %}
+    <div class="brand-pill">
+      <a class="brand-icon" href="{% url 'report_form' %}" title="Home"><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
+      <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Grafana Reports</button>
+    </div>
     <div class="spacer"></div>
 
     {# settings + notifications hamburger (red dot when there are unseen notifications) #}

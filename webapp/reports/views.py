@@ -115,11 +115,17 @@ def report_form(request):
          "mono_hue": _mono_hue(s["name"])}
         for s in list_systems()
     ]
+    # This screen IS the picker, so arriving here mid-report used to leave only one way
+    # forward: choose systems again — which pops the snapshot token and throws away answers
+    # already typed. Surfacing the open report gives the admin the choice back. Nothing is
+    # discarded by merely landing here; that only happens if they deliberately re-select.
+    open_systems = request.session.get("report_systems") or []
     return render(request, "reports/select.html", {
         "select_systems": select_systems,
         "recent_hours": _RECENT_REPORT_HOURS,
         "total_hosts": sum(s["hosts"] for s in select_systems),
         "recent_count": sum(1 for s in select_systems if s["reported"]),
+        "open_report": list(open_systems),
     })
 
 

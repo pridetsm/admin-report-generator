@@ -297,6 +297,56 @@ class ReportBuilderFlow(TestCase):
         self.assertEqual(r.context["back_url"], reverse("history"))
         self.assertEqual(r.context["back_label"], "History")
 
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_the_dashboard_offers_the_open_report_back(self, _cap):
+        """The System Analyses Dashboard IS the picker, so arriving mid-report left only one
+        way forward — choose systems again, which clears the snapshot token and discards
+        answers already typed. It now surfaces the open report instead.
+
+        Landing here must not itself discard anything: that only happens on a deliberate
+        re-selection.
+        """
+        self.client.login(username="tester", password="pw12345!")
+        clean = self.client.get(reverse("report_form")).content.decode()
+        self.assertNotIn("You have a report open", clean)
+
+        self._open_report("Efin")
+        r = self.client.get(reverse("report_form"))
+        self.assertContains(r, "You have a report open")
+        self.assertContains(r, "Continue that report")
+        self.assertContains(r, "Efin")
+        # merely visiting kept the report intact
+        self.assertEqual(self.client.session.get("report_systems"), ["Efin"])
+        self.assertTrue(self.client.session.get("snapshot_token"))
+        self.assertEqual(self.client.get(reverse("report")).status_code, 200)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_back_returns_to_an_open_report_not_to_the_picker(self, _cap):
+        """Home is the system PICKER. Walking the plain tree took an admin who stepped into
+        History mid-report out to a screen whose only offer was to start again — and picking
+        systems there clears the snapshot token, discarding answers already typed.
+
+        While a report is open, Back retraces what they were DOING rather than how they
+        began it. With no report open the tree is unchanged.
+        """
+        self.client.login(username="tester", password="pw12345!")
+        # nothing open yet: History goes back to the Dashboard as before
+        r = self.client.get(reverse("history"))
+        self.assertEqual(r.context["back_url"], reverse("report_form"))
+
+        self._open_report("Efin")                       # a report is now open
+        for page in ("history", "connect"):
+            r = self.client.get(reverse(page))
+            self.assertEqual(r.context["back_url"], reverse("report"),
+                             f"Back from {page} should return to the open report")
+            self.assertEqual(r.context["back_label"], "Report")
+
+        # the deeper tree is untouched — a child still walks to its own parent, not to
+        # the open report, because its parent is not the home screen
+        sub = ReportSubmission.objects.create(generated_by=self.user, theme="dark")
+        r = self.client.get(reverse("submission_detail", args=[sub.pk]))
+        self.assertEqual(r.context["back_url"], reverse("history"))
+
     @mock.patch("reports.views.capture_snapshot", side_effect=_two_system_snapshot)
     def test_selection_scopes_capture_and_report(self, cap):
         """Selecting a subset scopes the CAPTURE (only=names) and the audit row + content."""
@@ -607,14 +657,16 @@ class SystemSettingsTests(TestCase):
         sc.prometheus_url = "http://custom:9090"
         sc.save()
         cfg = type("Cfg", (), {"prom": "http://config:9090", "grafana": "g",
-                               "prometheus_yml": "y", "http_timeout": 5})()
+                               "prometheus_yml": "y", "http_timeout": 5,
+                               "verify_tls": True})()
         grm.load_config.return_value = cfg
         grm.load_topology.return_value = []
         grm.Prometheus.return_value = mock.MagicMock()
         grm.capture.return_value = mock.MagicMock(services={})
         from .services import capture_snapshot
         snap = capture_snapshot("tok")
-        grm.Prometheus.assert_called_once_with("http://custom:9090", 5)   # admin override wins
+        # the admin's URL override wins, and the TLS setting rides along with it
+        grm.Prometheus.assert_called_once_with("http://custom:9090", 5, True)
         self.assertEqual(snap.prom_url, "http://custom:9090")
 
 
