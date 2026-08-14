@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Choose a role · Report Builder{% endblock %}
+
+{% comment %}
+  The first screen after signing in, for people who hold more than one role.
+
+  It is a fork in the road, not a form: the whole card is the button, so there is nothing
+  to fill in and nothing to submit twice. One role means no choice worth showing, so the
+  view forwards straight past this page rather than asking a question with one answer.
+
+  Wording matters here. Choosing a role NARROWS a menu the user was already entitled to
+  see — it grants nothing — so the page says "working as", never "log in as", which would
+  imply a second authentication that is not happening.
+{% endcomment %}
+
+{% comment %}
+  No header, no drawer. The menu is what this screen is choosing, so showing it here would
+  let the user walk straight past the question. Sign-out stays reachable at the bottom so
+  the page is never a trap for someone who landed on it by mistake.
+{% endcomment %}
+{% block chrome %}{% endblock %}
+{% block page_spinner %}{% endblock %}
+
+{% block body %}
+<style>
+  /* Every colour here is a theme token: panel, ink, line-strong, accent, accent-ink, muted.
+     An earlier draft named tokens this app does not define and gave each a hex fallback.
+     Because the token did not exist, the fallback won in BOTH themes and these tiles stayed
+     white on a dark page. A fallback on an undefined token is a hardcoded colour wearing a
+     theme's clothes — see the CssTokenHygiene test, which now fails on one. */
+  .rs-wrap { max-width:760px; margin:0 auto; padding:8px 0 40px; }
+  .rs-head { text-align:center; margin-bottom:26px; }
+  .rs-head h1 { font-size:22px; font-weight:650; margin:0 0 6px; letter-spacing:-.2px; }
+  .rs-head p { margin:0; color:var(--muted); font-size:13px; line-height:1.6; }
+
+  /* A grid, not a stack: four roles read as four peers of equal standing, and the eye
+     compares them side by side instead of scanning a ranked column. auto-fit collapses it
+     to one column on a narrow window without a second breakpoint. */
+  .rs-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(232px,1fr));
+             grid-auto-rows:1fr; gap:10px; }
+
+  /* The whole card is the submit control, so the click target is the card and not a small
+     button inside it — a list of one-action rows should not need aiming. */
+  .rs-card { margin:0; }
+  .rs-btn {
+    width:100%; height:100%; text-align:left; cursor:pointer; font:inherit; color:inherit;
+    background:var(--panel); color:var(--ink); border:1px solid var(--line-strong);
+    border-radius:12px;
+    padding:16px 17px; display:flex; flex-direction:column; align-items:flex-start; gap:11px;
+    transition:border-color .12s ease, transform .12s ease;
+  }
+  .rs-btn:hover { border-color:var(--accent); transform:translateY(-1px); }
+  .rs-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+
+  .rs-mono {
+    flex:none; width:40px; height:40px; border-radius:11px; display:grid; place-items:center;
+    font-weight:700; font-size:15px; color:var(--accent-ink); background:var(--accent);
+  }
+  .rs-body { flex:1; min-width:0; }
+  .rs-name { font-size:14.5px; font-weight:640; }
+  .rs-pages { font-size:12px; color:var(--muted); margin-top:4px; line-height:1.55; }
+  .rs-go { display:none; }   /* the whole tile is the target; an arrow adds nothing */
+
+  .rs-current { font-size:10px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+                background:var(--accent); color:var(--accent-ink); padding:2px 7px;
+                border-radius:5px; margin-left:8px; vertical-align:1px; }
+
+  .rs-all { margin-top:20px; text-align:center; }
+  .rs-all button { background:none; border:0; color:var(--muted); font:inherit; font-size:12.5px;
+                   cursor:pointer; text-decoration:underline; padding:6px; }
+  .rs-all button:hover { color:var(--ink); }
+  .rs-all p { margin:5px 0 0; font-size:11.5px; color:var(--muted); }
+</style>
+
+<div class="rs-wrap">
+
+  <div class="rs-head">
+    <div style="margin-bottom:14px;font-size:12px;color:var(--muted)">
+      Signed in as <b>{{ display_name|default:user.get_username }}</b>
+    </div>
+    <h1>Choose a role</h1>
+    <p>
+      You hold more than one. Pick the one you are working as and the menu will show just
+      that role's screens — you can switch at any time.
+    </p>
+  </div>
+
+  <div class="rs-list">
+    {% for r in roles %}
+    <form method="post" class="rs-card">{% csrf_token %}
+      <input type="hidden" name="role" value="{{ r.name }}">
+      <button class="rs-btn" type="submit">
+        <span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>
+        <span class="rs-body">
+          <span class="rs-name">{{ r.name }}{% if r.name == current %}<span class="rs-current">Current</span>{% endif %}</span>
+          {% comment %}
+            What the role is FOR, not how many pages come with it. A screen count describes
+            the software; someone deciding which hat to put on needs to know whose job it is.
+          {% endcomment %}
+          <span class="rs-pages">{{ r.description }}</span>
+        </span>
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+
+  {% comment %}
+    The escape hatch. Someone who genuinely wears several hats at once should not have to
+    keep coming back here, so the pre-picker behaviour stays available as a deliberate
+    choice rather than being taken away by the new screen.
+  {% endcomment %}
+  <div class="rs-all">
+    <form method="post" style="margin:0">{% csrf_token %}
+      <input type="hidden" name="role" value="__all__">
+      <button type="submit">Show every role I hold</button>
+    </form>
+    <p>The full menu, as it was before.</p>
+    <form method="post" action="{% url 'logout' %}" style="margin:14px 0 0">{% csrf_token %}
+      <button type="submit">Sign out</button>
+    </form>
+  </div>
+
+</div>
+{% endblock %}

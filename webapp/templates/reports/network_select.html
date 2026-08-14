@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Network Analyses Dashboard{% endblock %}
+
+{% comment %}
+  The network admin's landing screen — the counterpart to the System Analyses Dashboard.
+
+  It reuses .sys-grid / .sys-tile from app.css deliberately. The two dashboards answer the
+  same question about different inventories ("which of these am I looking at?"), so they
+  should not look like two different products; a network admin who has seen the systems
+  picker already knows how this works.
+
+  One tile today. It stays a picker rather than redirecting straight to the report because
+  the grid is where the firewall and the wireless controller land when they are onboarded,
+  and a screen that quietly grows a list is easier to follow than one that appears from
+  nowhere the day a second device arrives.
+{% endcomment %}
+
+{% block body %}
+<style>
+  /* A device tile carries live state, which a system tile does not, so it is taller and
+     stacks. Everything else is inherited from .sys-tile so the two pickers stay siblings. */
+  .dev-tile { flex-direction:column; align-items:flex-start; gap:0; min-height:132px;
+              text-decoration:none; color:inherit; padding:15px 16px; }
+  .dev-top { display:flex; align-items:center; gap:12px; width:100%; }
+  .dev-name { font-size:14.5px; font-weight:640; }
+  .dev-kind { font-size:11.5px; color:var(--muted); margin-top:2px; }
+  .dev-meta { margin-top:auto; padding-top:12px; width:100%; font-size:12px; color:var(--muted);
+              display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .dev-target { font-family:ui-monospace,Consolas,monospace; font-size:11.5px; }
+
+  /* State is never colour alone — the dot always sits beside its word. */
+  .dev-state { display:inline-flex; align-items:center; gap:5px; font-weight:600; }
+  .dev-dot { width:8px; height:8px; border-radius:50%; flex:none; }
+  .dev-state.ok   { color:#1f8a5c; }  .dev-state.ok   .dev-dot { background:#1f8a5c; }
+  .dev-state.bad  { color:#b03a28; }  .dev-state.bad  .dev-dot { background:#b03a28; }
+  .dev-state.unk  { color:#78899a; }  .dev-state.unk  .dev-dot { background:#78899a; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .dev-state.ok  { color:#5fd39c; }
+    :root:not([data-theme="light"]) .dev-state.ok  .dev-dot { background:#5fd39c; }
+    :root:not([data-theme="light"]) .dev-state.bad { color:#f08b76; }
+    :root:not([data-theme="light"]) .dev-state.bad .dev-dot { background:#f08b76; }
+  }
+  [data-theme="dark"] .dev-state.ok  { color:#5fd39c; }
+  [data-theme="dark"] .dev-state.ok  .dev-dot { background:#5fd39c; }
+  [data-theme="dark"] .dev-state.bad { color:#f08b76; }
+  [data-theme="dark"] .dev-state.bad .dev-dot { background:#f08b76; }
+
+  .nd-note { margin:18px 0 0; font-size:12px; color:var(--muted); line-height:1.65; }
+</style>
+
+<div class="container" style="max-width:1180px">
+
+  <div class="section-label" style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+    <span>Network Analyses Dashboard</span>
+    <span style="font-weight:400;color:var(--muted);font-size:12px">
+      {{ device_count }} device{{ device_count|pluralize }} monitored ·
+      {{ reachable_count }} responding
+    </span>
+  </div>
+
+  <div class="sys-grid">
+    {% for d in devices %}
+    <a class="sys-tile dev-tile" href="{% url d.report %}">
+      <span class="dev-top">
+        <span class="sys-mono" style="--mono-h:210">{{ d.name.0|upper }}</span>
+        <span>
+          <span class="dev-name">{{ d.name }}</span>
+          <span class="dev-kind">{{ d.kind }} · SNMP {{ d.module }}</span>
+        </span>
+      </span>
+      <span class="dev-meta">
+        {% if not d.known %}
+          {% comment %}
+            No `up` series at all is not the same answer as up == 0. One means Prometheus has
+            never scraped this target, the other means it tried and failed, and rendering
+            them alike would send someone to check a cable over a missing scrape config.
+          {% endcomment %}
+          <span class="dev-state unk"><span class="dev-dot"></span>Not scraped</span>
+        {% elif d.reachable %}
+          <span class="dev-state ok"><span class="dev-dot"></span>Responding</span>
+          <span>· {{ d.iface_up }} of {{ d.iface_count }} links up</span>
+        {% else %}
+          <span class="dev-state bad"><span class="dev-dot"></span>Not responding</span>
+        {% endif %}
+        <span class="dev-target" style="margin-left:auto">{{ d.target }}</span>
+      </span>
+    </a>
+    {% endfor %}
+  </div>
+
+  <p class="nd-note">
+    Only the core switch is polled today. The firewall, wireless controller and routers each
+    need SNMP enabled and adding as a target before they can appear here.
+  </p>
+
+</div>
+{% endblock %}

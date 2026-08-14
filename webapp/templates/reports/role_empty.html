@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ role }} · Nothing here yet{% endblock %}
+
+{% comment %}
+  The landing screen for any role that exists but owns nothing yet.
+
+  Shared by all of them rather than written once each: they differ only in their name, and
+  a copy per role would drift the moment one gained a screen.
+
+  The role exists; its estate does not. This says so plainly instead of borrowing another
+  role's dashboard to look furnished — an empty room is a truthful answer, a room full of
+  someone else's furniture is not.
+
+  Nothing on this page is a dead end. The way out is a back button, and which button that
+  is depends on whether the user has anywhere to go: see the view for why a single-role
+  holder is offered sign-out rather than the picker.
+{% endcomment %}
+
+{% block body %}
+<style>
+  .gs-wrap { max-width:560px; margin:0 auto; padding:70px 20px 60px; text-align:center; }
+  .gs-mark { width:64px; height:64px; margin:0 auto 22px; border-radius:18px;
+             display:grid; place-items:center; background:var(--panel);
+             border:1px solid var(--line-strong); color:var(--muted); font-size:26px; }
+  .gs-wrap h1 { font-size:20px; font-weight:640; margin:0 0 10px; letter-spacing:-.2px; }
+  .gs-wrap p { margin:0 auto 26px; max-width:400px; font-size:13px; line-height:1.7;
+               color:var(--muted); }
+  .gs-back { display:inline-flex; align-items:center; gap:7px; }
+</style>
+
+<div class="gs-wrap">
+
+  <div class="gs-mark" aria-hidden="true">◦</div>
+
+  <h1>Nothing to see here</h1>
+  <p>
+    {{ role }} has no screens yet.{% if description %} {{ description }}{% endif %}
+    They will appear here once its systems are being monitored.
+  </p>
+
+  {% if can_go_back %}
+  <a class="btn ghost gs-back" href="{% url 'role_select' %}">
+    <span aria-hidden="true">‹</span> Back
+  </a>
+  {% else %}
+  {% comment %}
+    Only this role, so the picker would auto-apply it and bounce straight back to this page.
+    A button that returns you to where you already are is worse than none, so the honest
+    exit is to leave.
+  {% endcomment %}
+  <form method="post" action="{% url 'logout' %}" style="margin:0">{% csrf_token %}
+    <button class="btn ghost" type="submit">Sign out</button>
+  </form>
+  {% endif %}
+
+</div>
+{% endblock %}

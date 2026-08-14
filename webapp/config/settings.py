@@ -112,6 +112,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'reports.middleware.RoleRequiredMiddleware',
+    'reports.middleware.RoleScopeMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -213,7 +214,9 @@ STORAGES = {
 
 # Authentication: the whole app is gated (see LoginRequiredMixin / @login_required).
 LOGIN_URL = 'login'
-LOGIN_REDIRECT_URL = 'report_form'
+# Land on the role picker after signing in. It forwards straight through when the
+# user holds one role or none, so only people with a real choice ever see it.
+LOGIN_REDIRECT_URL = 'role_select'
 LOGOUT_REDIRECT_URL = 'login'
 
 # Session inactivity timeout: log an admin out after 15 minutes of no activity.

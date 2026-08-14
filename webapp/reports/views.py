@@ -19,6 +19,8 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import Group
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.core.cache import cache
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -28,11 +30,16 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
-from . import connect, folders
+from . import connect, folders, network
+from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import ProfileForm, SystemConfigForm, UserAccountForm
 from .models import ReportSubmission, RoleRequest, SystemConfig, UserProfile
-from .roles import ROLE_NAMES, is_role_admin, is_system_admin
+from .roles import (ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
+                    SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
+                    active_role, held_roles, is_network_admin, is_role_admin,
+                    role_screens,
+                    is_superuser, is_system_admin)
 from .services import (
     EmailNotConfigured,
     PrometheusUnavailable,
@@ -98,6 +105,105 @@ def _profile_author(user) -> str:
     prof = getattr(user, "profile", None)
     title = (getattr(prof, "job_title", "") or "").strip() if prof else ""
     return f"{name}, {title}" if title else name
+
+
+@never_cache
+@login_required
+def role_empty(request):
+    """The landing screen for a role that exists but owns nothing yet.
+
+    Shared by every such role rather than written once per role: they differ only in their
+    name, and a copy per role would drift the moment one of them gained a screen.
+
+    The way out depends on whether there IS one. Someone who holds other roles goes back to
+    the picker; someone who holds only this one would be bounced straight back here by that
+    same picker (it auto-applies a single role), so they are offered sign-out instead of a
+    button that loops.
+    """
+    roles = held_roles(request.user)
+    empty = [r for r in roles if r in roles_without_screens()]
+    if not empty:
+        return redirect("report_form")
+    # Name the role they are actually acting as, falling back to the first empty one they
+    # hold — arriving here by URL without a selection should still say something true.
+    current = active_role(request)
+    role = current if current in empty else empty[0]
+    return render(request, "reports/role_empty.html", {
+        "role": role,
+        "description": ROLE_DESCRIPTIONS.get(role, ""),
+        "can_go_back": len(roles) > 1,
+    })
+
+
+@never_cache
+@login_required
+def network_dashboard(request):
+    """Network Analyses Dashboard — the network admin's landing screen.
+
+    The counterpart to the System Analyses Dashboard: that one lists business systems, this
+    one lists network devices. Same shape, same grid, different inventory — a network admin
+    should not have to read past RTGS and Temenos to reach a switch.
+
+    One tile today, because one device is monitored. It is still a picker rather than a
+    straight redirect to the report: the grid is where the second and third device land when
+    the firewall and the wireless controller are onboarded, and a screen that silently
+    becomes a list later is less confusing than one that appears from nowhere.
+    """
+    if not is_network_admin(request.user):
+        return redirect("report_form")
+    try:
+        devices = network.device_inventory()
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    return render(request, "reports/network_select.html", {
+        "devices": devices,
+        "device_count": len(devices),
+        "reachable_count": sum(1 for d in devices if d["reachable"]),
+    })
+
+
+@never_cache
+@login_required
+def role_select(request):
+    """The screen you land on after signing in: which role am I working as today?
+
+    Only shown when there is a genuine choice. One role means there is nothing to pick, so
+    it is selected silently and the user goes straight to work — a confirmation dialog with
+    a single button is a speed bump, not a feature.
+
+    Selecting a role SCOPES THE MENU. It does not grant anything: the per-view permission
+    checks are untouched, so a role you do not hold stays shut whatever is chosen here.
+    """
+    roles = held_roles(request.user)
+
+    if request.method == "POST":
+        chosen = (request.POST.get("role") or "").strip()
+        if chosen == "__all__":
+            # An explicit way back to the pre-picker behaviour, for someone who genuinely
+            # wears several hats at once and does not want a narrowed menu.
+            request.session.pop(ROLE_SESSION_KEY, None)
+            messages.success(request, "Showing every role you hold.")
+        elif chosen in roles:
+            request.session[ROLE_SESSION_KEY] = chosen
+            messages.success(request, f"Working as {chosen}.")
+            return redirect(ROLE_HOME.get(chosen, "report_form"))
+        else:
+            messages.error(request, "That is not a role you hold.")
+            return redirect("role_select")
+        return redirect("report_form")
+
+    if len(roles) <= 1:
+        if roles:
+            request.session[ROLE_SESSION_KEY] = roles[0]
+            return redirect(ROLE_HOME.get(roles[0], "report_form"))
+        return redirect("report_form")
+
+    return render(request, "reports/role_select.html", {
+        "roles": [{"name": r,
+                   "description": ROLE_DESCRIPTIONS.get(r, ""),
+                   "pages": role_screens(r)} for r in roles],
+        "current": active_role(request),
+    })
 
 
 @login_required
@@ -461,6 +567,25 @@ def folder_watch_data(request):
         return JsonResponse({"ok": False, "error": str(exc)}, status=502)
 
 
+@never_cache
+@login_required
+def network_report(request):
+    """Network Admin Report — phase 1.
+
+    Renders what the SNMP job actually collects and states plainly what it does not. The
+    empty panels are the point: an Errors section that is blank because nothing counts
+    errors must not read as "no errors", which on the question the admins actually asked
+    would be a false all-clear.
+    """
+    if not is_network_admin(request.user):
+        return redirect("report_form")
+    try:
+        data = network.collect()
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    return render(request, "reports/network_report.html", {"n": data})
+
+
 @login_required
 @require_POST
 def mark_notifications_seen(request):
@@ -551,6 +676,18 @@ def no_role(request):
     return render(request, "reports/no_role.html", {"roles": roles, "has_any": bool(my_roles)})
 
 
+def _other_superusers(exclude) -> int:
+    """How many superusers would remain if `exclude` were deleted.
+
+    Guards the one irreversible mistake this console can make. Deleting the last superuser
+    leaves an app whose account tools nobody can reach — recoverable only from a shell on
+    the server, which is exactly the situation a self-service console exists to avoid.
+    """
+    return (get_user_model().objects
+            .filter(is_superuser=True, is_active=True)
+            .exclude(pk=exclude.pk).count())
+
+
 def _grant_role(user, role, keycloak):
     """Grant a single role — in Keycloak (the store) when enabled, else the local group mirror."""
     if keycloak.enabled():
@@ -592,13 +729,92 @@ def roles_console(request):
                     grp, _ = Group.objects.get_or_create(name=r)
                     user.groups.add(grp) if r in selected else user.groups.remove(grp)
             messages.success(request, f"Updated roles for {user.get_username()}.")
+
+        # ---- account actions: superuser only ------------------------------------------
+        # These act on the ACCOUNT rather than on its roles, so they are gated on
+        # is_superuser rather than on the Administrator role. Every guard below is
+        # enforced HERE, not in the template: hiding a button is presentation, and this
+        # is the layer a crafted POST actually reaches.
+        elif action in ("reset_password", "delete_user"):
+            if not is_superuser(request.user):
+                messages.error(request, "Only a superuser may reset passwords or delete accounts.")
+                return redirect("roles_console")
+
+            target = get_object_or_404(get_user_model(), pk=request.POST.get("user_id"))
+
+            if action == "reset_password":
+                if keycloak.enabled():
+                    # The password lives in Keycloak, not here. Writing to the local hash
+                    # would silently do nothing at login and look like it worked.
+                    messages.error(request, "Passwords are managed in Keycloak — reset it there.")
+                    return redirect("roles_console")
+                pw1 = request.POST.get("new_password") or ""
+                pw2 = request.POST.get("new_password2") or ""
+                if pw1 != pw2:
+                    messages.error(request, "The two passwords did not match — nothing was changed.")
+                    return redirect("roles_console")
+                try:
+                    validate_password(pw1, target)
+                except ValidationError as exc:
+                    messages.error(request, " ".join(exc.messages))
+                    return redirect("roles_console")
+                target.set_password(pw1)
+                target.save(update_fields=["password"])
+                # Changing a password does not, by itself, end that account's live sessions.
+                # Django's session auth hash is derived from the password, so every existing
+                # session for this user stops validating on its next request — which is the
+                # behaviour we want and the reason nothing else has to be cleaned up here.
+                messages.success(
+                    request,
+                    f"Password reset for {target.get_username()}. Their existing sessions are now invalid.")
+
+            else:   # delete_user
+                # The self-guard below is what actually keeps at least one superuser alive:
+                # a superuser deleting ANOTHER superuser always leaves themselves, and they
+                # cannot delete themselves, so the population can never reach zero. The
+                # last-superuser check after it is therefore unreachable today and kept as
+                # defence in depth — if the self-guard is ever relaxed (say, to allow
+                # deleting your own account), it becomes the thing standing between this
+                # console and an app whose account tools nobody can reach.
+                if target.pk == request.user.pk:
+                    messages.error(request, "You cannot delete the account you are signed in as.")
+                    return redirect("roles_console")
+                if target.is_superuser and _other_superusers(target) == 0:
+                    messages.error(
+                        request,
+                        f"{target.get_username()} is the only superuser left. Grant superuser to "
+                        "another account first, or this app can no longer manage its own accounts.")
+                    return redirect("roles_console")
+                # Deletion is irreversible and there is no undo in this UI, so the username
+                # has to be typed back. A misplaced click cannot satisfy this.
+                if (request.POST.get("confirm_username") or "").strip() != target.get_username():
+                    messages.error(request, "Type the username exactly to confirm deletion.")
+                    return redirect("roles_console")
+                name = target.get_username()
+                target.delete()
+                messages.success(request, f"Deleted the account {name}.")
+
         return redirect("roles_console")
 
     pending = RoleRequest.objects.filter(status="pending").select_related("user")
     users = get_user_model().objects.all().prefetch_related("groups").order_by("username")
-    user_rows = [{"u": u, "roles": set(u.groups.values_list("name", flat=True))} for u in users]
+    me = request.user
+    # `deletable` is computed per row so the template never has to re-derive a rule the view
+    # already enforces — the two can then not drift into a button that promises what the
+    # POST handler refuses.
+    user_rows = [{
+        "u": u,
+        "roles": set(u.groups.values_list("name", flat=True)),
+        "is_superuser": u.is_superuser,
+        "is_me": u.pk == me.pk,
+        "deletable": (u.pk != me.pk
+                      and not (u.is_superuser and _other_superusers(u) == 0)),
+    } for u in users]
     return render(request, "reports/roles.html", {
         "pending": pending, "user_rows": user_rows, "role_names": ROLE_NAMES,
+        "can_manage_accounts": is_superuser(me),
+        # Local password resets are meaningless when Keycloak owns the credential.
+        "passwords_are_local": not keycloak_mod.enabled(),
     })
 
 

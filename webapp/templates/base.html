@@ -36,6 +36,14 @@
 {% block page_spinner %}
 <div class="page-spinner" id="pageSpinner" aria-hidden="true"><div class="spinner"></div></div>
 {% endblock %}
+{% comment %}
+  The app chrome: header, navigation drawer and back button.
+
+  Wrapped in a block so a page can render WITHOUT a menu. The role picker does exactly
+  that — it is shown before a role has been chosen, and offering the full navigation on it
+  would let the user walk straight past the choice the screen exists to ask for.
+{% endcomment %}
+{% block chrome %}
 {% if user.is_authenticated %}
   <header class="topbar">
     {% comment %}
@@ -44,8 +52,33 @@
       wordmark opens the drawer — and merging them would cost a navigation route to save a
       rectangle.
     {% endcomment %}
-    <div class="brand-pill">
+    <div class="brand-pill{% if can_switch_role %} has-back{% endif %}">
+      {% comment %}
+        The caret leaves the current role entirely and returns to the picker — the same
+        destination from every screen, System Admin's included. It is deliberately NOT the
+        hierarchical back button on the canvas, which walks one level up inside a role; this
+        one steps out of the role altogether, which is why it lives on the brand pill rather
+        than beside the page content.
+
+        Hidden when there is only one role: the picker auto-applies a single role and would
+        bounce straight back, so the button would be a no-op that looks like a way out.
+      {% endcomment %}
+      {% if can_switch_role %}
+      {% comment %}
+        Caret and crest are ONE anchor, not two sitting side by side — they look like a
+        single control, so a click anywhere on them has to do a single thing. Splitting the
+        hit area would mean the half a user aims at decides where they land, which is the
+        one behaviour a control that reads as one button must not have.
+
+        That single thing is "leave this role". It costs the crest its old Home link; the
+        dashboard is still one tap away in the drawer, and a control cannot honestly offer
+        two destinations while presenting as one.
+      {% endcomment %}
+      <a class="brand-back" href="{% url 'role_select' %}" title="Back to role select"
+         aria-label="Back to role select"><span class="brand-back-caret" aria-hidden="true">‹</span><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
+      {% else %}
       <a class="brand-icon" href="{% url 'report_form' %}" title="Home"><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
+      {% endif %}
       <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Grafana Reports</button>
     </div>
     <div class="spacer"></div>
@@ -87,9 +120,10 @@
       <div class="navmenu-panel" role="menu">
         <div class="navmenu-user">
           <div class="nm-name">{{ display_name|default:user.get_username }}</div>
-          <div class="nm-sub">@{{ user.get_username }}</div>
+          <div class="nm-sub">{% if active_role %}{{ active_role }}{% else %}@{{ user.get_username }}{% endif %}</div>
         </div>
         <a href="{% url 'profile' %}">My profile</a>
+        {% if can_switch_role %}<a href="{% url 'role_select' %}">Switch role</a>{% endif %}
         <form method="post" action="{% url 'logout' %}" class="navmenu-form">{% csrf_token %}
           <button type="submit">Sign out</button>
         </form>
@@ -100,25 +134,67 @@
   {# ---- navigation drawer (opens from the app title) ---- #}
   <div class="drawer-backdrop" id="drawerBackdrop"></div>
   <nav class="drawer" id="drawer" aria-label="Navigation" aria-hidden="true">
+    {% comment %}
+      The head names the ROLE you are working as, not the account you signed in with. The
+      account is already on the profile widget in the header; the role is what decides
+      everything else in this drawer, so it is what belongs at the top of it.
+
+      No close chevron here. The drawer closes on the backdrop, on Escape, and on the title
+      that opened it, so a dedicated button was a control earning its space three times over
+      — app.js binds it defensively (`if (drawerClose)`), so its absence is a no-op there.
+    {% endcomment %}
     <div class="drawer-head">
-      <button class="iconbtn" id="drawerClose" type="button" aria-label="Close">‹</button>
-      <span class="drawer-user">{{ user.get_full_name|default:user.get_username }}</span>
+      <span class="drawer-user">{% if active_role %}{{ active_role }}{% else %}{{ user.get_full_name|default:user.get_username }}{% endif %}</span>
     </div>
-    <a href="{% url 'report_form' %}">System Analyses Dashboard</a>
-    <a href="{% url 'connect' %}">Connect</a>
+    {% comment %}
+      The open screen is marked with an accent bar and accent text, and carries aria-current
+      so a screen reader announces it too — the colour is the fast signal, the attribute is
+      the accessible one, and neither is left doing the job alone.
+    {% endcomment %}
+    {% comment %}
+      The way back to the role picker. Shown only when there is more than one role to switch
+      between — for everyone else it would be a link to a screen that immediately bounces.
+    {% endcomment %}
+    {% if can_switch_role %}
+    <a href="{% url 'role_select' %}" class="drawer-role">
+      <span aria-hidden="true">‹</span> Back to role select
+    </a>
+    {% endif %}
+    {% if is_system_admin %}
+    <a href="{% url 'report_form' %}"{% if current_page == 'report_form' %} class="is-current" aria-current="page"{% elif 'report_form' in current_ancestors %} class="is-ancestor"{% endif %}>System Analyses Dashboard</a>
+    {% endif %}
+    {% comment %}
+      The network dashboard is a parent in the same shape as Folder Watch: the device picker,
+      with one child per monitored device. One today; the firewall and wireless controller
+      join the same list rather than needing a new place to live.
+    {% endcomment %}
+    {% if is_network_admin %}
+    <a href="{% url 'network_dashboard' %}"{% if current_page == 'network_dashboard' %} class="is-current" aria-current="page"{% elif 'network_dashboard' in current_ancestors %} class="is-ancestor"{% endif %}>Network Analyses Dashboard</a>
+    <div class="drawer-children">
+      <a href="{% url 'network_report' %}" class="drawer-child{% if current_page == 'network_report' %} is-current{% endif %}"{% if current_page == 'network_report' %} aria-current="page"{% endif %}>Core Switch</a>
+    </div>
+    {% endif %}
+    <a href="{% url 'connect' %}"{% if current_page == 'connect' %} class="is-current" aria-current="page"{% elif 'connect' in current_ancestors %} class="is-ancestor"{% endif %}>Connect</a>
     {% comment %}
       Folder Watch is a parent: one child today (Temenos), more as other hosts start
       publishing folder metrics. System Admin only — the view enforces it too.
     {% endcomment %}
     {% if is_system_admin %}
-    <a href="{% url 'folder_watch' %}">Folder Watch</a>
+    <a href="{% url 'folder_watch' %}"{% if current_page == 'folder_watch' %} class="is-current" aria-current="page"{% elif 'folder_watch' in current_ancestors %} class="is-ancestor"{% endif %}>Folder Watch</a>
     <div class="drawer-children">
-      <a href="{% url 'folder_watch_temenos' %}" class="drawer-child">Temenos</a>
+      <a href="{% url 'folder_watch_temenos' %}" class="drawer-child{% if current_page == 'folder_watch_temenos' %} is-current{% endif %}"{% if current_page == 'folder_watch_temenos' %} aria-current="page"{% endif %}>Temenos</a>
     </div>
     {% endif %}
-    <a href="{% url 'history' %}">History</a>
+    <a href="{% url 'history' %}"{% if current_page == 'history' %} class="is-current" aria-current="page"{% elif 'history' in current_ancestors %} class="is-ancestor"{% endif %}>History</a>
+    {% comment %}
+      The Administrator's own screens. Configuration also appears under the ☰ Settings menu,
+      which is where it lived before roles scoped the drawer — but the drawer is what now
+      answers "what does this role open", and a role screen missing from it reads as a page
+      that does not exist.
+    {% endcomment %}
     {% if is_role_admin %}
-    <a href="{% url 'roles_console' %}">Roles</a>
+    <a href="{% url 'roles_console' %}"{% if current_page == 'roles_console' %} class="is-current" aria-current="page"{% elif 'roles_console' in current_ancestors %} class="is-ancestor"{% endif %}>Roles</a>
+    <a href="{% url 'system_settings' %}"{% if current_page == 'system_settings' %} class="is-current" aria-current="page"{% elif 'system_settings' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
     {% endif %}
   </nav>
 
@@ -129,6 +205,7 @@
   </a>
   {% endif %}
 {% endif %}
+{% endblock %}
 
 {% if messages %}
   <div class="container" style="padding-bottom:0">

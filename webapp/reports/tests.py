@@ -10,19 +10,22 @@ import json
 import re
 import time
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.test import TestCase
 from django.urls import reverse
+from django.utils.html import escape
 from unittest import mock
 
 import generate_report as gr
 
-from . import folders
+from . import folders, network
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
 from .models import ReportSubmission, RoleRequest, SystemConfig
-from .services import FlagVM, Snapshot, SystemVM, build_overview
+from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin
+from .services import FlagVM, Snapshot, SystemVM, build_overview, list_systems
 
 
 def _snapshot_from(systems, store, cfg, only, token):
@@ -1328,3 +1331,1102 @@ class FolderWatchAccess(TestCase):
         su = get_user_model().objects.create_superuser("root", password="pw12345!")
         self.client.force_login(su)
         self.assertEqual(self.client.get(reverse("folder_watch")).status_code, 200)
+
+
+# =============================================================================== #
+#  NETWORK ADMIN REPORT
+#
+#  Phase 1 renders three collected metrics and declares twelve uncollected ones. The
+#  tests below are weighted accordingly: most guard the DECLARATION, because that is
+#  the part a reader can be misled by. A panel that is empty because nothing measures
+#  it must never be readable as a clean bill of health.
+# =============================================================================== #
+def _snmp_series(up=3, down=2):
+    """ifOperStatus shaped like snmp_exporter's if_mib output: ifIndex only, and ifDescr
+    present but EMPTY, which is what the real device actually returns."""
+    oper = []
+    for i in range(up):
+        oper.append({"labels": {"ifIndex": str(i + 1), "ifDescr": "",
+                                "instance": "10.0.0.1", "system": "RBZ Network"}, "value": 1.0})
+    for i in range(down):
+        oper.append({"labels": {"ifIndex": str(100 + i), "ifDescr": "",
+                                "instance": "10.0.0.1", "system": "RBZ Network"}, "value": 2.0})
+    return oper
+
+
+def _snmp_prom(oper, rin=None, rout=None):
+    """A Prometheus whose answers depend on which query it is asked."""
+    prom = mock.MagicMock()
+
+    def q(expr):
+        if expr == "ifOperStatus":
+            return oper
+        if expr.startswith("rate(ifInOctets"):
+            return rin or []
+        if expr.startswith("rate(ifOutOctets"):
+            return rout or []
+        return [{"labels": {}, "value": 1.0}]        # vector(1) reachability probe
+
+    prom.query.side_effect = q
+    return mock.patch("reports.network._prometheus", return_value=(prom, "http://prom:9090"))
+
+
+class NetworkReportCollection(TestCase):
+    """What collect() makes of the exporter's output."""
+
+    def test_link_states_are_split_on_ifoperstatus_1(self):
+        with _snmp_prom(_snmp_series(up=4, down=3)):
+            d = network.collect()
+        self.assertEqual((d["iface_count"], d["up_count"], d["down_count"]), (7, 4, 3))
+
+    def test_non_up_states_other_than_down_are_named_not_lumped(self):
+        """IF-MIB has seven states. 'lowerLayerDown' is not the same fault as 'down', and a
+        report rendering both as the word 'down' sends someone to check the wrong cable."""
+        oper = _snmp_series(up=1, down=0)
+        oper.append({"labels": {"ifIndex": "9", "instance": "10.0.0.1"}, "value": 7.0})
+        with _snmp_prom(oper):
+            d = network.collect()
+        self.assertEqual([i["status_text"] for i in d["down_ports"]], ["lower layer down"])
+
+    def test_interfaces_fall_back_to_index_when_ifdescr_is_empty(self):
+        """ifDescr is collected as a label but arrives empty, so there is no name to show.
+        'ifIndex 3' is honestly unhelpful; 'Interface 3' would imply a name we do not have."""
+        with _snmp_prom(_snmp_series(up=1, down=0)):
+            d = network.collect()
+        self.assertEqual(d["interfaces"][0]["name"], "ifIndex 1")
+        self.assertFalse(d["has_names"])
+
+    def test_a_real_ifdescr_is_preferred_when_the_walk_ever_provides_one(self):
+        oper = _snmp_series(up=1, down=0)
+        oper[0]["labels"]["ifDescr"] = "GigabitEthernet1/0/1"
+        with _snmp_prom(oper):
+            d = network.collect()
+        self.assertEqual(d["interfaces"][0]["name"], "GigabitEthernet1/0/1")
+        self.assertTrue(d["has_names"])
+
+    def test_octets_are_converted_to_bits_per_second(self):
+        """SNMP counts OCTETS; network people speak in bits. A factor of eight is the
+        difference between 'this port is fine' and 'this port is saturated'."""
+        rin = [{"labels": {"ifIndex": "1"}, "value": 1000000.0}]        # 1 MB/s
+        with _snmp_prom(_snmp_series(up=1, down=0), rin=rin):
+            d = network.collect()
+        self.assertEqual(d["interfaces"][0]["in_bps"], 8000000.0)
+        self.assertEqual(d["interfaces"][0]["in_text"], "8.0 Mbps")
+
+    def test_longest_bar_is_full_width_and_nothing_overflows(self):
+        """Bars scale to the heaviest SINGLE direction shown. Scaling to a port's in+out
+        total instead leaves the longest bar short of full, so the visual maximum is a
+        length nothing ever occupies and every bar reads quieter than the truth."""
+        rin = [{"labels": {"ifIndex": "1"}, "value": 100.0},
+               {"labels": {"ifIndex": "2"}, "value": 50.0}]
+        rout = [{"labels": {"ifIndex": "1"}, "value": 100.0},
+                {"labels": {"ifIndex": "2"}, "value": 25.0}]
+        with _snmp_prom(_snmp_series(up=3, down=0), rin=rin, rout=rout):
+            d = network.collect()
+        widths = [p for i in d["busiest"] for p in (i["in_pct"], i["out_pct"])]
+        self.assertEqual(max(widths), 100.0)
+        self.assertTrue(all(0 <= w <= 100 for w in widths), widths)
+
+    def test_counter_wrap_time_is_computed_from_the_live_peak(self):
+        """The wrap figure is the page's central caveat, so it must track the traffic. A
+        hardcoded constant on a page whose point is 'this number is under-reported' would
+        be its own small lie. 2^32 bytes at 8 bytes/s = 2^29 seconds."""
+        rin = [{"labels": {"ifIndex": "1"}, "value": 8.0}]
+        with _snmp_prom(_snmp_series(up=1, down=0), rin=rin):
+            d = network.collect()
+        self.assertEqual(d["wrap_seconds"], round((2 ** 32) / 8))
+
+    def test_a_missing_metric_does_not_break_the_page(self):
+        """Nothing polls ifHighSpeed today; if a query fails or the metric is absent the
+        report must still render the parts that do exist."""
+        prom = mock.MagicMock()
+        oper = _snmp_series(up=2, down=1)
+
+        def q(expr):
+            if expr == "ifOperStatus":
+                return oper
+            if expr.startswith("rate("):
+                raise RuntimeError("no such metric")
+            return [{"labels": {}, "value": 1.0}]
+
+        prom.query.side_effect = q
+        with mock.patch("reports.network._prometheus", return_value=(prom, "http://p")):
+            d = network.collect()
+        self.assertEqual(d["up_count"], 2)
+        self.assertEqual(d["busiest"], [])
+
+    def test_prometheus_being_down_is_raised_not_rendered_as_zero(self):
+        """An unreachable Prometheus must not become 'zero interfaces, all quiet'."""
+        prom = mock.MagicMock()
+        prom.query.side_effect = RuntimeError("connection refused")
+        with mock.patch("reports.network._prometheus", return_value=(prom, "http://p")):
+            with self.assertRaises(network.NetworkUnavailable):
+                network.collect()
+
+
+class NetworkReportPage(TestCase):
+    """What the admin actually reads."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("netadm", password="pw12345!")
+        self.user.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="netadm", password="pw12345!")
+
+    def _body(self):
+        rin = [{"labels": {"ifIndex": "1"}, "value": 90000000.0}]
+        rout = [{"labels": {"ifIndex": "1"}, "value": 40000000.0}]
+        with _snmp_prom(_snmp_series(up=3, down=2), rin=rin, rout=rout):
+            resp = self.client.get(reverse("network_report"))
+        self.assertEqual(resp.status_code, 200)
+        return resp.content.decode()
+
+    def test_every_requested_metric_appears_even_when_uncollected(self):
+        """The admins named fifteen metrics. Dropping the twelve we cannot collect would
+        make the report look complete; each one gets a card and a state instead."""
+        body = self._body()
+        self.assertEqual(body.count('class="nw-card is-'), len(network.CATALOGUE))
+        for m in network.CATALOGUE:
+            # names carry "&" ("Temperature & fans"), which Django escapes on the way out
+            self.assertIn(escape(m["name"]), body)
+
+    def test_uncollected_metrics_say_so_in_words_not_only_in_colour(self):
+        body = self._body()
+        self.assertEqual(body.count("Not collected"),
+                         sum(1 for m in network.CATALOGUE if m["state"] == "missing"))
+
+    def test_every_uncollected_metric_says_what_it_would_take(self):
+        """'Not collected' on its own is a dead end. Each card carries the actual next
+        step, which is also what keeps the phase-2 list honest."""
+        for m in network.CATALOGUE:
+            if m["state"] != "live":
+                self.assertTrue(m.get("needs"), m["name"])
+
+    def test_the_32_bit_counter_caveat_is_stated_on_the_traffic_panel(self):
+        """The admins asked for ifHCInOctets by name and are not getting it. A throughput
+        figure presented without that caveat is a wrong number wearing a confident face."""
+        body = self._body()
+        self.assertIn("ifHCInOctets", body)
+        self.assertIn("floor, not a measurement", body)
+
+    def test_down_ports_are_not_presented_as_faults(self):
+        """Without ifAdminStatus a deliberately-shut port is indistinguishable from a
+        failed one, so the count must not be handed over as a fault total."""
+        self.assertIn("not necessarily", self._body())
+
+    def test_no_utilisation_percentage_is_claimed_anywhere(self):
+        """ifHighSpeed is not collected, so there is no capacity to be a percentage OF, and
+        any utilisation FIGURE on this page would be invented. Naming the concept is fine
+        and necessary — the phase-2 table has to say that collecting port speed is what
+        would enable it — so this looks for a number wearing the units, not the word."""
+        body = self._body()
+        self.assertFalse(re.search(r"[\d.]+\s*%\s*utilisation", body, re.I))
+        self.assertFalse(re.search(r"[\d.]+\s*%\s*utilization", body, re.I))
+        # and the absence is stated outright rather than left to be noticed
+        self.assertIn("No percentage utilisation appears anywhere", body)
+
+    def test_the_chart_is_also_readable_as_numbers(self):
+        body = self._body()
+        self.assertIn("Show as a table", body)
+        self.assertIn("Inbound", body)          # legend, so identity is never colour alone
+
+    def test_no_template_comment_text_reaches_the_screen(self):
+        """Django's {# #} is SINGLE-LINE. Spanning it across lines renders it as visible
+        prose, which has already shipped to this UI once. Anything multi-line uses
+        {% comment %}. Asserts on text a user can read, with script/style stripped."""
+        body = self._body()
+        visible = re.sub(r"<script.*?</script>", "", body, flags=re.S)
+        visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        for leak in ("{#", "#}", "endcomment", "comment %}"):
+            self.assertNotIn(leak, visible, "template comment syntax leaked: " + leak)
+        for prose in ("false all-clear", "honest headline", "Bar geometry belongs here"):
+            self.assertNotIn(prose, visible)
+
+
+class NetworkReportAccess(TestCase):
+    """The report is for the people who run the network gear."""
+
+    def setUp(self):
+        self.net = get_user_model().objects.create_user("na", password="pw12345!")
+        self.net.groups.add(Group.objects.get(name="Network Admin"))
+        self.sys = get_user_model().objects.create_user("sa", password="pw12345!")
+        self.sys.groups.add(Group.objects.get(name="System Admin"))
+        self.gov = get_user_model().objects.create_user("ga", password="pw12345!")
+        self.gov.groups.add(Group.objects.get(name="Gov Systems Admin"))
+
+    def test_requires_login(self):
+        resp = self.client.get(reverse("network_report"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("/accounts/login/", resp["Location"])
+
+    def test_an_unrelated_role_is_turned_away_from_the_url_itself(self):
+        """Hiding the nav link is not access control."""
+        self.client.login(username="ga", password="pw12345!")
+        resp = self.client.get(reverse("network_report"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertNotIn("/network/", resp["Location"])
+
+    def test_the_nav_link_follows_the_same_rule_as_the_url(self):
+        """A visible link to a page that bounces you is worse than no link at all.
+
+        The network screens are reached through their own dashboard now, so the link to
+        look for is that dashboard rather than the report directly."""
+        self.client.login(username="ga", password="pw12345!")
+        self.assertNotContains(self.client.get(reverse("history")), "Network Analyses Dashboard")
+        self.client.logout()
+        self.client.login(username="na", password="pw12345!")
+        self.assertContains(self.client.get(reverse("history")), "Network Analyses Dashboard")
+
+    def test_only_network_admin_holds_it(self):
+        """Systems and network are separated deliberately: the System Analyses Dashboard is
+        the systems role's screen and the network ones are not. A platform admin who needs
+        these is granted the Network Admin role, which leaves a record."""
+        self.assertTrue(is_network_admin(self.net))
+        self.assertFalse(is_network_admin(self.sys))
+        self.assertFalse(is_network_admin(self.gov))
+
+
+# =============================================================================== #
+#  SUPERUSER ACCOUNT MANAGEMENT
+#
+#  Resetting a password and deleting an account are the two things this console does
+#  that cannot be undone from inside it. The tests are therefore mostly about REFUSAL:
+#  who is turned away, and which deletions are blocked outright.
+# =============================================================================== #
+class AccountManagementAccess(TestCase):
+    """Only a superuser reaches these actions — the Administrator role is not enough."""
+
+    def setUp(self):
+        U = get_user_model()
+        self.root = U.objects.create_superuser("root", password="pw12345!")
+        self.spare = U.objects.create_superuser("spare", password="pw12345!")
+        self.roleadm = U.objects.create_user("radm", password="pw12345!")
+        self.roleadm.groups.add(Group.objects.get(name="Administrator"))
+        self.victim = U.objects.create_user("victim", password="pw12345!")
+
+    def test_an_administrator_cannot_reset_a_password(self):
+        """Administrator manages who holds which role. This one can take an account over,
+        which is a different kind of power and deliberately not granted with it."""
+        self.client.login(username="radm", password="pw12345!")
+        self.client.post(reverse("roles_console"), {
+            "action": "reset_password", "user_id": self.victim.pk,
+            "new_password": "hijacked!123", "new_password2": "hijacked!123"})
+        self.victim.refresh_from_db()
+        self.assertTrue(self.victim.check_password("pw12345!"))
+
+    def test_an_administrator_cannot_delete_an_account(self):
+        self.client.login(username="radm", password="pw12345!")
+        self.client.post(reverse("roles_console"), {
+            "action": "delete_user", "user_id": self.victim.pk,
+            "confirm_username": "victim"})
+        self.assertTrue(get_user_model().objects.filter(pk=self.victim.pk).exists())
+
+    def test_the_column_is_hidden_from_a_non_superuser(self):
+        self.client.login(username="radm", password="pw12345!")
+        self.assertNotContains(self.client.get(reverse("roles_console")), "Delete account")
+
+    def test_a_superuser_sees_it(self):
+        self.client.login(username="root", password="pw12345!")
+        self.assertContains(self.client.get(reverse("roles_console")), "Delete account")
+
+
+class AccountPasswordReset(TestCase):
+    def setUp(self):
+        U = get_user_model()
+        self.root = U.objects.create_superuser("root", password="pw12345!")
+        self.victim = U.objects.create_user("victim", password="oldpw12345!")
+        self.client.login(username="root", password="pw12345!")
+
+    def _post(self, pw1, pw2=None):
+        return self.client.post(reverse("roles_console"), {
+            "action": "reset_password", "user_id": self.victim.pk,
+            "new_password": pw1, "new_password2": pw1 if pw2 is None else pw2}, follow=True)
+
+    def test_a_superuser_can_reset_another_account(self):
+        self._post("Str0ng!Passphrase42")
+        self.victim.refresh_from_db()
+        self.assertTrue(self.victim.check_password("Str0ng!Passphrase42"))
+
+    def test_mismatched_confirmation_changes_nothing(self):
+        """A typo in the second box must not half-apply — the admin would walk away believing
+        a password they never actually set."""
+        resp = self._post("Str0ng!Passphrase42", "Str0ng!Passphrase43")
+        self.victim.refresh_from_db()
+        self.assertTrue(self.victim.check_password("oldpw12345!"))
+        self.assertContains(resp, "did not match")
+
+    def test_a_weak_password_is_refused_by_django_s_own_validators(self):
+        resp = self._post("123")
+        self.victim.refresh_from_db()
+        self.assertTrue(self.victim.check_password("oldpw12345!"))
+        self.assertNotContains(resp, "Password reset for")
+
+    def test_the_stored_value_is_a_hash_not_the_password(self):
+        """The reason this console can set a password but never show one."""
+        self._post("Str0ng!Passphrase42")
+        self.victim.refresh_from_db()
+        self.assertNotIn("Str0ng!Passphrase42", self.victim.password)
+        self.assertTrue(self.victim.password.startswith("pbkdf2_"))
+
+
+class AccountDeletion(TestCase):
+    def setUp(self):
+        U = get_user_model()
+        self.root = U.objects.create_superuser("root", password="pw12345!")
+        self.victim = U.objects.create_user("victim", password="pw12345!")
+        self.client.login(username="root", password="pw12345!")
+
+    def _delete(self, target, confirm):
+        return self.client.post(reverse("roles_console"), {
+            "action": "delete_user", "user_id": target.pk,
+            "confirm_username": confirm}, follow=True)
+
+    def test_a_superuser_can_delete_an_ordinary_account(self):
+        self._delete(self.victim, "victim")
+        self.assertFalse(get_user_model().objects.filter(username="victim").exists())
+
+    def test_the_username_must_be_typed_back_exactly(self):
+        """There is no undo, so a stray click must not be sufficient."""
+        resp = self._delete(self.victim, "vict")
+        self.assertTrue(get_user_model().objects.filter(username="victim").exists())
+        self.assertContains(resp, "Type the username exactly")
+
+    def test_you_cannot_delete_the_account_you_are_signed_in_as(self):
+        resp = self._delete(self.root, "root")
+        self.assertTrue(get_user_model().objects.filter(username="root").exists())
+        self.assertContains(resp, "signed in as")
+
+    def test_the_superuser_population_can_never_reach_zero(self):
+        """The one irreversible mistake this console could make is an app whose account tools
+        nobody can reach, recoverable only from a shell on the server.
+
+        What actually prevents it is the self-guard, not the last-superuser check: a
+        superuser deleting ANOTHER superuser always leaves themselves behind, and they
+        cannot delete themselves. So the invariant is tested here as an invariant."""
+        U = get_user_model()
+        other = U.objects.create_superuser("root2", password="pw12345!")
+        self.client.logout()
+        self.client.login(username="root2", password="pw12345!")
+
+        self._delete(self.root, "root")                    # allowed: two superusers existed
+        self.assertFalse(U.objects.filter(username="root").exists())
+
+        resp = self._delete(other, "root2")                # refused: it is the actor's own
+        self.assertTrue(U.objects.filter(username="root2").exists())
+        self.assertContains(resp, "signed in as")
+        self.assertEqual(U.objects.filter(is_superuser=True, is_active=True).count(), 1)
+
+    def test_the_last_superuser_guard_counts_correctly(self):
+        """Unreachable through the UI while the self-guard stands, so it is verified
+        directly — an unexercised guard is a guard nobody knows is broken."""
+        from reports.views import _other_superusers
+        U = get_user_model()
+        self.assertEqual(_other_superusers(self.root), 0)   # root is the only one
+        second = U.objects.create_superuser("root2", password="pw12345!")
+        self.assertEqual(_other_superusers(self.root), 1)
+        second.is_active = False                            # a disabled account is no fallback
+        second.save(update_fields=["is_active"])
+        self.assertEqual(_other_superusers(self.root), 0)
+
+    def test_deleting_an_account_keeps_its_reports_and_their_attribution(self):
+        """The audit trail must outlive the account. generated_by is SET_NULL and the author
+        name is stored as text, so history stays readable after the person leaves."""
+        sub = ReportSubmission.objects.create(
+            author="V. Ictim", generated_by=self.victim, theme="dark",
+            report_content={}, annotations={})
+        self._delete(self.victim, "victim")
+        sub.refresh_from_db()
+        self.assertIsNone(sub.generated_by)
+        self.assertEqual(sub.author, "V. Ictim")
+
+    def test_a_deleted_account_can_no_longer_sign_in(self):
+        self._delete(self.victim, "victim")
+        self.client.logout()
+        self.assertFalse(self.client.login(username="victim", password="pw12345!"))
+
+
+# =============================================================================== #
+#  ROLE SELECTION
+#
+#  Choosing a role NARROWS a menu the user was already entitled to see. The most
+#  important tests here are the ones proving it cannot do the opposite.
+# =============================================================================== #
+class RoleSelectScreen(TestCase):
+    def setUp(self):
+        U = get_user_model()
+        self.multi = U.objects.create_user("multi", password="pw12345!")
+        self.multi.groups.add(Group.objects.get(name="System Admin"))
+        self.multi.groups.add(Group.objects.get(name="Network Admin"))
+        self.single = U.objects.create_user("single", password="pw12345!")
+        self.single.groups.add(Group.objects.get(name="System Admin"))
+
+    def test_it_is_where_login_lands(self):
+        """LOGIN_REDIRECT_URL points here, so the choice is offered before the menu is."""
+        resp = self.client.post(reverse("login"),
+                                {"username": "multi", "password": "pw12345!"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp["Location"], reverse("role_select"))
+
+    def test_a_user_with_one_role_is_never_asked(self):
+        """A question with a single answer is a speed bump. The one role is applied silently
+        and the user goes straight to work."""
+        self.client.login(username="single", password="pw12345!")
+        resp = self.client.get(reverse("role_select"))
+        self.assertRedirects(resp, reverse("report_form"))
+        self.assertEqual(self.client.session.get("active_role"), "System Admin")
+
+    def test_a_user_with_several_roles_is_offered_each_one(self):
+        self.client.login(username="multi", password="pw12345!")
+        resp = self.client.get(reverse("role_select"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "System Admin")
+        self.assertContains(resp, "Network Admin")
+        self.assertNotContains(resp, "Gov Systems Admin")      # not held
+
+    def test_a_superuser_is_offered_every_role(self):
+        """is_superuser already passes every gate, so the roles it can act as ARE all of
+        them. An empty picker would describe a restriction that does not exist."""
+        get_user_model().objects.create_superuser("root", password="pw12345!")
+        self.client.login(username="root", password="pw12345!")
+        resp = self.client.get(reverse("role_select"))
+        for role in ROLE_NAMES:
+            self.assertContains(resp, role)
+
+    def test_choosing_a_role_records_it_and_gets_on_with_the_job(self):
+        """Landing is role-specific: picking Network Admin must not drop you on a systems
+        screen your own role no longer shows."""
+        self.client.login(username="multi", password="pw12345!")
+        resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        self.assertRedirects(resp, reverse("network_dashboard"))
+        self.assertEqual(self.client.session["active_role"], "Network Admin")
+
+    def test_the_escape_hatch_restores_the_full_menu(self):
+        """Someone who genuinely wears several hats at once should not have to keep coming
+        back here, so the pre-picker behaviour stays available as a deliberate choice."""
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        self.client.post(reverse("role_select"), {"role": "__all__"})
+        self.assertIsNone(self.client.session.get("active_role"))
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertIn("Folder Watch", body)
+        self.assertIn("Network Analyses Dashboard", body)
+
+    def test_the_drawer_head_names_the_role_being_worn(self):
+        """The head names the ROLE, not the account — the account is already on the profile
+        widget, and the role is what decides everything else in the drawer."""
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        body = self.client.get(reverse("history")).content.decode()
+        head = body[body.find("drawer-head"):body.find("</div>", body.find("drawer-head"))]
+        self.assertIn("System Admin", head)
+        self.assertNotIn("multi", head)
+
+    def test_the_way_back_is_offered_only_when_there_is_a_choice(self):
+        """Asserted on the LINK rather than its wording, so relabelling the entry does not
+        quietly turn this into a test of nothing."""
+        self.client.login(username="multi", password="pw12345!")
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertIn(reverse("role_select"), body)
+        self.assertIn("Back to role select", body)
+        self.client.logout()
+        self.client.login(username="single", password="pw12345!")
+        self.assertNotIn(reverse("role_select"),
+                         self.client.get(reverse("history")).content.decode())
+
+    def test_the_drawer_has_no_close_button_of_its_own(self):
+        """It closes on the backdrop, on Escape, and on the title that opened it, so a
+        dedicated chevron was a control earning its space three times over. app.js binds it
+        defensively, so its absence is a no-op there — this pins that it stays absent."""
+        self.client.login(username="multi", password="pw12345!")
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertNotIn("drawerClose", body)
+
+
+    def test_the_picker_renders_without_any_navigation(self):
+        """The menu is what this screen is choosing. Showing it here would let the user walk
+        straight past the question the page exists to ask."""
+        self.client.login(username="multi", password="pw12345!")
+        body = self.client.get(reverse("role_select")).content.decode()
+        self.assertNotIn('class="topbar"', body)
+        self.assertNotIn('class="drawer"', body)
+        for link in ("System Analyses Dashboard", "Folder Watch", "Network Report"):
+            self.assertNotIn(link, body)
+
+    def test_the_picker_is_never_a_trap(self):
+        """No header means no Sign out in the usual place, so the page carries its own."""
+        self.client.login(username="multi", password="pw12345!")
+        self.assertContains(self.client.get(reverse("role_select")), "Sign out")
+
+    def test_ordinary_pages_still_have_their_chrome(self):
+        """The chrome block is overridden on ONE page; every other page must be untouched."""
+        self.client.login(username="multi", password="pw12345!")
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertIn('class="topbar"', body)
+        self.assertIn("System Analyses Dashboard", body)
+
+    def test_the_picker_describes_the_job_not_the_software(self):
+        """"Adds 2 screens" describes the app; someone deciding which hat to put on needs to
+        know whose job it is. Every role must carry a description, including the empty ones —
+        a blank tile is the one thing worse than a screen count."""
+        from reports.roles import ROLE_DESCRIPTIONS
+        self.client.login(username="multi", password="pw12345!")
+        body = self.client.get(reverse("role_select")).content.decode()
+        self.assertNotIn("Adds ", body)
+        self.assertNotIn("screens to the menu", body)
+        for role in ROLE_NAMES:
+            self.assertTrue(ROLE_DESCRIPTIONS.get(role), f"{role} has no description")
+
+    def test_a_data_endpoint_is_never_counted_as_a_screen(self):
+        """folder_watch_data is polled by JavaScript, never navigated to; `report` and
+        `generate` are steps inside the dashboard rather than destinations. role_screens()
+        is what any future "what does this role open" copy must be built from."""
+        from reports.roles import ROLE_PAGES as RP, role_screens
+        screens = role_screens("System Admin")
+        for hidden in ("folder_watch_data", "report", "generate"):
+            self.assertNotIn(hidden, screens)
+        self.assertLess(len(screens), len(RP["System Admin"]))
+
+
+class RoleSelectCannotGrant(TestCase):
+    """The whole point: selecting a role narrows, never widens."""
+
+    def setUp(self):
+        U = get_user_model()
+        self.net = U.objects.create_user("netonly", password="pw12345!")
+        self.net.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="netonly", password="pw12345!")
+
+    def test_a_role_you_do_not_hold_is_refused(self):
+        """The refusal is the assertion. Following the redirect then lands on the picker,
+        which auto-applies this user's ONE role — correct behaviour, and the reason the
+        check below is 'not Administrator' rather than 'nothing at all'."""
+        resp = self.client.post(reverse("role_select"), {"role": "Administrator"}, follow=True)
+        self.assertContains(resp, "not a role you hold")
+        self.assertNotEqual(self.client.session.get("active_role"), "Administrator")
+        self.assertEqual(self.client.session.get("active_role"), "Network Admin")
+
+    def test_a_forged_session_value_grants_nothing(self):
+        """Even if the session key is set to a role the user does not hold, every gate must
+        still refuse — the picker is navigation, not access control."""
+        session = self.client.session
+        session["active_role"] = "Administrator"
+        session.save()
+        resp = self.client.get(reverse("roles_console"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertNotIn("/roles/", resp["Location"])
+
+    def test_an_unheld_selection_is_discarded_rather_than_trusted(self):
+        session = self.client.session
+        session["active_role"] = "Administrator"
+        session.save()
+        body = self.client.get(reverse("history")).content.decode()
+        # falls back to UNSCOPED rather than to the role that was forged into the session
+        self.assertNotIn(">Roles<", body)
+        self.assertNotIn(reverse("roles_console"), body)
+
+    def test_a_revoked_role_stops_applying_immediately(self):
+        """The role is checked against what is held on every request, so revoking it while
+        someone is signed in takes effect at once rather than at their next login."""
+        self.net.groups.add(Group.objects.get(name="System Admin"))
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.assertEqual(self.client.session["active_role"], "System Admin")
+        self.net.groups.remove(Group.objects.get(name="System Admin"))
+        self.assertNotContains(self.client.get(reverse("history")), "Folder Watch")
+
+
+class RoleScopedMenu(TestCase):
+    def setUp(self):
+        U = get_user_model()
+        self.u = U.objects.create_user("multi", password="pw12345!")
+        for r in ("System Admin", "Network Admin", "Administrator"):
+            self.u.groups.add(Group.objects.get(name=r))
+        self.client.login(username="multi", password="pw12345!")
+
+    def _menu(self):
+        return self.client.get(reverse("history")).content.decode()
+
+    def test_with_no_role_chosen_the_menu_is_the_union_as_before(self):
+        """Unscoped is a real state, not an unfinished one — a bookmark or a deep link must
+        not dead-end at a chooser."""
+        body = self._menu()
+        for link in ("Folder Watch", "Network Analyses Dashboard", "Roles"):
+            self.assertIn(link, body)
+
+    def test_choosing_system_admin_hides_the_other_roles_screens(self):
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        body = self._menu()
+        self.assertIn("Folder Watch", body)
+        self.assertNotIn(">Roles<", body)
+
+    def test_choosing_administrator_hides_folder_watch(self):
+        self.client.post(reverse("role_select"), {"role": "Administrator"})
+        body = self._menu()
+        self.assertNotIn("Folder Watch", body)
+        self.assertIn("Roles", body)
+
+    def test_the_notification_dot_never_outlives_its_panel(self):
+        """The panel is gated on the scoped flag, so a dot that opens an empty menu would
+        read as a bug — and worse, train people to ignore it."""
+        RoleRequest.objects.create(user=self.u, role="System Admin", status="pending")
+        self.client.post(reverse("role_select"), {"role": "Administrator"})
+        self.assertContains(self.client.get(reverse("history")), "reddot")
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.assertNotContains(self.client.get(reverse("history")), "reddot")
+
+    def test_common_screens_stay_in_every_role(self):
+        """Connect and History belong to everyone. The DASHBOARDS do not — systems and
+        network each have their own, which is the whole point of the separation, so the
+        systems dashboard is deliberately absent from this list."""
+        for role in ("System Admin", "Network Admin", "Administrator"):
+            self.client.post(reverse("role_select"), {"role": role})
+            body = self._menu()
+            for link in ("Connect", "History"):
+                self.assertIn(link, body, f"{link} vanished under {role}")
+
+    def test_each_role_sees_only_its_own_dashboard(self):
+        """The counterpart to the test above: the dashboards are exactly what is NOT common."""
+        expected = {
+            "System Admin":  ("System Analyses Dashboard", "Network Analyses Dashboard"),
+            "Network Admin": ("Network Analyses Dashboard", "System Analyses Dashboard"),
+        }
+        for role, (present, absent) in expected.items():
+            self.client.post(reverse("role_select"), {"role": role})
+            body = self._menu()
+            self.assertIn(present, body, f"{present} missing under {role}")
+            self.assertNotIn(absent, body, f"{absent} leaked into {role}")
+
+
+    def test_every_screen_a_role_owns_is_reachable_from_its_drawer(self):
+        """The drawer is what answers "what does this role open". A screen the role owns but
+        the drawer never lists reads as a page that does not exist — which is exactly how
+        Configuration hid: it lived only under the settings menu.
+
+        Driven from ROLE_PAGES so a new screen cannot be added without a way in.
+        """
+        from reports.roles import ROLE_PAGES, role_screens
+
+        for role in ("System Admin", "Network Admin", "Administrator"):
+            self.client.post(reverse("role_select"), {"role": role})
+            body = self._menu()
+            drawer = body[body.find('id="drawer"'):body.find("</nav>")]
+            for page in role_screens(role):
+                self.assertIn(reverse(page), drawer,
+                              f"{page} is owned by {role} but absent from its drawer")
+
+class EmptyRoles(TestCase):
+    """Roles that exist with their estate still to come.
+
+    They own no screens, and must not borrow another role's dashboard to look furnished —
+    an empty menu is the honest description of where these roles currently stand.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("gov2", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="Gov Systems Admin"))
+        self.client.login(username="gov2", password="pw12345!")
+
+    def test_both_empty_roles_own_no_screens(self):
+        for role in ("Gov Systems Admin", "Security Admin"):
+            self.assertEqual(ROLE_PAGES[role], set(), role)
+
+    def test_security_admin_exists_as_a_group(self):
+        """Seeded by migration, so a fresh deployment has it without anyone running a
+        command — the roles console can only tick a role that exists."""
+        self.assertTrue(Group.objects.filter(name="Security Admin").exists())
+        self.assertIn("Security Admin", ROLE_NAMES)
+
+    def test_the_empty_screen_names_the_role_being_worn(self):
+        """One screen serves every empty role, so it has to say which one you are in."""
+        self.u.groups.add(Group.objects.get(name="Security Admin"))
+        for role in ("Gov Systems Admin", "Security Admin"):
+            self.client.post(reverse("role_select"), {"role": role})
+            resp = self.client.get(reverse("role_empty"))
+            self.assertContains(resp, role)
+            self.assertContains(resp, "Nothing to see here")
+
+    def test_it_is_not_given_another_role_s_dashboard(self):
+        body = self.client.get(reverse("history")).content.decode()
+        self.assertNotIn("System Analyses Dashboard", body)
+        self.assertNotIn("Network Analyses Dashboard", body)
+
+    def test_it_lands_on_a_screen_that_admits_it_is_empty(self):
+        """Not History, not another role's dashboard. A role with nothing in it should look
+        like a role with nothing in it."""
+        resp = self.client.post(reverse("role_select"), {"role": "Gov Systems Admin"})
+        self.assertRedirects(resp, reverse("role_empty"))
+        self.assertContains(self.client.get(reverse("role_empty")), "Nothing to see here")
+
+    def test_the_empty_screen_offers_a_way_back(self):
+        """Nothing here is a dead end."""
+        self.u.groups.add(Group.objects.get(name="System Admin"))   # now holds two roles
+        resp = self.client.get(reverse("role_empty"))
+        self.assertContains(resp, reverse("role_select"))
+
+    def test_a_holder_of_only_this_role_is_not_sent_round_a_loop(self):
+        """The picker auto-applies a single role, so a Back button pointing at it would
+        bounce straight back to this page. A button that returns you where you already are
+        is worse than none, so the exit offered is sign-out."""
+        resp = self.client.get(reverse("role_empty"))
+        self.assertNotContains(resp, reverse("role_select"))
+        self.assertContains(resp, "Sign out")
+
+    def test_the_screen_belongs_to_the_role(self):
+        other = get_user_model().objects.create_user("notgov", password="pw12345!")
+        other.groups.add(Group.objects.get(name="System Admin"))
+        self.client.logout()
+        self.client.login(username="notgov", password="pw12345!")
+        self.assertEqual(self.client.get(reverse("role_empty")).status_code, 302)
+
+
+
+class RoleScopedNavigation(TestCase):
+    """A bookmark to another role's page explains itself instead of vanishing."""
+
+    def setUp(self):
+        U = get_user_model()
+        self.u = U.objects.create_user("multi", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="System Admin"))
+        self.u.groups.add(Group.objects.get(name="Administrator"))
+        self.client.login(username="multi", password="pw12345!")
+
+    def test_a_page_outside_the_active_role_sends_you_to_the_picker(self):
+        self.client.post(reverse("role_select"), {"role": "Administrator"})
+        resp = self.client.get(reverse("folder_watch"), follow=True)
+        self.assertContains(resp, "belongs to the System Admin role")
+
+    def test_the_page_opens_normally_once_the_role_matches(self):
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.assertEqual(self.client.get(reverse("folder_watch")).status_code, 200)
+
+    def test_unscoped_navigation_is_never_interrupted(self):
+        self.client.post(reverse("role_select"), {"role": "__all__"})
+        self.assertEqual(self.client.get(reverse("folder_watch")).status_code, 200)
+
+    def test_a_page_the_user_cannot_hold_is_left_to_the_view_to_refuse(self):
+        """The middleware is a navigation aid. It must never be the only thing standing
+        between a user and a page, so for a role they do not hold it does nothing at all
+        and the view's own permission check answers."""
+        other = get_user_model().objects.create_user("gov", password="pw12345!")
+        other.groups.add(Group.objects.get(name="Gov Systems Admin"))
+        self.client.logout()
+        self.client.login(username="gov", password="pw12345!")
+        resp = self.client.get(reverse("folder_watch"))
+        self.assertEqual(resp.status_code, 302)
+        self.assertNotIn(reverse("role_select"), resp["Location"])
+
+
+# =============================================================================== #
+#  THE TWO DASHBOARDS
+#
+#  Systems and network are separate estates with separate landing screens. Most of
+#  these tests guard the SEPARATION, because the failure mode is quiet: a switch
+#  listed among the business systems looks plausible until someone reports on it.
+# =============================================================================== #
+class DashboardsAreSeparate(TestCase):
+    def setUp(self):
+        U = get_user_model()
+        self.sys = U.objects.create_user("sysadm", password="pw12345!")
+        self.sys.groups.add(Group.objects.get(name="System Admin"))
+        self.net = U.objects.create_user("netadm2", password="pw12345!")
+        self.net.groups.add(Group.objects.get(name="Network Admin"))
+
+    def _drawer(self, who):
+        self.client.logout()
+        self.client.login(username=who, password="pw12345!")
+        body = self.client.get(reverse("history")).content.decode()
+        return body[body.find('id="drawer"'):body.find("</nav>")]
+
+    def test_the_systems_dashboard_belongs_to_the_systems_role(self):
+        self.assertIn("System Analyses Dashboard", self._drawer("sysadm"))
+
+    def test_a_network_admin_is_not_shown_the_systems_dashboard(self):
+        self.assertNotIn("System Analyses Dashboard", self._drawer("netadm2"))
+
+    def test_the_network_dashboard_belongs_to_the_network_role(self):
+        self.assertIn("Network Analyses Dashboard", self._drawer("netadm2"))
+
+    def test_a_system_admin_is_not_shown_the_network_dashboard(self):
+        """An earlier draft let System Admin read the network screens. The roles have since
+        been separated deliberately, and a systems menu full of switch screens is exactly
+        what that separation exists to prevent."""
+        self.assertNotIn("Network Analyses Dashboard", self._drawer("sysadm"))
+
+    def test_a_system_admin_is_refused_the_network_urls(self):
+        """Hiding the link is not access control."""
+        self.client.login(username="sysadm", password="pw12345!")
+        for name in ("network_dashboard", "network_report"):
+            resp = self.client.get(reverse(name))
+            self.assertEqual(resp.status_code, 302, name)
+
+    def test_each_role_lands_on_its_own_dashboard(self):
+        """Picking a role and then being dropped on another role's screen would undo the
+        choice with the very redirect that follows it."""
+        self.client.login(username="netadm2", password="pw12345!")
+        resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        self.assertRedirects(resp, reverse("network_dashboard"))
+
+
+class NetworkDevicePicker(TestCase):
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("netadm3", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="netadm3", password="pw12345!")
+
+    def _get(self, up=1.0, ifaces=3):
+        oper = [{"labels": {"ifIndex": str(i + 1), "instance": "10.100.210.253"}, "value": 1.0}
+                for i in range(ifaces)]
+        prom = mock.MagicMock()
+
+        def q(expr):
+            if expr.startswith("up{"):
+                return ([{"labels": {"instance": "10.100.210.253"}, "value": up}]
+                        if up is not None else [])
+            if expr == "ifOperStatus":
+                return oper
+            return [{"labels": {}, "value": 1.0}]
+
+        prom.query.side_effect = q
+        with mock.patch("reports.network._prometheus", return_value=(prom, "http://p")):
+            return self.client.get(reverse("network_dashboard"))
+
+    def test_it_lists_exactly_the_one_device_monitored_today(self):
+        resp = self._get()
+        self.assertEqual(resp.content.decode().count("dev-tile"), 2)   # class + style rule
+        self.assertContains(resp, "Core Switch")
+        self.assertContains(resp, "10.100.210.253")
+
+    def test_the_tile_opens_that_device_s_report(self):
+        self.assertContains(self._get(), reverse("network_report"))
+
+    def test_a_responding_device_shows_its_link_count(self):
+        resp = self._get(up=1.0, ifaces=4)
+        self.assertContains(resp, "Responding")
+        self.assertContains(resp, "4 of 4 links up")
+
+    def test_a_device_that_fails_its_scrape_says_so(self):
+        self.assertContains(self._get(up=0.0), "Not responding")
+
+    def test_never_scraped_is_not_rendered_as_down(self):
+        """`up == 0` means Prometheus tried and failed; no `up` at all means it never tried.
+        Rendering them alike sends someone to check a cable over a missing scrape config."""
+        resp = self._get(up=None)
+        self.assertContains(resp, "Not scraped")
+        self.assertNotContains(resp, "Not responding")
+
+
+class NetworkDeviceIsNotASystem(TestCase):
+    """The core switch must never appear among the business systems."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("sysadm2", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="sysadm2", password="pw12345!")
+
+    def test_the_topology_contains_no_network_device(self):
+        """The systems picker reads systems_config.yml; the switch lives only as a label on
+        the SNMP metrics. This asserts the two inventories stay disjoint."""
+        names = {s["name"] for s in list_systems()}
+        for d in network.DEVICES:
+            self.assertNotIn(d["system"], names)
+            self.assertNotIn(d["name"], names)
+
+    def test_the_systems_picker_shows_no_switch(self):
+        body = self.client.get(reverse("report_form")).content.decode()
+        for probe in ("RBZ Network", "Core Switch", "10.100.210.253"):
+            self.assertNotIn(probe, body)
+
+
+class CssTokenHygiene(TestCase):
+    """Every CSS custom property a template uses must actually be defined somewhere.
+
+    This exists because the mistake is silent. `var(--card, #fff)` on an app with no --card
+    does not fail, warn, or fall back to something sensible — it renders #fff in every theme,
+    so the page simply stops responding to dark mode and nothing anywhere says why. It cost
+    three templates before it was spotted by eye.
+    """
+
+    #: tokens supplied by the browser/user agent rather than by app.css
+    _EXTERNAL = {"--mono-h"}
+
+    def _defined_in(self, text):
+        """Tokens this file supplies: CSS declarations, plus any set from JavaScript.
+
+        The JS half matters — the folder-watch wave sets --fw-delay per tile with
+        setProperty, and its var() fallback is a real pre-script value rather than a
+        hardcoded colour standing in for a theme.
+        """
+        return (set(re.findall(r"(--[a-z0-9-]+)\s*:", text))
+                | set(re.findall(r"""setProperty\(\s*["'](--[a-z0-9-]+)""", text)))
+
+    def test_no_template_uses_an_undefined_custom_property(self):
+        import pathlib
+
+        root = pathlib.Path(settings.BASE_DIR)
+        app_css = (root / "static" / "css" / "app.css").read_text(encoding="utf-8")
+        global_tokens = self._defined_in(app_css) | self._EXTERNAL
+
+        offenders = []
+        for tpl in (root / "templates").rglob("*.html"):
+            text = tpl.read_text(encoding="utf-8")
+            # a page may define its own tokens inline (the network report does); those count
+            known = global_tokens | self._defined_in(text)
+            for used in set(re.findall(r"var\(\s*(--[a-z0-9-]+)", text)):
+                if used not in known:
+                    offenders.append(f"{tpl.name}: {used}")
+
+        self.assertEqual(offenders, [], "undefined CSS custom properties: " + ", ".join(offenders))
+
+    def test_app_css_itself_is_clean(self):
+        import pathlib
+
+        app_css = (pathlib.Path(settings.BASE_DIR) / "static" / "css" / "app.css").read_text(encoding="utf-8")
+        known = self._defined_in(app_css) | self._EXTERNAL
+        undefined = {u for u in re.findall(r"var\(\s*(--[a-z0-9-]+)", app_css) if u not in known}
+        self.assertEqual(undefined, set())
+
+
+class DrawerCurrentIndicator(TestCase):
+    """The accent marker showing which screen is open.
+
+    Its whole value is being unambiguous, so the tests are mostly about it appearing exactly
+    once — a marker on two rows, or on a row that is always lit, says nothing.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("marker", password="pw12345!")
+        for r in ("System Admin", "Network Admin", "Administrator"):
+            self.u.groups.add(Group.objects.get(name=r))
+        self.client.login(username="marker", password="pw12345!")
+
+    def _drawer(self, url_name, role):
+        self.client.post(reverse("role_select"), {"role": role})
+        body = self.client.get(reverse(url_name)).content.decode()
+        return body[body.find('id="drawer"'):body.find("</nav>")]
+
+    def test_exactly_one_entry_is_marked_current(self):
+        for url_name, role in (("report_form", "System Admin"),
+                               ("folder_watch", "System Admin"),
+                               ("folder_watch_temenos", "System Admin"),
+                               ("network_dashboard", "Network Admin"),
+                               ("network_report", "Network Admin"),
+                               ("history", "Administrator"),
+                               ("roles_console", "Administrator"),
+                               ("system_settings", "Administrator")):
+            drawer = self._drawer(url_name, role)
+            self.assertEqual(drawer.count("is-current"), 1,
+                             f"{url_name} should mark exactly one drawer entry")
+
+    def test_the_marked_entry_is_the_page_you_are_on(self):
+        drawer = self._drawer("system_settings", "Administrator")
+        marked = re.search(r'<a href="([^"]+)"[^>]*is-current', drawer)
+        self.assertIsNotNone(marked)
+        self.assertEqual(marked.group(1), reverse("system_settings"))
+
+    def test_a_child_screen_also_lights_its_parent(self):
+        """On Temenos, Folder Watch shows which branch you are inside rather than going dark
+        while its own child is open."""
+        drawer = self._drawer("folder_watch_temenos", "System Admin")
+        parent = re.search(r'<a href="([^"]+)"[^>]*is-ancestor', drawer)
+        self.assertIsNotNone(parent)
+        self.assertEqual(parent.group(1), reverse("folder_watch"))
+
+    def test_the_home_screen_is_never_marked_as_a_branch(self):
+        """Every page descends from home, so marking it would accent the dashboard on all of
+        them — and a marker that is nearly always lit stops meaning "you are here"."""
+        for url_name in ("folder_watch", "folder_watch_temenos"):
+            drawer = self._drawer(url_name, "System Admin")
+            dash = re.search(r'<a href="' + reverse("report_form") + r'"([^>]*)>', drawer)
+            self.assertIsNotNone(dash)
+            self.assertNotIn("is-ancestor", dash.group(1))
+            self.assertNotIn("is-current", dash.group(1))
+
+    def test_the_marker_is_not_colour_alone(self):
+        """A screen reader gets the same information from aria-current that a sighted user
+        gets from the accent bar."""
+        drawer = self._drawer("history", "Administrator")
+        self.assertIn('aria-current="page"', drawer)
+        self.assertEqual(drawer.count('aria-current="page"'), 1)
+
+    def test_the_accent_styles_are_theme_tokens(self):
+        """The marker must follow the theme, which is exactly what the tile bug was."""
+        import pathlib
+
+        css = (pathlib.Path(settings.BASE_DIR) / "static" / "css" / "app.css").read_text(encoding="utf-8")
+        block = css[css.index(".drawer a.is-current,"):]
+        self.assertNotIn("#", block.split("/* ---- ")[0] if "/* ---- " in block else block[:600])
+
+
+class BrandBackCaret(TestCase):
+    """The caret on the brand pill: step OUT of the current role, from any screen.
+
+    Distinct from the canvas back button, which walks one level up inside a role. This one
+    has a single destination — the role picker — and the point of these tests is that the
+    destination does not vary by role.
+    """
+
+    def setUp(self):
+        U = get_user_model()
+        self.multi = U.objects.create_user("caret", password="pw12345!")
+        for r in ("System Admin", "Network Admin", "Administrator"):
+            self.multi.groups.add(Group.objects.get(name=r))
+        self.single = U.objects.create_user("caret1", password="pw12345!")
+        self.single.groups.add(Group.objects.get(name="System Admin"))
+
+    def _caret(self, path_name, role=None):
+        if role:
+            self.client.post(reverse("role_select"), {"role": role})
+        body = self.client.get(reverse(path_name)).content.decode()
+        pill = body[body.find("brand-pill"):body.find("spacer")]
+        return re.search(r'class="brand-back" href="([^"]+)"', pill), pill
+
+    def test_it_returns_to_the_picker_from_every_role_including_system_admin(self):
+        """The System Admin screens used to be the exception — their back led to the System
+        Analyses Dashboard rather than out of the role."""
+        self.client.login(username="caret", password="pw12345!")
+        for role in ("System Admin", "Network Admin", "Administrator"):
+            for page in ("history", "connect"):
+                match, _ = self._caret(page, role)
+                self.assertIsNotNone(match, f"caret missing on {page} as {role}")
+                self.assertEqual(match.group(1), reverse("role_select"),
+                                 f"caret on {page} as {role} does not return to the picker")
+
+    def test_the_caret_and_crest_are_a_single_control(self):
+        """They look like one button, so a click anywhere on them must do one thing. Two
+        anchors side by side would mean the half a user aims at decides where they land."""
+        self.client.login(username="caret", password="pw12345!")
+        _, pill = self._caret("history", "System Admin")
+        anchors = re.findall(r'class="(brand-[a-z-]+)" href="([^"]+)"', pill)
+        self.assertEqual(anchors, [("brand-back", reverse("role_select"))])
+        # the crest lives INSIDE that anchor rather than beside it
+        self.assertRegex(pill, r'class="brand-back"[^>]*>.*?brand-logo')
+
+    def test_a_single_role_user_keeps_the_crest_as_a_home_link(self):
+        """Without a caret there is nothing to merge, so the crest keeps its old job."""
+        self.client.login(username="caret1", password="pw12345!")
+        _, pill = self._caret("history")
+        self.assertIn(('brand-icon', reverse("report_form")),
+                      re.findall(r'class="(brand-[a-z-]+)" href="([^"]+)"', pill))
+
+    def test_it_is_hidden_when_there_is_only_one_role(self):
+        """The picker auto-applies a single role and would bounce straight back, so the
+        button would be a no-op that looks like a way out."""
+        self.client.login(username="caret1", password="pw12345!")
+        match, pill = self._caret("history")
+        self.assertIsNone(match)
+        self.assertNotIn("has-back", pill)
+
+    def test_the_pill_is_told_it_has_a_caret(self):
+        """The pill's left padding tightens to sit the caret against the crest. That rides a
+        modifier class rather than :has(), which this codebase treats as an unsafe bet on
+        the Edge build here — the same reason color-mix is avoided."""
+        self.client.login(username="caret", password="pw12345!")
+        _, pill = self._caret("history", "System Admin")
+        self.assertIn("has-back", pill)
+
+    def test_the_stylesheet_does_not_rely_on_has(self):
+        import pathlib
+
+        css = (pathlib.Path(settings.BASE_DIR) / "static" / "css" / "app.css").read_text(encoding="utf-8")
+        # strip comments first: the rationale for avoiding :has() naturally mentions it
+        code = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        self.assertNotIn(":has(", code)

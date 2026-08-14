@@ -10,7 +10,8 @@ from django.conf import settings
 from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
-from .roles import is_role_admin, is_system_admin
+from .roles import (ROLE_PAGES, active_role, effective_roles, held_roles,
+                    is_network_admin, is_role_admin, is_system_admin)
 
 
 def _asset_version() -> str:
@@ -40,22 +41,52 @@ _NAV_PARENT = {
     "connect": "report_form",
     "folder_watch": "report_form",
     "folder_watch_temenos": "folder_watch",
+    "network_dashboard": "report_form",
+    "network_report": "network_dashboard",
     "history": "report_form",
     "submission_detail": "history",
     "roles_console": "report_form",
     "system_settings": "report_form",
     "profile": "report_form",
 }
+#: the tree's root — a parent of everything, so never marked as "the branch you are in"
+_NAV_ROOT = "report_form"
+
 _NAV_LABEL = {
     "report_form": "Dashboard",
     "connect": "Connect",
     "folder_watch": "Folder Watch",
     "folder_watch_temenos": "Temenos",
+    "network_dashboard": "Network Analyses",
+    "network_report": "Core Switch",
     "history": "History",
     "roles_console": "Roles",
     "system_settings": "Configuration",
     "profile": "Profile",
 }
+
+
+def _current_page(request):
+    """(url_name, ancestors) for the page being viewed.
+
+    `ancestors` walks _NAV_PARENT upward, so a child screen also lights its parent — on
+    Temenos, Folder Watch is shown as the branch you are inside rather than going dark while
+    its own child is open.
+
+    The home screen is dropped from that chain. Every page descends from it, so marking it
+    would accent the dashboard on ALL of them, and a marker that is nearly always lit stops
+    meaning "you are here". Only real branches get the muted accent.
+    """
+    match = getattr(request, "resolver_match", None)
+    name = getattr(match, "url_name", None) if match else None
+    ancestors, cur = set(), name
+    seen = set()
+    while cur in _NAV_PARENT and cur not in seen:
+        seen.add(cur)
+        cur = _NAV_PARENT[cur]
+        ancestors.add(cur)
+    ancestors.discard(_NAV_ROOT)
+    return name or "", ancestors
 
 
 def _back_nav(request):
@@ -90,14 +121,32 @@ def role_flags(request):
     user = getattr(request, "user", None)
     admin = is_role_admin(user)
     back_url, back_label = _back_nav(request)
+    current_page, current_ancestors = _current_page(request)
+    # Nav flags are the CAPABILITY and-ed with the ACTIVE ROLE's scope. The capability half
+    # is what keeps a link honest; the scope half is what the picker actually does. With no
+    # role selected `scope` holds every role the user has, so the menu is the union — exactly
+    # what it was before the picker existed.
+    scope = effective_roles(request) if user is not None else set()
+
+    def in_scope(role):
+        return role in scope
+
     ctx = {
-        "is_role_admin": admin,
-        "is_system_admin": is_system_admin(user),   # drives the Folder Watch nav group
+        "is_role_admin": admin and in_scope("Administrator"),
+        # drives the Folder Watch nav group
+        "is_system_admin": is_system_admin(user) and in_scope("System Admin"),
+        "is_network_admin": is_network_admin(user) and in_scope("Network Admin"),
+        "active_role": active_role(request) if user is not None else "",
+        # Only offer "switch role" to someone who actually has somewhere to switch to.
+        "can_switch_role": len(held_roles(user)) > 1,
         "notif_count": 0,
         "notifications": [],
         "notif_unseen": False,   # drives the red dot on the hamburger
         "back_url": back_url,    # parent page for the canvas Back button
         "back_label": back_label,
+        # drives the accent marker on the drawer entry for the open screen
+        "current_page": current_page,
+        "current_ancestors": current_ancestors,
         "asset_v": _asset_version(),   # ?v= on app.js/app.css so edits are never served stale
     }
     if user is not None and getattr(user, "is_authenticated", False):
@@ -105,7 +154,10 @@ def role_flags(request):
         ctx["report_theme"] = prof.default_report_theme if prof else "dark"
         ctx["display_name"] = (user.get_full_name() or user.get_username())
 
-        if admin:
+        # The notifications panel is hidden when acting as another role (it is gated on the
+        # SCOPED is_role_admin), so the red dot must follow the same rule. A dot that opens a
+        # menu with nothing in it reads as a bug, and worse, trains people to ignore it.
+        if admin and ctx["is_role_admin"]:
             pending_qs = RoleRequest.objects.filter(status="pending")
             pending = list(pending_qs.select_related("user")[:8])
             ctx["notif_count"] = pending_qs.count()

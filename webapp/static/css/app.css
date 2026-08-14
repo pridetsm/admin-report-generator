@@ -65,6 +65,22 @@ a:hover { text-decoration: underline; }
   padding: 5px 16px 5px 6px; border-radius: 999px;
   background: var(--panel-2); border: 1px solid var(--line);
 }
+/* Caret + crest are one anchor, so they get one hover surface and one focus ring. The
+   caret is tucked close to the crest with a small gap — grouped, not touching — and the
+   pill's left padding tightens to match so the pair is not floating in space.
+
+   The padding rides a modifier class rather than :has(). This codebase already avoids
+   color-mix over doubts about the Edge build on this network, and :has() is the same kind
+   of bet — it would fail silently, as a layout shift nobody traces back to a selector. */
+.brand-pill.has-back { padding-left: 4px; }
+.brand-back {
+  display: inline-flex; align-items: center; gap: 1px; flex: none;
+  padding: 1px 4px 1px 0; border-radius: 999px;
+  color: var(--muted); text-decoration: none;
+}
+.brand-back .brand-back-caret { font-size: 19px; line-height: 1; margin-top: -2px; }
+.brand-back:hover { color: var(--accent); background: var(--panel); text-decoration: none; }
+.brand-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .brand-icon { display: flex; align-items: center; flex: none; text-decoration: none; border-radius: 50%; }
 .brand-icon:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .brand-logo { height: 30px; width: 30px; object-fit: contain; display: block; }
@@ -530,3 +546,43 @@ table.hist tr:last-child td { border-bottom: 0; }
   display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px;
   background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; font-weight: 600;
 }
+
+/* The head is now a plain label (the role) with no close button beside it, so it needs the
+   nav rows' own left padding to line up with them instead of sitting 6px out. */
+.drawer-head { padding-left: 12px; }
+
+/* The way back to the role picker. Reads as a step out of this menu rather than another
+   destination in it, so it is set apart with a rule instead of styled like the nav rows. */
+.drawer .drawer-role {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 12px 12px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  margin-bottom: 6px;
+}
+.drawer .drawer-role:hover { color: var(--ink); background: none; }
+
+/* ---- drawer: which screen is open ----
+   An accent bar on the leading edge plus accent text. The bar is what the eye finds when
+   scanning a vertical list — accent colour on the label alone reads as a slightly different
+   link, whereas a bar breaks the column's edge and is unmistakable at a glance.
+
+   `is-ancestor` is the muted half of the same idea: on a child screen the parent shows which
+   branch you are inside without competing with the row that is actually open. */
+.drawer a.is-current,
+.drawer a.is-ancestor { position: relative; }
+.drawer a.is-current {
+  color: var(--accent); background: var(--panel-2); font-weight: 650;
+}
+.drawer a.is-current::before {
+  content: ""; position: absolute; left: 0; top: 7px; bottom: 7px;
+  width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
+}
+.drawer a.is-ancestor { color: var(--accent); }
+.drawer a.is-ancestor::before {
+  content: ""; position: absolute; left: 0; top: 11px; bottom: 11px;
+  width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); opacity: .38;
+}
+/* child rows sit inside the spine, so their bar is pulled out clear of it */
+.drawer .drawer-child.is-current::before { left: -8px; }
