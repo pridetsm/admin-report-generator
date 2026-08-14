@@ -511,7 +511,7 @@ def main(argv=None) -> int:
     ap.add_argument("--theme", choices=("dark", "light"), default="dark")
     args = ap.parse_args(argv)
 
-    prom = Prometheus(args.prom)
+    prom = Prometheus(args.prom, cfg.http_timeout, cfg.verify_tls)
     try:
         prom.ping()
     except Exception as exc:

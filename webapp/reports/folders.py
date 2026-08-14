@@ -172,7 +172,7 @@ def _prometheus():
             cfg.prom = sc.prometheus_url
     except Exception:                       # noqa: BLE001 — DB/config optional here
         pass
-    return gr.Prometheus(cfg.prom, cfg.http_timeout), cfg.prom
+    return gr.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls), cfg.prom
 
 
 def limits_for(name: str) -> Tuple[int, int]:

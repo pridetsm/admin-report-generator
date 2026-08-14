@@ -71,7 +71,7 @@ def fetch_up(cfg=None) -> Optional[Dict[str, bool]]:
     except Exception:                       # noqa: BLE001 — DB/config optional here
         pass
     try:
-        prom = gr.Prometheus(cfg.prom, cfg.http_timeout)
+        prom = gr.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
         return {r["labels"]["instance"]: r["value"] >= 1
                 for r in prom.query("up") if r["labels"].get("instance")}
     except Exception:                       # noqa: BLE001 — Prometheus down: reachability unknown

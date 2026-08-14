@@ -62,7 +62,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "config.ini"
 
 # Grafana Report Generator webapp — admins open this to build the full report on demand.
-REPORT_GENERATOR_URL = "http://10.100.248.249:8000"
+REPORT_GENERATOR_URL = "https://monitoring.rbz.co.zw"
 
 # severity thresholds (mirror the report's chip colours)
 CRIT = 90      # used % >= CRIT  -> critical
@@ -81,9 +81,9 @@ TINT = {RED: RED_T, AMBER: AMBER_T, GREEN: GREEN_T, NAVY: NAVY_T, MUTED: "#f1f2f
 # ============================================================================ #
 @dataclass
 class Config:
-    prom: str = "http://10.100.248.249:9090"
+    prom: str = "https://10.100.248.249:9090"
     grafana: str = (
-        "http://10.100.248.249:3000/d/05e1d489-469b-4557-a0e9-73d782b60e844/"
+        "https://10.100.248.249:3000/d/05e1d489-469b-4557-a0e9-73d782b60e844/"
         "system-admin-dashboard-green?orgId=1&from=now-5m&to=now&timezone=browser"
         "&var-Filters=&refresh=30s"
     )
@@ -94,6 +94,8 @@ class Config:
     http_timeout: int = 20
     # LDAP / auth blackbox probe instance; blank = not monitored (no sign-in banner)
     ldap_target: str = "vault.rbz.co.zw:7272"
+    # set false for an internal Prometheus serving a self-signed cert (mirror of generate_report.py)
+    verify_tls: bool = True
 
 
 def load_config(path=None) -> "Config":
@@ -104,6 +106,7 @@ def load_config(path=None) -> "Config":
         if cp.has_section("prometheus"):
             cfg.prom = cp["prometheus"].get("url", cfg.prom)
             cfg.prometheus_yml = cp["prometheus"].get("yml", cfg.prometheus_yml)
+            cfg.verify_tls = cp["prometheus"].getboolean("verify_tls", cfg.verify_tls)
         if cp.has_section("grafana"):
             cfg.grafana = cp["grafana"].get("url", cfg.grafana)
         if cp.has_section("report"):
@@ -147,14 +150,17 @@ def load_mail_config(ini_path) -> dict:
 class Prometheus:
     """Minimal read-only client for the Prometheus HTTP API (instant queries)."""
 
-    def __init__(self, base: str, timeout: int = 20):
+    def __init__(self, base: str, timeout: int = 20, verify_tls: bool = True):
         self.base = base.rstrip("/")
         self.timeout = timeout
+        # unverified context only when explicitly opted out (verify_tls=False) — e.g. an
+        # internal Prometheus serving a self-signed cert. None = urllib's normal verification.
+        self._ssl_context = None if verify_tls else ssl._create_unverified_context()
 
     def query(self, expr: str) -> List[dict]:
         body = urllib.parse.urlencode({"query": expr}).encode()
         req = urllib.request.Request(self.base + "/api/v1/query", data=body)
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_context) as resp:
             payload = json.loads(resp.read().decode())
         if payload.get("status") != "success":
             raise RuntimeError(f"query failed: {payload.get('error', 'unknown error')}")
@@ -1154,7 +1160,7 @@ def capture_via_engine(engine, args) -> tuple:
         systems = [s for s in systems if s.name in only]
         if not systems:
             raise SystemExit(f"[!] --systems matched nothing: {args.systems}")
-    prom = engine.Prometheus(cfg.prom, cfg.http_timeout)
+    prom = engine.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
     prom.ping()
     store = engine.capture(prom, systems, cfg)
     if only:
@@ -1226,7 +1232,7 @@ def main(argv=None) -> int:
             print("[!] --systems needs --attach (the report engine) — ignoring it.", file=sys.stderr)
         print(f"[*] reading topology from {cfg.prometheus_yml} ...")
         systems = load_topology(cfg.prometheus_yml)
-        prom = Prometheus(cfg.prom, cfg.http_timeout)
+        prom = Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
         print(f"[*] capturing live metrics from {cfg.prom} ...")
         prom.ping()
         store = capture(prom, systems, cfg)

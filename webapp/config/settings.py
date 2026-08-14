@@ -79,6 +79,12 @@ if not CSRF_TRUSTED_ORIGINS:
 # admin nothing and leaves them stranded mid-report.
 CSRF_FAILURE_VIEW = "reports.views.csrf_failure"
 
+# IIS+ARR now terminates TLS in front of waitress (deployment.txt §9) and forwards
+# X-Forwarded-Proto: https, so Django can tell a proxied request was originally HTTPS.
+# SAFE ONLY as long as waitress itself isn't reachable by untrusted clients directly —
+# see deployment.txt for the loopback-binding note.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 # How long a captured snapshot stays valid between loading the form and generating the
 # report (seconds). Keeps the answers married to the exact numbers the admin reviewed.
 SNAPSHOT_TTL = int(os.environ.get("REPORT_SNAPSHOT_TTL", "300"))   # 5 minutes

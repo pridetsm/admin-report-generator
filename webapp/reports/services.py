@@ -203,7 +203,7 @@ def capture_snapshot(token: str, only: Optional[set] = None) -> Snapshot:
     if only is not None:
         want = {n for n in only}
         systems = [s for s in systems if s.name in want]
-    prom = gr.Prometheus(cfg.prom, cfg.http_timeout)
+    prom = gr.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
     try:
         prom.ping()
     except Exception as exc:                              # noqa: BLE001 — surfaced to the view

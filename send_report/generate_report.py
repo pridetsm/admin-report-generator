@@ -41,6 +41,7 @@ import io
 import json
 import math
 import re
+import ssl
 import sys
 import threading
 import urllib.parse
@@ -66,9 +67,9 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # ============================================================================ #
 @dataclass
 class Config:
-    prom: str = "http://10.100.248.249:9090"
+    prom: str = "https://10.100.248.249:9090"
     grafana: str = (
-        "http://10.100.248.249:3000/d/05e1d489-469b-4557-a0e9-73d782b60e844/"
+        "https://10.100.248.249:3000/d/05e1d489-469b-4557-a0e9-73d782b60e844/"
         "system-admin-dashboard-green?orgId=1&from=now-5m&to=now&timezone=browser"
         "&var-Filters=&refresh=30s"
     )
@@ -89,6 +90,9 @@ class Config:
     # LDAP / auth service probe: the blackbox `probe_success` instance label that reports whether
     # the authentication service (that GCMS, GMS, ... depend on) is up. Blank = not monitored.
     ldap_target: str = "vault.rbz.co.zw:7272"
+    # set false for an internal Prometheus serving a self-signed cert (matches the verify_tls
+    # pattern already used for [auth]/[keycloak] elsewhere in this app)
+    verify_tls: bool = True
 
 
 HERE = Path(__file__).resolve().parent
@@ -103,6 +107,7 @@ def load_config(path=None) -> "Config":
         if cp.has_section("prometheus"):
             cfg.prom = cp["prometheus"].get("url", cfg.prom)
             cfg.prometheus_yml = cp["prometheus"].get("yml", cfg.prometheus_yml)
+            cfg.verify_tls = cp["prometheus"].getboolean("verify_tls", cfg.verify_tls)
         if cp.has_section("grafana"):
             cfg.grafana = cp["grafana"].get("url", cfg.grafana)
         if cp.has_section("report"):
@@ -203,14 +208,17 @@ def palette(name: str):
 class Prometheus:
     """Minimal read-only client for the Prometheus HTTP API (instant queries)."""
 
-    def __init__(self, base: str, timeout: int = 20):
+    def __init__(self, base: str, timeout: int = 20, verify_tls: bool = True):
         self.base = base.rstrip("/")
         self.timeout = timeout
+        # unverified context only when explicitly opted out (verify_tls=False) — e.g. an
+        # internal Prometheus serving a self-signed cert. None = urllib's normal verification.
+        self._ssl_context = None if verify_tls else ssl._create_unverified_context()
 
     def query(self, expr: str) -> List[dict]:
         body = urllib.parse.urlencode({"query": expr}).encode()
         req = urllib.request.Request(self.base + "/api/v1/query", data=body)
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_context) as resp:
             payload = json.loads(resp.read().decode())
         if payload.get("status") != "success":
             raise RuntimeError(f"query failed: {payload.get('error', 'unknown error')}")
@@ -1933,7 +1941,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"    {len(systems)} systems: {', '.join(s.name for s in systems)}"
           + (" (scoped)" if only else ""))
 
-    prom = Prometheus(cfg.prom, cfg.http_timeout)
+    prom = Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
     print(f"[*] connecting to Prometheus at {cfg.prom} ...")
     try:
         prom.ping()
