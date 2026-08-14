@@ -994,6 +994,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     disk_high_h, disk_high_d, disk_high_state = disk_high(store, systems, thr, CRIT)
     disk_high_color = {"good": GREEN, "warn": AMBER, "bad": RED}[disk_high_state]
     n_untracked = len(backup_untracked(store, systems))
+    n_tracked = len(systems) - n_untracked
     watch_kpis = [
         _kpi_panel("High CPU usage", [("Hosts", cpu_hosts)], AMBER if cpu_hosts else GREEN),
         _kpi_panel("High RAM usage", [("Hosts", ram_hosts)], AMBER if ram_hosts else GREEN),
@@ -1001,7 +1002,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                    [("Hosts", disk_high_h), ("Disks", disk_high_d)],
                    disk_high_color),
         _kpi_panel("Web encryption", [("HTTPS", n_https), ("HTTP", n_http)], web_color),
-        _kpi_panel("Untracked backups", [("Systems", n_untracked)],
+        _kpi_panel("Backup tracking", [("Tracked", n_tracked), ("Untracked", n_untracked)],
                    AMBER if n_untracked else GREEN),
     ]
     immediate_kpis = "".join(immediate_kpis)

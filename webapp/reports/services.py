@@ -95,6 +95,7 @@ def build_overview(store, systems, cfg) -> dict:
     dh_hosts, dh_disks, dh_state = gr.disk_high(store, systems, thr, cfg.chip_red)
     nmiss = len(gr.backup_missing(store, systems))
     n_untracked = len(gr.backup_untracked(store, systems))
+    n_tracked = len(systems) - n_untracked
     cert_expired, cert_expiring = gr.cert_rollup(store)
     ur = gr.unreachable(store, systems)
     nearfull = gr.disk_near_full(store, systems, cfg.chip_red)
@@ -127,7 +128,8 @@ def build_overview(store, systems, cfg) -> dict:
         {"label": f"High disk ≥{thr}%", "value": dh_hosts,
          "sub": f"{dh_disks} disk{'' if dh_disks == 1 else 's'}", "state": dh_state},
         {"label": "Web encryption", "value": f"{n_https} | {n_http}", "sub": "https | http", "state": web_state},
-        {"label": "Untracked backups", "value": n_untracked, "sub": "systems", "state": warn(n_untracked)},
+        {"label": "Backup tracking", "value": f"{n_tracked} | {n_untracked}",
+         "sub": "tracked | untracked", "state": warn(n_untracked)},
     ]
 
     banners = []

@@ -1214,6 +1214,7 @@ class ReportBuilder:
             store, systems, thr, self.cfg.chip_red)
         # systems with no backup check at all (a monitoring blind spot) -> amber when any
         n_untracked = len(backup_untracked(store, systems))
+        n_tracked = len(systems) - n_untracked
         # web-encryption posture: green ONLY when no endpoint is plain HTTP; red when plain
         # HTTP endpoints OUTNUMBER the encrypted ones; amber for anything in between.
         web_state = "good" if n_http == 0 else ("bad" if n_http > n_https else "warn")
@@ -1224,7 +1225,7 @@ class ReportBuilder:
              [("HOSTS", disk_high_h), ("DISKS", disk_high_d)],
              disk_high_state),
             ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("HTTP", n_http)], web_state),
-            ("panel", "UNTRACKED BACKUPS", [("SYSTEMS", n_untracked)],
+            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("UNTRACKED", n_untracked)],
              "good" if n_untracked == 0 else "warn"),
         ]
 
@@ -1460,7 +1461,7 @@ class ReportBuilder:
                   [("missing", host, reason) for host, reason in bk_missing]   # ("file", name, day, mtime) | ("missing", host, reason)
         nbk_missing = len(bk_missing)
         # system-wide backup blind spot: NOT ONE host reports the backup check (matches the
-        # overview UNTRACKED BACKUPS tile). Distinct from NO BACKUP — a host that DOES run the
+        # overview BACKUP TRACKING tile). Distinct from NO BACKUP — a host that DOES run the
         # check but produced nothing fresh. Untracked means the check itself is absent, so the
         # loop above judged nothing; the admin must still answer for it in the notes table.
         bk_untracked = not any(c.instance in store.backups for c in sysm.components)
