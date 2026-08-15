@@ -144,6 +144,35 @@ def _back_nav(request):
         return None, None
 
 
+def _home_url(request):
+    """Where the persistent Home icon (top-left, on every page) should go.
+
+    _back_nav already sends a Network Admin's Back button to network_dashboard instead of
+    the systems screen — Home had the same bug and was simply never given the same fix: it
+    was hardcoded to report_form, so a Network Admin (freshly granted the role, without
+    having been through role_select this session to set an active_role) clicking Home landed
+    back on the System Admin dashboard. report_form carries no role gate of its own, so this
+    failed silently rather than erroring — it just showed the wrong screen.
+
+    Mirrors role_select's own single-role auto-apply: a scoped active_role wins outright; an
+    unscoped user holding exactly one role gets THAT role's home without needing to have
+    visited the picker first; everyone else (no role, or several with none chosen) keeps the
+    original report_form default.
+    """
+    role = active_role(request)
+    if not role:
+        roles = held_roles(getattr(request, "user", None))
+        role = roles[0] if len(roles) == 1 else None
+    if role:
+        home = ROLE_HOME.get(role)
+        if home:
+            try:
+                return reverse(home)
+            except NoReverseMatch:
+                pass
+    return reverse("report_form")
+
+
 def role_flags(request):
     user = getattr(request, "user", None)
     admin = is_role_admin(user)
@@ -166,6 +195,7 @@ def role_flags(request):
         "active_role": active_role(request) if user is not None else "",
         # Only offer "switch role" to someone who actually has somewhere to switch to.
         "can_switch_role": len(held_roles(user)) > 1,
+        "home_url": _home_url(request) if user is not None else reverse("report_form"),
         "notif_count": 0,
         "notifications": [],
         "notif_unseen": False,   # drives the red dot on the hamburger

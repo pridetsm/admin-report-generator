@@ -481,10 +481,19 @@
   }
   function saveAndReload() {
     try { localStorage.setItem("reportDraft", JSON.stringify(collect())); } catch (e) {}
-    window.location.href = window.location.pathname + "?fresh=1";   // force a fresh snapshot + reset the timer
+    window.location.reload();   // every GET to this page always captures a fresh snapshot server-side
   }
   document.querySelectorAll("[data-refresh]").forEach(function (b) {
     b.addEventListener("click", function (e) { e.preventDefault(); saveAndReload(); });
+  });
+
+  // ---- always persist the current draft before leaving this page ----
+  // Not just the explicit Refresh button above: a plain F5, clicking Home/History/Connect and
+  // coming back via "Continue that report", or closing the tab and reopening later should all
+  // find typed answers intact too — every GET here re-captures fresh metrics (see report()),
+  // so the draft is the ONLY thing that would otherwise be lost.
+  window.addEventListener("beforeunload", function () {
+    try { localStorage.setItem("reportDraft", JSON.stringify(collect())); } catch (e) {}
   });
 
   // ---- restore inputs after a refresh + advise on what changed ----

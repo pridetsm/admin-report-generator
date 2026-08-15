@@ -77,7 +77,7 @@
       <a class="brand-back" href="{% url 'role_select' %}" title="Back to role select"
          aria-label="Back to role select"><span class="brand-back-caret" aria-hidden="true">‹</span><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
       {% else %}
-      <a class="brand-icon" href="{% url 'report_form' %}" title="Home"><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
+      <a class="brand-icon" href="{{ home_url }}" title="Home"><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
       {% endif %}
       <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Grafana Reports</button>
     </div>

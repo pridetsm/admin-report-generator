@@ -249,9 +249,14 @@ def report(request):
     POST (from the selection screen): record the chosen systems and redirect to GET
     (Post/Redirect/Get, so a browser refresh never re-submits the selection).
 
-    GET: capture a live snapshot scoped to those systems and render the annotation form. A
-    plain refresh reuses the cached snapshot (countdown keeps running); ``?fresh=1`` (the
-    Refresh action / auto-refresh on expiry) forces a new scoped capture.
+    GET: ALWAYS captures a fresh live snapshot scoped to those systems — a plain browser
+    refresh, clicking "Continue that report" from the picker, or any other way of landing
+    back on this URL never serves numbers that quietly aged past the countdown without the
+    admin knowing. Typed answers survive this because the page saves a draft to localStorage
+    before it's ever navigated away from (see form.html) and restores it on load, so a fresh
+    capture costs nothing the admin had already entered. The countdown is solely about how
+    long THIS render's snapshot stays valid for Generate — refreshing always gets fresh data
+    regardless of where the countdown is.
     """
     if request.method == "POST":
         names = [n for n in request.POST.getlist("include_system") if n]
@@ -266,24 +271,17 @@ def report(request):
     if not names:                                     # arrived without choosing -> pick first
         return redirect("report_form")
 
-    force = request.GET.get("fresh") == "1"
-    snapshot = None
-    token = request.session.get("snapshot_token", "")
-    if not force and token:
-        snapshot = cache.get(_cache_key(token))       # None if it lapsed
-
-    if snapshot is None:
-        token = uuid.uuid4().hex
-        try:
-            snapshot = capture_snapshot(token, only=set(names))
-        except PrometheusUnavailable as exc:
-            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
-        if not snapshot.systems:                      # selection no longer in the topology
-            messages.error(request, "None of the selected systems were found. Please choose again.")
-            request.session.pop("report_systems", None)
-            return redirect("report_form")
-        cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
-        request.session["snapshot_token"] = token
+    token = uuid.uuid4().hex
+    try:
+        snapshot = capture_snapshot(token, only=set(names))
+    except PrometheusUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:                      # selection no longer in the topology
+        messages.error(request, "None of the selected systems were found. Please choose again.")
+        request.session.pop("report_systems", None)
+        return redirect("report_form")
+    cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
+    request.session["snapshot_token"] = token
 
     # Anchor the countdown to the capture time so a refresh continues it (never restarts).
     # captured_at is a naive datetime.now(); compare against the same clock.

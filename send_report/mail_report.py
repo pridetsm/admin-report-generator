@@ -72,8 +72,13 @@ WARN = 75      # WARN <= used %  -> warning
 NAVY, GOLD = "#0e2a47", "#c8a24b"
 RED, AMBER, GREEN, MUTED = "#c0392b", "#b9770e", "#1e7d4f", "#6b7785"
 RED_T, AMBER_T, GREEN_T, NAVY_T = "#fdecea", "#fef6e7", "#e8f5ee", "#f3f5f8"
+# reserved for the unreachable-components banner alone: the highest-severity finding, since
+# it means Prometheus has lost visibility entirely (every other red finding is at least still
+# being measured). Same tint as RED (a slight escalation, not a new visual language); a
+# deeper, more serious accent carries it. Always paired with an explicit "CRITICAL" label.
+CRITICAL = "#8e1f1f"
 # light tint behind a KPI tile, keyed to its value colour (card-like look, mirrors the xlsx)
-TINT = {RED: RED_T, AMBER: AMBER_T, GREEN: GREEN_T, NAVY: NAVY_T, MUTED: "#f1f2f4"}
+TINT = {RED: RED_T, AMBER: AMBER_T, GREEN: GREEN_T, NAVY: NAVY_T, MUTED: "#f1f2f4", CRITICAL: RED_T}
 
 
 # ============================================================================ #
@@ -275,8 +280,11 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
                 "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle",
                 "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme"]
-# `system` label values that are not real systems
-SKIP_SYSTEMS = {"unassigned", "prometheus", ""}
+# `system` label values that are not real systems. "rbz network" is the core switch / network
+# device estate (see the `snmp` job in prometheus.yml and DEVICES in webapp/reports/network.py)
+# — those get their own Network Admin Report and are deliberately excluded here so a switch
+# never appears among RTGS and Temenos on the System Admin side.
+SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network"}
 # systems whose users sign in through the LDAP / auth service (see cfg.ldap_target)
 LDAP_DEPENDENTS = {"GCMS", "GMS"}
 
@@ -363,6 +371,7 @@ class Store:
 _FS = 'fstype=~"ext.*|xfs|btrfs",mountpoint!~".*pod.*|.*container.*|^/snap/|^/var/snap"'
 _VOL = 'volume!~"HarddiskVolume.+"'
 _HASH = re.compile(r"[0-9a-f]{20,}")
+_INSTANCE_RE = re.compile(r'instance="([^"]+)"')   # pulls the target host out of a Service.expr
 
 
 def _shorten(name: str) -> str:
@@ -437,6 +446,20 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
                     continue
                 seen.add((group, name))
                 rows.append((name, r["value"] >= 1, svc.kind, group))
+            # A NAMED check (svc.name fixed, not a dynamic name_label list like the T24 TSA
+            # services) that produced NO series at all is a service we explicitly monitor —
+            # whether the host went unreachable or the check just isn't reporting, it must
+            # still show as DOWN rather than silently vanishing from the table and the
+            # SERVICES count. Without this, a system's service count shrinks the moment a
+            # host goes unreachable, understating what we actually monitor.
+            if svc.name and not result:
+                m = _INSTANCE_RE.search(svc.expr)
+                inst = m.group(1) if m else None
+                group = svc.group or next((c.label for c in sysm.components if c.instance == inst), sysm.name)
+                name = svc.prefix + svc.name
+                if (group, name) not in seen:
+                    seen.add((group, name))
+                    rows.append((name, False, svc.kind, group))
         rows.sort(key=lambda t: (SERVICE_KIND_ORDER.get(t[2], 99),
                                  comp_order.get(t[3], 999), t[3]))
         services[sysm.name] = rows
@@ -590,6 +613,13 @@ def cert_rollup(store: "Store", horizon_days: int = 30) -> Tuple[List[Tuple[str,
     return expired, expiring
 
 
+def cert_monitored(store: "Store") -> int:
+    """Total HTTPS endpoints with a known certificate expiry — the denominator for the
+       Expired certs tile, same filter cert_rollup uses."""
+    return sum(1 for url, d in store.links.items()
+               if url.lower().startswith("https") and d.get("cert_days") is not None)
+
+
 def is_unreachable(store: "Store", instance: str) -> bool:
     """True when a configured target isn't reporting: up==0 OR no up series at all
        (only trusted when up data exists for OTHER targets)."""
@@ -615,6 +645,12 @@ def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, s
                 missing.append((s.name, c.label,
                                 "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
     return missing
+
+
+def backup_tracked_hosts(store: "Store", systems: List["System"]) -> int:
+    """Total HOST components with a backup check reporting at all — the denominator for the
+       Missing backups tile."""
+    return sum(1 for s in systems for c in s.components if c.instance in store.backups)
 
 
 def backup_untracked(store: "Store", systems: List["System"]) -> List[str]:
@@ -785,8 +821,8 @@ def _unreachable_block(unreach: List[Finding]) -> str:
     )
     return (
         '<tr><td style="padding:18px 24px 2px;">'
-        f'<div style="background:{RED_T};border-left:4px solid {RED};border-radius:4px;padding:12px 16px;">'
-        f'<div style="font-size:15px;font-weight:700;color:{RED};">&#9888;&nbsp; {len(unreach)} component(s) unreachable</div>'
+        f'<div style="background:{RED_T};border-left:4px solid {CRITICAL};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{CRITICAL};">&#9888;&nbsp; CRITICAL &mdash; {len(unreach)} component(s) unreachable</div>'
         f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">Prometheus can no longer scrape these targets &mdash; '
         "the host is down, the exporter has stopped, or there is a network / connectivity issue. "
         "<b>Treat as urgent.</b></div>"
@@ -820,20 +856,57 @@ def _disk_nearfull_block(store, systems) -> str:
     )
 
 
-def _cob_block(store) -> str:
-    """A callout when COB looks like it never ran — flagged every day EXCEPT Monday."""
+def _cob_block(store, unreach) -> str:
+    """A callout when COB looks like it never ran — flagged every day EXCEPT Monday.
+
+    If the T24 database component is itself unreachable, an abnormally-high/absent COB
+    reading doesn't mean COB failed to run — it means we can't tell, because the exporter
+    that would report it can't be reached. Say that plainly rather than implying a T24
+    process failure when the real fault may just be connectivity to the DB host."""
     cob_missing = store.cob is None or (isinstance(store.cob, float) and math.isnan(store.cob))
     if not cob_missing or datetime.date.today().weekday() == 0:   # 0 = Monday
+        return ""
+    db_unreachable = any(sysn == "Temenos" and "DB" in comp for sysn, comp, *_ in unreach)
+    if db_unreachable:
+        headline = "COB &mdash; could not be calculated, T24 database is unreachable"
+        detail = ("The T24 database component is unreachable, so COB time could not be "
+                   "calculated for the previous day &mdash; this is not evidence that COB "
+                   "itself failed to run. <b>Restore connectivity to the T24 database first, "
+                   "then re-check COB.</b>")
+    else:
+        headline = "COB &mdash; close-of-business may not have run yesterday"
+        detail = ("COB time is out of range (abnormally high), so no completed close-of-business "
+                   "was detected for the previous day. <b>Confirm the T24 COB ran and completed.</b> "
+                   "(On Mondays this is expected &mdash; Sunday has no COB &mdash; and is not flagged.)")
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{AMBER};">&#9888;&nbsp; {headline}</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 0;">{detail}</div>'
+        "</div></td></tr>"
+    )
+
+
+def _swift_block(store, unreach) -> str:
+    """A callout when SWIFT transaction count is missing WHILE the T24 application component
+    is down. Only fires in that specific case — a blank SWIFT count while T24 App is up is
+    left unflagged, since the app being reachable makes the missing count a different
+    question. That's not evidence no SWIFT transactions occurred — it means we can't tell,
+    because the exporter that would report it can't be reached."""
+    swift_missing = store.swift is None or (isinstance(store.swift, float) and math.isnan(store.swift))
+    if not swift_missing:
+        return ""
+    if not any(sysn == "Temenos" and "App" in comp for sysn, comp, *_ in unreach):
         return ""
     return (
         '<tr><td style="padding:18px 24px 2px;">'
         f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
         f'<div style="font-size:15px;font-weight:700;color:{AMBER};">&#9888;&nbsp; '
-        "COB &mdash; close-of-business may not have run yesterday</div>"
-        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 0;">COB time is out of range '
-        "(abnormally high), so no completed close-of-business was detected for the previous day. "
-        "<b>Confirm the T24 COB ran and completed.</b> "
-        "(On Mondays this is expected &mdash; Sunday has no COB &mdash; and is not flagged.)</div>"
+        "SWIFT &mdash; could not be calculated, T24 application is down</div>"
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 0;">The T24 application component '
+        "is down, so SWIFT transaction count could not be calculated for the current period "
+        "&mdash; this is not evidence that no SWIFT transactions occurred. "
+        "<b>Restore the T24 application first, then re-check SWIFT.</b></div>"
         "</div></td></tr>"
     )
 
@@ -956,7 +1029,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     cob_missing = store.cob is None or (isinstance(store.cob, float) and math.isnan(store.cob))
     cob = "N/A" if cob_missing else f"{store.cob/60:.1f} min"
     cob_alert = cob_missing and datetime.date.today().weekday() != 0   # 0 = Monday (Sunday: no COB)
-    swift = f"{store.swift:.0f}" if store.swift is not None else "n/a"
+    swift = f"{store.swift:.0f}" if store.swift is not None else "N/A"
     cert_expired, _cert_expiring = cert_rollup(store)
     n_https = sum(1 for u in store.links if u.lower().startswith("https"))
     n_http = sum(1 for u in store.links if u.lower().startswith("http://"))
@@ -967,8 +1040,8 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                       else "generate the report from the Grafana Report Generator above")
 
     if unreach:
-        banner_bg, banner_fg = RED_T, RED
-        headline = f"{len(unreach)} component(s) UNREACHABLE — possible host / network outage"
+        banner_bg, banner_fg = RED_T, CRITICAL
+        headline = f"CRITICAL — {len(unreach)} component(s) UNREACHABLE — possible host / network outage"
     elif crit:
         banner_bg, banner_fg, headline = RED_T, RED, f"{len(crit)} item(s) need immediate attention"
     elif warn or cob_alert:
@@ -986,10 +1059,18 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
         _kpi("COB &middot; T24", cob, NAVY),
     ])
     immediate_kpis = [
-        _kpi("Missing backups", str(nmiss), miss_color),
-        _kpi("Unreachable", str(len(unreach)), RED if unreach else GREEN),
-        _kpi("Services down", str(down), RED if down else GREEN),
-        _kpi("Expired certs", str(len(cert_expired)), RED if cert_expired else GREEN),
+        # missing out of TRACKED hosts (an untracked host isn't judged either way — see the
+        # separate Backup tracking tile for those).
+        _kpi_panel("Missing backups", [("Missing", nmiss), ("Tracked", backup_tracked_hosts(store, systems))],
+                   miss_color),
+        # unreachable/down out of the TOTAL we monitor, so the count never reads as if fewer
+        # components/services exist just because some are currently failing.
+        _kpi_panel("Unreachable components", [("Unreachable", len(unreach)), ("Total", hosts)],
+                   CRITICAL if unreach else GREEN),
+        _kpi_panel("Services down", [("Down", down), ("Total", nsvc)],
+                   RED if down else GREEN),
+        _kpi_panel("Expired certs", [("Expired", len(cert_expired)), ("Total", cert_monitored(store))],
+                   RED if cert_expired else GREEN),
     ]
     disk_high_h, disk_high_d, disk_high_state = disk_high(store, systems, thr, CRIT)
     disk_high_color = {"good": GREEN, "warn": AMBER, "bad": RED}[disk_high_state]
@@ -1013,7 +1094,8 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
             + _disk_nearfull_block(store, systems)
             + _unreachable_block(unreach)
             + _cert_block(store)
-            + _cob_block(store)
+            + _cob_block(store, unreach)
+            + _swift_block(store, unreach)
             + _section("Critical", crit, RED, RED_T)
             + _section("Warning", warn, AMBER, AMBER_T)
             + _section("No data (check exporters)", nodata, MUTED, "#f1f2f4"))

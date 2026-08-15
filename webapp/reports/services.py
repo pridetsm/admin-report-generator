@@ -104,7 +104,8 @@ def build_overview(store, systems, cfg) -> dict:
 
     cob_missing = store.cob is None or (isinstance(store.cob, float) and math.isnan(store.cob))
     cob = "N/A" if cob_missing else f"{store.cob / 60:.1f} min"
-    swift = f"{store.swift:.0f}" if store.swift is not None else "—"
+    swift_missing = store.swift is None or (isinstance(store.swift, float) and math.isnan(store.swift))
+    swift = f"{store.swift:.0f}" if store.swift is not None else "N/A"
     bad = lambda n: "good" if not n else "bad"
     warn = lambda n: "good" if not n else "warn"
     web_state = "good" if n_http == 0 else ("bad" if n_http > n_https else "warn")
@@ -117,10 +118,18 @@ def build_overview(store, systems, cfg) -> dict:
         {"label": "COB · T24", "value": cob, "state": "info"},
     ]
     immediate = [
-        {"label": "Missing backups", "value": nmiss, "state": gr.backup_missing_band(nmiss)},
-        {"label": "Unreachable", "value": len(ur), "state": bad(len(ur))},
-        {"label": "Services down", "value": down, "state": bad(down)},
-        {"label": "Expired certs", "value": len(cert_expired), "state": bad(len(cert_expired))},
+        # missing out of TRACKED hosts (an untracked host isn't judged either way — see the
+        # separate Backup tracking tile for those).
+        {"label": "Missing backups", "value": f"{nmiss} | {gr.backup_tracked_hosts(store, systems)}",
+         "sub": "missing | tracked", "state": gr.backup_missing_band(nmiss)},
+        # unreachable/down out of the TOTAL we monitor, so the count never reads as if fewer
+        # components/services exist just because some are currently failing.
+        {"label": "Unreachable components", "value": f"{len(ur)} | {hosts}",
+         "sub": "unreachable | total", "state": bad(len(ur))},
+        {"label": "Services down", "value": f"{down} | {nsvc}",
+         "sub": "down | total", "state": bad(down)},
+        {"label": "Expired certs", "value": f"{len(cert_expired)} | {gr.cert_monitored(store)}",
+         "sub": "expired | total", "state": bad(len(cert_expired))},
     ]
     watch = [
         {"label": "High CPU", "value": cpu_hosts, "sub": "hosts", "state": warn(cpu_hosts)},
@@ -161,10 +170,32 @@ def build_overview(store, systems, cfg) -> dict:
                         "detail": "   ·   ".join([f"{h} (EXPIRED)" for h, _ in cert_expired] +
                                                  [f"{h} ({cd:.0f}d)" for h, cd in cert_expiring])})
     if cob_missing and datetime.date.today().weekday() != 0:   # 0 = Monday (Sunday: no COB)
+        # If the T24 database component is itself unreachable, an abnormal COB reading isn't
+        # evidence COB failed to run — it means we can't tell, because the exporter that would
+        # report it can't be reached. Say that, not "may not have run".
+        if any(s == "Temenos" and "DB" in lbl for s, lbl, _ in ur):
+            banners.append({"band": "amber",
+                            "head": "COB — could not be calculated, T24 database is unreachable",
+                            "detail": "The T24 database component is unreachable, so COB time could "
+                                      "not be calculated for the previous day — this is not evidence "
+                                      "that COB itself failed to run. Restore connectivity to the T24 "
+                                      "database first, then re-check COB."})
+        else:
+            banners.append({"band": "amber",
+                            "head": "COB — close-of-business may not have run yesterday",
+                            "detail": "COB time is out of range; confirm the T24 COB completed. "
+                                      "(On Mondays this is expected and not flagged.)"})
+    # SWIFT transaction count missing WHILE the T24 application component is down — that's not
+    # evidence no SWIFT transactions occurred, it means we can't tell, because the exporter
+    # that would report it can't be reached. Only flagged in this specific case; a blank SWIFT
+    # count while T24 App is up is left unflagged, same as COB's DB-reachable case.
+    if swift_missing and any(s == "Temenos" and "App" in lbl for s, lbl, _ in ur):
         banners.append({"band": "amber",
-                        "head": "COB — close-of-business may not have run yesterday",
-                        "detail": "COB time is out of range; confirm the T24 COB completed. "
-                                  "(On Mondays this is expected and not flagged.)"})
+                        "head": "SWIFT — could not be calculated, T24 application is down",
+                        "detail": "The T24 application component is down, so SWIFT transaction "
+                                  "count could not be calculated for the current period — this is "
+                                  "not evidence that no SWIFT transactions occurred. Restore the "
+                                  "T24 application first, then re-check SWIFT."})
 
     return {"glance": glance, "immediate": immediate, "watch": watch, "banners": banners}
 

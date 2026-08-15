@@ -146,6 +146,12 @@ class Theme:
         "green": ("004CC9A4", "0014322B"),
         "amber": ("00E8B04B", "003A2F14"),
         "red":   ("00EF6A5A", "003A1A16"),
+        # "critical" — reserved for unreachable components alone: the highest-severity
+        # finding, since it means Prometheus itself has lost visibility (every other red
+        # finding is at least still being measured). Same tint as "red" (a slight escalation,
+        # not a new visual language); a punchier, more saturated accent than the warm-coral
+        # "red" carries it. Always paired with an explicit label, never color alone.
+        "critical": ("00FF4438", "003A1A16"),
     }
     INFO = ("005BC0D4", "001B2836")            # neutral overview accent
 
@@ -168,7 +174,7 @@ PALETTES: Dict[str, Dict[str, object]] = {
         "BG": "000E1620", "CARD": "00121E2B", "HDR": "001B2836", "BORDER": "0026323F",
         "WHITE": "00E7EEF5", "GREY": "00AFBBC7", "CYAN": "005BC0D4", "SUB": "007F93A6",
         "CHIP": {"green": ("004CC9A4", "0014322B"), "amber": ("00E8B04B", "003A2F14"),
-                 "red": ("00EF6A5A", "003A1A16")},
+                 "red": ("00EF6A5A", "003A1A16"), "critical": ("00FF4438", "003A1A16")},
         "INFO": ("005BC0D4", "001B2836"),
     },
     "light": {  # matched to the approved reference (webapp/System_Admin_Report_Light.xlsx):
@@ -176,7 +182,7 @@ PALETTES: Dict[str, Dict[str, object]] = {
         "BG": "00FFFFFF", "CARD": "00F2F5F8", "HDR": "00F5F7FA", "BORDER": "00E1E6EA",
         "WHITE": "0016232E", "GREY": "005B6B78", "CYAN": "000E7C93", "SUB": "0051707F",
         "CHIP": {"green": ("000E9C74", "00E8F6F0"), "amber": ("00B8790A", "00FFF6E0"),
-                 "red": ("00D14A3A", "00FDEBEA")},
+                 "red": ("00D14A3A", "00FDEBEA"), "critical": ("00B02318", "00FDEBEA")},
         "INFO": ("000E7C93", "00F5F7FA"),
     },
 }
@@ -358,11 +364,26 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
              Service("IIS (W3SVC)", win_service("W3SVC", "10.0.206.12:9182"))],
     "ebis": [Service("IIS (W3SVC)", win_service("W3SVC", "10.0.207.20:9182")),
              Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.207.21:9182"))],
+    "refinitivreuters": [
+        Service("Post Trade 1.9 Conversation Printer RESZ",
+                win_service("PT_1.9_CONVPRT_RESZ", "10.100.245.216:9182")),
+        Service("Post Trade 1.9 Feeds Administrator",
+                win_service("PT_1.9_FeedsGUI", "10.100.245.216:9182")),
+        Service("Post Trade 1.9 Ticket Feed (TOF) RESZ",
+                win_service("PT_1.9_TOF_RESZ", "10.100.245.216:9182")),
+        Service("Post Trade 1.9 Ticket Printer RESZ",
+                win_service("PT_1.9_TKTPRT_RESZ", "10.100.245.216:9182")),
+    ],
+    "assetregistry": [
+        Service("Asset Management", systemd("10.100.245.249:9100", "asset-management.service", "simple")),
+        Service("Assets Mgt",        systemd("10.100.245.249:9100", "assetsmgt.service", "simple")),
+        Service("MySQL",            systemd("10.100.245.249:9100", "mysql.service", "notify")),
+    ],
 }
 
 # preferred display order (known systems first); anything else is appended A-Z
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
-                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS", "EBIS"]
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS", "EBIS", "Refinitiv (Reuters)", "Asset Registry"]
 
 # BACKUP POLICY — how many calendar days old a host's newest backup may be and still count
 # as CURRENT. Almost every system backs up daily, so the default of 1 means "today or
@@ -394,8 +415,11 @@ def backup_cutoff(instance: str, now: datetime.datetime | None = None) -> float:
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
 LDAP_DEPENDENTS = {"GCMS", "GMS"}
-# `system` label values that are not real systems
-SKIP_SYSTEMS = {"unassigned", "prometheus", ""}
+# `system` label values that are not real systems. "rbz network" is the core switch / network
+# device estate (see the `snmp` job in prometheus.yml and DEVICES in webapp/reports/network.py)
+# — those get their own Network Admin Report and are deliberately excluded here so a switch
+# never appears among RTGS and Temenos on the System Admin side.
+SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network"}
 
 # Web links (blackbox HTTP probes) become a "WEB LINKS" service class inside a
 # system's Services table. A link is auto-attributed to the system whose name
@@ -498,6 +522,7 @@ class Store:
 _FS = 'fstype=~"ext.*|xfs|btrfs",mountpoint!~".*pod.*|.*container.*|^/snap/|^/var/snap"'
 _VOL = 'volume!~"HarddiskVolume.+"'
 _HASH = re.compile(r"[0-9a-f]{20,}")
+_INSTANCE_RE = re.compile(r'instance="([^"]+)"')   # pulls the target host out of a Service.expr
 
 
 def _shorten(name: str) -> str:
@@ -582,6 +607,20 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
                     continue
                 seen.add((group, name))
                 rows.append((name, r["value"] >= 1, svc.kind, group))
+            # A NAMED check (svc.name fixed, not a dynamic name_label list like the T24 TSA
+            # services) that produced NO series at all is a service we explicitly monitor —
+            # whether the host went unreachable or the check just isn't reporting, it must
+            # still show as DOWN rather than silently vanishing from the table and the
+            # SERVICES count. Without this, a system's service count shrinks the moment a
+            # host goes unreachable, understating what we actually monitor.
+            if svc.name and not result:
+                m = _INSTANCE_RE.search(svc.expr)
+                inst = m.group(1) if m else None
+                group = svc.group or next((c.label for c in sysm.components if c.instance == inst), sysm.name)
+                name = svc.prefix + svc.name
+                if (group, name) not in seen:
+                    seen.add((group, name))
+                    rows.append((name, False, svc.kind, group))
         # SYSTEM services first, then OFFERED; within a class, cluster rows by component
         # (in topology order) so each sub-group is contiguous for the sub-header pass
         rows.sort(key=lambda t: (SERVICE_KIND_ORDER.get(t[2], 99),
@@ -780,6 +819,14 @@ def cert_rollup(store: "Store", horizon_days: int = 30) -> Tuple[List[Tuple[str,
     return expired, expiring
 
 
+def cert_monitored(store: "Store") -> int:
+    """Total HTTPS endpoints with a known certificate expiry — the denominator for the
+       EXPIRED CERTS tile, same filter cert_rollup uses, so 0 expired out of N never reads
+       as if N endpoints simply weren't being watched."""
+    return sum(1 for url, d in store.links.items()
+               if url.lower().startswith("https") and d.get("cert_days") is not None)
+
+
 def is_unreachable(store: "Store", instance: str) -> bool:
     """True when a configured target isn't reporting: up==0 (scrape failing) OR no up
        series at all (never scraped - target added but Prometheus not reloaded, or a
@@ -850,6 +897,13 @@ def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, s
                 missing.append((s.name, c.label,
                                 "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
     return missing
+
+
+def backup_tracked_hosts(store: "Store", systems: List["System"]) -> int:
+    """Total HOST components with a backup check reporting at all — the denominator for the
+       MISSING BACKUPS tile. backup_missing only judges hosts in this set (an untracked host
+       produces no row either way), so this is the honest "out of how many" for that count."""
+    return sum(1 for s in systems for c in s.components if c.instance in store.backups)
 
 
 def backup_untracked(store: "Store", systems: List["System"]) -> List[str]:
@@ -1120,13 +1174,15 @@ class ReportBuilder:
         # COB", shown as N/A rather than a bogus number.
         cob_missing = store.cob is None or (isinstance(store.cob, float) and math.isnan(store.cob))
         cob = "N/A" if cob_missing else f"{store.cob/60:.1f} min"
-        swift = f"{store.swift:.0f}" if store.swift is not None else "—"
+        swift_missing = store.swift is None or (isinstance(store.swift, float) and math.isnan(store.swift))
+        swift = f"{store.swift:.0f}" if store.swift is not None else "N/A"
         # web-encryption posture: how many monitored endpoints are HTTPS vs plain HTTP
         n_https = sum(1 for u in store.links if u.lower().startswith("https"))
         n_http = sum(1 for u in store.links if u.lower().startswith("http://"))
 
         palette = {"info": Theme.INFO, "good": Theme.CHIP["green"],
-                   "bad": Theme.CHIP["red"], "warn": Theme.CHIP["amber"]}
+                   "bad": Theme.CHIP["red"], "warn": Theme.CHIP["amber"],
+                   "critical": Theme.CHIP["critical"]}
 
         def card(rtop, group, label, value, state, vrow=None):
             """Standard card: title (rtop) + big value. vrow lets row 2 bottom-align
@@ -1200,10 +1256,18 @@ class ReportBuilder:
         cert_expired, cert_expiring = cert_rollup(store)
 
         imm_tiles = [
-            ("card", "MISSING BACKUPS", str(nmiss), backup_missing_band(nmiss)),
-            ("card", "UNREACHABLE COMPONENTS", str(len(ur)), "good" if not ur else "bad"),
-            ("card", "SERVICES DOWN",   str(down), "good" if down == 0 else "bad"),
-            ("card", "EXPIRED CERTS", str(len(cert_expired)), "good" if not cert_expired else "bad"),
+            # missing out of TRACKED hosts (an untracked host isn't judged either way —
+            # see backup_tracked_hosts / the separate BACKUP TRACKING tile for those).
+            ("panel", "MISSING BACKUPS", [("MISSING", nmiss), ("TRACKED", backup_tracked_hosts(store, systems))],
+             backup_missing_band(nmiss)),
+            # unreachable/down out of the TOTAL we monitor, so the count never reads as if
+            # fewer components/services exist just because some are currently failing.
+            ("panel", "UNREACHABLE COMPONENTS", [("UNREACHABLE", len(ur)), ("TOTAL", hosts)],
+             "good" if not ur else "critical"),
+            ("panel", "SERVICES DOWN", [("DOWN", down), ("TOTAL", nsvc)],
+             "good" if down == 0 else "bad"),
+            ("panel", "EXPIRED CERTS", [("EXPIRED", len(cert_expired)), ("TOTAL", cert_monitored(store))],
+             "good" if not cert_expired else "bad"),
         ]
         # This tile counts EVERY high disk (>= thr) — elevated and near-full together —
         # so it can never read 0 while the DISK NEAR-FULL banner below lists disks; those
@@ -1300,14 +1364,17 @@ class ReportBuilder:
                 "These volumes are almost full — an imminent outage that can take the service down. "
                 "Free space or extend the disk now."))
 
-        # 2) components Prometheus can no longer reach
+        # 2) components Prometheus can no longer reach — the highest-severity finding on
+        #    this report: every other red banner is at least still being measured, this one
+        #    means we've lost visibility entirely. "critical" band + an explicit label (not
+        #    just a different accent) so the escalation reads even in black-and-white print.
         if ur:
             bysys: Dict[str, List[str]] = {}
             for s, lbl, _ in ur:
                 bysys.setdefault(s, []).append(lbl)
             banners.append((
-                "red",
-                f"UNREACHABLE  —  {len(ur)} component(s) across {len(bysys)} system(s)",
+                "critical",
+                f"CRITICAL — UNREACHABLE  —  {len(ur)} component(s) across {len(bysys)} system(s)",
                 "      ·      ".join(f"{s} ({', '.join(lbls)})" for s, lbls in bysys.items()),
                 "Prometheus can no longer scrape these targets — the host is down, the exporter has "
                 "stopped, or there are network / connectivity issues. Treat as urgent."))
@@ -1332,14 +1399,40 @@ class ReportBuilder:
         # 4) COB looks like it never ran — flagged EVERY day EXCEPT Monday. A Monday
         #    reading covers Sunday (a non-work day with no COB), so an absent/abnormally
         #    high value then is expected, not a fault, and is left unflagged.
+        #    EXCEPTION: if the T24 database component is itself unreachable, an abnormal COB
+        #    reading isn't evidence COB failed to run — it means we can't tell, because the
+        #    exporter that would report it can't be reached. Say that, not "may not have run".
         if cob_missing and datetime.datetime.now().weekday() != 0:   # 0 = Monday
+            db_unreachable = any(s == "Temenos" and "DB" in lbl for s, lbl, _ in ur)
+            if db_unreachable:
+                banners.append((
+                    "amber",
+                    "COB  —  could not be calculated, T24 database is unreachable",
+                    "The T24 database component is unreachable, so COB time could not be calculated "
+                    "for the previous day — this is not evidence that COB itself failed to run.",
+                    "Restore connectivity to the T24 database first, then re-check COB."))
+            else:
+                banners.append((
+                    "amber",
+                    "COB  —  close-of-business may not have run yesterday",
+                    "COB time is out of range (abnormally high), so no completed close-of-business was "
+                    "detected for the previous day.",
+                    "Confirm the T24 COB ran and completed. (On Mondays this is expected — Sunday has no "
+                    "COB — and is not flagged.)"))
+
+        # 5) SWIFT transaction count missing, WHILE the T24 application component is down —
+        #    that's not evidence no SWIFT transactions occurred, it means we can't tell,
+        #    because the exporter that would report it can't be reached. Only flagged in this
+        #    specific case; a blank SWIFT count while T24 App is up is left unflagged, same as
+        #    today, since the app being reachable makes the missing count a different question.
+        if swift_missing and any(s == "Temenos" and "App" in lbl for s, lbl, _ in ur):
             banners.append((
                 "amber",
-                "COB  —  close-of-business may not have run yesterday",
-                "COB time is out of range (abnormally high), so no completed close-of-business was "
-                "detected for the previous day.",
-                "Confirm the T24 COB ran and completed. (On Mondays this is expected — Sunday has no "
-                "COB — and is not flagged.)"))
+                "SWIFT  —  could not be calculated, T24 application is down",
+                "The T24 application component is down, so SWIFT transaction count could not be "
+                "calculated for the current period — this is not evidence that no SWIFT transactions "
+                "occurred.",
+                "Restore the T24 application first, then re-check SWIFT."))
 
         if banners:
             r = content_bottom + 2                # one gap row below the tile bands
