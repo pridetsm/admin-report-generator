@@ -68,9 +68,24 @@
     </div>
   </div></div>
 
+  {% comment %}
+    Alert banners, most severe first. The severity is SPELLED OUT beside the title rather
+    than implied by the accent colour alone — it has to survive a printout, a colourblind
+    reader, and someone who has never been told what amber means here.
+
+    The detail is a two-column table, not a middot-joined paragraph: a list of a dozen
+    systems re-wrapping at the window edge reads as prose, and you cannot scan down it.
+  {% endcomment %}
   {% for b in snapshot.overview.banners %}
   <div class="banner {{ b.band }}">
-    <div class="head">{{ b.head }}</div>
+    <div class="head"><span class="sev">{{ b.sev_label }}</span>{{ b.head }}</div>
+    {% if b.rows %}
+    <table class="banner-rows">
+      {% for row in b.rows %}
+      <tr><th>{{ row.label }}</th><td>{{ row.values }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
     {% if b.detail %}<div class="detail">{{ b.detail }}</div>{% endif %}
   </div>
   {% endfor %}

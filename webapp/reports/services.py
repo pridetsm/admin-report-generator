@@ -145,43 +145,50 @@ def build_overview(store, systems, cfg) -> dict:
     # LDAP / auth service down — highest priority, listed first (mirrors the xlsx + email).
     ldap_dependents = gr.ldap_alert(store, systems)
     if ldap_dependents:
-        banners.append({"band": "red",
+        banners.append({"severity": "imminent",
                         "head": f"LDAP / auth service down — {len(ldap_dependents)} dependent system(s) affected",
-                        "detail": "Users cannot sign in to: " + ", ".join(ldap_dependents)})
+                        "rows": [{"label": "Cannot sign in", "values": ", ".join(ldap_dependents)}]})
     if nearfull:
         byhost: dict = {}
         for s, lbl, mp, used in nearfull:
             byhost.setdefault(f"{s} · {lbl}", []).append(f"{mp} {used:.0f}%")
-        banners.append({"band": "red",
+        banners.append({"severity": "critical",
                         "head": f"Disk near-full — {len(nearfull)} disk(s) on {len(byhost)} host(s)",
-                        "detail": "   ·   ".join(f"{h} ({', '.join(v)})" for h, v in byhost.items())})
+                        "rows": [{"label": h, "values": ", ".join(v)}
+                                 for h, v in sorted(byhost.items())]})
     if ur:
         bysys: dict = {}
         for s, lbl, _ in ur:
             bysys.setdefault(s, []).append(lbl)
-        banners.append({"band": "red",
+        # Always IMMINENT: an unreachable component is not a metric out of range, it is the
+        # loss of our ability to see one. Every other finding is at least still being measured.
+        banners.append({"severity": "imminent",
                         "head": f"Unreachable — {len(ur)} component(s) across {len(bysys)} system(s)",
-                        "detail": "   ·   ".join(f"{s} ({', '.join(l)})" for s, l in bysys.items())})
+                        "rows": [{"label": s, "values": ", ".join(l)}
+                                 for s, l in sorted(bysys.items())]})
     if cert_expired or cert_expiring:
         bits = ([f"{len(cert_expired)} expired"] if cert_expired else []) + \
                ([f"{len(cert_expiring)} expiring ≤30d"] if cert_expiring else [])
-        banners.append({"band": "red" if cert_expired else "amber",
+        banners.append({"severity": "critical" if cert_expired else "warning",
                         "head": "SSL certs — " + ", ".join(bits),
-                        "detail": "   ·   ".join([f"{h} (EXPIRED)" for h, _ in cert_expired] +
-                                                 [f"{h} ({cd:.0f}d)" for h, cd in cert_expiring])})
+                        "rows": ([{"label": "Expired",
+                                   "values": ", ".join(h for h, _ in cert_expired)}] if cert_expired else []) +
+                                ([{"label": "Expiring ≤30d",
+                                   "values": ", ".join(f"{h} ({cd:.0f}d)" for h, cd in cert_expiring)}]
+                                 if cert_expiring else [])})
     if cob_missing and datetime.date.today().weekday() != 0:   # 0 = Monday (Sunday: no COB)
         # If the T24 database component is itself unreachable, an abnormal COB reading isn't
         # evidence COB failed to run — it means we can't tell, because the exporter that would
         # report it can't be reached. Say that, not "may not have run".
         if any(s == "Temenos" and "DB" in lbl for s, lbl, _ in ur):
-            banners.append({"band": "amber",
+            banners.append({"severity": "warning",
                             "head": "COB — could not be calculated, T24 database is unreachable",
                             "detail": "The T24 database component is unreachable, so COB time could "
                                       "not be calculated for the previous day — this is not evidence "
                                       "that COB itself failed to run. Restore connectivity to the T24 "
                                       "database first, then re-check COB."})
         else:
-            banners.append({"band": "amber",
+            banners.append({"severity": "warning",
                             "head": "COB — close-of-business may not have run yesterday",
                             "detail": "COB time is out of range; confirm the T24 COB completed. "
                                       "(On Mondays this is expected and not flagged.)"})
@@ -190,12 +197,22 @@ def build_overview(store, systems, cfg) -> dict:
     # that would report it can't be reached. Only flagged in this specific case; a blank SWIFT
     # count while T24 App is up is left unflagged, same as COB's DB-reachable case.
     if swift_missing and any(s == "Temenos" and "App" in lbl for s, lbl, _ in ur):
-        banners.append({"band": "amber",
+        banners.append({"severity": "warning",
                         "head": "SWIFT — could not be calculated, T24 application is down",
                         "detail": "The T24 application component is down, so SWIFT transaction "
                                   "count could not be calculated for the current period — this is "
                                   "not evidence that no SWIFT transactions occurred. Restore the "
                                   "T24 application first, then re-check SWIFT."})
+
+    # One vocabulary for the screen and the workbook. `band` is derived from the severity
+    # rather than set by hand, so a banner cannot end up amber on screen and red in the file.
+    for b in banners:
+        sev = b.get("severity") or {"red": "critical", "amber": "warning"}.get(b.get("band"), "warning")
+        b["severity"] = sev
+        b["sev_label"] = gr.SEVERITY[sev]["label"]
+        b["band"] = {"imminent": "critical", "critical": "red", "warning": "amber"}[sev]
+        b.setdefault("rows", [])
+    banners.sort(key=lambda b: gr.SEVERITY[b["severity"]]["rank"])   # imminent first
 
     return {"glance": glance, "immediate": immediate, "watch": watch, "banners": banners}
 

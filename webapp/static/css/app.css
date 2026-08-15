@@ -685,3 +685,29 @@ table.hist tr:last-child td { border-bottom: 0; }
   .resume-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
   .resume-text b { font-size: 14px; }
   .resume-text span { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- alert banners: named severity + tabular detail ----
+   The severity chip spells out IMMINENT / CRITICAL / WARNING beside the title. Colour alone
+   cannot carry an escalation: it does not survive a printout, a colourblind reader, or
+   someone who has never been told what amber means in this report.
+
+   `critical` is the band reserved for lost visibility (an unreachable component) — a
+   punchier accent than `red`, never a new visual language. */
+.banner.critical { border-left-color: var(--red); }
+.banner.critical .head { color: var(--red); }
+.banner .head .sev {
+  display: inline-block; margin-right: 9px; padding: 1px 7px; border-radius: 5px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .7px; vertical-align: 1px;
+  background: var(--red-bg); color: var(--red);
+}
+.banner.amber .head .sev { background: var(--amber-bg); color: var(--amber); }
+
+/* The detail as rows and columns. A dozen hosts joined by middots re-wraps at the window
+   edge and reads as a paragraph — you cannot scan down it to find your system. */
+.banner-rows { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12.5px; }
+.banner-rows th {
+  text-align: left; vertical-align: top; white-space: nowrap; font-weight: 650;
+  color: var(--ink); padding: 3px 14px 3px 0; width: 1%;
+}
+.banner-rows td { vertical-align: top; color: var(--muted); padding: 3px 0; word-break: break-word; }
+.banner-rows tr + tr th, .banner-rows tr + tr td { border-top: 1px solid var(--line); }

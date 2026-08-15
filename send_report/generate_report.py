@@ -167,6 +167,26 @@ class Theme:
 # -- selectable palettes (dark is the default; light is the same layout, re-coloured).
 #    Values are swapped onto the Theme class for the duration of a build (see `palette`),
 #    so the whole builder re-themes without touching its ~80 Theme.* references. --------
+# ---------------------------------------------------------------------------------------
+#  BANNER SEVERITY — three levels, named on every banner.
+#
+#  The label is written into the headline, not just implied by an accent colour, so the
+#  escalation survives a black-and-white print and a reader who does not know the palette.
+#
+#    imminent  an outage is underway, or we have lost the ability to see one
+#    critical  not down yet, but it will take the service down if left
+#    warning   needs attention; nothing is failing because of it right now
+#
+#  `chip` maps a severity onto the existing colour bands, so this adds a vocabulary rather
+#  than a new visual language.
+# ---------------------------------------------------------------------------------------
+SEVERITY = {
+    "imminent": {"label": "IMMINENT", "chip": "critical", "rank": 0},
+    "critical": {"label": "CRITICAL", "chip": "red", "rank": 1},
+    "warning": {"label": "WARNING", "chip": "amber", "rank": 2},
+}
+
+
 _THEME_KEYS = ("BG", "CARD", "HDR", "BORDER", "WHITE", "GREY", "CYAN", "SUB", "CHIP", "INFO")
 
 PALETTES: Dict[str, Dict[str, object]] = {
@@ -1327,26 +1347,44 @@ class ReportBuilder:
             cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
             self.ws.row_dimensions[row].height = (max(1, (len(text) + per - 1) // per)) * 14 + 6
 
-        def render_banner(top, band_name, headline, detail, expl):
-            accent, tint = Theme.CHIP[band_name]
-            banner_line(top, headline, Theme.font(10, True, accent), 72, tint, accent)
+        def banner_row(row, left, right, tint, accent):
+            """One line of a banner's table: a fixed label column, then its values.
+
+            Two merged ranges rather than one wrapped string. The detail used to be every
+            host joined by middots into a single paragraph that re-wrapped at the window
+            edge, so nothing lined up and a long list read as prose — you could not scan
+            down it to find a system.
+            """
+            self._merge(row, 2, 5, "  " + left, Theme.font(9, True, Theme.WHITE), bg=tint, al="left")
+            self.ws.cell(row, 2).border = Border(left=Side(style="thick", color=accent))
+            self.ws.cell(row, 2).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            self._merge(row, 6, 12, right, Theme.font(9, False, Theme.GREY), bg=tint, al="left")
+            self.ws.cell(row, 6).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            self.ws.row_dimensions[row].height = (max(1, (len(right) + 63) // 64)) * 13 + 5
+
+        def render_banner(top, severity, title, rows, expl):
+            spec = SEVERITY[severity]
+            accent, tint = Theme.CHIP[spec["chip"]]
+            banner_line(top, f"{spec['label']}  —  {title}", Theme.font(10, True, accent), 72, tint, accent)
             r = top
-            if detail:
-                r += 1; banner_line(r, detail, Theme.font(9, False, Theme.WHITE), 82, tint, accent)
+            for left, right in rows:
+                r += 1
+                banner_row(r, left, right, tint, accent)
             if expl:
                 r += 1; banner_line(r, expl, Theme.font(8, False, Theme.SUB), 95, tint, accent)
             return r
 
-        banners: List[Tuple[str, str, str, str]] = []   # (band, headline, detail, explanation)
+        # (severity, title, rows, explanation) — rows is [(label, values), ...]
+        banners: List[Tuple[str, str, List[Tuple[str, str]], str]] = []
 
         # 0) LDAP / authentication service down — highest priority, listed first. Every dependent
         #    system can't authenticate users while the shared auth service is unreachable.
         ldap_dependents = ldap_alert(store, systems)
         if ldap_dependents:
             banners.append((
-                "red",
+                "imminent",
                 f"LDAP / AUTH SERVICE DOWN  —  {len(ldap_dependents)} dependent system(s) affected",
-                "      ·      ".join(ldap_dependents),
+                [("Affected systems", "   ".join(ldap_dependents))],
                 "The shared LDAP / authentication service is not responding — users cannot sign in to "
                 "the systems that depend on it. Restore the auth service urgently."))
 
@@ -1357,10 +1395,10 @@ class ReportBuilder:
             for s, lbl, mp, used in nearfull:
                 byhost.setdefault(f"{s} · {lbl}", []).append(f"{mp} {used:.0f}%")
             banners.append((
-                "red",
+                "critical",
                 f"DISK NEAR-FULL  —  {len(nearfull)} disk(s) on {len(byhost)} host(s) "
                 f"at/over {self.cfg.chip_red}%",
-                "      ·      ".join(f"{h} ({', '.join(v)})" for h, v in byhost.items()),
+                [(h, ", ".join(v)) for h, v in sorted(byhost.items())],
                 "These volumes are almost full — an imminent outage that can take the service down. "
                 "Free space or extend the disk now."))
 
@@ -1373,9 +1411,9 @@ class ReportBuilder:
             for s, lbl, _ in ur:
                 bysys.setdefault(s, []).append(lbl)
             banners.append((
-                "critical",
-                f"CRITICAL — UNREACHABLE  —  {len(ur)} component(s) across {len(bysys)} system(s)",
-                "      ·      ".join(f"{s} ({', '.join(lbls)})" for s, lbls in bysys.items()),
+                "imminent",
+                f"UNREACHABLE  —  {len(ur)} component(s) across {len(bysys)} system(s)",
+                [(s, ", ".join(lbls)) for s, lbls in sorted(bysys.items())],
                 "Prometheus can no longer scrape these targets — the host is down, the exporter has "
                 "stopped, or there are network / connectivity issues. Treat as urgent."))
 
@@ -1386,13 +1424,13 @@ class ReportBuilder:
         if cert_expired or cert_expiring:
             bits = ([f"{len(cert_expired)} expired"] if cert_expired else []) + \
                    ([f"{len(cert_expiring)} expiring within 30 days"] if cert_expiring else [])
-            detail = "      ·      ".join(
-                [f"{h} (EXPIRED {abs(cd):.0f}d ago)" for h, cd in cert_expired] +
-                [f"{h} ({cd:.0f}d)" for h, cd in cert_expiring])
+            rows = ([("Expired", "   ".join(f"{h} ({abs(cd):.0f}d ago)" for h, cd in cert_expired))]
+                    if cert_expired else []) +                    ([("Expiring ≤30d", "   ".join(f"{h} ({cd:.0f}d)" for h, cd in cert_expiring))]
+                    if cert_expiring else [])
             banners.append((
-                "red" if cert_expired else "amber",
+                "critical" if cert_expired else "warning",
                 f"SSL CERTS  —  {', '.join(bits)}",
-                detail,
+                rows,
                 "Renew these certificates before they lapse — an expired certificate makes browsers "
                 "reject the site, a silent outage until the certificate is replaced."))
 
@@ -1406,17 +1444,18 @@ class ReportBuilder:
             db_unreachable = any(s == "Temenos" and "DB" in lbl for s, lbl, _ in ur)
             if db_unreachable:
                 banners.append((
-                    "amber",
+                    "warning",
                     "COB  —  could not be calculated, T24 database is unreachable",
-                    "The T24 database component is unreachable, so COB time could not be calculated "
-                    "for the previous day — this is not evidence that COB itself failed to run.",
+                    [("Why", "The T24 database component is unreachable, so COB time could not be "
+                             "calculated for the previous day — this is not evidence that COB "
+                             "itself failed to run.")],
                     "Restore connectivity to the T24 database first, then re-check COB."))
             else:
                 banners.append((
-                    "amber",
+                    "warning",
                     "COB  —  close-of-business may not have run yesterday",
-                    "COB time is out of range (abnormally high), so no completed close-of-business was "
-                    "detected for the previous day.",
+                    [("Why", "COB time is out of range (abnormally high), so no completed "
+                             "close-of-business was detected for the previous day.")],
                     "Confirm the T24 COB ran and completed. (On Mondays this is expected — Sunday has no "
                     "COB — and is not flagged.)"))
 
@@ -1427,19 +1466,20 @@ class ReportBuilder:
         #    today, since the app being reachable makes the missing count a different question.
         if swift_missing and any(s == "Temenos" and "App" in lbl for s, lbl, _ in ur):
             banners.append((
-                "amber",
+                "warning",
                 "SWIFT  —  could not be calculated, T24 application is down",
-                "The T24 application component is down, so SWIFT transaction count could not be "
-                "calculated for the current period — this is not evidence that no SWIFT transactions "
-                "occurred.",
+                [("Why", "The T24 application component is down, so SWIFT transaction count could "
+                         "not be calculated for the current period — this is not evidence that no "
+                         "SWIFT transactions occurred.")],
                 "Restore the T24 application first, then re-check SWIFT."))
 
         if banners:
             r = content_bottom + 2                # one gap row below the tile bands
-            for i, (band_name, headline, detail, expl) in enumerate(banners):
+            banners.sort(key=lambda b: SEVERITY[b[0]]["rank"])   # imminent first, warning last
+            for i, (severity, title, rows, expl) in enumerate(banners):
                 if i:
                     r += 1                        # blank spacer row between stacked banners
-                r = render_banner(r, band_name, headline, detail, expl)
+                r = render_banner(r, severity, title, rows, expl)
             content_bottom = r
 
         # ---- Summary Notes: RHS panel spanning the whole summary (explain anything, incl. the alert) ----

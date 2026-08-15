@@ -4,6 +4,7 @@ The report engine's capture() needs a live Prometheus, so we patch capture_snaps
 synthetic snapshot built from generate_report's own dataclasses. Everything else — auth,
 templates, the generate/download path, and the audit row — is exercised for real.
 """
+import contextlib
 import datetime
 import io
 import json
@@ -207,21 +208,23 @@ class ReportBuilderFlow(TestCase):
         self.assertEqual(self.user.profile.default_report_theme, "light")
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
-    def test_refresh_reuses_snapshot_but_fresh_forces_new(self, cap):
+    def test_every_visit_to_the_report_captures_fresh_metrics(self, cap):
+        """Landing on the report ALWAYS re-captures — a plain refresh, "Continue that
+        report", or any other route in. A report is a statement about now, so a screen that
+        quietly served numbers captured minutes ago was the more dangerous default."""
         self.client.login(username="tester", password="pw12345!")
         pat = r'name="token" value="(\w+)"'
 
-        # choose systems -> first capture, land on the report screen
         t1 = self._open_report("Efin")
         self.assertEqual(cap.call_count, 1)
-        # a plain revisit of the report reuses the same snapshot (timer keeps running)
+
         t2 = re.search(pat, self.client.get(reverse("report")).content.decode()).group(1)
-        self.assertEqual(t1, t2)
-        self.assertEqual(cap.call_count, 1)
-        # ?fresh=1 explicitly re-captures and mints a new token
-        t3 = re.search(pat, self.client.get(reverse("report"), {"fresh": "1"}).content.decode()).group(1)
-        self.assertNotEqual(t1, t3)
+        self.assertNotEqual(t1, t2)
         self.assertEqual(cap.call_count, 2)
+
+        t3 = re.search(pat, self.client.get(reverse("report"), {"fresh": "1"}).content.decode()).group(1)
+        self.assertNotEqual(t2, t3)
+        self.assertEqual(cap.call_count, 3)
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_author_autofills_from_profile(self, _cap):
@@ -452,8 +455,13 @@ class ReportBuilderFlow(TestCase):
 
         cfg = gr.Config()
         down = build_overview(store(False), [gcms], cfg)["banners"]
-        self.assertTrue(down and down[0]["band"] == "red" and "LDAP" in down[0]["head"])  # first = top priority
-        self.assertIn("GCMS", down[0]["detail"])
+        # LDAP down means nobody can sign in — an outage already underway, so IMMINENT,
+        # which bands it "critical" rather than plain red.
+        self.assertTrue(down and "LDAP" in down[0]["head"])          # first = top priority
+        self.assertEqual(down[0]["severity"], "imminent")
+        self.assertEqual(down[0]["band"], "critical")
+        # the dependents are a table row now, not a middot-joined sentence
+        self.assertIn("GCMS", " ".join(r["values"] for r in down[0]["rows"]))
         for state in (True, None):   # up / not monitored -> no LDAP banner
             self.assertFalse(any("LDAP" in b["head"] for b in build_overview(store(state), [gcms], cfg)["banners"]))
 
@@ -2116,9 +2124,10 @@ class EmptyRoles(TestCase):
         """The picker auto-applies a single role, so a Back button pointing at it would
         bounce straight back to this page. A button that returns you where you already are
         is worse than none, so the exit offered is sign-out."""
-        resp = self.client.get(reverse("role_empty"))
-        self.assertNotContains(resp, reverse("role_select"))
-        self.assertContains(resp, "Sign out")
+        body = self.client.get(reverse("role_empty")).content.decode()
+        page = body[body.find("gs-wrap"):]          # the screen itself, not the app chrome
+        self.assertNotIn(reverse("role_select"), page)
+        self.assertIn("Sign out", page)
 
     def test_the_screen_belongs_to_the_role(self):
         other = get_user_model().objects.create_user("notgov", password="pw12345!")
@@ -2808,3 +2817,107 @@ class NetworkOpenReportParity(TestCase):
         session.save()
         body = self.client.get(reverse("history")).content.decode()
         self.assertIn('class="backnav" href="%s"' % reverse("report"), body)
+
+
+def _build_overview(unreachable=False, nearfull=False, certs=None, ldap=False):
+    """Run services.build_overview with the banner conditions dialled in.
+
+    The gr.* helpers are patched rather than a Store fabricated: those helpers are what decide
+    a condition holds, so faking their inputs would be testing the fixture instead of the
+    code. Everything not under test is patched to "nothing wrong", so each test's banner is
+    the only one that appears unless it asks for more.
+    """
+    from reports import services
+
+    store = mock.MagicMock(services={}, links={}, cob=1.0, swift=1.0)
+    systems = [mock.MagicMock(components=[1])]
+    cfg = mock.MagicMock(overview_threshold=80, chip_red=90)
+
+    ur = [("Efin", "DB", None), ("RTGS", "Backend", None)] if unreachable else []
+    nf = [("Eagle", "DR", "/u01", 97.0), ("CEPECS", "Web", "/u01", 93.0)] if nearfull else []
+    expired = [("vault.example", -3.0)] if certs == "expired" else []
+    expiring = [("rtgs.example", 12.0)] if certs in ("expiring", "expired") else []
+
+    patches = {
+        "services_down": 0, "ram_pressure": (0, []), "cpu_pressure": (0, []),
+        "disk_high": (0, 0, "good"), "backup_missing": [], "backup_untracked": [],
+        "cert_rollup": (expired, expiring), "unreachable": ur, "disk_near_full": nf,
+        "ldap_alert": ["Efin"] if ldap else [], "backup_missing_band": "good",
+        # counters the overview tiles read; irrelevant to banners but they must not explode
+        "backup_tracked_hosts": 1, "cert_monitored": 1,
+    }
+    with contextlib.ExitStack() as stack:
+        for name, value in patches.items():
+            stack.enter_context(mock.patch.object(services.gr, name, return_value=value))
+        return services.build_overview(store, systems, cfg)
+
+
+class BannerSeverity(TestCase):
+    """Three named levels — imminent, critical, warning — on the screen and in the workbook.
+
+    The label is spelled out rather than implied by an accent colour, because colour alone
+    does not survive a printout, a colourblind reader, or someone who was never told what
+    amber means in this report.
+    """
+
+    def _overview(self, **kw):
+        return _build_overview(**kw)
+
+    def test_every_banner_carries_one_of_the_three_levels(self):
+        ov = self._overview(unreachable=True, nearfull=True, certs="expiring")
+        self.assertTrue(ov["banners"])
+        for b in ov["banners"]:
+            self.assertIn(b["severity"], ("imminent", "critical", "warning"), b["head"])
+            self.assertEqual(b["sev_label"], gr.SEVERITY[b["severity"]]["label"])
+
+    def test_unreachable_is_always_imminent(self):
+        """Not a metric out of range — the loss of our ability to see one. Every other
+        finding is at least still being measured."""
+        ov = self._overview(unreachable=True)
+        banner = next(b for b in ov["banners"] if "Unreachable" in b["head"])
+        self.assertEqual(banner["severity"], "imminent")
+        self.assertEqual(banner["sev_label"], "IMMINENT")
+
+    def test_disk_near_full_is_critical(self):
+        ov = self._overview(nearfull=True)
+        banner = next(b for b in ov["banners"] if "Disk near-full" in b["head"])
+        self.assertEqual(banner["severity"], "critical")
+
+    def test_an_expired_cert_is_critical_but_merely_expiring_is_a_warning(self):
+        """One is an outage now — browsers reject the site. The other is a diary entry."""
+        self.assertEqual(
+            next(b for b in self._overview(certs="expired")["banners"] if "SSL" in b["head"])["severity"],
+            "critical")
+        self.assertEqual(
+            next(b for b in self._overview(certs="expiring")["banners"] if "SSL" in b["head"])["severity"],
+            "warning")
+
+    def test_banners_are_ordered_most_severe_first(self):
+        ov = self._overview(unreachable=True, nearfull=True, certs="expiring")
+        ranks = [gr.SEVERITY[b["severity"]]["rank"] for b in ov["banners"]]
+        self.assertEqual(ranks, sorted(ranks))
+
+    def test_the_colour_band_is_derived_from_the_severity(self):
+        """Set by hand in two places, a banner could read amber on screen and red in the
+        file. The band follows the severity so they cannot disagree."""
+        expected = {"imminent": "critical", "critical": "red", "warning": "amber"}
+        for b in self._overview(unreachable=True, nearfull=True, certs="expiring")["banners"]:
+            self.assertEqual(b["band"], expected[b["severity"]])
+
+    def test_the_detail_is_rows_not_a_run_on_paragraph(self):
+        """A dozen hosts joined by middots re-wraps at the window edge and reads as prose —
+        you cannot scan down it to find your system."""
+        ov = self._overview(unreachable=True)
+        banner = next(b for b in ov["banners"] if "Unreachable" in b["head"])
+        self.assertTrue(banner["rows"])
+        for row in banner["rows"]:
+            self.assertIn("label", row)
+            self.assertIn("values", row)
+        self.assertNotIn("·", " ".join(r["values"] for r in banner["rows"]))
+
+    def test_the_engine_and_the_webapp_share_one_vocabulary(self):
+        """gr.SEVERITY is the single source; the webapp reads its labels and ranks from it
+        rather than keeping a second copy to drift."""
+        self.assertEqual(sorted(gr.SEVERITY), ["critical", "imminent", "warning"])
+        for name, spec in gr.SEVERITY.items():
+            self.assertEqual(spec["label"], name.upper())
