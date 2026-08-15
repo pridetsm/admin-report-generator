@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Network Analyses Dashboard{% endblock %}
+{% block title %}Network Device Picker{% endblock %}
 
 {% comment %}
   The network admin's landing screen — a structural mirror of reports/select.html.
@@ -35,7 +35,7 @@
 <div class="container">
   <div class="snap" style="align-items:flex-start">
     <div style="min-width:0">
-      <h1>Network Analyses Dashboard</h1>
+      <h1>Network Device Picker</h1>
       <div class="meta">Choose the devices for this report — live metrics are captured only for what you pick.</div>
       <div class="sys-stats">
         <span class="sys-stat">{{ devices|length }} device{{ devices|length|pluralize }}</span>
@@ -54,7 +54,7 @@
   {% endcomment %}
   <div class="resume-bar">
     <div class="resume-text">
-      <b>You have a report open</b>
+      <b>You have a report open <span class="resume-cd" id="resumeCountdown" data-left="{{ open_seconds }}"></span></b>
       <span>{{ open_report|join:", " }} — your answers are still there.</span>
     </div>
     <a class="btn primary" href="{% url 'network_report' %}">Continue that report</a>
@@ -194,4 +194,30 @@
   sync();
 })();
 </script>
+
+{% comment %}
+  The open report expires on the same clock as its snapshot, so the widget counts down to the
+  moment it stops being true rather than offering to continue a report whose numbers went
+  stale hours ago. At zero the page reloads; the server has already dropped the session keys
+  by then, so the widget is simply gone.
+{% endcomment %}
+{% if open_seconds %}
+<script>
+(function () {
+  "use strict";
+  var el = document.getElementById("resumeCountdown");
+  if (!el) { return; }
+  var deadline = Date.now() + (parseInt(el.getAttribute("data-left"), 10) || 0) * 1000;
+  function tick() {
+    var left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    var m = Math.floor(left / 60), s = left % 60;
+    el.textContent = m + ":" + (s < 10 ? "0" : "") + s;
+    el.classList.toggle("warn", left <= 60);
+    if (left <= 0) { clearInterval(iv); window.location.reload(); }
+  }
+  tick();
+  var iv = setInterval(tick, 1000);
+})();
+</script>
+{% endif %}
 {% endblock %}

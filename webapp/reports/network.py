@@ -75,26 +75,31 @@ CATALOGUE = [
          state="missing", oid="—",
          needs="A vendor MIB module. CPU is not in IF-MIB: Cisco exposes it via "
                "CISCO-PROCESS-MIB (cpmCPUTotal5minRev), other vendors differ. Needs a new "
-               "snmp_exporter module built for this switch's vendor."),
+               "snmp_exporter module built for this switch's vendor.",
+         probe="cpmCPUTotal5minRev"),
     dict(section="System & Hardware Health", name="Memory (RAM)",
          what="How much memory is in use. High memory usage can cause memory leaks or "
               "device crashes.",
          state="missing", oid="—",
-         needs="Vendor MIB, as above (CISCO-MEMORY-POOL-MIB or equivalent)."),
+         needs="Vendor MIB, as above (CISCO-MEMORY-POOL-MIB or equivalent).",
+         probe="ciscoMemoryPoolUsed"),
     dict(section="System & Hardware Health", name="Device uptime",
          what="How long the device has been powered on. Helps detect unexpected reboots.",
          state="missing", oid="sysUpTime",
          needs="The cheapest gap to close: sysUpTime is standard SNMPv2-MIB, available on "
-               "every device, and only needs adding to the module's walk."),
+               "every device, and only needs adding to the module's walk.",
+         probe="sysUpTime"),
     dict(section="System & Hardware Health", name="Temperature & fans",
          what="Internal heat levels and fan speeds, to prevent hardware burnouts.",
          state="missing", oid="entPhySensorValue",
          needs="ENTITY-SENSOR-MIB is the standard route and is widely supported; some "
-               "vendors only populate their own MIB."),
+               "vendors only populate their own MIB.",
+         probe="entSensorValue"),
     dict(section="System & Hardware Health", name="Power supplies",
          what="Whether redundant power sources are working.",
          state="missing", oid="entPhySensorValue / vendor",
-         needs="ENTITY-MIB / ENTITY-SENSOR-MIB, or the vendor's environment MIB."),
+         needs="ENTITY-MIB / ENTITY-SENSOR-MIB, or the vendor's environment MIB.",
+         probe="ciscoEnvMonSupplyState"),
 
     # ---- 2. Interface Performance & Bandwidth -----------------------------------------
     dict(section="Interface Performance & Bandwidth", name="Inbound traffic",
@@ -105,50 +110,60 @@ CATALOGUE = [
                "minute at this switch's observed rates — see the traffic panel for the "
                "figure computed from the current peak. Every wrap loses traffic, so what "
                "is shown is a FLOOR. Poll the 64-bit ifHCInOctets instead — the admins "
-               "asked for it by name."),
+               "asked for it by name.",
+         probe="ifHCInOctets"),
     dict(section="Interface Performance & Bandwidth", name="Outbound traffic",
          what="Data leaving each interface.",
          state="degraded", oid="ifOutOctets (32-bit)",
          promql="rate(ifOutOctets[%s]) * 8" % RATE_WINDOW,
-         needs="As above — switch to ifHCOutOctets."),
+         needs="As above — switch to ifHCOutOctets.",
+         probe="ifHCOutOctets"),
     dict(section="Interface Performance & Bandwidth", name="Port speed",
          what="The interface's maximum capacity, used with traffic to give a percentage.",
          state="missing", oid="ifHighSpeed",
          needs="Without it there is no denominator, so no % utilisation anywhere in this "
-               "report. In IF-MIB and trivial to add."),
+               "report. In IF-MIB and trivial to add.",
+         probe="ifHighSpeed"),
     dict(section="Interface Performance & Bandwidth", name="Operational status",
          what="Whether a port is physically up or down.",
-         state="live", oid="ifOperStatus", promql="ifOperStatus"),
+         state="live", oid="ifOperStatus", promql="ifOperStatus",
+         probe="ifOperStatus"),
     dict(section="Interface Performance & Bandwidth", name="Admin status",
          what="Whether a port was deliberately enabled or disabled by an admin.",
          state="missing", oid="ifAdminStatus",
          needs="In IF-MIB alongside ifOperStatus. Without it a down port cannot be told "
-               "from a deliberately shut one, so every shut port reads as a fault."),
+               "from a deliberately shut one, so every shut port reads as a fault.",
+         probe="ifAdminStatus"),
     dict(section="Interface Performance & Bandwidth", name="Interface errors",
          what="Bad packets from faulty cables or hardware.",
          state="missing", oid="ifInErrors / ifOutErrors",
          needs="In IF-MIB. The Errors panel is empty because nothing counts them — not "
-               "because there are none."),
+               "because there are none.",
+         probe="ifInErrors"),
     dict(section="Interface Performance & Bandwidth", name="Interface discards",
          what="Packets dropped when the port buffer overflows — congestion.",
          state="missing", oid="ifInDiscards / ifOutDiscards",
-         needs="In IF-MIB, same walk as the error counters."),
+         needs="In IF-MIB, same walk as the error counters.",
+         probe="ifInDiscards"),
 
     # ---- 3. Protocol & Network State ---------------------------------------------------
     dict(section="Protocol & Network State", name="Routing status (BGP / OSPF)",
          what="Whether sessions to other networks or ISPs are alive.",
          state="missing", oid="bgpPeerState / ospfNbrState",
          needs="BGP4-MIB / OSPF-MIB modules. Only meaningful on devices that route — the "
-               "core switch may not, so confirm which devices these belong to."),
+               "core switch may not, so confirm which devices these belong to.",
+         probe="bgpPeerState"),
     dict(section="Protocol & Network State", name="Active connections",
          what="Firewall and VPN connection counts, to catch a device being overwhelmed.",
          state="missing", oid="vendor firewall MIB",
          needs="A firewall is not in scope yet: only the core switch is polled. Needs the "
-               "firewall added as an SNMP target first."),
+               "firewall added as an SNMP target first.",
+         probe=""),
     dict(section="Protocol & Network State", name="Connected devices (Wi-Fi)",
          what="How many users are on each wireless access point.",
          state="missing", oid="vendor wireless MIB",
-         needs="No wireless controller is polled yet. Needs the WLC added as a target."),
+         needs="No wireless controller is polled yet. Needs the WLC added as a target.",
+         probe=""),
 ]
 
 
@@ -185,11 +200,48 @@ def _iface_label(labels: Dict[str, str]) -> str:
     "ifIndex 103" is at least honestly unhelpful, where "Interface 103" would imply a name
     the report does not actually have.
     """
-    for key in ("ifDescr", "ifAlias", "ifName"):
+    # ifAlias is the admin's own description of the port and beats a generated name when set
+    for key in ("ifAlias", "ifDescr", "ifName"):
         if labels.get(key):
             return labels[key]
     idx = labels.get("ifIndex", "?")
     return f"ifIndex {idx}"
+
+
+def measure_catalogue(q, wanted_targets=None) -> list:
+    """The catalogue with each entry's state MEASURED, not declared.
+
+    The states used to be written into the table by hand, which meant the report kept saying
+    "not collected" for a metric the day after it started being collected — and a hardcoded
+    claim about someone else's Prometheus config is a claim that goes stale silently.
+
+    Each entry names the metric that would prove it present; if the series exist for the
+    devices in scope, it is live. `degraded` is reserved for the one case where the data is
+    there but known-wrong: 32-bit octet counters standing in for the 64-bit pair.
+    """
+    out = []
+    for m in CATALOGUE:
+        probe = m.get("probe") or ""
+        present = False
+        if probe:
+            rows = q(probe)
+            if wanted_targets is not None:
+                rows = [r for r in rows if r["labels"].get("instance") in wanted_targets]
+            present = bool(rows)
+        entry = dict(m)
+        if present:
+            entry["state"] = "live"
+        elif m["name"] in ("Inbound traffic", "Outbound traffic"):
+            # the 64-bit counter is absent; fall back to the 32-bit one and say it is a floor
+            legacy = "ifInOctets" if "Inbound" in m["name"] else "ifOutOctets"
+            rows = q(legacy)
+            if wanted_targets is not None:
+                rows = [r for r in rows if r["labels"].get("instance") in wanted_targets]
+            entry["state"] = "degraded" if rows else "missing"
+        else:
+            entry["state"] = "missing"
+        out.append(entry)
+    return out
 
 
 def collect(only: Optional[set] = None) -> dict:
@@ -229,8 +281,27 @@ def collect(only: Optional[set] = None) -> dict:
             out[(inst, r["labels"].get("ifIndex"))] = r["value"] * 8
         return out
 
-    rate_in = _rates(f"rate(ifInOctets[{RATE_WINDOW}])")
-    rate_out = _rates(f"rate(ifOutOctets[{RATE_WINDOW}])")
+    # 64-bit first. The 32-bit pair wraps in ~35s on a saturated 1G port and every wrap loses
+    # traffic, so it is a fallback that has to announce itself — never a silent equivalent.
+    rate_in = _rates(f"rate(ifHCInOctets[{RATE_WINDOW}])")
+    rate_out = _rates(f"rate(ifHCOutOctets[{RATE_WINDOW}])")
+    counters_are_64bit = bool(rate_in or rate_out)
+    if not counters_are_64bit:
+        rate_in = _rates(f"rate(ifInOctets[{RATE_WINDOW}])")
+        rate_out = _rates(f"rate(ifOutOctets[{RATE_WINDOW}])")
+
+    # capacity, admin intent, and the error/discard counters — each optional, each simply
+    # absent until the matching module is scraped
+    speed = {(r["labels"].get("instance"), r["labels"].get("ifIndex")): r["value"] * 1_000_000
+             for r in q("ifHighSpeed")}
+    admin = {(r["labels"].get("instance"), r["labels"].get("ifIndex")): int(r["value"])
+             for r in q("ifAdminStatus")}
+    errs = {}
+    for metric, key in (("ifInErrors", "in_err"), ("ifOutErrors", "out_err"),
+                        ("ifInDiscards", "in_disc"), ("ifOutDiscards", "out_disc")):
+        for r in q(f"increase({metric}[{RATE_WINDOW}])"):
+            k = (r["labels"].get("instance"), r["labels"].get("ifIndex"))
+            errs.setdefault(k, {})[key] = max(0.0, r["value"])
 
     devices = sorted({r["labels"].get("instance", "") for r in oper if r["labels"].get("instance")})
     system = next((r["labels"].get("system") for r in oper if r["labels"].get("system")), "")
@@ -252,6 +323,11 @@ def collect(only: Optional[set] = None) -> dict:
                             5: "dormant", 6: "not present", 7: "lower layer down"}.get(status, str(status)),
             "in_bps": rate_in.get(idx),
             "out_bps": rate_out.get(idx),
+            "speed_bps": speed.get(idx),
+            # None when ifAdminStatus is not collected — which is NOT the same as "enabled",
+            # and the report must not render it as though it were
+            "admin_up": (admin.get(idx) == 1) if idx in admin else None,
+            "errors": errs.get(idx, {}),
             "in_text": _fmt_bps(rate_in.get(idx)),
             "out_text": _fmt_bps(rate_out.get(idx)),
             "total_bps": (rate_in.get(idx) or 0) + (rate_out.get(idx) or 0),
@@ -289,6 +365,38 @@ def collect(only: Optional[set] = None) -> dict:
     # rather than presenting 65 rows as if they were all faults.
     down_sorted = sorted(down, key=lambda i: int(i["index"]) if str(i["index"]).isdigit() else 0)
 
+    # % utilisation, at last: a port doing 900 Mbps is bored on a 10G link and saturated on a
+    # 1G one, and until ifHighSpeed is collected there is no way to tell which. Computed only
+    # where capacity is known, so it is absent rather than guessed.
+    for i in interfaces:
+        cap = i["speed_bps"]
+        # NOT `busiest` — that name already holds the top-N interface list a few lines up,
+        # and shadowing it here emptied the traffic table on the report.
+        heaviest = max(i["in_bps"] or 0, i["out_bps"] or 0)
+        i["util_pct"] = round((heaviest / cap) * 100, 1) if cap else None
+    saturated = [i for i in interfaces if (i["util_pct"] or 0) >= 80]
+
+    erroring = [i for i in interfaces if sum(i["errors"].values() or [0]) > 0]
+
+    # Hardware health, from the vendor module. Each is optional; a missing reading is None and
+    # renders as "not collected" rather than as a zero, which would read as "cool and idle".
+    def _one(expr):
+        rows = q(expr)
+        if wanted is not None:
+            rows = [r for r in rows if r["labels"].get("instance") in wanted]
+        return rows
+
+    cpu_rows = _one("cpmCPUTotal5minRev") or _one("cpmCPUTotal1minRev")
+    cpu = max((r["value"] for r in cpu_rows), default=None)
+    mem_used = sum(r["value"] for r in _one("ciscoMemoryPoolUsed")) or None
+    mem_free = sum(r["value"] for r in _one("ciscoMemoryPoolFree")) or None
+    mem_pct = round(mem_used / (mem_used + mem_free) * 100, 1) if mem_used and mem_free else None
+    up_rows = _one("sysUpTime")
+    # sysUpTime is in hundredths of a second (TimeTicks), not seconds
+    uptime_days = round(max(r["value"] for r in up_rows) / 100.0 / 86400.0, 1) if up_rows else None
+    temps = [r["value"] for r in _one("entSensorValue") if 0 < r["value"] < 200]
+    temp_max = max(temps) if temps else None
+
     # How long a 32-bit octet counter survives at the fastest rate actually observed here.
     # Computed, never hardcoded: the peak moves with the traffic, and a stale constant on a
     # page whose whole point is "this number is under-reported" would be its own small lie.
@@ -296,9 +404,10 @@ def collect(only: Optional[set] = None) -> dict:
     peak_bps = max((max(i["in_bps"] or 0, i["out_bps"] or 0) for i in interfaces), default=0)
     wrap_seconds = (2 ** 32) / (peak_bps / 8) if peak_bps else None
 
-    live = sum(1 for m in CATALOGUE if m["state"] == "live")
-    degraded = sum(1 for m in CATALOGUE if m["state"] == "degraded")
-    missing = sum(1 for m in CATALOGUE if m["state"] == "missing")
+    catalogue = measure_catalogue(q, wanted)
+    live = sum(1 for m in catalogue if m["state"] == "live")
+    degraded = sum(1 for m in catalogue if m["state"] == "degraded")
+    missing = sum(1 for m in catalogue if m["state"] == "missing")
 
     return {
         "ok": True,
@@ -324,12 +433,21 @@ def collect(only: Optional[set] = None) -> dict:
         "total_out_bps": sum(i["out_bps"] or 0 for i in interfaces),
         "total_in_text": _fmt_bps(sum(i["in_bps"] or 0 for i in interfaces)),
         "total_out_text": _fmt_bps(sum(i["out_bps"] or 0 for i in interfaces)),
-        "catalogue": CATALOGUE,
+        "catalogue": catalogue,
         "count_live": live,
         "count_degraded": degraded,
         "count_missing": missing,
         "count_total": len(CATALOGUE),
         "peak_bps_text": _fmt_bps(peak_bps),
+        "counters_are_64bit": counters_are_64bit,
+        "saturated": saturated,
+        "erroring": erroring,
+        "has_speed": bool(speed),
+        "has_admin": bool(admin),
+        "cpu_pct": cpu,
+        "mem_pct": mem_pct,
+        "uptime_days": uptime_days,
+        "temp_max": temp_max,
         "wrap_seconds": round(wrap_seconds) if wrap_seconds else None,
         "scrape_interval_s": SCRAPE_INTERVAL,
         # How many scrapes the counter survives on the busiest port. Not a safety margin:
@@ -448,7 +566,7 @@ def _device_flags(dev: dict, data: dict) -> list:
 
     # The counter-width problem is a defect in the MEASUREMENT, and belongs on the report as
     # one — an admin reading these numbers has to know they are a floor.
-    if data.get("wrap_seconds"):
+    if data.get("wrap_seconds") and not data.get("counters_are_64bit"):
         flags.append(FlagVM(
             "counter_width",
             f"Throughput is under-reported: the 32-bit octet counters wrap about every "
@@ -456,7 +574,42 @@ def _device_flags(dev: dict, data: dict) -> list:
             f"Poll ifHCInOctets/ifHCOutOctets to fix it.",
             "amber", "untracked"))
 
-    missing = [m["name"] for m in CATALOGUE if m["state"] == "missing"]
+    # ---- hardware, once the vendor module is scraped -------------------------------
+    if data.get("cpu_pct") is not None and data["cpu_pct"] >= 80:
+        flags.append(FlagVM("cpu_high", f"CPU at {data['cpu_pct']:.0f}% (5-minute average)",
+                            "red" if data["cpu_pct"] >= 90 else "amber", "cpu"))
+    if data.get("mem_pct") is not None and data["mem_pct"] >= 80:
+        flags.append(FlagVM("mem_high", f"Memory at {data['mem_pct']:.0f}% in use",
+                            "red" if data["mem_pct"] >= 90 else "amber", "ram"))
+    if data.get("temp_max") is not None and data["temp_max"] >= 60:
+        flags.append(FlagVM("temp_high", f"Hottest sensor reading {data['temp_max']:.0f}°C",
+                            "red" if data["temp_max"] >= 75 else "amber", "unreachable"))
+    if data.get("uptime_days") is not None and data["uptime_days"] < 1:
+        # A switch that has just rebooted is the single most useful thing on this page: it
+        # explains every other anomaly on it.
+        flags.append(FlagVM("recent_reboot",
+                            f"Device restarted {data['uptime_days'] * 24:.0f} hours ago",
+                            "red", "unreachable"))
+
+    # ---- interface health, once the counters are collected --------------------------
+    sat = [i for i in data.get("saturated", []) if i["device"] == dev["target"]]
+    if sat:
+        worst = max(sat, key=lambda i: i["util_pct"])
+        flags.append(FlagVM(
+            "links_saturated",
+            f"{len(sat)} interface(s) at or above 80% of capacity — worst {worst['name']} "
+            f"at {worst['util_pct']:.0f}% of {_fmt_bps(worst['speed_bps'])}",
+            "amber", "service"))
+    err = [i for i in data.get("erroring", []) if i["device"] == dev["target"]]
+    if err:
+        total = sum(sum(i["errors"].values()) for i in err)
+        flags.append(FlagVM(
+            "iface_errors",
+            f"{total:.0f} errors/discards across {len(err)} interface(s) in the last "
+            f"{RATE_WINDOW} — faulty cabling, a failing optic, or congestion",
+            "amber", "service"))
+
+    missing = [m["name"] for m in data.get("catalogue", CATALOGUE) if m["state"] == "missing"]
     if missing:
         flags.append(FlagVM(
             "metrics_missing",
@@ -481,6 +634,12 @@ def _network_overview(data: dict, devices: list) -> dict:
     return {
         "glance": [
             {"label": "Devices", "value": len(devices), "state": "info"},
+            {"label": "CPU", "value": (f"{data['cpu_pct']:.0f}%" if data.get("cpu_pct") is not None else "—"),
+             "state": "info"},
+            {"label": "Memory", "value": (f"{data['mem_pct']:.0f}%" if data.get("mem_pct") is not None else "—"),
+             "state": "info"},
+            {"label": "Uptime", "value": (f"{data['uptime_days']:.0f}d" if data.get("uptime_days") is not None else "—"),
+             "state": "info"},
             {"label": "Interfaces", "value": data["iface_count"], "state": "info"},
             {"label": "Links up", "value": data["up_count"], "state": "info"},
             {"label": "Carrying traffic", "value": data["carrying_count"], "state": "info"},
@@ -492,6 +651,10 @@ def _network_overview(data: dict, devices: list) -> dict:
         ],
         "watch": [
             {"label": "Links not up", "value": down, "sub": "interfaces", "state": warn(down)},
+            {"label": "At capacity", "value": len(data.get("saturated", [])), "sub": "≥80% used",
+             "state": warn(len(data.get("saturated", [])))},
+            {"label": "With errors", "value": len(data.get("erroring", [])), "sub": "interfaces",
+             "state": warn(len(data.get("erroring", [])))},
             {"label": "Metrics not collected", "value": missing,
              "sub": f"of {len(CATALOGUE)} requested", "state": warn(missing)},
             {"label": "Counter width", "value": "32-bit", "sub": "under-reports throughput",

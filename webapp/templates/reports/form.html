@@ -311,7 +311,8 @@
 {# ---- toast notifications ---- #}
 <div id="toasts" class="toast-wrap" aria-live="polite"></div>
 
-<span id="ttlData" data-ttl="{{ ttl_seconds }}" data-remaining="{{ remaining_seconds }}" hidden></span>
+<span id="ttlData" data-ttl="{{ ttl_seconds }}" data-remaining="{{ remaining_seconds }}"
+      data-draft-key="{{ draft_key }}" hidden></span>
 
 <script>
 (function () {
@@ -494,8 +495,18 @@
              summary: val("textarea[name=summary_comment]"), theme: theme ? theme.value : "dark",
              systems: systems, flagText: flagText };
   }
+  // Scoped to this estate AND this selection. A single shared key meant the systems draft
+  // was restored into a network report, where no card name matches — the answers were saved
+  // faithfully and then dropped on the floor, which looks exactly like not saving at all.
+  var DRAFT_KEY = (function () {
+    var d = document.getElementById("ttlData");
+    return (d && d.getAttribute("data-draft-key")) || "draft:report";
+  })();
+  function saveDraft() {
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(collect())); } catch (e) {}
+  }
   function saveAndReload() {
-    try { localStorage.setItem("reportDraft", JSON.stringify(collect())); } catch (e) {}
+    saveDraft();
     window.location.reload();   // every GET to this page always captures a fresh snapshot server-side
   }
   document.querySelectorAll("[data-refresh]").forEach(function (b) {
@@ -507,15 +518,22 @@
   // coming back via "Continue that report", or closing the tab and reopening later should all
   // find typed answers intact too — every GET here re-captures fresh metrics (see report()),
   // so the draft is the ONLY thing that would otherwise be lost.
-  window.addEventListener("beforeunload", function () {
-    try { localStorage.setItem("reportDraft", JSON.stringify(collect())); } catch (e) {}
+  window.addEventListener("beforeunload", saveDraft);
+  // beforeunload is not fired reliably on every route out of a page (a discarded tab, a
+  // mobile background, some in-page navigations). visibilitychange is, so the draft is
+  // written whenever this page stops being the one on screen.
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") saveDraft();
   });
+  form.addEventListener("submit", saveDraft);
 
   // ---- restore inputs after a refresh + advise on what changed ----
   (function restore() {
-    var raw; try { raw = localStorage.getItem("reportDraft"); } catch (e) { return; }
+    var raw; try { raw = localStorage.getItem(DRAFT_KEY); } catch (e) { return; }
     if (!raw) return;
-    try { localStorage.removeItem("reportDraft"); } catch (e) {}
+    // NOT removed on restore. Every visit to this page re-captures, so a second refresh —
+    // the countdown reload, an F5, coming back a third time — has to find the draft still
+    // there. It is cleared when the report is actually generated, and lapses after an hour.
     var d; try { d = JSON.parse(raw); } catch (e) { return; }
     if (!d || Date.now() - (d.ts || 0) > 3600000) return;   // ignore stale drafts (>1h)
 

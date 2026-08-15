@@ -53,11 +53,11 @@ _NAV_PARENT = {
 _NAV_ROOT = "report_form"
 
 _NAV_LABEL = {
-    "report_form": "Dashboard",
+    "report_form": "System Picker",
     "connect": "Connect",
     "folder_watch": "Folder Watch",
     "folder_watch_temenos": "Temenos",
-    "network_dashboard": "Network Analyses",
+    "network_dashboard": "Network Device Picker",
     "role_empty": "Home",
     "network_report": "Core Switch",
     "history": "History",
@@ -112,7 +112,10 @@ def _back_nav(request):
     # An OPEN REPORT outranks the tree, for whichever estate the admin is working in. Both
     # pickers discard the answers already typed if you re-select on them, so Back must
     # retrace the report rather than the screen it was started from.
-    if parent in ("report_form", "network_dashboard"):
+    # ...but never when you are ALREADY on that report: the override would hand its own URL
+    # back as "Back", so the button pointed at the page you were standing on and did nothing.
+    on_the_open_report = name in ("report", "network_report")
+    if parent in ("report_form", "network_dashboard") and not on_the_open_report:
         if "Network Admin" in scope and request.session.get("network_devices"):
             try:
                 return reverse("network_report"), "Report"

@@ -296,7 +296,7 @@ class ReportBuilderFlow(TestCase):
         # History's parent is the Dashboard (home)
         r = self.client.get(reverse("history"))
         self.assertEqual(r.context["back_url"], reverse("report_form"))
-        self.assertEqual(r.context["back_label"], "Dashboard")
+        self.assertEqual(r.context["back_label"], "System Picker")
         # A report detail's parent is History (not home) — one level up the tree
         sub = ReportSubmission.objects.create(generated_by=self.user, theme="dark")
         r = self.client.get(reverse("submission_detail", args=[sub.pk]))
@@ -1404,7 +1404,13 @@ def _snmp_prom(oper, rin=None, rout=None):
             return rout
         if expr.startswith("up{"):
             return [{"labels": {"instance": _DEV_TARGET}, "value": 1.0}]
-        return [{"labels": {}, "value": 1.0}]        # vector(1) reachability probe
+        if expr == "vector(1)":
+            return [{"labels": {}, "value": 1.0}]    # reachability probe
+        # Everything else is genuinely absent. The catch-all used to answer ANY query with a
+        # dummy series, which meant a metric the fixture had never heard of — ifHCInOctets,
+        # ifHighSpeed — arrived looking collected, and the code under test took the rich path
+        # against data that did not exist.
+        return []
 
     prom.query.side_effect = q
     return mock.patch("reports.network._prometheus", return_value=(prom, "http://prom:9090"))
@@ -1560,10 +1566,15 @@ class NetworkReportPage(TestCase):
         self.assertIn("ifHCInOctets", body)
 
     def test_the_uncollected_metrics_are_reported_as_a_finding(self):
+        """The count is MEASURED against Prometheus now, not written into the table, so the
+        assertion derives it the same way rather than hardcoding a number that goes stale the
+        day a metric starts being collected."""
         body = self._body()
         self.assertIn("not collected", body)
-        missing = sum(1 for m in network.CATALOGUE if m["state"] == "missing")
-        self.assertIn(f"{missing} of {len(network.CATALOGUE)} requested metrics", body)
+        with _snmp_prom(_snmp_series(up=3, down=2)):
+            data = network.collect(only={"core-switch"})
+        self.assertGreater(data["count_missing"], 0)
+        self.assertIn(f"{data['count_missing']} of {len(network.CATALOGUE)} requested metrics", body)
 
     def test_nothing_is_flagged_that_is_not_measured(self):
         """No band is invented for a metric that is not polled — an amber row for "CPU
@@ -1579,7 +1590,7 @@ class NetworkReportPage(TestCase):
         read "System Analyses Dashboard · 1 system selected" above a switch — someone else's
         screen with their device on it."""
         body = self._body()
-        self.assertIn("Network Analyses Dashboard", body)
+        self.assertIn("Network Device Picker", body)
         self.assertNotIn("System Analyses Dashboard", body)
         self.assertIn("1 device selected", body)
         self.assertIn("Devices needing attention", body)
@@ -1630,10 +1641,10 @@ class NetworkReportAccess(TestCase):
         The network screens are reached through their own dashboard now, so the link to
         look for is that dashboard rather than the report directly."""
         self.client.login(username="ga", password="pw12345!")
-        self.assertNotContains(self.client.get(reverse("history")), "Network Analyses Dashboard")
+        self.assertNotContains(self.client.get(reverse("history")), "Network Device Picker")
         self.client.logout()
         self.client.login(username="na", password="pw12345!")
-        self.assertContains(self.client.get(reverse("history")), "Network Analyses Dashboard")
+        self.assertContains(self.client.get(reverse("history")), "Network Device Picker")
 
     def test_only_network_admin_holds_it(self):
         """Systems and network are separated deliberately: the System Analyses Dashboard is
@@ -1833,13 +1844,34 @@ class RoleSelectScreen(TestCase):
         self.assertRedirects(resp, reverse("report_form"))
         self.assertEqual(self.client.session.get("active_role"), "System Admin")
 
-    def test_a_user_with_several_roles_is_offered_each_one(self):
+    def test_every_role_is_listed_held_or_not(self):
+        """Showing only what you hold made the app look like it had two different ideas of
+        how many roles exist — the first-login screen has always listed them all. A role you
+        do not hold appears muted, with a request in place of the switch."""
         self.client.login(username="multi", password="pw12345!")
         resp = self.client.get(reverse("role_select"))
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "System Admin")
-        self.assertContains(resp, "Network Admin")
-        self.assertNotContains(resp, "Gov Systems Admin")      # not held
+        body = resp.content.decode()
+        for role in ROLE_NAMES:
+            self.assertIn(role, body)
+        # held -> switch, not held -> request
+        self.assertIn('name="role" value="System Admin"', body)
+        self.assertIn('name="request_role" value="Gov Systems Admin"', body)
+
+    def test_a_role_you_do_not_hold_can_be_requested_from_here(self):
+        """The same action the first-login screen offers, so the two screens differ in
+        presentation and not in what they can do."""
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"request_role": "Gov Systems Admin"}, follow=True)
+        self.assertTrue(RoleRequest.objects.filter(
+            user__username="multi", role="Gov Systems Admin", status="pending").exists())
+
+    def test_requesting_a_role_twice_does_not_stack_requests(self):
+        self.client.login(username="multi", password="pw12345!")
+        for _ in range(2):
+            self.client.post(reverse("role_select"), {"request_role": "Security Admin"}, follow=True)
+        self.assertEqual(RoleRequest.objects.filter(
+            user__username="multi", role="Security Admin").count(), 1)
 
     def test_a_superuser_is_offered_every_role(self):
         """is_superuser already passes every gate, so the roles it can act as ARE all of
@@ -1858,16 +1890,18 @@ class RoleSelectScreen(TestCase):
         self.assertRedirects(resp, reverse("network_dashboard"))
         self.assertEqual(self.client.session["active_role"], "Network Admin")
 
-    def test_the_escape_hatch_restores_the_full_menu(self):
-        """Someone who genuinely wears several hats at once should not have to keep coming
-        back here, so the pre-picker behaviour stays available as a deliberate choice."""
+    def test_there_is_no_every_role_at_once_option(self):
+        """A role is the hat being worn. An everything-at-once mode let the menu show screens
+        from estates the admin was not working in — the thing this screen exists to prevent.
+        Removed from the page AND from the view, so it cannot be reached by posting a value
+        the screen no longer renders."""
         self.client.login(username="multi", password="pw12345!")
+        self.assertNotContains(self.client.get(reverse("role_select")), "Show every role I hold")
+
         self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        self.client.post(reverse("role_select"), {"role": "__all__"})
-        self.assertIsNone(self.client.session.get("active_role"))
-        body = self.client.get(reverse("history")).content.decode()
-        self.assertIn("Folder Watch", body)
-        self.assertIn("Network Analyses Dashboard", body)
+        resp = self.client.post(reverse("role_select"), {"role": "__all__"}, follow=True)
+        self.assertContains(resp, "not a role you hold")
+        self.assertEqual(self.client.session.get("active_role"), "Network Admin")   # unchanged
 
     def test_the_drawer_head_names_the_role_being_worn(self):
         """The head names the ROLE, not the account — the account is already on the profile
@@ -1907,7 +1941,7 @@ class RoleSelectScreen(TestCase):
         body = self.client.get(reverse("role_select")).content.decode()
         self.assertNotIn('class="topbar"', body)
         self.assertNotIn('class="drawer"', body)
-        for link in ("System Analyses Dashboard", "Folder Watch", "Network Report"):
+        for link in ("System Picker", "Folder Watch", "Network Device Picker"):
             self.assertNotIn(link, body)
 
     def test_the_picker_is_never_a_trap(self):
@@ -1920,7 +1954,7 @@ class RoleSelectScreen(TestCase):
         self.client.login(username="multi", password="pw12345!")
         body = self.client.get(reverse("history")).content.decode()
         self.assertIn('class="topbar"', body)
-        self.assertIn("System Analyses Dashboard", body)
+        self.assertIn("System Picker", body)
 
     def test_the_picker_describes_the_job_not_the_software(self):
         """"Adds 2 screens" describes the app; someone deciding which hat to put on needs to
@@ -2007,7 +2041,7 @@ class RoleScopedMenu(TestCase):
         """Unscoped is a real state, not an unfinished one — a bookmark or a deep link must
         not dead-end at a chooser."""
         body = self._menu()
-        for link in ("Folder Watch", "Network Analyses Dashboard", "Roles"):
+        for link in ("Folder Watch", "Network Device Picker", "Roles"):
             self.assertIn(link, body)
 
     def test_choosing_system_admin_hides_the_other_roles_screens(self):
@@ -2044,8 +2078,8 @@ class RoleScopedMenu(TestCase):
     def test_each_role_sees_only_its_own_dashboard(self):
         """The counterpart to the test above: the dashboards are exactly what is NOT common."""
         expected = {
-            "System Admin":  ("System Analyses Dashboard", "Network Analyses Dashboard"),
-            "Network Admin": ("Network Analyses Dashboard", "System Analyses Dashboard"),
+            "System Admin":  ("System Picker", "Network Device Picker"),
+            "Network Admin": ("Network Device Picker", "System Picker"),
         }
         for role, (present, absent) in expected.items():
             self.client.post(reverse("role_select"), {"role": role})
@@ -2105,7 +2139,7 @@ class EmptyRoles(TestCase):
     def test_it_is_not_given_another_role_s_dashboard(self):
         body = self.client.get(reverse("history")).content.decode()
         self.assertNotIn("System Analyses Dashboard", body)
-        self.assertNotIn("Network Analyses Dashboard", body)
+        self.assertNotIn("Network Device Picker", body)
 
     def test_it_lands_on_a_screen_that_admits_it_is_empty(self):
         """Not History, not another role's dashboard. A role with nothing in it should look
@@ -2196,19 +2230,19 @@ class DashboardsAreSeparate(TestCase):
         return body[body.find('id="drawer"'):body.find("</nav>")]
 
     def test_the_systems_dashboard_belongs_to_the_systems_role(self):
-        self.assertIn("System Analyses Dashboard", self._drawer("sysadm"))
+        self.assertIn("System Picker", self._drawer("sysadm"))
 
     def test_a_network_admin_is_not_shown_the_systems_dashboard(self):
-        self.assertNotIn("System Analyses Dashboard", self._drawer("netadm2"))
+        self.assertNotIn("System Picker", self._drawer("netadm2"))
 
     def test_the_network_dashboard_belongs_to_the_network_role(self):
-        self.assertIn("Network Analyses Dashboard", self._drawer("netadm2"))
+        self.assertIn("Network Device Picker", self._drawer("netadm2"))
 
     def test_a_system_admin_is_not_shown_the_network_dashboard(self):
         """An earlier draft let System Admin read the network screens. The roles have since
         been separated deliberately, and a systems menu full of switch screens is exactly
         what that separation exists to prevent."""
-        self.assertNotIn("Network Analyses Dashboard", self._drawer("sysadm"))
+        self.assertNotIn("Network Device Picker", self._drawer("sysadm"))
 
     def test_a_system_admin_is_refused_the_network_urls(self):
         """Hiding the link is not access control."""
@@ -2658,13 +2692,17 @@ class NetworkGenerate(TestCase):
         self.assertEqual(sub.annotations["Core Switch"]["comment"], "Unused access ports.")
         self.assertEqual([s["name"] for s in sub.report_content["systems"]], ["Core Switch"])
 
-    def test_the_snapshot_is_spent_once_reported(self):
-        """The next report starts from fresh metrics, never from numbers already signed off."""
+    def test_the_report_can_be_generated_more_than_once(self):
+        """The page stays open after a download, so Generate has to work a second time. It
+        used to consume the snapshot — pressing it again died with "this snapshot expired",
+        and coming back after e-mailing hit the same wall, which read as e-mailing having
+        forced a refresh. Freshness is guaranteed by every GET re-capturing, not by
+        destroying the snapshot underneath the page that is still showing it."""
         token = self._open()
-        self.client.post(reverse("network_generate"), {"token": token, "author": "P. Moyo"})
-        again = self.client.post(reverse("network_generate"),
-                                 {"token": token, "author": "P. Moyo"}, follow=True)
-        self.assertContains(again, "expired")
+        for _ in range(3):
+            resp = self.client.post(reverse("network_generate"), {"token": token, "author": "P. Moyo"})
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.content.startswith(b"PK"))
 
     def test_a_system_admin_cannot_generate_a_network_report(self):
         other = get_user_model().objects.create_user("sysgen", password="pw12345!")
@@ -2921,3 +2959,105 @@ class BannerSeverity(TestCase):
         self.assertEqual(sorted(gr.SEVERITY), ["critical", "imminent", "warning"])
         for name, spec in gr.SEVERITY.items():
             self.assertEqual(spec["label"], name.upper())
+
+
+class OpenReportExpiry(TestCase):
+    """The "you have a report open" widget expires with the snapshot it refers to.
+
+    The widget offers to CONTINUE a report, so it has to stop offering when that stops being
+    possible — otherwise it invites an admin back to numbers captured hours ago.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("expiry", password="pw12345!")
+        for r in ("System Admin", "Network Admin"):
+            self.u.groups.add(Group.objects.get(name=r))
+        self.client.login(username="expiry", password="pw12345!")
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_the_widget_counts_down_on_the_snapshot_clock(self, _cap):
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.client.post(reverse("report"), {"include_system": "Efin"})
+        self.client.get(reverse("report"))
+        body = self.client.get(reverse("report_form")).content.decode()
+        self.assertIn("You have a report open", body)
+        left = int(re.search(r'data-left="(\d+)"', body).group(1))
+        self.assertGreater(left, 0)
+        self.assertLessEqual(left, settings.SNAPSHOT_TTL)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_when_it_runs_out_the_report_closes_and_the_widget_goes(self, _cap):
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.client.post(reverse("report"), {"include_system": "Efin"})
+        self.client.get(reverse("report"))
+
+        session = self.client.session
+        session["report_expires_at"] = time.time() - 1      # wind past the deadline
+        session.save()
+
+        body = self.client.get(reverse("report_form")).content.decode()
+        self.assertNotIn("You have a report open", body)
+        self.assertIsNone(self.client.session.get("report_systems"))
+        self.assertIsNone(self.client.session.get("snapshot_token"))
+
+    def test_the_network_estate_behaves_the_same(self):
+        self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        with _snmp_prom(_snmp_series()):
+            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+            self.client.get(reverse("network_report"))
+            body = self.client.get(reverse("network_dashboard")).content.decode()
+            self.assertIn("You have a report open", body)
+            self.assertRegex(body, r'data-left="\d+"')
+
+            session = self.client.session
+            session["network_expires_at"] = time.time() - 1
+            session.save()
+            body = self.client.get(reverse("network_dashboard")).content.decode()
+        self.assertNotIn("You have a report open", body)
+        self.assertIsNone(self.client.session.get("network_devices"))
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_the_countdown_script_is_absent_when_nothing_is_open(self, _cap):
+        """It reloads the page at zero, so shipping it with no report open would reload a
+        screen nobody asked to reload."""
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.assertNotIn("resumeCountdown", self.client.get(reverse("report_form")).content.decode())
+
+
+class GenerateIsRepeatable(TestCase):
+    """The page stays open after a download, so Generate has to work more than once."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("regen", password="pw12345!")
+        self.user.groups.add(Group.objects.create(name="Report Users"))
+        self.client.login(username="regen", password="pw12345!")
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def _token(self, _cap):
+        self.client.post(reverse("report"), {"include_system": "Efin"})
+        body = self.client.get(reverse("report")).content.decode()
+        return re.search(r'name="token" value="(\w+)"', body).group(1)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_downloading_twice_works(self, _cap):
+        token = self._token()
+        for _ in range(3):
+            resp = self.client.post(reverse("generate"),
+                                    {"token": token, "author": "P", "theme": "dark",
+                                     "action": "download"})
+            self.assertEqual(resp.status_code, 200)
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    @mock.patch("mail_report.send_email", return_value="Subject")
+    def test_the_report_still_works_after_e_mailing(self, _send, _cap):
+        """E-mailing used to consume the snapshot, so going back to the report hit "this
+        snapshot expired" — which reads as e-mailing having forced a refresh."""
+        token = self._token()
+        sent = self.client.post(reverse("generate"),
+                                {"token": token, "author": "P", "theme": "dark",
+                                 "action": "email", "recipients": "ops@rbz.co.zw"})
+        self.assertEqual(sent.status_code, 200)
+        after = self.client.post(reverse("generate"),
+                                 {"token": token, "author": "P", "theme": "dark",
+                                  "action": "download"})
+        self.assertEqual(after.status_code, 200)

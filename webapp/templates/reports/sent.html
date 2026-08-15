@@ -20,4 +20,19 @@
     </div>
   </div></div>
 </div>
+
+{% comment %}
+  The report went out, so its draft has done its job. Cleared here rather than on submit:
+  a DOWNLOAD leaves the page open and the admin may generate again, so the draft has to
+  survive that — only a sent report is definitively finished with.
+{% endcomment %}
+<script>
+(function () {
+  try {
+    Object.keys(localStorage).forEach(function (k) {
+      if (k.indexOf("draft:") === 0 || k === "reportDraft") localStorage.removeItem(k);
+    });
+  } catch (e) {}
+})();
+</script>
 {% endblock %}

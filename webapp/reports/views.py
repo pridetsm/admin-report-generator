@@ -12,6 +12,7 @@ exact numbers they reviewed (Prometheus could drift in the seconds between form 
 from __future__ import annotations
 
 import datetime
+import time
 import uuid
 
 from django.conf import settings
@@ -158,7 +159,8 @@ def network_dashboard(request):
         return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
     # A device already chosen means a report is open — surfaced the same way the systems
     # picker surfaces one, so the only way forward is not "start again and lose the answers".
-    open_keys = request.session.get("network_devices") or []
+    open_seconds = _open_report_seconds(request, "network")
+    open_keys = (request.session.get("network_devices") or []) if open_seconds else []
     by_key = {d["key"]: d for d in devices}
     return render(request, "reports/network_select.html", {
         "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
@@ -166,6 +168,7 @@ def network_dashboard(request):
         "reachable_count": sum(1 for d in devices if d["reachable"]),
         "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
         "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
+        "open_seconds": open_seconds,
     })
 
 
@@ -181,36 +184,83 @@ def role_select(request):
     Selecting a role SCOPES THE MENU. It does not grant anything: the per-view permission
     checks are untouched, so a role you do not hold stays shut whatever is chosen here.
     """
-    roles = held_roles(request.user)
+    held = held_roles(request.user)
+    pending = set(request.user.role_requests.filter(status="pending").values_list("role", flat=True))
 
     if request.method == "POST":
+        # Requesting a role you do not hold — the same action the first-login screen offers,
+        # so the two screens differ in presentation and not in what they can do.
+        wanted = [r for r in request.POST.getlist("request_role") if r in ROLE_NAMES]
+        if wanted:
+            created = 0
+            for r in wanted:
+                if r not in held and r not in pending:
+                    RoleRequest.objects.create(user=request.user, role=r)
+                    created += 1
+            messages.success(request, f"Requested {created} role(s). An administrator will review it."
+                             if created else "Those roles are already held or already requested.")
+            return redirect("role_select")
+
+        # No "every role at once" option. A role is the hat being worn, and an
+        # everything-at-once mode let the menu show screens from estates the admin was not
+        # working in — the thing this screen exists to prevent. The unscoped state still
+        # exists for a session that has never picked; it is simply not offered, and not
+        # reachable by posting a value the screen no longer renders.
         chosen = (request.POST.get("role") or "").strip()
-        if chosen == "__all__":
-            # An explicit way back to the pre-picker behaviour, for someone who genuinely
-            # wears several hats at once and does not want a narrowed menu.
-            request.session.pop(ROLE_SESSION_KEY, None)
-            messages.success(request, "Showing every role you hold.")
-        elif chosen in roles:
+        if chosen in held:
             request.session[ROLE_SESSION_KEY] = chosen
             messages.success(request, f"Working as {chosen}.")
             return redirect(ROLE_HOME.get(chosen, "report_form"))
         else:
             messages.error(request, "That is not a role you hold.")
-            return redirect("role_select")
-        return redirect("report_form")
+        return redirect("role_select")
 
-    if len(roles) <= 1:
-        if roles:
-            request.session[ROLE_SESSION_KEY] = roles[0]
-            return redirect(ROLE_HOME.get(roles[0], "report_form"))
+    if len(held) <= 1 and not request.GET.get("stay"):
+        if held:
+            request.session[ROLE_SESSION_KEY] = held[0]
+            return redirect(ROLE_HOME.get(held[0], "report_form"))
         return redirect("report_form")
 
     return render(request, "reports/role_select.html", {
+        # EVERY role in the catalogue, each with its standing. The first-login screen already
+        # lists them all; showing only what you hold here made the app look like it had two
+        # different ideas of how many roles exist.
         "roles": [{"name": r,
                    "description": ROLE_DESCRIPTIONS.get(r, ""),
-                   "pages": role_screens(r)} for r in roles],
+                   "pages": role_screens(r),
+                   "held": r in held,
+                   "pending": r in pending} for r in ROLE_NAMES],
+        "held_count": len(held),
         "current": active_role(request),
     })
+
+
+#: session keys holding when an open report lapses, per estate. An open report is a claim on
+#: the admin's attention ("your answers are still there"), so it has to expire on its own —
+#: otherwise the resume bar offers to continue a report whose numbers went stale hours ago.
+_OPEN_UNTIL = {"systems": "report_expires_at", "network": "network_expires_at"}
+
+
+def _open_report_seconds(request, estate: str) -> int:
+    """Seconds left on the open report, 0 if none or lapsed. Clears the session when it has.
+
+    Cleared HERE rather than by a background job: the picker is where the claim is displayed,
+    so the moment it is looked at is exactly when it should be honest about being over.
+    """
+    until = request.session.get(_OPEN_UNTIL[estate]) or 0
+    left = int(until - time.time())
+    if left <= 0:
+        if until:
+            _close_open_report(request, estate)
+        return 0
+    return left
+
+
+def _close_open_report(request, estate: str) -> None:
+    keys = ({"report_systems", "snapshot_token", "report_expires_at"} if estate == "systems"
+            else {"network_devices", "network_token", "network_expires_at"})
+    for k in keys:
+        request.session.pop(k, None)
 
 
 @login_required
@@ -232,13 +282,15 @@ def report_form(request):
     # forward: choose systems again — which pops the snapshot token and throws away answers
     # already typed. Surfacing the open report gives the admin the choice back. Nothing is
     # discarded by merely landing here; that only happens if they deliberately re-select.
-    open_systems = request.session.get("report_systems") or []
+    open_seconds = _open_report_seconds(request, "systems")
+    open_systems = (request.session.get("report_systems") or []) if open_seconds else []
     return render(request, "reports/select.html", {
         "select_systems": select_systems,
         "recent_hours": _RECENT_REPORT_HOURS,
         "total_hosts": sum(s["hosts"] for s in select_systems),
         "recent_count": sum(1 for s in select_systems if s["reported"]),
         "open_report": list(open_systems),
+        "open_seconds": open_seconds,
     })
 
 
@@ -282,6 +334,9 @@ def report(request):
         return redirect("report_form")
     cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
     request.session["snapshot_token"] = token
+    # The open report lapses on the same clock as its snapshot, so the picker's resume bar
+    # counts down to the moment it stops being true.
+    request.session["report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
 
     # Anchor the countdown to the capture time so a refresh continues it (never restarts).
     # captured_at is a naive datetime.now(); compare against the same clock.
@@ -302,6 +357,10 @@ def report(request):
         "generate_default": reverse("generate"),
         "dash_title": "System Analyses Dashboard",
         "subject": "system",
+        # Per-estate, per-selection draft key. One shared "reportDraft" meant a systems draft
+        # was restored into a network report, where none of the card names match — so the
+        # typed answers silently went nowhere and the page looked like it had forgotten them.
+        "draft_key": "draft:systems:" + ",".join(sorted(names)),
         "picker_url": reverse("report_form"),
         "snapshot": snapshot,
         "token": token,
@@ -423,7 +482,12 @@ def generate(request):
         report_content=report_content,
         filename=filename,
     )
-    cache.delete(_cache_key(token))   # one-shot: a fresh form gets a fresh snapshot
+    # The snapshot is NOT consumed here. It used to be — "one-shot: a fresh form gets a
+    # fresh snapshot" — which made sense when a revisit reused the cache. Now that every GET
+    # to the report re-captures, deleting it bought nothing and broke two things the admin
+    # actually does: pressing Generate a second time (the page stays open after a download)
+    # died with "this snapshot expired", and coming back after e-mailing hit the same wall,
+    # which read as e-mailing having forced a refresh. It now simply lapses at its TTL.
 
     if action == "email":
         return render(request, "reports/sent.html", {
@@ -624,6 +688,7 @@ def network_report(request):
             return redirect("network_dashboard")
         cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
         request.session["network_token"] = token
+        request.session["network_expires_at"] = time.time() + settings.SNAPSHOT_TTL
 
     # The SAME annotation screen the systems report uses. One device is one "system" and its
     # faults are its flags, so the template needs no network special-casing — which is the
@@ -643,6 +708,7 @@ def network_report(request):
         # systems screen with a switch on it
         "dash_title": "Network Analyses Dashboard",
         "subject": "device",
+        "draft_key": "draft:network:" + ",".join(sorted(keys)),
         "picker_url": reverse("network_dashboard"),
         "generate_url": reverse("network_generate"),
         "generate_default": reverse("generate"),
@@ -707,10 +773,8 @@ def network_generate(request):
         immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
         summary_comment=summary_comment,
     )
-    # The snapshot is spent: the next report starts from fresh metrics, never from numbers
-    # the admin has already signed off.
-    cache.delete(_cache_key(token))
-    request.session.pop("network_token", None)
+    # Left in the cache to lapse at its TTL, for the same reason as the systems flow above:
+    # the page stays open after a download, and Generate has to work twice.
 
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

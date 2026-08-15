@@ -161,7 +161,7 @@
     </a>
     {% endif %}
     {% if is_system_admin %}
-    <a href="{% url 'report_form' %}"{% if current_page == 'report_form' %} class="is-current" aria-current="page"{% elif 'report_form' in current_ancestors %} class="is-ancestor"{% endif %}>System Analyses Dashboard</a>
+    <a href="{% url 'report_form' %}"{% if current_page == 'report_form' %} class="is-current" aria-current="page"{% elif 'report_form' in current_ancestors %} class="is-ancestor"{% endif %}>System Picker</a>
     {% endif %}
     {% comment %}
       The network dashboard is a parent in the same shape as Folder Watch: the device picker,
@@ -169,7 +169,7 @@
       join the same list rather than needing a new place to live.
     {% endcomment %}
     {% if is_network_admin %}
-    <a href="{% url 'network_dashboard' %}"{% if current_page == 'network_dashboard' %} class="is-current" aria-current="page"{% elif 'network_dashboard' in current_ancestors %} class="is-ancestor"{% endif %}>Network Analyses Dashboard</a>
+    <a href="{% url 'network_dashboard' %}"{% if current_page == 'network_dashboard' %} class="is-current" aria-current="page"{% elif 'network_dashboard' in current_ancestors %} class="is-ancestor"{% endif %}>Network Device Picker</a>
     <div class="drawer-children">
       <a href="{% url 'network_report' %}" class="drawer-child{% if current_page == 'network_report' %} is-current{% endif %}"{% if current_page == 'network_report' %} aria-current="page"{% endif %}>Core Switch</a>
     </div>
