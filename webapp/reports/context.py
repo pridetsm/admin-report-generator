@@ -38,10 +38,17 @@ def _asset_version() -> str:
 # level up this tree (child -> parent -> ... -> home), rather than jumping straight home.
 # report_form (home) has no parent, so it shows no Back button.
 _NAV_PARENT = {
+    # The pickers are the top of each estate, and the step above an estate is choosing which
+    # one you are working in. Both therefore lead back to Role Select rather than dead-ending.
+    "report_form": "role_select",
+    "network_dashboard": "role_select",
+    # Each report sits under the picker that opened it, so Back steps out of the report
+    # rather than dead-ending on it. The network report already worked this way; the systems
+    # one had no Back at all and relied solely on the "Change systems" button in its header.
+    "report": "report_form",
     "connect": "report_form",
     "folder_watch": "report_form",
     "folder_watch_temenos": "folder_watch",
-    "network_dashboard": "report_form",
     "network_report": "network_dashboard",
     "history": "report_form",
     "submission_detail": "history",
@@ -53,7 +60,9 @@ _NAV_PARENT = {
 _NAV_ROOT = "report_form"
 
 _NAV_LABEL = {
+    "role_select": "Role Select",
     "report_form": "System Picker",
+    "report": "Report",
     "connect": "Connect",
     "folder_watch": "Folder Watch",
     "folder_watch_temenos": "Temenos",
@@ -65,6 +74,10 @@ _NAV_LABEL = {
     "system_settings": "Configuration",
     "profile": "Profile",
 }
+
+
+def user_of(request):
+    return getattr(request, "user", None)
 
 
 def _current_page(request):
@@ -115,7 +128,11 @@ def _back_nav(request):
     # ...but never when you are ALREADY on that report: the override would hand its own URL
     # back as "Back", so the button pointed at the page you were standing on and did nothing.
     on_the_open_report = name in ("report", "network_report")
-    if parent in ("report_form", "network_dashboard") and not on_the_open_report:
+    on_a_picker = name in ("report_form", "network_dashboard")
+    # A picker's Back steps OUT of the estate, so the open-report override does not apply
+    # there — the picker already offers "Continue that report" in its own widget, and having
+    # Back do the same thing would leave no way up at all.
+    if parent in ("report_form", "network_dashboard") and not on_the_open_report and not on_a_picker:
         if "Network Admin" in scope and request.session.get("network_devices"):
             try:
                 return reverse("network_report"), "Report"
@@ -132,6 +149,12 @@ def _back_nav(request):
     # Never send anyone to a screen their own role does not show. The tree is rooted at the
     # SYSTEMS dashboard, so without this a network admin's Back led to a systems screen that
     # is not in their menu — the tree describing the app, not the role using it.
+    # Role Select auto-applies a single role and would bounce straight back, so a user with
+    # one role gets no Back from the picker rather than a button that returns them to where
+    # they already are.
+    if parent == "role_select" and len(held_roles(user_of(request))) <= 1:
+        return None, None
+
     if parent == "report_form" and scope and "System Admin" not in scope:
         home = ROLE_HOME.get(active_role(request))
         if home and home != "report_form":

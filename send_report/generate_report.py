@@ -1302,13 +1302,18 @@ class ReportBuilder:
         # web-encryption posture: green ONLY when no endpoint is plain HTTP; red when plain
         # HTTP endpoints OUTNUMBER the encrypted ones; amber for anything in between.
         web_state = "good" if n_http == 0 else ("bad" if n_http > n_https else "warn")
+        # Every tile reads affected-out-of-TOTAL. A bare count cannot be judged: 3 is alarming
+        # out of 5 hosts and unremarkable out of 56, and the tile has to say which.
+        total_hosts = sum(len(sy.components) for sy in systems)
         watch_tiles = [
-            ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts)], cpu_state),
-            ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts)], ram_state),
+            ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts), ("TOTAL", total_hosts)], cpu_state),
+            ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts), ("TOTAL", total_hosts)], ram_state),
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
-             [("HOSTS", disk_high_h), ("DISKS", disk_high_d)],
+             [("HOSTS", disk_high_h), ("TOTAL", total_hosts), ("DISKS", disk_high_d)],
              disk_high_state),
-            ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("HTTP", n_http)], web_state),
+            # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
+            # encrypted estate read "12 | 0", which looks like half a number, not a pass.
+            ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("TOTAL", n_https + n_http)], web_state),
             ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("UNTRACKED", n_untracked)],
              "good" if n_untracked == 0 else "warn"),
         ]

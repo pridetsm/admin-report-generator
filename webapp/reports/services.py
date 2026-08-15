@@ -132,11 +132,19 @@ def build_overview(store, systems, cfg) -> dict:
          "sub": "expired | total", "state": bad(len(cert_expired))},
     ]
     watch = [
-        {"label": "High CPU", "value": cpu_hosts, "sub": "hosts", "state": warn(cpu_hosts)},
-        {"label": "High RAM", "value": ram_hosts, "sub": "hosts", "state": warn(ram_hosts)},
-        {"label": f"High disk ≥{thr}%", "value": dh_hosts,
-         "sub": f"{dh_disks} disk{'' if dh_disks == 1 else 's'}", "state": dh_state},
-        {"label": "Web encryption", "value": f"{n_https} | {n_http}", "sub": "https | http", "state": web_state},
+        # Every tile reads "affected | total" so a count can never be mistaken for the whole
+        # estate: 3 is alarming out of 5 hosts and unremarkable out of 56, and the tile has to
+        # say which without the reader going to look it up.
+        {"label": "High CPU", "value": f"{cpu_hosts} | {hosts}", "sub": "hosts | total",
+         "state": warn(cpu_hosts)},
+        {"label": "High RAM", "value": f"{ram_hosts} | {hosts}", "sub": "hosts | total",
+         "state": warn(ram_hosts)},
+        {"label": f"High disk ≥{thr}%", "value": f"{dh_hosts} | {hosts}",
+         "sub": f"hosts | total · {dh_disks} disk{'' if dh_disks == 1 else 's'}", "state": dh_state},
+        # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
+        # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
+        {"label": "Web encryption", "value": f"{n_https} | {n_https + n_http}",
+         "sub": "https | total", "state": web_state},
         {"label": "Backup tracking", "value": f"{n_tracked} | {n_untracked}",
          "sub": "tracked | untracked", "state": warn(n_untracked)},
     ]

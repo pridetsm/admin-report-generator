@@ -442,7 +442,7 @@ class ReportBuilderFlow(TestCase):
         # and the overview built from the scoped store counts only Efin's (1 https, 0 http)
         ov = build_overview(store, [efin], gr.Config())
         web = [w for w in ov["watch"] if w["label"] == "Web encryption"][0]
-        self.assertEqual(web["value"], "1 | 0")
+        self.assertEqual(web["value"], "1 | 1")   # https | total, not https | http
 
     def test_ldap_down_banner_lists_dependents(self):
         """When the LDAP probe reports down, the overview gets a red, top banner naming the
@@ -2728,21 +2728,23 @@ class NetworkGenerate(TestCase):
         for theme in ("dark", "light"):
             ws = self._sheet(self._xlsx(theme=theme).content)
             pal = gr.PALETTES[theme]
-            fills = {ws.cell(r, 1).fill.fgColor.rgb for r in range(1, 12)}
+            # column A is the crest gutter now (the logo floats over it, as in the systems
+            # report), so the body starts at B — sample there, not in the margin
+            fills = {ws.cell(r, c).fill.fgColor.rgb for r in range(1, 20) for c in (1, 2, 3)}
             for key in ("BG", "CARD", "HDR"):
                 self.assertIn(str(pal[key]), fills, f"{theme}: {key} missing from the canvas")
-            self.assertEqual(ws.cell(1, 1).font.color.rgb, str(pal["CYAN"]))
+            self.assertEqual(ws.cell(3, 2).font.color.rgb, str(pal["WHITE"]))   # title
 
     def test_the_two_themes_are_actually_different(self):
-        dark = self._sheet(self._xlsx(theme="dark").content).cell(1, 1).fill.fgColor.rgb
-        light = self._sheet(self._xlsx(theme="light").content).cell(1, 1).fill.fgColor.rgb
+        dark = self._sheet(self._xlsx(theme="dark").content).cell(3, 2).fill.fgColor.rgb
+        light = self._sheet(self._xlsx(theme="light").content).cell(3, 2).fill.fgColor.rgb
         self.assertNotEqual(dark, light)
 
     def test_the_canvas_is_painted_rather_than_left_white(self):
         """On the dark theme an unpainted sheet frames the report in white and the whole
         thing reads as broken."""
         ws = self._sheet(self._xlsx(theme="dark").content)
-        self.assertEqual(ws.cell(2, 6).fill.fgColor.rgb, str(gr.PALETTES["dark"]["BG"]))
+        self.assertEqual(ws.cell(2, 7).fill.fgColor.rgb, str(gr.PALETTES["dark"]["BG"]))
 
     def test_the_theme_is_named_in_the_filename_as_it_is_for_systems(self):
         self.assertIn("(light).xlsx", self._xlsx(theme="light")["Content-Disposition"])
@@ -3061,3 +3063,55 @@ class GenerateIsRepeatable(TestCase):
                                  {"token": token, "author": "P", "theme": "dark",
                                   "action": "download"})
         self.assertEqual(after.status_code, 200)
+
+
+class BackNavigationChain(TestCase):
+    """Back walks one step up the tree, and the tree is the same shape in both estates:
+
+        report  ->  picker  ->  Role Select
+
+    The systems report used to be the exception — it had no Back at all and relied on the
+    "Change systems" button in its own header, which is a different control in a different
+    place from the one every other screen uses.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("chain", password="pw12345!")
+        for r in ("System Admin", "Network Admin"):
+            self.u.groups.add(Group.objects.get(name=r))
+        self.client.login(username="chain", password="pw12345!")
+
+    def _back(self, url_name):
+        return self.client.get(reverse(url_name)).context["back_url"]
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_the_systems_chain(self, _cap):
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.client.post(reverse("report"), {"include_system": "Efin"})
+        self.assertEqual(self._back("report"), reverse("report_form"))
+        self.assertEqual(self._back("report_form"), reverse("role_select"))
+
+    def test_the_network_chain_is_the_same_shape(self):
+        self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        with _snmp_prom(_snmp_series()):
+            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+            self.assertEqual(self._back("network_report"), reverse("network_dashboard"))
+            self.assertEqual(self._back("network_dashboard"), reverse("role_select"))
+
+    @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
+    def test_back_from_a_report_never_points_at_itself(self, _cap):
+        """The open-report override sends other pages BACK to the report; on the report it
+        would hand its own URL over, so the button pointed where you already were."""
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.client.post(reverse("report"), {"include_system": "Efin"})
+        self.assertNotEqual(self._back("report"), reverse("report"))
+
+    def test_a_single_role_holder_gets_no_back_from_the_picker(self):
+        """Role Select auto-applies one role and would bounce straight back, so the button
+        would return them to where they already are."""
+        one = get_user_model().objects.create_user("justone", password="pw12345!")
+        one.groups.add(Group.objects.get(name="System Admin"))
+        self.client.logout()
+        self.client.login(username="justone", password="pw12345!")
+        self.client.get(reverse("role_select"))
+        self.assertIsNone(self._back("report_form"))

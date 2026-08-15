@@ -555,14 +555,32 @@ def _device_flags(dev: dict, data: dict) -> list:
 
     down = [i for i in ifaces if not i["up"]]
     if down:
-        # AMBER, not red. Without ifAdminStatus a deliberately shut port looks exactly like a
-        # failed one, and on a 311-port switch most of these are simply unused. Calling that
-        # an incident every day is how a report teaches people to ignore it.
-        flags.append(FlagVM(
-            "links_down",
-            f"{len(down)} of {len(ifaces)} interfaces are not up "
-            f"(admin status is not collected, so shut ports cannot be told from failed ones)",
-            "amber", "service"))
+        # With ifAdminStatus collected, a port an admin deliberately shut is no longer
+        # indistinguishable from one that failed — which is the whole point of the metric.
+        # Only the enabled-but-not-up ports are a fault; the shut ones are a decision, and
+        # reporting them as incidents daily is how a report teaches people to ignore it.
+        failed = [i for i in down if i["admin_up"] is True]
+        shut = [i for i in down if i["admin_up"] is False]
+        if failed:
+            flags.append(FlagVM(
+                "links_failed",
+                f"{len(failed)} interface(s) are enabled but not up — "
+                + ", ".join(i["name"] for i in failed[:6])
+                + ("…" if len(failed) > 6 else ""),
+                "red", "service"))
+        if shut and not failed:
+            flags.append(FlagVM(
+                "links_shut",
+                f"{len(shut)} of {len(ifaces)} interfaces are administratively shut "
+                f"(a deliberate decision, not a fault)",
+                "amber", "service"))
+        if not failed and not shut:
+            # admin status unknown for these — say so rather than guessing either way
+            flags.append(FlagVM(
+                "links_down",
+                f"{len(down)} of {len(ifaces)} interfaces are not up "
+                f"(admin status is not collected, so shut ports cannot be told from failed ones)",
+                "amber", "service"))
 
     # The counter-width problem is a defect in the MEASUREMENT, and belongs on the report as
     # one — an admin reading these numbers has to know they are a floor.
@@ -747,10 +765,10 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
         ws.title = "Network Admin Report"
         ws.sheet_view.showGridLines = False
         ws.sheet_properties.tabColor = CYAN
-        for col, width in zip("ABCDEF", (34, 15, 62, 12, 34, 4)):
+        for col, width in zip("BCDEFG", (34, 15, 62, 12, 34, 4)):
             ws.column_dimensions[col].width = width
 
-        LAST = 6
+        FIRST, LAST = 2, 7
 
         def paint(row):
             """Fill the row with the page colour.
@@ -762,38 +780,57 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             for c in range(1, LAST + 1):
                 ws.cell(row, c).fill = page
 
-        r = 1
-        paint(r)
-        ws.cell(r, 1, "NETWORK ADMIN REPORT").font = Font(bold=True, size=16, color=CYAN)
-        r += 1
-        paint(r)
-        ws.cell(r, 1, snapshot.captured_at.strftime("Captured %d %b %Y at %H:%M")).font = Font(color=SUB, size=10)
-        r += 1
-        paint(r)
-        ws.cell(r, 1, f"By {author}").font = Font(color=SUB, size=10)
-        r += 1
-        paint(r)
-        r += 1
+        # ---- header: the same crest-then-title block the systems report opens with -------
+        # The logo floats over the grid rather than sitting in a cell, exactly as it does
+        # there; a missing or unreadable file is not worth failing a report over, so it is
+        # skipped with a note and the header renders without it.
+        cfg = gr.load_config()
+        for row in range(1, 9):
+            paint(row)
+        try:
+            from openpyxl.drawing.image import Image as XLImage
+            from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+            from openpyxl.drawing.xdr import XDRPositiveSize2D
+            img = XLImage(cfg.logo)
+            img.anchor = OneCellAnchor(
+                _from=AnchorMarker(col=cfg.logo_from_col, colOff=cfg.logo_from_coloff,
+                                   row=cfg.logo_from_row, rowOff=cfg.logo_from_rowoff),
+                ext=XDRPositiveSize2D(cx=cfg.logo_cx, cy=cfg.logo_cy))
+            ws.add_image(img)
+        except Exception as exc:                      # missing/unreadable logo -> carry on
+            import sys as _sys
+            print(f"[!] logo not embedded ({exc})", file=_sys.stderr)
+        for row, ht in {1: 6, 2: 18, 3: 26, 4: 15, 5: 20, 6: 34, 7: 18}.items():
+            ws.row_dimensions[row].height = ht
+        # column A is the crest gutter, so the title block starts at B — as it does there
+        ws.column_dimensions["A"].width = 9
+
+        ws.cell(3, 2, "NETWORK ADMIN REPORT").font = Font(bold=True, size=22, color=INK)
+        ws.cell(4, 2, snapshot.captured_at.strftime(
+            "snapshot generated %d %b %Y  ·  %H:%M      •      Network Analyses Dashboard")).font =             Font(color=SUB, size=9)
+        ws.cell(5, 2, "Static snapshot.   Device telemetry captured by SNMP.").font = Font(color=GREY, size=9)
+        ws.cell(7, 2, f"By  {author}").font = Font(color=SUB, size=9)
+        r = 9
 
         def band(title, rows):
             nonlocal r
             paint(r)
-            ws.cell(r, 1, title.upper()).font = Font(bold=True, size=10, color=INK)
-            for c in range(1, LAST):
+            ws.cell(r, FIRST, title.upper()).font = Font(bold=True, size=10, color=INK)
+            for c in range(FIRST, LAST):
                 ws.cell(r, c).fill = head
                 ws.cell(r, c).border = box
             r += 1
             for item in rows:
                 paint(r)
-                for c in range(1, LAST):
+                for c in range(FIRST, LAST):
                     ws.cell(r, c).fill = card
-                ws.cell(r, 1, item["label"]).font = Font(color=GREY, size=10)
-                v = ws.cell(r, 2, item["value"])
+                ws.cell(r, FIRST, item["label"]).font = Font(color=GREY, size=10)
+                v = ws.cell(r, FIRST + 1, item["value"])
                 v.font = Font(bold=True, size=10,
                               color={"bad": CHIP["red"][0], "warn": CHIP["amber"][0],
                                      "good": CHIP["green"][0]}.get(item.get("state"), INK))
                 if item.get("sub"):
-                    ws.cell(r, 3, item["sub"]).font = Font(color=SUB, size=9)
+                    ws.cell(r, FIRST + 2, item["sub"]).font = Font(color=SUB, size=9)
                 r += 1
             paint(r)
             r += 1
@@ -805,13 +842,13 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
 
         for sysvm in snapshot.systems:
             paint(r)
-            ws.cell(r, 1, sysvm.name.upper()).font = Font(bold=True, size=12, color=CYAN)
-            ws.cell(r, 2, f"{sysvm.hosts} interfaces").font = Font(color=SUB, size=10)
+            ws.cell(r, FIRST, sysvm.name.upper()).font = Font(bold=True, size=12, color=CYAN)
+            ws.cell(r, FIRST + 1, f"{sysvm.hosts} interfaces").font = Font(color=SUB, size=10)
             r += 1
 
             paint(r)
-            for label, col in (("Finding", 1), ("Band", 2), ("Detail", 3),
-                               ("Fixed?", 4), ("Comment", 5)):
+            for label, col in (("Finding", FIRST), ("Band", FIRST + 1), ("Detail", FIRST + 2),
+                               ("Fixed?", FIRST + 3), ("Comment", FIRST + 4)):
                 h = ws.cell(r, col, label)
                 h.font = Font(bold=True, size=9, color=SUB)
                 h.fill = head
@@ -821,31 +858,31 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             ann = annotations.get(sysvm.name, {})
             if not sysvm.flags:
                 paint(r)
-                ws.cell(r, 1, "No findings — every collected metric is within limits").font = Font(
+                ws.cell(r, FIRST, "No findings — every collected metric is within limits").font = Font(
                     color=CHIP["green"][0], size=10)
                 r += 1
             for flag in sysvm.flags:
                 paint(r)
                 fg, bgc = CHIP["red" if flag.band == "red" else "amber"]
-                for col in range(1, 6):
+                for col in range(FIRST, FIRST + 5):
                     cell = ws.cell(r, col)
                     cell.fill = card
                     cell.border = box
-                ws.cell(r, 1, flag.key).font = Font(color=GREY, size=10)
-                b = ws.cell(r, 2, "Immediate" if flag.band == "red" else "Watch")
+                ws.cell(r, FIRST, flag.key).font = Font(color=GREY, size=10)
+                b = ws.cell(r, FIRST + 1, "Immediate" if flag.band == "red" else "Watch")
                 b.font = Font(bold=True, size=10, color=fg)
                 b.fill = PatternFill("solid", fgColor=bgc)
-                d = ws.cell(r, 3, flag.text)
+                d = ws.cell(r, FIRST + 2, flag.text)
                 d.font = Font(color=INK, size=10)
                 d.alignment = Alignment(wrap_text=True, vertical="top")
-                ws.cell(r, 4, ann.get("flags", {}).get(flag.key, "")).font = Font(size=10, color=INK)
+                ws.cell(r, FIRST + 3, ann.get("flags", {}).get(flag.key, "")).font = Font(size=10, color=INK)
                 r += 1
             if ann.get("comment"):
                 paint(r)
-                for col in range(1, 6):
+                for col in range(FIRST, FIRST + 5):
                     ws.cell(r, col).fill = card
-                ws.cell(r, 1, "Comment").font = Font(bold=True, size=9, color=SUB)
-                cm = ws.cell(r, 3, ann["comment"])
+                ws.cell(r, FIRST, "Comment").font = Font(bold=True, size=9, color=SUB)
+                cm = ws.cell(r, FIRST + 2, ann["comment"])
                 cm.font = Font(color=INK, size=10)
                 cm.alignment = Alignment(wrap_text=True, vertical="top")
                 r += 1
@@ -854,19 +891,19 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
 
         if summary_comment:
             paint(r)
-            ws.cell(r, 1, "SUMMARY").font = Font(bold=True, size=10, color=INK)
+            ws.cell(r, FIRST, "SUMMARY").font = Font(bold=True, size=10, color=INK)
             r += 1
             paint(r)
-            sc = ws.cell(r, 1, summary_comment)
+            sc = ws.cell(r, FIRST, summary_comment)
             sc.font = Font(color=INK, size=10)
             sc.alignment = Alignment(wrap_text=True, vertical="top")
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=FIRST + 4)
             r += 2
 
         # The caveats belong IN the artifact. A spreadsheet outlives the screen it was made on,
         # and these numbers are wrong in a specific, knowable way its reader has to be told.
         paint(r)
-        ws.cell(r, 1, "HOW TO READ THESE NUMBERS").font = Font(bold=True, size=10, color=INK)
+        ws.cell(r, FIRST, "HOW TO READ THESE NUMBERS").font = Font(bold=True, size=10, color=INK)
         r += 1
         for line in (
             "Throughput is a FLOOR, not a measurement: only 32-bit octet counters are polled "
@@ -878,10 +915,10 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             "(ifAdminStatus is not collected).",
         ):
             paint(r)
-            cell = ws.cell(r, 1, "• " + line)
+            cell = ws.cell(r, FIRST, "• " + line)
             cell.font = Font(color=SUB, size=9)
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=FIRST + 4)
             ws.row_dimensions[r].height = 26
             r += 1
 
