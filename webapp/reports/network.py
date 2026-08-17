@@ -387,6 +387,12 @@ def collect(only: Optional[set] = None) -> dict:
     # would be "down but NOT administratively shut", which is the actionable subset. Say so
     # rather than presenting 65 rows as if they were all faults.
     down_sorted = sorted(down, key=lambda i: int(i["index"]) if str(i["index"]).isdigit() else 0)
+    # Split the same way _device_flags() already judges these per-device: an interface the
+    # switch says is enabled but not carrying traffic is a genuine fault (red, immediate —
+    # matches links_failed there); one an admin shut on purpose, or whose admin status isn't
+    # collected at all, is a decision or an unknown, not a live incident (watch, amber).
+    links_failed = [i for i in down if i["admin_up"] is True]
+    links_shut_or_unknown = [i for i in down if i["admin_up"] is not True]
 
     # % utilisation, at last: a port doing 900 Mbps is bored on a 10G link and saturated on a
     # 1G one, and until ifHighSpeed is collected there is no way to tell which. Computed only
@@ -398,8 +404,30 @@ def collect(only: Optional[set] = None) -> dict:
         heaviest = max(i["in_bps"] or 0, i["out_bps"] or 0)
         i["util_pct"] = round((heaviest / cap) * 100, 1) if cap else None
     saturated = [i for i in interfaces if (i["util_pct"] or 0) >= 80]
+    # >=95% is not "worth watching", it is the point real links start dropping packets —
+    # matches the systems report's disk_high()'s own near-full/full split (a WATCH-band tile
+    # is still allowed to render red when the level itself demands it).
+    saturated_critical = [i for i in interfaces if (i["util_pct"] or 0) >= 95]
 
     erroring = [i for i in interfaces if sum(i["errors"].values() or [0]) > 0]
+    # Errors (CRC/framing/etc.) are close to always a real physical fault — a cable, a
+    # connector, a failing optic. Discards are frequently a POLICY decision (QoS dropping
+    # excess traffic on purpose) and are not inherently a fault the same way, so the two are
+    # graded separately rather than one combined "has some non-zero number" bucket.
+    err_only = [i for i in interfaces
+               if (i["errors"].get("in_err", 0) + i["errors"].get("out_err", 0)) > 0]
+    # A high discard volume is still worth escalating even without a true error present —
+    # the two thresholds below aren't a precise SLA, just a floor well above the handful of
+    # discards a healthy, momentarily-busy link can show, and well below the 200k+/400k+
+    # seen on a genuinely congested interface here.
+    DISCARD_RED = 1000
+    discard_heavy = [i for i in interfaces
+                     if (i["errors"].get("in_disc", 0) + i["errors"].get("out_disc", 0)) >= DISCARD_RED]
+    # Whatever is left once true errors and heavy discards are accounted for — a light
+    # discard count, on its own, worth a watch-band amber rather than red. Computed as its
+    # own set (not erroring-count minus the other two) so an interface with BOTH a real
+    # error and a heavy discard isn't subtracted twice.
+    disc_light = [i for i in erroring if i not in err_only and i not in discard_heavy]
 
     # Hardware health, from the vendor module. Each is optional; a missing reading is None and
     # renders as "not collected" rather than as a zero, which would read as "cool and idle".
@@ -460,7 +488,12 @@ def collect(only: Optional[set] = None) -> dict:
     # conservative, industry-typical figure for SFP/SFP+ optics, not a per-optic vendor
     # value, and is stated as such wherever it is shown.
     OPTICS_RX_MIN_DBM = -20.0
-    optics_low = [o for o in optics if o["direction"] == "Rx" and o["dbm"] <= OPTICS_RX_MIN_DBM + 3]
+    # AT or below the assumed floor is not "approaching" a limit, it is a link the report
+    # believes is failing right now — same near-full/full split as the disk and saturation
+    # checks. "Low" (amber) is everything within 3 dB of it that is not already there.
+    optics_critical = [o for o in optics if o["direction"] == "Rx" and o["dbm"] <= OPTICS_RX_MIN_DBM]
+    optics_low = [o for o in optics
+                 if o["direction"] == "Rx" and OPTICS_RX_MIN_DBM < o["dbm"] <= OPTICS_RX_MIN_DBM + 3]
 
     # ---- MAC / ARP table size (BRIDGE-MIB / IP-MIB) --------------------------------------
     # Entry counts only — the platform's hardware MAX per table is a datasheet figure, not
@@ -512,7 +545,13 @@ def collect(only: Optional[set] = None) -> dict:
         "peak_bps_text": _fmt_bps(peak_bps),
         "counters_are_64bit": counters_are_64bit,
         "saturated": saturated,
+        "saturated_critical": saturated_critical,
         "erroring": erroring,
+        "err_only": err_only,
+        "discard_heavy": discard_heavy,
+        "disc_light": disc_light,
+        "links_failed": links_failed,
+        "links_shut_or_unknown": links_shut_or_unknown,
         "has_speed": bool(speed),
         "has_admin": bool(admin),
         "cpu_pct": cpu,
@@ -526,6 +565,7 @@ def collect(only: Optional[set] = None) -> dict:
         "ospf_total": ospf_total,
         "optics": optics,
         "optics_low": optics_low,
+        "optics_critical": optics_critical,
         "optics_rx_min_dbm": OPTICS_RX_MIN_DBM,
         "mac_count": mac_count,
         "arp_count": arp_count,
@@ -705,6 +745,15 @@ def _device_flags(dev: dict, data: dict) -> list:
             f"{len(ospf_down)} of {data.get('ospf_total', 0)} OSPF neighbour(s) not Full "
             f"(stuck below the 2-Way/Full states)",
             "red", "service"))
+    optics_critical = [o for o in data.get("optics_critical", []) if o["instance"] == dev["target"]]
+    if optics_critical:
+        worst = min(optics_critical, key=lambda o: o["dbm"])
+        flags.append(FlagVM(
+            "optics_critical",
+            f"{len(optics_critical)} receive optic(s) AT or BELOW a typical SFP sensitivity "
+            f"floor ({data.get('optics_rx_min_dbm', 0):.0f} dBm) — worst {worst['name']} at "
+            f"{worst['dbm']:.2f} dBm — this link is expected to be dropping frames now",
+            "red", "service"))
     optics_low = [o for o in data.get("optics_low", []) if o["instance"] == dev["target"]]
     if optics_low:
         worst = min(optics_low, key=lambda o: o["dbm"])
@@ -716,7 +765,18 @@ def _device_flags(dev: dict, data: dict) -> list:
             "amber", "service"))
 
     # ---- interface health, once the counters are collected --------------------------
-    sat = [i for i in data.get("saturated", []) if i["device"] == dev["target"]]
+    # >=95% is not "worth watching" — it is where real links start dropping packets.
+    sat_critical = [i for i in data.get("saturated_critical", []) if i["device"] == dev["target"]]
+    if sat_critical:
+        worst = max(sat_critical, key=lambda i: i["util_pct"])
+        flags.append(FlagVM(
+            "links_saturated_critical",
+            f"{len(sat_critical)} interface(s) at or above 95% of capacity — worst {worst['name']} "
+            f"at {worst['util_pct']:.0f}% of {_fmt_bps(worst['speed_bps'])} — packets are likely "
+            f"being dropped now",
+            "red", "service"))
+    sat = [i for i in data.get("saturated", []) if i["device"] == dev["target"]
+          and i not in data.get("saturated_critical", [])]
     if sat:
         worst = max(sat, key=lambda i: i["util_pct"])
         flags.append(FlagVM(
@@ -724,13 +784,33 @@ def _device_flags(dev: dict, data: dict) -> list:
             f"{len(sat)} interface(s) at or above 80% of capacity — worst {worst['name']} "
             f"at {worst['util_pct']:.0f}% of {_fmt_bps(worst['speed_bps'])}",
             "amber", "service"))
-    err = [i for i in data.get("erroring", []) if i["device"] == dev["target"]]
-    if err:
-        total = sum(sum(i["errors"].values()) for i in err)
+    # Errors are close to always a real physical fault (cabling, a connector, a failing
+    # optic) — any is worth a red flag, unlike discards, which are frequently a QoS policy
+    # choice and only escalate once the volume is heavy (see DISCARD_RED in collect()).
+    err_only = [i for i in data.get("err_only", []) if i["device"] == dev["target"]]
+    if err_only:
+        total = sum(i["errors"].get("in_err", 0) + i["errors"].get("out_err", 0) for i in err_only)
         flags.append(FlagVM(
             "iface_errors",
-            f"{total:.0f} errors/discards across {len(err)} interface(s) in the last "
-            f"{RATE_WINDOW} — faulty cabling, a failing optic, or congestion",
+            f"{total:.0f} error(s) across {len(err_only)} interface(s) in the last "
+            f"{RATE_WINDOW} — almost always faulty cabling, a connector, or a failing optic",
+            "red", "service"))
+    discard_heavy = [i for i in data.get("discard_heavy", []) if i["device"] == dev["target"]]
+    if discard_heavy:
+        total = sum(i["errors"].get("in_disc", 0) + i["errors"].get("out_disc", 0) for i in discard_heavy)
+        flags.append(FlagVM(
+            "iface_discards_heavy",
+            f"{total:.0f} discard(s) across {len(discard_heavy)} interface(s) in the last "
+            f"{RATE_WINDOW} — congestion or a QoS policy actively dropping traffic",
+            "red", "service"))
+    disc_light = [i for i in data.get("disc_light", []) if i["device"] == dev["target"]]
+    if disc_light:
+        total = sum(sum(i["errors"].values()) for i in disc_light)
+        flags.append(FlagVM(
+            "iface_discards",
+            f"{total:.0f} discard(s) across {len(disc_light)} interface(s) in the last "
+            f"{RATE_WINDOW} — often a QoS policy dropping excess traffic on purpose, worth "
+            f"confirming rather than assuming a fault",
             "amber", "service"))
 
     missing = [m["name"] for m in data.get("catalogue", CATALOGUE) if m["state"] == "missing"]
@@ -753,28 +833,63 @@ def _network_overview(data: dict, devices: list) -> dict:
     unscraped = [d for d in devices if not d.get("known")]
     dev_total = len(devices)
     iface_total = data["iface_count"]
-    down = data["down_count"]
     missing = sum(1 for m in CATALOGUE if m["state"] == "missing")
     psu_failed, psu_total = len(data.get("psu_failed", [])), data.get("psu_total", 0)
     ospf_down_n, ospf_total = len(data.get("ospf_down", [])), data.get("ospf_total", 0)
     optics_total = len(data.get("optics", []))
-    optics_low = len(data.get("optics_low", []))
+    optics_low_n = len(data.get("optics_low", []))
+    optics_critical_n = len(data.get("optics_critical", []))
+    links_failed_n = len(data.get("links_failed", []))
+    links_shut_n = len(data.get("links_shut_or_unknown", []))
+    sat_n = len(data.get("saturated", []))
+    sat_critical_n = len(data.get("saturated_critical", []))
+    err_only_n = len(data.get("err_only", []))
+    discard_heavy_n = len(data.get("discard_heavy", []))
+    disc_light_n = len(data.get("disc_light", []))
     bad = lambda n: "good" if not n else "bad"
     warn = lambda n: "good" if not n else "warn"
 
     # Every immediate/watch tile reads "affected | total", the identical shape the systems
-    # report's tiles use (High CPU: "hosts | total", not a bare percentage) — copied here
-    # exactly, not just for the interfaces tile: a count alone can't be judged (12 is
-    # alarming out of 20 interfaces, unremarkable out of 300), and the reader should not
-    # have to hold the denominator in their head or go find it in AT A GLANCE above.
+    # report's tiles use (High CPU: "hosts | total", not a bare percentage) — a count alone
+    # can't be judged (12 is alarming out of 20 interfaces, unremarkable out of 300), and the
+    # reader should not have to hold the denominator in their head or go find it above.
     #
-    # CPU/Memory become "device(s) over threshold | total devices" for the same reason
-    # High CPU/High RAM never show a raw percentage on the systems dashboard either — the
+    # Each tile below was asked the same question _device_flags() already answers per finding:
+    # is this a live fault (a component is failed/down/gone right now — immediate, red) or a
+    # level that's merely bad (a percentage or a rate crossing a threshold — watch), and for
+    # levels, is the READING itself severe enough to render red even while the TILE stays in
+    # the watch row — exactly how the systems report's High Disk works (near-full is still red,
+    # it just isn't a Missing-Backups-style outage). A tile that only ever shows amber
+    # regardless of how bad the number gets was the bug: "60 interfaces down" and "1 interface
+    # down" read the same colour before this pass.
+    #
+    # CPU/Memory become "device(s) over threshold | total devices" for the same reason High
+    # CPU/High RAM never show a raw percentage on the systems dashboard either — the
     # percentage itself lives on the per-device Health section. With one device monitored
-    # today this reads as "0 | 1" or "1 | 1"; it is written as a device COUNT rather than
+    # today this reads as "0 | 1" or "1 | 1"; it is written as a device count rather than
     # hardcoded to one so onboarding a second device grows the denominator for free.
-    cpu_over = 1 if (data.get("cpu_pct") is not None and data["cpu_pct"] >= 80) else 0
-    mem_over = 1 if (data.get("mem_pct") is not None and data["mem_pct"] >= 80) else 0
+    cpu_pct = data.get("cpu_pct")
+    mem_pct = data.get("mem_pct")
+    cpu_state = "bad" if (cpu_pct is not None and cpu_pct >= 90) else warn(cpu_pct is not None and cpu_pct >= 80)
+    mem_state = "bad" if (mem_pct is not None and mem_pct >= 90) else warn(mem_pct is not None and mem_pct >= 80)
+    cpu_over = 1 if (cpu_pct is not None and cpu_pct >= 80) else 0
+    mem_over = 1 if (mem_pct is not None and mem_pct >= 80) else 0
+
+    # A device that is fully unreachable has no throughput being measured AT ALL, imprecisely
+    # or otherwise — "Not responding" above already says the real thing. Saying "Understated"
+    # here too would read as a second, unrelated problem instead of the same one.
+    fully_dark = dev_total > 0 and (len(unreachable) + len(unscraped)) >= dev_total
+    if fully_dark:
+        accuracy = {"label": "Throughput accuracy", "value": "No data",
+                   "sub": "device unreachable — see above", "state": "info"}
+    else:
+        accuracy = {
+            "label": "Throughput accuracy",
+            "value": "Accurate" if data.get("counters_are_64bit") else "Understated",
+            "sub": ("64-bit counters" if data.get("counters_are_64bit")
+                    else "32-bit counters — wrap and lose data on a fast link"),
+            "state": "info" if data.get("counters_are_64bit") else "warn",
+        }
 
     return {
         "glance": [
@@ -797,32 +912,42 @@ def _network_overview(data: dict, devices: list) -> dict:
              "sub": "failed | total", "state": bad(psu_failed)},
             {"label": "OSPF adjacencies lost", "value": f"{ospf_down_n} | {ospf_total}",
              "sub": "down | total", "state": bad(ospf_down_n)},
+            # Moved out of the old combined "Links not up" watch tile: enabled-but-not-up is
+            # not a level to keep an eye on, it is the same live fault _device_flags() already
+            # flags red (links_failed) — an admin-shut port is a decision, not this.
+            {"label": "Links failed", "value": f"{links_failed_n} | {iface_total}",
+             "sub": "enabled but down | total", "state": bad(links_failed_n)},
+            # Any real error (not a discard) is close to always a physical fault, the same
+            # reasoning _device_flags()'s iface_errors flag uses to go straight to red.
+            {"label": "Interfaces with errors", "value": f"{err_only_n} | {iface_total}",
+             "sub": "true errors | total", "state": bad(err_only_n)},
         ],
         "watch": [
             {"label": "High CPU", "value": f"{cpu_over} | {dev_total}",
-             "sub": "devices | total", "state": warn(cpu_over)},
+             "sub": "devices | total", "state": cpu_state},
             {"label": "High Memory", "value": f"{mem_over} | {dev_total}",
-             "sub": "devices | total", "state": warn(mem_over)},
-            {"label": "Links not up", "value": f"{down} | {iface_total}",
-             "sub": "interfaces | total", "state": warn(down)},
-            {"label": "At capacity", "value": f"{len(data.get('saturated', []))} | {iface_total}",
-             "sub": "interfaces ≥80% | total", "state": warn(len(data.get("saturated", [])))},
-            {"label": "With errors", "value": f"{len(data.get('erroring', []))} | {iface_total}",
-             "sub": "interfaces | total", "state": warn(len(data.get("erroring", [])))},
-            {"label": "Optics near floor", "value": f"{optics_low} | {optics_total}",
-             "sub": "receive optics | total", "state": warn(optics_low)},
+             "sub": "devices | total", "state": mem_state},
+            # What's left after Links failed above: admin-shut on purpose, or down with
+            # ifAdminStatus unknown so shut can't be told from failed — a decision or an
+            # unknown, not a live incident.
+            {"label": "Links shut / unclear", "value": f"{links_shut_n} | {iface_total}",
+             "sub": "interfaces | total", "state": warn(links_shut_n)},
+            {"label": "At capacity", "value": f"{sat_n} | {iface_total}",
+             "sub": "interfaces ≥80% | total",
+             "state": "bad" if sat_critical_n else warn(sat_n)},
+            # Heavy discards (>=1000 in the window) escalate on their own — a QoS policy
+            # occasionally shaving a handful of packets is normal; hundreds of thousands is
+            # active, ongoing congestion, whatever set the policy. Light discards stay amber.
+            {"label": "Heavy discards", "value": f"{discard_heavy_n} | {iface_total}",
+             "sub": "interfaces | total", "state": bad(discard_heavy_n)},
+            {"label": "Some discards", "value": f"{disc_light_n} | {iface_total}",
+             "sub": "interfaces | total", "state": warn(disc_light_n)},
+            {"label": "Optics near floor", "value": f"{optics_critical_n + optics_low_n} | {optics_total}",
+             "sub": "receive optics | total",
+             "state": "bad" if optics_critical_n else warn(optics_low_n)},
             {"label": "Metrics not collected", "value": f"{missing} | {len(CATALOGUE)}",
              "sub": "metrics | total requested", "state": warn(missing)},
-            # Leads with the JUDGEMENT ("can the throughput figures above be trusted"), not
-            # the SNMP mechanism behind it — "Counter width: accurate" told the reader a fact
-            # about a counter's bit-width without saying what that fact means for them; this
-            # says the thing that actually matters and puts the mechanism in the sub-caption
-            # for whoever wants to know why.
-            {"label": "Throughput accuracy",
-             "value": "Accurate" if data.get("counters_are_64bit") else "Understated",
-             "sub": ("64-bit counters" if data.get("counters_are_64bit")
-                     else "32-bit counters — wrap and lose data on a fast link"),
-             "state": "info" if data.get("counters_are_64bit") else "warn"},
+            accuracy,
         ],
         "banners": [],
     }
