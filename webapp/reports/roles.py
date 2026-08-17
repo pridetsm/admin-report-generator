@@ -111,11 +111,15 @@ ROLE_DESCRIPTIONS = {
 # problem the node graph was kept off Network Admin to avoid. role_icon() falls back to the
 # role's initial letter, which is honest rather than borrowed.
 ROLE_ICONS = {
-    SYSTEM_ADMIN_ROLE:   "img/roles/neural-networks.png",
-    NETWORK_ADMIN_ROLE:  "img/roles/network-infrastructure.png",
-    "Gov Systems Admin": "img/roles/bank.png",
-    "Security Admin":    "img/roles/cyber-security.png",
-    ADMIN_ROLE:          "img/roles/system-administration.png",
+    SYSTEM_ADMIN_ROLE:      "img/roles/neural-networks.png",
+    NETWORK_ADMIN_ROLE:     "img/roles/network-infrastructure.png",
+    # The platform underneath everything else — HCI cluster and Oracle hosts — so the cloud
+    # and gear over a machine, rather than another link diagram: this role owns the tin, not
+    # the wires between it (Network Admin) or the systems running on it (System Admin).
+    "Infrastructure Admin": "img/roles/cloud-computing.png",
+    "Gov Systems Admin":    "img/roles/bank.png",
+    "Security Admin":       "img/roles/cyber-security.png",
+    ADMIN_ROLE:             "img/roles/system-administration.png",
 }
 
 
