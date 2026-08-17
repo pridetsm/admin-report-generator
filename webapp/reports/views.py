@@ -32,14 +32,14 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
-from . import connect, crypto, folders, grafana_admin, network, prometheus_admin
+from . import connect, crypto, folders, grafana_admin, network, promconfig, prometheus_admin
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
 from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
-                     PrometheusRuleFileRevision, ReportSubmission, RoleRequest, SystemConfig,
-                     UserProfile)
+                     PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
+                     SystemConfig, UserProfile)
 from .roles import (ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_network_admin, is_role_admin,
@@ -831,11 +831,176 @@ def set_report_theme(request):
     return redirect(request.META.get("HTTP_REFERER") or "report_form")
 
 
+# ---------------------------------------------------------------------------------------
+#  Configuration — every configuration screen lives under here (drawer › Configuration)
+# ---------------------------------------------------------------------------------------
+#  The default screen is the FORM: a labelled view of prometheus.yml, so the estate is edited
+#  through validated fields instead of hand-written YAML. "Live YAML file" shows the same file
+#  verbatim; the other tabs configure the app around it.
+#  Every configuration surface is listed here, including the two raw-text editors that already
+#  existed — an admin looking for "where do I configure things" should find one list, not this
+#  hub plus a couple of screens reachable only from the drawer.
+_CONFIG_TABS = [
+    ("configuration", "Configuration form", "Prometheus topology, in labelled fields"),
+    ("config_yaml", "Live YAML file", "prometheus.yml exactly as it is on disk"),
+    ("prometheus_config", "Prometheus (raw)", "The whole file as text, promtool-validated"),
+    ("grafana_config", "Grafana", "custom.ini, versioned and applied"),
+    ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
+    ("config_role_scopes", "Role scopes", "Which systems each role sees"),
+]
+
+
+def _config_context(active: str) -> dict:
+    return {
+        "config_tabs": [{"url_name": n, "label": lbl, "hint": hint, "active": n == active}
+                        for n, lbl, hint in _CONFIG_TABS],
+        "yaml_file": promconfig.file_info(),
+    }
+
+
+def _require_admin(request):
+    """Configuration is Administrator-only; everyone else goes back to the dashboard."""
+    return None if is_role_admin(request.user) else redirect("report_form")
+
+
+def _topology_systems() -> list:
+    """Every system name in the live prometheus.yml, for the role-scope picker.
+
+    Read through promconfig so this screen and the configuration form always agree on which
+    file is the topology. Returns empty — never raises — if the file can't be read, so a
+    broken YAML degrades this screen instead of taking it down; the form's own load error
+    says what is wrong.
+    """
+    try:
+        return promconfig.system_names(promconfig.load())
+    except Exception:      # noqa: BLE001 — surfaced properly on the configuration form
+        return []
+
+
+@never_cache
+@login_required
+def configuration(request):
+    """DEFAULT configuration screen: prometheus.yml as a labelled form.
+
+    Reads the live file on every request and writes it back on save, so this is a view of the
+    file rather than a copy of it. Validation happens before anything is written, and the
+    previous file is kept as a timestamped .bak — see reports/promconfig.py.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    try:
+        doc = promconfig.load()
+        raw = promconfig.read_text()
+    except promconfig.ConfigError as exc:
+        return render(request, "reports/configuration.html",
+                      {**_config_context("configuration"), "load_error": str(exc)}, status=200)
+
+    errors: list = []
+    if request.method == "POST":
+        new_doc, errors = promconfig.parse_post(request.POST, doc)
+        if not errors:
+            try:
+                backup = promconfig.save(new_doc, header=promconfig.header_comment(raw),
+                                         author=request.user.get_full_name() or request.user.get_username())
+            except promconfig.ConfigError as exc:
+                messages.error(request, str(exc))
+                return redirect("configuration")
+            messages.success(request, "prometheus.yml saved." + (
+                f" Previous version kept as {backup}." if backup else ""))
+            return redirect("configuration")
+        view = promconfig.view_from_post(request.POST, doc)
+    else:
+        view = promconfig.to_view(doc)
+
+    return render(request, "reports/configuration.html", {
+        **_config_context("configuration"),
+        "view": view, "errors": errors,
+        "prom_url": SystemConfig.get().prometheus_url or gr.load_config().prom,
+        "backups": promconfig.backups(),
+    })
+
+
+@never_cache
+@login_required
+def config_yaml(request):
+    """The live prometheus.yml, verbatim — the source of truth behind the form."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    try:
+        raw, error = promconfig.read_text(), ""
+    except promconfig.ConfigError as exc:
+        raw, error = "", str(exc)
+    if request.GET.get("download") == "1" and raw:
+        resp = HttpResponse(raw, content_type="text/yaml; charset=utf-8")
+        resp["Content-Disposition"] = 'attachment; filename="prometheus.yml"'
+        return resp
+    return render(request, "reports/config_yaml.html", {
+        **_config_context("config_yaml"),
+        "raw": raw, "error": error,
+        "line_count": len(raw.splitlines()),
+        "backups": promconfig.backups(),
+    })
+
+
+@login_required
+@require_POST
+def prometheus_reload(request):
+    """Ask the running Prometheus to re-read the config we just wrote (POST /-/reload)."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    url = SystemConfig.get().prometheus_url or gr.load_config().prom
+    ok, detail = promconfig.reload_prometheus(url)
+    (messages.success if ok else messages.error)(request, detail)
+    return redirect(request.POST.get("next") or "configuration")
+
+
+@never_cache
+@login_required
+def config_role_scopes(request):
+    """Which systems each role's workspace covers — what the role tiles at sign-in select.
+
+    A role with nothing ticked is UNRESTRICTED (it sees the whole estate), so the mapping can
+    be filled in one role at a time without hiding systems from anyone in the meantime.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    systems = _topology_systems()
+    if request.method == "POST":
+        for role in ROLE_NAMES:
+            chosen = [s for s in request.POST.getlist(f"systems__{role}") if s in systems]
+            scope, _ = RoleScope.objects.get_or_create(role=role)
+            scope.systems = chosen
+            scope.updated_by = request.user
+            scope.save()
+        messages.success(request, "Role scopes saved — they apply the next time a role is selected.")
+        return redirect("config_role_scopes")
+
+    mapped = {s.role: set(s.systems or []) for s in RoleScope.objects.all()}
+    rows = [{
+        "role": role,
+        "icon": role_icon(role),
+        "description": ROLE_DESCRIPTIONS.get(role, ""),
+        "chosen": mapped.get(role, set()),
+        "unscoped": not mapped.get(role),
+    } for role in ROLE_NAMES]
+    return render(request, "reports/config_role_scopes.html", {
+        **_config_context("config_role_scopes"),
+        "rows": rows, "systems": systems,
+    })
+
+
 @login_required
 def system_settings(request):
     """Administrator-only: the Prometheus/Grafana the dashboard fetches from (overrides config.ini)."""
-    if not is_role_admin(request.user):
-        return redirect("report_form")
+    denied = _require_admin(request)
+    if denied:
+        return denied
     sc = SystemConfig.get()
     if request.method == "POST":
         form = SystemConfigForm(request.POST, instance=sc)
@@ -849,6 +1014,7 @@ def system_settings(request):
         form = SystemConfigForm(instance=sc)
     defaults = gr.load_config()   # the file-based fallbacks, shown for reference
     return render(request, "reports/settings.html", {
+        **_config_context("system_settings"),
         "form": form, "sc": sc,
         "config_prom": defaults.prom, "config_grafana": defaults.grafana,
     })

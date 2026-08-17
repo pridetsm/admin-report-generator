@@ -1,0 +1,12 @@
+{# Sub-navigation shared by every Configuration screen. The first tab (the form) is the
+   default screen the drawer's "Configuration" entry opens. #}
+<div class="section-label">Configuration</div>
+<nav class="cfg-tabs" aria-label="Configuration sections">
+  {% for t in config_tabs %}
+  <a class="cfg-tab{% if t.active %} is-active{% endif %}" href="{% url t.url_name %}"
+     {% if t.active %}aria-current="page"{% endif %}>
+    <span class="cfg-tab-label">{{ t.label }}</span>
+    <span class="cfg-tab-hint">{{ t.hint }}</span>
+  </a>
+  {% endfor %}
+</nav>

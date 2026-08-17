@@ -3,8 +3,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from .models import (EmailRecipient, GrafanaConfigRevision, PrometheusConfigRevision,
-                     PrometheusRuleFileRevision, ReportSubmission, RoleRequest, SystemConfig,
-                     UserProfile)
+                     PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
+                     SystemConfig, UserProfile)
 
 
 @admin.register(SystemConfig)
@@ -99,6 +99,18 @@ class RoleRequestAdmin(admin.ModelAdmin):
     list_filter = ("status", "role")
     search_fields = ("user__username", "role")
     autocomplete_fields = ()
+
+
+@admin.register(RoleScope)
+class RoleScopeAdmin(admin.ModelAdmin):
+    """Normally edited in-app (Configuration › Role scopes); here for completeness."""
+    list_display = ("role", "system_count", "updated_at", "updated_by")
+    readonly_fields = ("updated_at", "updated_by")
+    search_fields = ("role",)
+
+    @admin.display(description="Systems")
+    def system_count(self, obj):
+        return len(obj.systems or []) or "all (unrestricted)"
 
 
 @admin.register(EmailRecipient)

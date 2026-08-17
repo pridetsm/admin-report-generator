@@ -516,6 +516,66 @@ table.hist tr:last-child td { border-bottom: 0; }
 .toast.success { border-left-color: var(--green); }
 .toast.info { border-left-color: var(--accent); }
 
+/* ============================================================================
+   CONFIGURATION — tabs, the prometheus.yml form, role scopes
+   ============================================================================ */
+.cfg-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.cfg-tab {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; min-width: 170px;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel);
+  color: var(--ink); text-decoration: none;
+}
+.cfg-tab:hover { border-color: var(--accent); text-decoration: none; }
+.cfg-tab.is-active { border-color: var(--accent); background: var(--panel-2); box-shadow: inset 0 -2px 0 var(--accent); }
+.cfg-tab-label { font-weight: 650; font-size: 14px; }
+.cfg-tab-hint { color: var(--muted); font-size: 12px; }
+
+.cfg-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.cfg-grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+.cfg-grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.cfg-hint { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; }
+.cfg-req { color: var(--accent); font-weight: 600; text-transform: none; letter-spacing: 0; }
+.cfg-sub-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin: 18px 0 8px; }
+.cfg-sub-label .cfg-hint { display: inline; text-transform: none; letter-spacing: 0; margin-left: 6px; }
+.cfg-scheme { max-width: 220px; margin-top: 12px; }
+
+/* key/value rows (extra labels, external labels) */
+.cfg-kv { display: flex; flex-direction: column; gap: 8px; }
+.cfg-kv-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
+.cfg-x {
+  width: 30px; height: 30px; flex: none; border-radius: 8px; border: 1px solid var(--line-strong);
+  background: var(--panel-2); color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1;
+}
+.cfg-x:hover { border-color: var(--red); color: var(--red); }
+.cfg-add { padding: 7px 13px; font-size: 13px; margin-top: 10px; }
+
+/* a scrape job card + its target groups */
+.cfg-job > header h2 { font-weight: 650; }
+.cfg-job > header .cfg-x { margin-right: 4px; }
+.cfg-group { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px 14px; margin-bottom: 12px; background: var(--panel-2); }
+.cfg-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13.5px; }
+.cfg-group-head .spacer { flex: 1; }
+.cfg-group .field { margin-bottom: 10px; }
+.cfg-group textarea { background: var(--panel); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; }
+
+/* read-only blocks: preserved advanced job keys, and the live YAML view */
+.cfg-pre {
+  margin: 0 0 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel-2); color: var(--muted); overflow-x: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.5;
+}
+.cfg-yaml {
+  margin: 0; padding: 16px 18px; max-height: 70vh; overflow: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.55;
+  color: var(--ink); tab-size: 2;
+}
+
+/* role -> systems picker */
+.scope-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.scope-opt { display: flex; align-items: center; gap: 9px; padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer; font-size: 13.5px; background: var(--panel-2); }
+.scope-opt:hover { border-color: var(--accent); }
+.scope-opt input { width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+
 /* ---- recipients dropdown ---- */
 .dropdown { position: relative; }
 .dropdown-btn {

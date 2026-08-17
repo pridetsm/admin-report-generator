@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Live YAML file · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+  {% include "reports/_config_tabs.html" %}
+
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <p style="margin:0 0 10px">
+      <code>{{ yaml_file.path }}</code> exactly as it is on disk — the file the report engine reads
+      and the <a href="{% url 'configuration' %}">configuration form</a> writes.
+    </p>
+    <p style="margin:0;color:var(--muted);font-size:13px">
+      {% if yaml_file.exists %}
+        {{ line_count }} line{{ line_count|pluralize }} · {{ yaml_file.size }} bytes · last modified
+        {{ yaml_file.modified|date:"d M Y, H:i:s" }}.
+      {% endif %}
+      Read-only here on purpose: edit through the form, where values are validated and the previous
+      file is backed up before anything is written.
+    </p>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <a class="btn primary" href="{% url 'configuration' %}">Edit in the configuration form</a>
+      {% if raw %}<a class="btn ghost" href="?download=1" download>⬇ Download a copy</a>{% endif %}
+    </div>
+  </div></div>
+
+  {% if error %}
+    <div class="card"><div class="body" style="padding:18px">
+      <div class="errornote" style="margin-top:0">{{ error }}</div>
+    </div></div>
+  {% else %}
+    <div class="section-label sub">prometheus.yml</div>
+    <div class="card"><div class="body" style="padding:0">
+      <pre class="cfg-yaml"><code>{{ raw }}</code></pre>
+    </div></div>
+  {% endif %}
+
+  {% if backups %}
+  <div class="section-label sub">Recent backups</div>
+  <div class="card"><div class="body" style="padding:10px 18px 14px">
+    <table class="hist">
+      <thead><tr><th>File</th><th>Written</th><th style="text-align:right">Size</th></tr></thead>
+      <tbody>
+      {% for b in backups %}
+        <tr><td class="mono">{{ b.name }}</td><td>{{ b.modified|date:"d M Y, H:i:s" }}</td><td style="text-align:right">{{ b.size }} bytes</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+  {% endif %}
+</div>
+{% endblock %}
