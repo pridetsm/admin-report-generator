@@ -1097,17 +1097,18 @@ def backup_missing_band(count: int) -> str:
 # ============================================================================ #
 class ReportBuilder:
     # column widths (A gutter, then Services | gap | Memory | gap | Disk | gap | Backups | gap | Notes)
-    # D=9, F=9, G=9, M=9 (not the tighter 2/8 you'd expect for what are otherwise mere gap /
-    # numeric columns): the overview tile band reuses these same sheet columns for its KPI
-    # sub-columns (HOSTS/TOTAL/DISKS/...), and at their old widths those labels clipped —
-    # first caught on HIGH RAM USAGE's "HOSTS" landing on D=2, then again on HIGH DISK USAGE
-    # gaining a 4th sub-column (DISKS total) and pushing BACKUP TRACKING's "TOTAL" onto M=2.
-    # 9 matches C, comfortably fits every one of these short bold labels, and each of D/F/G/M
-    # still only ever merges into a wider card/gap in the per-system section below, so
-    # widening them doesn't disturb that layout.
-    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 9,
-              "G": 9, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
-              "M": 9, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
+    # D=9 (not the tighter 2 you'd expect for a mere gap column): the overview tile band
+    # reuses these same sheet columns, and HIGH RAM USAGE's "HOSTS" sub-column lands
+    # entirely on D — at width 2 that clipped the label. 9 matches C so both KPI sub-columns
+    # read fully, and D still just merges into the wider Services card body below. F/G/M
+    # were bumped the same way for a while when HIGH DISK USAGE briefly carried 4 sub-columns
+    # (needing a whole extra physical column, which pushed BACKUP TRACKING onto M) — that grew
+    # the NEEDS ATTENTION row wider than the bands above it. Reverted: HIGH DISK USAGE's disk
+    # count and its total now share one cell ("11/140"), so the row fits back in its original
+    # 11 columns and F/G/M return to the narrower widths that were already proven fine here.
+    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 8,
+              "G": 8, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
+              "M": 2, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
               "Q": 2,                                      # gap before Notes
               "R": 13, "S": 11, "T": 11, "U": 11, "V": 9}  # R-V = notes column
     CARD_GROUPS = [(2, 4), (5, 7), (8, 9), (10, 12)]   # 4 overview cards across the width
@@ -1172,24 +1173,24 @@ class ReportBuilder:
         spans.append((cols[start], cols[-1]))
         return spans
 
-    def _band_spans(self, tiles, ncols=None) -> List[int]:
-        """Column counts for a row of overview tiles, starting at col 2. Every tile gets AT
+    def _band_spans(self, tiles) -> List[int]:
+        """Column counts for a row of overview tiles across cols 2..12. Every tile gets AT
            LEAST 2 physical columns — 1 is never enough for a 2-number panel (HOSTS | TOTAL):
            with only 1 column, the split degenerates to a single sub-column holding BOTH
            labels merged into one narrow cell and clips (this is what happened to HIGH RAM
            USAGE's "HOSTS" label before the column was widened). A panel with MORE
-           sub-columns than 2 (e.g. HIGH DISK USAGE's HOSTS/TOTAL/DISKS/TOTAL) gets that many
-           instead, so it never straddles a too-narrow column either. `ncols` lets a caller
-           force several bands to the SAME total width (see _overview: every row of tiles —
-           and the AT A GLANCE cards above them — share one width so their right edges line
-           up, rather than each band growing only as wide as ITS OWN tiles need); left None,
-           the row's width grows to fit whatever these tiles alone need (at least the
-           historical 11 columns). Any spare width beyond each tile's own minimum goes first
-           to the widest-need panel(s)."""
+           sub-columns than 2 gets that many instead, so it never straddles a too-narrow
+           column either — but keep an eye on the total: every tile here stays at its 2-column
+           floor deliberately, because a panel needing a 3rd/4th column pushes the row's total
+           past 11 and out of alignment with the bands above/below it (this happened once,
+           when HIGH DISK USAGE briefly carried 4 sub-columns — fixed by combining two of its
+           numbers into one cell instead of widening the row). The row's total width grows to
+           fit whatever these tiles need (at least the historical 11 columns), and any spare
+           width beyond each tile's own minimum goes first to the widest-need panel(s)."""
         n = len(tiles)
         subcols = lambda t: len(t[2]) if t[0] == "panel" else 1
         spans = [max(2, subcols(t)) for t in tiles]
-        ncols = max(ncols or 0, 11, sum(spans))
+        ncols = max(11, sum(spans))
         spare = ncols - sum(spans)
         order = sorted(range(n), key=lambda i: (-subcols(tiles[i]), i))   # widest need first
         i = 0
@@ -1355,6 +1356,17 @@ class ReportBuilder:
 
         ur = unreachable(store, systems)           # needed for the Unreachable KPI below
 
+        # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
+        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups
+        caption(8, "AT A GLANCE  ·  inventory & readings")
+        static = [((2, 2),   "SYSTEMS",    str(len(systems))),
+                  ((3, 4),   "HOSTS",      str(hosts)),
+                  ((5, 6),   "SERVICES",   str(nsvc)),
+                  ((7, 9),   "SWIFT TXNS", swift),
+                  ((10, 12), "COB · T24",  cob)]
+        for group, label, value in static:
+            card(9, group, label, value, "info", vrow=10)
+
         # ---- ROW 2 · live health signals, SPLIT BY URGENCY -------------------
         # Two bands, each 3 rows tall (title · sub-labels · value):
         #   NEEDS IMMEDIATE ATTENTION — failing now (missing backups, unreachable,
@@ -1400,9 +1412,15 @@ class ReportBuilder:
         watch_tiles = [
             ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts), ("TOTAL", total_hosts)], cpu_state),
             ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts), ("TOTAL", total_hosts)], ram_state),
+            # DISKS and its TOTAL share one cell ("11/140") rather than each getting a
+            # full-size number of their own — a 4th sub-column would force this whole row a
+            # column wider than the bands above/below it (see _band_spans), and there's no
+            # way to claw that back without either this or shrinking some OTHER tile below
+            # its own safe minimum. Keeping the row's total at 11 columns, matching every
+            # other band, was worth more than a 4th big number here.
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
              [("HOSTS", disk_high_h), ("TOTAL", total_hosts),
-              ("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
+              ("DISKS", f"{disk_high_d}/{total_disks(store, systems)}")],
              disk_high_state),
             # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
             # encrypted estate read "12 | 0", which looks like half a number, not a pass.
@@ -1411,28 +1429,11 @@ class ReportBuilder:
              "good" if n_untracked == 0 else "warn"),
         ]
 
-        # Both bands (and the AT A GLANCE cards above them) share ONE width, so every row's
-        # right edge lines up — a band is never left to grow only as wide as its OWN tiles
-        # need (that jogged the right edge when HIGH DISK USAGE gained a 4th sub-column).
-        overview_ncols = max(sum(self._band_spans(imm_tiles)), sum(self._band_spans(watch_tiles)))
-
-        # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
-        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups. Rendered
-        # here (not right after "Summary") so its last card can reach overview_ncols too.
-        caption(8, "AT A GLANCE  ·  inventory & readings", end_col=1 + overview_ncols)
-        static = [((2, 2),   "SYSTEMS",    str(len(systems))),
-                  ((3, 4),   "HOSTS",      str(hosts)),
-                  ((5, 6),   "SERVICES",   str(nsvc)),
-                  ((7, 9),   "SWIFT TXNS", swift),
-                  ((10, 1 + overview_ncols), "COB · T24", cob)]
-        for group, label, value in static:
-            card(9, group, label, value, "info", vrow=10)
-
         def band(cap_row, title, tiles):
-            """Lay a row of tiles across columns starting at 2 under a caption, so the band
-               reads as one group however many tiles it holds. Every band in the overview
-               shares overview_ncols (see above) so their right edges align."""
-            spans = self._band_spans(tiles, ncols=overview_ncols)
+            """Lay a row of tiles across columns 2..12 under a caption, so the band reads as
+               one group however many tiles it holds. Width is shared by _band_spans (wider
+               panels get more room)."""
+            spans = self._band_spans(tiles)
             caption(cap_row, title, end_col=1 + sum(spans))
             trow = cap_row + 1
             start = 2
