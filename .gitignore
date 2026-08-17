@@ -9,6 +9,7 @@ webapp/.env
 # Real runtime config that lives at these paths once deployed (samples ARE committed):
 /send_report/config.ini
 /prometheus.yml
+/deployments/standalone/systems admin report/config.ini
 
 # ── Python ────────────────────────────────────────────────────────────
 __pycache__/
@@ -31,6 +32,7 @@ Thumbs.db
 *.png
 !webapp/static/img/logo.png
 !send_report/logo.png
+!deployments/standalone/systems admin report/logo.png
 # The header mark is a SHIPPED asset, not a screenshot: without it the deployed app has no
 # manifest entry for it and the header breaks. Same for the design references it came from.
 !webapp/static/img/brand-mark.png

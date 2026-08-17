@@ -1,0 +1,5 @@
+# Runtime requirements for the System Admin Report tools.
+# (mail_report.py uses only the Python standard library beyond these.)
+openpyxl>=3.1
+PyYAML>=6.0
+Pillow>=9.0
