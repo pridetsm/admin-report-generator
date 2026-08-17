@@ -56,6 +56,8 @@ class Snapshot:
     prom_url: str
     systems: List[SystemVM]
     overview: dict = field(default_factory=dict)   # the same summary the email presents
+    scope_label: str = ""      # which role's workspace this snapshot covers ("" = the whole estate)
+    scoped_out: int = 0        # systems the active role's scope excluded (0 = nothing hidden)
     # raw engine objects, cached so generation reuses the EXACT snapshot the admin reviewed
     _store: object = None
     _systems: object = None
@@ -161,10 +163,16 @@ def build_overview(store, systems, cfg) -> dict:
     return {"glance": glance, "immediate": immediate, "watch": watch, "banners": banners}
 
 
-def capture_snapshot(token: str) -> Snapshot:
+def capture_snapshot(token: str, *, systems_filter=None, scope_label: str = "") -> Snapshot:
     """Load config + topology, capture a FRESH set of live metrics from Prometheus, and compute
     the per-system flagged items. Called on every form load / refresh, so each capture is a real
-    re-fetch. Raises PrometheusUnavailable if the endpoint is unreachable."""
+    re-fetch. Raises PrometheusUnavailable if the endpoint is unreachable.
+
+    ``systems_filter`` is the set of system names the caller's active role may see (None =
+    unrestricted). Filtering happens on the TOPOLOGY, before any query runs, so a scoped
+    workspace also means fewer Prometheus round-trips — and the generated report, the overview
+    KPIs and the e-mail all describe exactly the same slice the admin reviewed.
+    """
     cfg = gr.load_config()
     # runtime overrides an Administrator set in the app (which Prometheus/Grafana to use)
     from .models import SystemConfig
@@ -173,7 +181,17 @@ def capture_snapshot(token: str) -> Snapshot:
         cfg.prom = sc.prometheus_url
     if sc.grafana_url:
         cfg.grafana = sc.grafana_url
+    # resolve the topology through the same helper the Configuration form writes with, so the
+    # file being edited is always the file being read — they can never point at different YAMLs
+    from .promconfig import yaml_path
+    cfg.prometheus_yml = str(yaml_path())
     systems = gr.load_topology(cfg.prometheus_yml)
+    scoped_out = 0
+    if systems_filter is not None:
+        allowed = set(systems_filter)
+        kept = [s for s in systems if s.name in allowed]
+        scoped_out = len(systems) - len(kept)
+        systems = kept
     prom = gr.Prometheus(cfg.prom, cfg.http_timeout)
     try:
         prom.ping()
@@ -193,10 +211,23 @@ def capture_snapshot(token: str) -> Snapshot:
         prom_url=cfg.prom,
         systems=svms,
         overview=build_overview(store, systems, cfg),
+        scope_label=scope_label,
+        scoped_out=scoped_out,
         _store=store,
         _systems=systems,
         _cfg=cfg,
     )
+
+
+def topology_systems() -> List[str]:
+    """Every system name in the live prometheus.yml — the choices the role-scope editor and
+    the role tiles count against. Empty (never an exception) if the file can't be read, so a
+    broken topology file degrades the scope editor instead of breaking sign-in."""
+    from .promconfig import load, system_names
+    try:
+        return system_names(load())
+    except Exception:      # noqa: BLE001 — unreadable/invalid YAML is surfaced elsewhere
+        return []
 
 
 def build_report(snapshot: Snapshot, *, theme: str, author: str,

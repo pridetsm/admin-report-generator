@@ -30,6 +30,8 @@ Thumbs.db
 *.xlsx
 *.png
 !webapp/static/img/logo.png
+# role-selection tile icons — real app assets, not dev artefacts
+!webapp/static/img/roles/*.png
 !send_report/logo.png
 Screenshot*.png
 example.png

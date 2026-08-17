@@ -136,6 +136,11 @@ Minimum production values:
         admin-report.rbz.co.zw,localhost,127.0.0.1
   POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_HOST / POSTGRES_PORT
   REPORT_SNAPSHOT_TTL   optional, default 300 (seconds a snapshot stays valid)
+  PROMETHEUS_YML      optional, absolute path to the prometheus.yml the app reads
+        AND writes (Configuration form, section 10a). Blank = wherever
+        config.ini [prometheus] yml points, which is the normal case. Whichever
+        path wins, the OS user running the app needs WRITE access to that file
+        and to its directory (backups are written alongside it).
   KEYCLOAK_CLIENT_SECRET   only if you enable Keycloak (section 10)
 
 CSRF_TRUSTED_ORIGINS is derived automatically from DJANGO_ALLOWED_HOSTS
@@ -276,10 +281,66 @@ Roles (four Django groups): System Admin, Network Admin, Gov Systems Admin,
   Administrator (or Django superuser) sees the Roles console to grant them, and
   gets the in-app notifications (hamburger red dot) for pending requests.
 
+Role selection at sign-in:
+  A user holding MORE THAN ONE role is sent to a role-selection screen before
+  the dashboard loads — one tile per role they hold, plus a "Load all my roles"
+  tile that combines them. The choice lives in the session (so it resets at every
+  sign-in) and scopes the dashboard, the report and the e-mail to that role's
+  systems. A single-role user is never asked; their one role is selected
+  silently. Switch later from the topbar chip or the drawer ("Switch role").
+  Which systems a role covers is set in Configuration › Role scopes; a role with
+  nothing mapped is UNRESTRICTED (sees the whole estate), which is the default,
+  so nothing is hidden until you deliberately map it.
+
 Keycloak (config.ini [keycloak], OFF by default):
   When enabled=true (and KEYCLOAK_CLIENT_SECRET set in env), roles are read from
   Keycloak realm roles and mirrored into Django groups at login. Leave it OFF to
   manage roles locally in the Administrator console / Django admin.
+
+
+────────────────────────────────────────────────────────────────────────────
+10a. CONFIGURATION SCREENS (Administrator only)
+────────────────────────────────────────────────────────────────────────────
+The drawer's "Configuration" entry opens one place with four tabs:
+
+  1. Configuration form  (the default screen)
+       prometheus.yml presented as labelled sections and fields — global
+       intervals, storage window, rule files, and every scrape job with its
+       target groups and labels. It reads the live file on each visit and writes
+       it back on save, so form and file cannot drift. This exists so the
+       topology is edited through validated fields rather than hand-written
+       YAML, which is where the syntax errors came from.
+
+       On save: every value is validated FIRST (durations, label names, job
+       names, metrics paths) and nothing is written if anything fails; the
+       previous file is copied to  prometheus.yml.<YYYYmmdd-HHMMSS>.bak  beside
+       it; the new file is written atomically (temp file + rename).
+
+       Keys the form does not model — params, relabel_configs, tls_config, … —
+       are preserved untouched and shown read-only under "Advanced". Comments
+       inside the body are NOT carried across (the header block is); the .bak
+       holds the original verbatim.
+
+       Housekeeping: the .bak files accumulate. Prune them on whatever schedule
+       suits you — they are plain copies, restore with cp.
+
+  2. Live YAML file
+       prometheus.yml verbatim, read-only, with a download link and the list of
+       recent backups.
+
+  3. Data sources
+       The Prometheus/Grafana URLs the dashboard READS from (formerly the whole
+       of the Configuration screen). Distinct from the topology file above.
+
+  4. Role scopes
+       Role → systems mapping used by the sign-in role tiles (see section 10).
+
+"⟳ Reload Prometheus" on the form POSTs to <prometheus-url>/-/reload so the
+running server picks the new file up. That needs Prometheus started with
+  --web.enable-lifecycle
+otherwise the button reports that the lifecycle API is disabled and you reload
+on the server instead (systemctl reload prometheus). Saving never reloads on its
+own — the file changes, and Prometheus keeps running the old config until told.
 
 
 ────────────────────────────────────────────────────────────────────────────
@@ -296,6 +357,11 @@ Keycloak (config.ini [keycloak], OFF by default):
   * Generate & e-mail -> arrives from the SMTP from_address (proves SMTP).
   * As Administrator, open the hamburger -> Notifications; the Roles console lists
     any pending requests.
+  * As a user holding two or more roles, sign in -> you get the role-selection
+    tiles (including "Load all my roles") before the dashboard.
+  * Drawer -> Configuration -> the form lists every scrape job in prometheus.yml.
+    Save it unchanged: a .bak appears next to prometheus.yml and the dashboard
+    still captures normally (proves the app can write the topology file).
 
 
 ────────────────────────────────────────────────────────────────────────────

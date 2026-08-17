@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Choose a role · Admin Report Generator{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:860px">
+
+  <div style="text-align:center;margin:6px 0 26px">
+    <h1 style="font-size:22px;margin:0 0 6px">Which role are you working as?</h1>
+    <p style="color:var(--muted);margin:0">
+      You hold more than one role. Pick one to work in its systems only — or load them all at
+      once. You can switch at any time from the navigation drawer.
+    </p>
+  </div>
+
+  <form method="post" id="roleSelect">{% csrf_token %}
+    <div class="role-tiles">
+      {% for t in tiles %}
+      <button class="role-tile{% if t.value == current %} is-current{% endif %}"
+              type="submit" name="role" value="{{ t.value }}">
+        <img class="role-tile-icon" src="{% static 'img/'|add:t.icon %}" alt="">
+        <span class="role-tile-name">{{ t.name }}</span>
+        {% if t.blurb %}<span class="role-tile-blurb">{{ t.blurb }}</span>{% endif %}
+        <span class="role-tile-meta">
+          {% if t.unscoped %}Whole estate{% if t.count %} · {{ t.count }} system{{ t.count|pluralize }}{% endif %}
+          {% else %}{{ t.count }} system{{ t.count|pluralize }}{% endif %}
+        </span>
+        {% if t.value == current %}<span class="chip green role-tile-chip">Current</span>{% endif %}
+      </button>
+      {% endfor %}
+    </div>
+
+    {# ---- the combined workspace: every system across every role held ---- #}
+    <button class="role-tile role-tile-all{% if all_tile.value == current %} is-current{% endif %}"
+            type="submit" name="role" value="{{ all_tile.value }}">
+      <img class="role-tile-icon" src="{% static 'img/'|add:all_tile.icon %}" alt="">
+      <span class="role-tile-body">
+        <span class="role-tile-name">⊞ {{ all_tile.name }}</span>
+        <span class="role-tile-blurb">{{ all_tile.blurb }}</span>
+      </span>
+      <span class="role-tile-meta">
+        {% if all_tile.unscoped %}Whole estate{% if all_tile.count %} · {{ all_tile.count }} system{{ all_tile.count|pluralize }}{% endif %}
+        {% else %}{{ all_tile.count }} system{{ all_tile.count|pluralize }} · combined{% endif %}
+      </span>
+      {% if all_tile.value == current %}<span class="chip green role-tile-chip">Current</span>{% endif %}
+    </button>
+  </form>
+
+  <p style="color:var(--muted);font-size:13px;text-align:center;margin:22px 0 0">
+    {% if is_role_admin %}
+      A role with no systems mapped sees the whole estate ({{ total_systems }} system{{ total_systems|pluralize }}).
+      Map them under <a href="{% url 'config_role_scopes' %}">Configuration › Role scopes</a>.
+    {% else %}
+      Roles cover different parts of the estate. Ask an Administrator if something you expect is missing.
+    {% endif %}
+  </p>
+</div>
+{% endblock %}

@@ -28,10 +28,20 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
+from . import promconfig
 from .directory import search_directory
 from .forms import ProfileForm, SystemConfigForm, UserAccountForm
-from .models import ReportSubmission, RoleRequest, SystemConfig, UserProfile
-from .roles import ROLE_NAMES, is_role_admin
+from .models import ReportSubmission, RoleRequest, RoleScope, SystemConfig, UserProfile
+from .roles import (
+    ALL_ROLES,
+    ALL_ROLES_LABEL,
+    ALL_ROLES_META,
+    ALL_ROLES_TILE_LABEL,
+    ROLE_NAMES,
+    is_role_admin,
+    role_meta,
+    user_roles,
+)
 from .services import (
     EmailNotConfigured,
     PrometheusUnavailable,
@@ -41,6 +51,7 @@ from .services import (
     default_report_filename,
     email_report,
     recipient_options,
+    topology_systems,
 )
 
 _CACHE_PREFIX = "snapshot:"
@@ -48,6 +59,19 @@ _CACHE_PREFIX = "snapshot:"
 
 def _cache_key(token: str) -> str:
     return f"{_CACHE_PREFIX}{token}"
+
+
+def _active_scope(user, session):
+    """(systems_filter, label) for the role this session is working as.
+
+    ``systems_filter`` is None when the workspace is unrestricted — either the active role has
+    no Role scope mapped yet, or the user is a superuser holding no groups at all.
+    """
+    active = session.get("active_role") or ALL_ROLES
+    held = user_roles(user)
+    if active == ALL_ROLES:
+        return (RoleScope.systems_for(held) if held else None), ALL_ROLES_LABEL
+    return RoleScope.systems_for([active]), active
 
 
 def _profile_author(user) -> str:
@@ -81,8 +105,10 @@ def report_form(request):
 
     if snapshot is None:
         token = uuid.uuid4().hex
+        systems_filter, scope_label = _active_scope(request.user, request.session)
         try:
-            snapshot = capture_snapshot(token)
+            snapshot = capture_snapshot(token, systems_filter=systems_filter,
+                                        scope_label=scope_label)
         except PrometheusUnavailable as exc:
             return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
         cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
@@ -300,11 +326,203 @@ def set_report_theme(request):
     return redirect(request.META.get("HTTP_REFERER") or "report_form")
 
 
+# ---------------------------------------------------------------------------------------
+#  Role selection — which workspace am I in?
+# ---------------------------------------------------------------------------------------
+@never_cache
+@login_required
+def role_select(request):
+    """The screen a multi-role user meets straight after signing in.
+
+    One tile per role they hold, plus a "Load all my roles" tile that combines them. The
+    choice scopes the dashboard (see ``_active_scope``) and is kept in the session, so it
+    lasts until they switch roles or sign out.
+    """
+    held = user_roles(request.user)
+
+    if request.method == "POST":
+        choice = request.POST.get("role", "")
+        if choice != ALL_ROLES and choice not in held:
+            messages.error(request, "That role isn’t assigned to you.")
+            return redirect("role_select")
+        request.session["active_role"] = choice
+        # the cached snapshot belongs to the PREVIOUS scope — drop it so the dashboard
+        # re-captures against the systems this role can actually see
+        request.session.pop("snapshot_token", None)
+        label = ALL_ROLES_LABEL if choice == ALL_ROLES else choice
+        messages.success(request, f"Working as {label}.")
+        return redirect("report_form")
+
+    scoped = {r: RoleScope.systems_for([r]) for r in held}
+    all_systems = topology_systems()
+    tiles = []
+    for role in held:
+        systems = scoped[role]
+        tiles.append(dict(role_meta(role),
+                          value=role,
+                          count=len(all_systems) if systems is None else len(systems),
+                          unscoped=systems is None))
+    combined = RoleScope.systems_for(held) if held else None
+    return render(request, "reports/role_select.html", {
+        "tiles": tiles,
+        "all_tile": dict(ALL_ROLES_META, name=ALL_ROLES_TILE_LABEL, value=ALL_ROLES,
+                         count=len(all_systems) if combined is None else len(combined),
+                         unscoped=combined is None),
+        "current": request.session.get("active_role", ""),
+        "total_systems": len(all_systems),
+    })
+
+
+# ---------------------------------------------------------------------------------------
+#  Configuration — every configuration screen lives under here (drawer › Configuration)
+# ---------------------------------------------------------------------------------------
+#  The default screen is the FORM: a labelled view of prometheus.yml, so the estate is edited
+#  through validated fields instead of hand-written YAML. "Live YAML file" shows the same file
+#  verbatim; the other tabs configure the app around it.
+_CONFIG_TABS = [
+    ("configuration", "Configuration form", "Prometheus topology, in labelled fields"),
+    ("config_yaml", "Live YAML file", "prometheus.yml exactly as it is on disk"),
+    ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
+    ("config_role_scopes", "Role scopes", "Which systems each role sees"),
+]
+
+
+def _config_context(active: str) -> dict:
+    return {
+        "config_tabs": [{"url_name": n, "label": lbl, "hint": hint, "active": n == active}
+                        for n, lbl, hint in _CONFIG_TABS],
+        "yaml_file": promconfig.file_info(),
+    }
+
+
+def _require_admin(request):
+    """Configuration is Administrator-only; everyone else goes back to the dashboard."""
+    return None if is_role_admin(request.user) else redirect("report_form")
+
+
+@never_cache
+@login_required
+def configuration(request):
+    """DEFAULT configuration screen: prometheus.yml as a labelled form.
+
+    Reads the live file on every request and writes it back on save, so this is a view of the
+    file rather than a copy of it. Validation happens before anything is written, and the
+    previous file is kept as a timestamped .bak — see reports/promconfig.py.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    try:
+        doc = promconfig.load()
+        raw = promconfig.read_text()
+    except promconfig.ConfigError as exc:
+        return render(request, "reports/configuration.html",
+                      {**_config_context("configuration"), "load_error": str(exc)}, status=200)
+
+    errors: list = []
+    if request.method == "POST":
+        new_doc, errors = promconfig.parse_post(request.POST, doc)
+        if not errors:
+            try:
+                backup = promconfig.save(new_doc, header=promconfig.header_comment(raw),
+                                         author=request.user.get_full_name() or request.user.get_username())
+            except promconfig.ConfigError as exc:
+                messages.error(request, str(exc))
+                return redirect("configuration")
+            messages.success(request, "prometheus.yml saved." + (
+                f" Previous version kept as {backup}." if backup else ""))
+            return redirect("configuration")
+        view = promconfig.view_from_post(request.POST, doc)
+    else:
+        view = promconfig.to_view(doc)
+
+    return render(request, "reports/configuration.html", {
+        **_config_context("configuration"),
+        "view": view, "errors": errors,
+        "prom_url": SystemConfig.get().prometheus_url or gr.load_config().prom,
+        "backups": promconfig.backups(),
+    })
+
+
+@never_cache
+@login_required
+def config_yaml(request):
+    """The live prometheus.yml, verbatim — the source of truth behind the form."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    try:
+        raw, error = promconfig.read_text(), ""
+    except promconfig.ConfigError as exc:
+        raw, error = "", str(exc)
+    if request.GET.get("download") == "1" and raw:
+        resp = HttpResponse(raw, content_type="text/yaml; charset=utf-8")
+        resp["Content-Disposition"] = 'attachment; filename="prometheus.yml"'
+        return resp
+    return render(request, "reports/config_yaml.html", {
+        **_config_context("config_yaml"),
+        "raw": raw, "error": error,
+        "line_count": len(raw.splitlines()),
+        "backups": promconfig.backups(),
+    })
+
+
+@login_required
+@require_POST
+def prometheus_reload(request):
+    """Ask the running Prometheus to re-read the config we just wrote (POST /-/reload)."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    url = SystemConfig.get().prometheus_url or gr.load_config().prom
+    ok, detail = promconfig.reload_prometheus(url)
+    (messages.success if ok else messages.error)(request, detail)
+    return redirect(request.POST.get("next") or "configuration")
+
+
+@never_cache
+@login_required
+def config_role_scopes(request):
+    """Which systems each role's workspace covers — what the role tiles at sign-in select.
+
+    A role with nothing ticked is UNRESTRICTED (it sees the whole estate), so the mapping can
+    be filled in one role at a time without hiding systems from anyone in the meantime.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    systems = topology_systems()
+    if request.method == "POST":
+        for role in ROLE_NAMES:
+            chosen = [s for s in request.POST.getlist(f"systems__{role}") if s in systems]
+            scope, _ = RoleScope.objects.get_or_create(role=role)
+            scope.systems = chosen
+            scope.updated_by = request.user
+            scope.save()
+        messages.success(request, "Role scopes saved — they apply the next time a role is selected.")
+        return redirect("config_role_scopes")
+
+    mapped = {s.role: set(s.systems or []) for s in RoleScope.objects.all()}
+    rows = [{
+        "role": role,
+        "meta": role_meta(role),
+        "chosen": mapped.get(role, set()),
+        "unscoped": not mapped.get(role),
+    } for role in ROLE_NAMES]
+    return render(request, "reports/config_role_scopes.html", {
+        **_config_context("config_role_scopes"),
+        "rows": rows, "systems": systems,
+    })
+
+
 @login_required
 def system_settings(request):
     """Administrator-only: the Prometheus/Grafana the dashboard fetches from (overrides config.ini)."""
-    if not is_role_admin(request.user):
-        return redirect("report_form")
+    denied = _require_admin(request)
+    if denied:
+        return denied
     sc = SystemConfig.get()
     if request.method == "POST":
         form = SystemConfigForm(request.POST, instance=sc)
@@ -318,6 +536,7 @@ def system_settings(request):
         form = SystemConfigForm(instance=sc)
     defaults = gr.load_config()   # the file-based fallbacks, shown for reference
     return render(request, "reports/settings.html", {
+        **_config_context("system_settings"),
         "form": form, "sc": sc,
         "config_prom": defaults.prom, "config_grafana": defaults.grafana,
     })

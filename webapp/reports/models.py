@@ -157,6 +157,52 @@ class SystemConfig(models.Model):
         return obj
 
 
+class RoleScope(models.Model):
+    """Which systems (from prometheus.yml) a role's workspace covers.
+
+    Picking a role on the role-selection screen scopes the dashboard to that role's systems;
+    "Load all my roles" is the union across every role the user holds. An EMPTY `systems`
+    list means "unrestricted" — the role sees the whole estate — so the mapping can be filled
+    in gradually without ever hiding data by accident.
+    """
+
+    role = models.CharField(max_length=64, unique=True,
+                            help_text="Role (Django group) name, e.g. 'Network Admin'")
+    systems = models.JSONField(
+        default=list, blank=True,
+        help_text="System names from prometheus.yml. Empty = this role sees every system.")
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["role"]
+        verbose_name = "role scope"
+
+    def __str__(self):
+        n = len(self.systems or [])
+        return f"{self.role} → {n} system(s)" if n else f"{self.role} → all systems"
+
+    @classmethod
+    def systems_for(cls, roles):
+        """The set of system names the given roles may see, or None for 'unrestricted'.
+
+        None (not an empty set) is returned when ANY of the roles is unmapped, because an
+        unmapped role means "everything" — and a union with everything is everything.
+        """
+        roles = [r for r in roles if r]
+        if not roles:
+            return None
+        rows = {r.role: (r.systems or []) for r in cls.objects.filter(role__in=roles)}
+        allowed: set = set()
+        for role in roles:
+            mapped = rows.get(role)
+            if not mapped:          # unmapped, or mapped to an empty list -> unrestricted
+                return None
+            allowed.update(mapped)
+        return allowed
+
+
 class RoleRequest(models.Model):
     """A user's request for a role (Django group). Administrators approve/reject these."""
 

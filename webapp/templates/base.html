@@ -18,6 +18,21 @@
     <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Admin Report Generator</button>
     <div class="spacer"></div>
 
+    {# which role's workspace is loaded — click to go back to the chooser #}
+    {% if active_role_label %}
+      {% if can_switch_role %}
+      <a class="rolechip" href="{% url 'role_select' %}" title="Switch role">
+        {% if active_role_icon %}<img src="{% static 'img/'|add:active_role_icon %}" alt="">{% endif %}
+        <span>{{ active_role_label }}</span><span class="rolechip-caret" aria-hidden="true">⇄</span>
+      </a>
+      {% else %}
+      <span class="rolechip is-static">
+        {% if active_role_icon %}<img src="{% static 'img/'|add:active_role_icon %}" alt="">{% endif %}
+        <span>{{ active_role_label }}</span>
+      </span>
+      {% endif %}
+    {% endif %}
+
     {# settings + notifications hamburger (red dot when there are unseen notifications) #}
     <div class="navmenu" id="settingsMenu" data-seen-url="{% url 'mark_notifications_seen' %}">
       <button class="iconbtn" id="settingsToggle" type="button" aria-label="Menu" aria-expanded="false">
@@ -73,11 +88,30 @@
       <button class="iconbtn" id="drawerClose" type="button" aria-label="Close">‹</button>
       <span class="drawer-user">{{ user.get_full_name|default:user.get_username }}</span>
     </div>
+
+    {# which role's workspace is loaded, and the way back to the chooser #}
+    {% if active_role_label %}
+    <div class="drawer-role">
+      <span class="drawer-role-lbl">Working as</span>
+      <span class="drawer-role-name">
+        {% if active_role_icon %}<img src="{% static 'img/'|add:active_role_icon %}" alt="">{% endif %}
+        {{ active_role_label }}
+      </span>
+      {% if can_switch_role %}<a class="drawer-role-switch" href="{% url 'role_select' %}">Switch role</a>{% endif %}
+    </div>
+    {% endif %}
+
     <a href="{% url 'report_form' %}">System Analyses Dashboard</a>
     <a href="{% url 'history' %}">History</a>
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}">Roles</a>
-    <a href="{% url 'system_settings' %}">Configuration</a>
+
+    {# every configuration screen hangs off one drawer entry; the form is what it opens #}
+    <div class="drawer-group-label">Configuration</div>
+    <a href="{% url 'configuration' %}">Configuration form</a>
+    <a class="drawer-sub" href="{% url 'config_yaml' %}">Live YAML file</a>
+    <a class="drawer-sub" href="{% url 'system_settings' %}">Data sources</a>
+    <a class="drawer-sub" href="{% url 'config_role_scopes' %}">Role scopes</a>
     {% endif %}
   </nav>
 

@@ -408,6 +408,116 @@ table.hist tr:last-child td { border-bottom: 0; }
 .toast.success { border-left-color: var(--green); }
 .toast.info { border-left-color: var(--accent); }
 
+/* ============================================================================
+   ROLE SELECTION — the screen a multi-role user meets at sign-in
+   ============================================================================ */
+.role-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 14px; }
+.role-tile {
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  padding: 20px 18px 16px; text-align: left; width: 100%;
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 12px;
+  color: var(--ink); font: inherit; cursor: pointer; box-shadow: var(--shadow);
+  transition: border-color .15s ease, transform .12s ease;
+}
+.role-tile:hover { border-color: var(--accent); transform: translateY(-2px); }
+.role-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.role-tile.is-current { border-color: var(--accent); background: var(--panel-2); }
+.role-tile-icon { height: 46px; width: 46px; object-fit: contain; margin-bottom: 4px; }
+.role-tile-name { font-size: 16px; font-weight: 700; }
+.role-tile-blurb { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.role-tile-meta { margin-top: auto; padding-top: 8px; color: var(--accent); font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .4px; }
+.role-tile-chip { position: absolute; top: 12px; right: 12px; }
+
+/* the combined "load all my roles" tile spans the full width, laid out horizontally */
+.role-tile-all { flex-direction: row; align-items: center; gap: 16px; padding: 18px; }
+.role-tile-all .role-tile-icon { margin-bottom: 0; flex: none; }
+.role-tile-all .role-tile-body { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.role-tile-all .role-tile-meta { margin-top: 0; padding-top: 0; white-space: nowrap; }
+
+/* topbar chip showing the active role */
+.rolechip {
+  display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 11px;
+  border: 1px solid var(--line); border-radius: 18px; background: var(--panel-2);
+  color: var(--ink); font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap;
+}
+.rolechip:hover { border-color: var(--accent); text-decoration: none; }
+.rolechip img { height: 18px; width: 18px; object-fit: contain; }
+.rolechip-caret { color: var(--muted); font-size: 12px; }
+.rolechip.is-static { cursor: default; }
+@media (max-width: 760px) { .rolechip span:not(.rolechip-caret) { display: none; } }
+
+/* drawer: active role block + grouped Configuration entries */
+.drawer-role { padding: 10px 12px 12px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+.drawer-role-lbl { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.drawer-role-name { display: flex; align-items: center; gap: 7px; font-weight: 650; margin-top: 4px; }
+.drawer-role-name img { height: 20px; width: 20px; object-fit: contain; }
+.drawer a.drawer-role-switch { display: inline-block; padding: 4px 0 0; font-size: 12.5px; color: var(--accent); font-weight: 600; }
+.drawer a.drawer-role-switch:hover { background: transparent; text-decoration: underline; }
+.drawer-group-label { padding: 14px 12px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+.drawer a.drawer-sub { padding-left: 24px; font-weight: 500; color: var(--muted); }
+.drawer a.drawer-sub:hover { color: var(--ink); }
+
+/* ============================================================================
+   CONFIGURATION — tabs, the prometheus.yml form, role scopes
+   ============================================================================ */
+.cfg-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.cfg-tab {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; min-width: 170px;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel);
+  color: var(--ink); text-decoration: none;
+}
+.cfg-tab:hover { border-color: var(--accent); text-decoration: none; }
+.cfg-tab.is-active { border-color: var(--accent); background: var(--panel-2); box-shadow: inset 0 -2px 0 var(--accent); }
+.cfg-tab-label { font-weight: 650; font-size: 14px; }
+.cfg-tab-hint { color: var(--muted); font-size: 12px; }
+
+.cfg-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.cfg-grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+.cfg-grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.cfg-hint { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; }
+.cfg-req { color: var(--accent); font-weight: 600; text-transform: none; letter-spacing: 0; }
+.cfg-sub-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin: 18px 0 8px; }
+.cfg-sub-label .cfg-hint { display: inline; text-transform: none; letter-spacing: 0; margin-left: 6px; }
+.cfg-scheme { max-width: 220px; margin-top: 12px; }
+
+/* key/value rows (extra labels, external labels) */
+.cfg-kv { display: flex; flex-direction: column; gap: 8px; }
+.cfg-kv-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
+.cfg-x {
+  width: 30px; height: 30px; flex: none; border-radius: 8px; border: 1px solid var(--line-strong);
+  background: var(--panel-2); color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1;
+}
+.cfg-x:hover { border-color: var(--red); color: var(--red); }
+.cfg-add { padding: 7px 13px; font-size: 13px; margin-top: 10px; }
+
+/* a scrape job card + its target groups */
+.cfg-job > header h2 { font-weight: 650; }
+.cfg-job > header .cfg-x { margin-right: 4px; }
+.cfg-group { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px 14px; margin-bottom: 12px; background: var(--panel-2); }
+.cfg-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13.5px; }
+.cfg-group-head .spacer { flex: 1; }
+.cfg-group .field { margin-bottom: 10px; }
+.cfg-group textarea { background: var(--panel); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; }
+
+/* read-only blocks: preserved advanced job keys, and the live YAML view */
+.cfg-pre {
+  margin: 0 0 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel-2); color: var(--muted); overflow-x: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.5;
+}
+.cfg-yaml {
+  margin: 0; padding: 16px 18px; max-height: 70vh; overflow: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.55;
+  color: var(--ink); tab-size: 2;
+}
+
+/* role -> systems picker */
+.scope-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.scope-opt { display: flex; align-items: center; gap: 9px; padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer; font-size: 13.5px; background: var(--panel-2); }
+.scope-opt:hover { border-color: var(--accent); }
+.scope-opt input { width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+.scope-opt:has(input:checked) { border-color: var(--accent); }
+
 /* ---- recipients dropdown ---- */
 .dropdown { position: relative; }
 .dropdown-btn {

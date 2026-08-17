@@ -17,7 +17,13 @@
   {# ---- snapshot banner ---- #}
   <div class="snap">
     <h1>System Analyses Dashboard</h1>
-    <div class="meta">Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }} · {{ snapshot.prom_url }}</div>
+    <div class="meta">
+      Static snapshot · {{ snapshot.captured_at|date:"d M Y, H:i" }} · {{ snapshot.prom_url }}
+      {% if snapshot.scope_label %}
+        <br>{{ snapshot.systems|length }} system{{ snapshot.systems|length|pluralize }} in scope as
+        <b>{{ snapshot.scope_label }}</b>{% if snapshot.scoped_out %} · {{ snapshot.scoped_out }} outside this role{% endif %}
+      {% endif %}
+    </div>
     <div class="spacer" style="flex:1"></div>
     {% if snapshot.grafana_url %}
     <a class="btn ghost" href="{{ snapshot.grafana_url }}" target="_blank" rel="noopener"

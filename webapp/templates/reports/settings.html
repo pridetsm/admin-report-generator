@@ -1,12 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Configuration · Admin Report Generator{% endblock %}
+{% block title %}Data sources · Configuration{% endblock %}
 
 {% block body %}
-<div class="container" style="max-width:720px">
-  {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
+<div class="container" style="max-width:1040px">
+  {% include "reports/_config_tabs.html" %}
 
-  <div class="section-label">Configuration</div>
-  <div class="card"><div class="body" style="padding:18px">
+  <div class="card" style="max-width:720px"><div class="body" style="padding:18px">
     <p style="margin:0 0 16px;color:var(--muted)">
       Where the dashboard fetches its data. Changes take effect on the next capture (a refresh or
       a new report re-fetches live from this Prometheus server). Leave a field blank to fall back
@@ -33,5 +32,11 @@
       </div>
     </form>
   </div></div>
+
+  <p style="color:var(--muted);font-size:13px;margin:4px 2px">
+    This is the server the dashboard <i>reads</i>. The topology it reads — which hosts belong to
+    which system — is the separate <code>prometheus.yml</code> on the
+    <a href="{% url 'configuration' %}">configuration form</a>.
+  </p>
 </div>
 {% endblock %}

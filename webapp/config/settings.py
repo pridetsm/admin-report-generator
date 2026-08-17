@@ -75,6 +75,10 @@ if not CSRF_TRUSTED_ORIGINS:
         if _h not in ("localhost", "127.0.0.1", "0.0.0.0", "*"):
             CSRF_TRUSTED_ORIGINS += [f"https://{_h}", f"http://{_h}"]
 
+# The prometheus.yml the Configuration form reads and writes. Blank = wherever the report
+# engine's config.ini ([prometheus] yml) points, which is the normal deployment.
+PROMETHEUS_YML = os.environ.get("PROMETHEUS_YML", "")
+
 # How long a captured snapshot stays valid between loading the form and generating the
 # report (seconds). Keeps the answers married to the exact numbers the admin reviewed.
 SNAPSHOT_TTL = int(os.environ.get("REPORT_SNAPSHOT_TTL", "300"))   # 5 minutes
@@ -101,6 +105,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'reports.middleware.RoleRequiredMiddleware',
+    'reports.middleware.ActiveRoleMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'

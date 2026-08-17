@@ -7,23 +7,30 @@ templates, the generate/download path, and the audit row — is exercised for re
 import datetime
 import io
 import json
+import pathlib
 import re
+import shutil
+import tempfile
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from unittest import mock
 
 import generate_report as gr
+import yaml
 
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
-from .models import ReportSubmission, RoleRequest, SystemConfig
+from .models import ReportSubmission, RoleRequest, RoleScope, SystemConfig
+from .roles import ALL_ROLES, ALL_ROLES_LABEL
 from .services import FlagVM, Snapshot, SystemVM, build_overview
 
 
-def _synthetic_snapshot(token: str) -> Snapshot:
+def _synthetic_snapshot(token: str, *, systems_filter=None, scope_label: str = "") -> Snapshot:
+    """Stands in for capture_snapshot(); mirrors its signature so the role-scoping arguments
+    the view now passes are exercised rather than swallowed."""
     cfg = gr.Config()
     sysm = gr.System("Efin", [gr.Component("DB", "10.0.201.3:9182")])
     store = gr.Store(
@@ -40,6 +47,7 @@ def _synthetic_snapshot(token: str) -> Snapshot:
     return Snapshot(
         token=token, captured_at=datetime.datetime(2026, 7, 17, 9, 0), prom_url=cfg.prom,
         systems=[SystemVM("Efin", 1, flags)], overview=build_overview(store, [sysm], cfg),
+        scope_label=scope_label,
         _store=store, _systems=[sysm], _cfg=cfg,
     )
 
@@ -494,3 +502,390 @@ class KeycloakRoleSync(TestCase):
         kc.sync_user_roles(u)
         self.assertEqual(set(u.groups.values_list("name", flat=True)),
                          {"Administrator", "Network Admin"})
+
+
+# =========================================================================================
+#  Role selection — a multi-role user chooses a workspace instead of getting all of them
+# =========================================================================================
+class RoleSelection(TestCase):
+    fixtures: list = []
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("multi", password="pw12345!")
+        for r in ("System Admin", "Network Admin"):
+            self.user.groups.add(Group.objects.get(name=r))
+        self.solo = get_user_model().objects.create_user("solo", password="pw12345!")
+        self.solo.groups.add(Group.objects.get(name="System Admin"))
+
+    def test_multi_role_user_is_sent_to_the_chooser(self):
+        self.client.login(username="multi", password="pw12345!")
+        resp = self.client.get(reverse("report_form"))
+        self.assertRedirects(resp, reverse("role_select"))
+
+    def test_single_role_user_is_not_asked(self):
+        """One role is not a choice — select it silently and go straight to the dashboard."""
+        self.client.login(username="solo", password="pw12345!")
+        with mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot):
+            resp = self.client.get(reverse("report_form"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.client.session["active_role"], "System Admin")
+
+    def test_chooser_offers_every_held_role_plus_load_all(self):
+        self.client.login(username="multi", password="pw12345!")
+        resp = self.client.get(reverse("role_select"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([t["value"] for t in resp.context["tiles"]],
+                         ["System Admin", "Network Admin"])
+        self.assertEqual(resp.context["all_tile"]["value"], ALL_ROLES)
+        self.assertContains(resp, "Load all my roles")
+        self.assertNotContains(resp, "Gov Systems Admin")     # a role they don't hold
+
+    def test_choosing_a_role_stores_it_and_returns_to_the_dashboard(self):
+        self.client.login(username="multi", password="pw12345!")
+        resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        self.assertRedirects(resp, reverse("report_form"), fetch_redirect_response=False)
+        self.assertEqual(self.client.session["active_role"], "Network Admin")
+
+    def test_load_all_my_roles_is_accepted(self):
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": ALL_ROLES})
+        self.assertEqual(self.client.session["active_role"], ALL_ROLES)
+
+    def test_a_role_the_user_does_not_hold_is_refused(self):
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": "Gov Systems Admin"})
+        self.assertFalse(self.client.session.get("active_role"))
+
+    def test_switching_role_discards_the_cached_snapshot(self):
+        """A snapshot captured under one role's scope must not be re-served under another."""
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        with mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot):
+            self.client.get(reverse("report_form"))
+        self.assertTrue(self.client.session.get("snapshot_token"))
+        self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        self.assertIsNone(self.client.session.get("snapshot_token"))
+
+
+class RoleScoping(TestCase):
+    """The active role decides which systems the capture (and so the report) covers."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user("scoped", password="pw12345!")
+        for r in ("System Admin", "Network Admin"):
+            self.user.groups.add(Group.objects.get(name=r))
+        RoleScope.objects.create(role="System Admin", systems=["Efin", "CRB"])
+        RoleScope.objects.create(role="Network Admin", systems=["RTGS"])
+        self.client.login(username="scoped", password="pw12345!")
+
+    def _capture_kwargs(self):
+        with mock.patch("reports.views.capture_snapshot",
+                        side_effect=_synthetic_snapshot) as cap:
+            self.client.get(reverse("report_form"))
+        return cap.call_args.kwargs
+
+    def test_one_role_scopes_to_that_roles_systems(self):
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        kwargs = self._capture_kwargs()
+        self.assertEqual(kwargs["systems_filter"], {"Efin", "CRB"})
+        self.assertEqual(kwargs["scope_label"], "System Admin")
+
+    def test_load_all_my_roles_unions_the_scopes(self):
+        self.client.post(reverse("role_select"), {"role": ALL_ROLES})
+        kwargs = self._capture_kwargs()
+        self.assertEqual(kwargs["systems_filter"], {"Efin", "CRB", "RTGS"})
+        self.assertEqual(kwargs["scope_label"], ALL_ROLES_LABEL)
+
+    def test_an_unmapped_role_is_unrestricted(self):
+        RoleScope.objects.filter(role="Network Admin").update(systems=[])
+        self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        self.assertIsNone(self._capture_kwargs()["systems_filter"])
+
+    def test_unmapped_role_makes_the_union_unrestricted_too(self):
+        """Union with 'everything' is everything — it must not silently shrink to the mapped role."""
+        RoleScope.objects.filter(role="Network Admin").update(systems=[])
+        self.client.post(reverse("role_select"), {"role": ALL_ROLES})
+        self.assertIsNone(self._capture_kwargs()["systems_filter"])
+
+    def test_capture_filters_the_topology(self):
+        """The filter is applied to the topology, so scoped-out systems are never queried."""
+        with mock.patch("reports.services.build_overview", return_value={}), \
+             mock.patch("reports.services.gr") as grm:
+            cfg = type("Cfg", (), {"prom": "http://p:9090", "grafana": "g",
+                                   "prometheus_yml": "y", "http_timeout": 5})()
+            grm.load_config.return_value = cfg
+            grm.load_topology.return_value = [
+                gr.System("Efin", [gr.Component("DB", "1:9182")]),
+                gr.System("RTGS", [gr.Component("App", "2:9100")]),
+                gr.System("CRB", [gr.Component("Web", "3:9182")]),
+            ]
+            grm.Prometheus.return_value = mock.MagicMock()
+            grm.capture.return_value = mock.MagicMock(services={})
+            grm.flagged_for_system.return_value = []
+            from .services import capture_snapshot as real_capture
+            snap = real_capture("tok", systems_filter={"Efin", "CRB"}, scope_label="System Admin")
+        self.assertEqual([s.name for s in snap.systems], ["Efin", "CRB"])
+        self.assertEqual(snap.scoped_out, 1)
+        self.assertEqual(snap.scope_label, "System Admin")
+
+
+# =========================================================================================
+#  Configuration — prometheus.yml as a validated form, and the screens around it
+# =========================================================================================
+_FIXTURE_YML = """\
+# Topology for the estate.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+storage:
+  tsdb:
+    out_of_order_time_window: 30d
+
+rule_files:
+  - "alerts.yml"
+
+scrape_configs:
+  - job_name: "windows_exporter"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["10.0.201.3:9182"]
+        labels:
+          app: "windows"
+          system: "Efin"
+          display: "Efin DB"
+      - targets: ["10.0.212.3:9182"]
+        labels:
+          app: "windows"
+          system: "Temenos"
+          display: "Temenos/T24 App"
+          tier: "gold"
+
+  - job_name: "blackbox_http"
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ["https://rtgs.rbz.co.zw/"]
+        labels:
+          system: "RTGS"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+"""
+
+
+class PrometheusConfigBase(TestCase):
+    """Every Configuration test works against a throwaway prometheus.yml, never the real one."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="promcfg_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = pathlib.Path(self.dir) / "prometheus.yml"
+        self.path.write_text(_FIXTURE_YML, encoding="utf-8")
+        self.override = override_settings(PROMETHEUS_YML=str(self.path))
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+
+        self.admin = get_user_model().objects.create_user("cfgadmin", password="pw12345!")
+        self.admin.groups.add(Group.objects.get(name="Administrator"))
+        self.client.login(username="cfgadmin", password="pw12345!")
+
+    def current(self) -> dict:
+        return yaml.safe_load(self.path.read_text(encoding="utf-8"))
+
+    def post_data(self, **overrides) -> dict:
+        """The exact fields the rendered form submits for the fixture, unchanged."""
+        data = {
+            "g_scrape_interval": "15s", "g_evaluation_interval": "15s", "g_scrape_timeout": "10s",
+            "storage_ooo_window": "30d", "rule_files": "alerts.yml",
+            "job__0__name": "windows_exporter", "job__0__scrape_interval": "15s",
+            "job__0__scrape_timeout": "", "job__0__metrics_path": "", "job__0__scheme": "",
+            "sc__0__0__targets": "10.0.201.3:9182",
+            "sc__0__0__l_app": "windows", "sc__0__0__l_system": "Efin",
+            "sc__0__0__l_display": "Efin DB", "sc__0__0__l_role": "",
+            "sc__0__1__targets": "10.0.212.3:9182",
+            "sc__0__1__l_app": "windows", "sc__0__1__l_system": "Temenos",
+            "sc__0__1__l_display": "Temenos/T24 App", "sc__0__1__l_role": "",
+            "sc__0__1__xkey__0": "tier", "sc__0__1__xval__0": "gold",
+            "job__1__name": "blackbox_http", "job__1__scrape_interval": "",
+            "job__1__scrape_timeout": "", "job__1__metrics_path": "/probe", "job__1__scheme": "",
+            "sc__1__0__targets": "https://rtgs.rbz.co.zw/",
+            "sc__1__0__l_app": "", "sc__1__0__l_system": "RTGS",
+            "sc__1__0__l_display": "", "sc__1__0__l_role": "",
+        }
+        data.update(overrides)
+        return data
+
+
+class PrometheusConfigForm(PrometheusConfigBase):
+    def test_requires_administrator(self):
+        u = get_user_model().objects.create_user("cfgnope", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="cfgnope", password="pw12345!")
+        for name in ("configuration", "config_yaml", "config_role_scopes"):
+            self.assertEqual(self.client.get(reverse(name)).status_code, 302, name)
+
+    def test_form_shows_every_value_in_the_file(self):
+        resp = self.client.get(reverse("configuration"))
+        self.assertEqual(resp.status_code, 200)
+        view = resp.context["view"]
+        self.assertEqual(view["global"]["scrape_interval"], "15s")
+        self.assertEqual(view["storage_out_of_order"], "30d")
+        self.assertEqual(view["rule_files_text"], "alerts.yml")
+        self.assertEqual([j["job_name"] for j in view["jobs"]],
+                         ["windows_exporter", "blackbox_http"])
+        efin = view["jobs"][0]["groups"][0]
+        self.assertEqual(efin["targets_text"], "10.0.201.3:9182")
+        self.assertEqual(efin["known"]["system"], "Efin")
+        self.assertEqual(efin["known"]["display"], "Efin DB")
+        # a label outside the well-known four still appears, as an editable extra row
+        self.assertEqual(view["jobs"][0]["groups"][1]["extra"],
+                         [{"i": 0, "key": "tier", "value": "gold"}])
+        self.assertEqual(view["systems"], ["Efin", "RTGS", "Temenos"])
+        # keys the form doesn't model are surfaced read-only rather than dropped
+        self.assertIn("relabel_configs", view["jobs"][1]["preserved"])
+        self.assertIn("params", view["jobs"][1]["preserved"])
+
+    def test_saving_unchanged_leaves_the_file_equivalent(self):
+        before = self.current()
+        resp = self.client.post(reverse("configuration"), self.post_data())
+        self.assertRedirects(resp, reverse("configuration"), fetch_redirect_response=False)
+        self.assertEqual(self.current(), before)
+
+    def test_editing_a_label_is_written_to_the_file(self):
+        self.client.post(reverse("configuration"),
+                         self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
+        labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
+        self.assertEqual(labels["display"], "Efin Database")
+        self.assertEqual(labels["system"], "Efin")
+
+    def test_adding_a_target_group_lands_in_the_right_job(self):
+        self.client.post(reverse("configuration"), self.post_data(**{
+            "sc__0__2__targets": "10.0.201.9:9182\n10.0.201.10:9182",
+            "sc__0__2__l_app": "windows", "sc__0__2__l_system": "Efin",
+            "sc__0__2__l_display": "Efin App", "sc__0__2__l_role": "app",
+        }))
+        groups = self.current()["scrape_configs"][0]["static_configs"]
+        self.assertEqual(len(groups), 3)
+        self.assertEqual(groups[2]["targets"], ["10.0.201.9:9182", "10.0.201.10:9182"])
+        self.assertEqual(groups[2]["labels"]["role"], "app")
+
+    def test_removing_a_group_removes_only_that_group(self):
+        """Rows are addressed by their original index, so a gap must not shift its neighbours."""
+        data = self.post_data()
+        for k in [k for k in data if k.startswith("sc__0__0__")]:
+            del data[k]
+        self.client.post(reverse("configuration"), data)
+        groups = self.current()["scrape_configs"][0]["static_configs"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["labels"]["system"], "Temenos")
+
+    def test_unmodelled_job_keys_survive_a_save(self):
+        self.client.post(reverse("configuration"),
+                         self.post_data(**{"job__1__metrics_path": "/probe2"}))
+        job = self.current()["scrape_configs"][1]
+        self.assertEqual(job["metrics_path"], "/probe2")
+        self.assertEqual(job["params"], {"module": ["http_2xx"]})
+        self.assertEqual(job["relabel_configs"],
+                         [{"source_labels": ["__address__"], "target_label": "__param_target"}])
+
+    def test_a_bad_duration_writes_nothing(self):
+        before = self.path.read_text(encoding="utf-8")
+        resp = self.client.post(reverse("configuration"),
+                                self.post_data(g_scrape_interval="15 seconds"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(any("15 seconds" in e for e in resp.context["errors"]))
+        self.assertEqual(self.path.read_text(encoding="utf-8"), before)
+
+    def test_a_bad_label_name_writes_nothing(self):
+        before = self.path.read_text(encoding="utf-8")
+        resp = self.client.post(reverse("configuration"), self.post_data(**{
+            "sc__0__0__xkey__0": "2bad", "sc__0__0__xval__0": "x"}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context["errors"])
+        self.assertEqual(self.path.read_text(encoding="utf-8"), before)
+
+    def test_duplicate_job_names_are_rejected(self):
+        resp = self.client.post(reverse("configuration"),
+                                self.post_data(job__1__name="windows_exporter"))
+        self.assertTrue(any("unique" in e for e in resp.context["errors"]))
+
+    def test_a_rejected_save_gives_the_admin_their_own_typing_back(self):
+        resp = self.client.post(reverse("configuration"),
+                                self.post_data(g_scrape_interval="15 seconds"))
+        self.assertEqual(resp.context["view"]["global"]["scrape_interval"], "15 seconds")
+
+    def test_saving_keeps_a_timestamped_backup(self):
+        original = self.path.read_text(encoding="utf-8")
+        self.client.post(reverse("configuration"),
+                         self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
+        baks = list(pathlib.Path(self.dir).glob("prometheus.yml.*.bak"))
+        self.assertEqual(len(baks), 1)
+        self.assertEqual(baks[0].read_text(encoding="utf-8"), original)
+
+    def test_an_unparseable_file_explains_itself_instead_of_crashing(self):
+        self.path.write_text("global:\n  scrape_interval: 15s\n :::\n", encoding="utf-8")
+        resp = self.client.get(reverse("configuration"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("not valid YAML", resp.context["load_error"])
+
+    def test_the_saved_file_still_loads_as_topology(self):
+        """The whole point: whatever the form writes, the report engine can still read."""
+        self.client.post(reverse("configuration"), self.post_data(**{
+            "sc__0__2__targets": "10.0.201.9:9182", "sc__0__2__l_system": "Efin",
+            "sc__0__2__l_display": "Efin App",
+        }))
+        systems = gr.load_topology(str(self.path))
+        self.assertEqual(sorted(s.name for s in systems), ["Efin", "RTGS", "Temenos"])
+        self.assertEqual(len(next(s for s in systems if s.name == "Efin").components), 2)
+
+
+class PrometheusYamlView(PrometheusConfigBase):
+    def test_live_yaml_shows_the_file_verbatim(self):
+        resp = self.client.get(reverse("config_yaml"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["raw"], _FIXTURE_YML)
+
+    def test_download(self):
+        resp = self.client.get(reverse("config_yaml"), {"download": "1"})
+        self.assertIn("attachment", resp["Content-Disposition"])
+        self.assertEqual(resp.content.decode(), _FIXTURE_YML)
+
+    @mock.patch("reports.promconfig.reload_prometheus", return_value=(True, "reloaded"))
+    def test_reload_button_asks_prometheus(self, rl):
+        sc = SystemConfig.get()
+        sc.prometheus_url = "http://p:9090"
+        sc.save()
+        resp = self.client.post(reverse("prometheus_reload"))
+        self.assertRedirects(resp, reverse("configuration"), fetch_redirect_response=False)
+        rl.assert_called_once_with("http://p:9090")
+
+    def test_reload_requires_administrator(self):
+        u = get_user_model().objects.create_user("noreload", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="noreload", password="pw12345!")
+        with mock.patch("reports.promconfig.reload_prometheus") as rl:
+            self.assertEqual(self.client.post(reverse("prometheus_reload")).status_code, 302)
+        rl.assert_not_called()
+
+
+class RoleScopeConfig(PrometheusConfigBase):
+    def test_systems_come_from_the_live_yaml(self):
+        resp = self.client.get(reverse("config_role_scopes"))
+        self.assertEqual(resp.context["systems"], ["Efin", "RTGS", "Temenos"])
+
+    def test_saving_a_scope(self):
+        self.client.post(reverse("config_role_scopes"), {
+            "systems__System Admin": ["Efin", "Temenos"],
+            "systems__Network Admin": ["RTGS"],
+        })
+        self.assertEqual(set(RoleScope.objects.get(role="System Admin").systems),
+                         {"Efin", "Temenos"})
+        self.assertEqual(RoleScope.objects.get(role="Gov Systems Admin").systems, [])
+
+    def test_a_system_not_in_the_yaml_is_ignored(self):
+        self.client.post(reverse("config_role_scopes"),
+                         {"systems__System Admin": ["Efin", "MadeUp"]})
+        self.assertEqual(RoleScope.objects.get(role="System Admin").systems, ["Efin"])
