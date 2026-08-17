@@ -1842,13 +1842,41 @@ class RoleSelectScreen(TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp["Location"], reverse("role_select"))
 
-    def test_a_user_with_one_role_is_never_asked(self):
-        """A question with a single answer is a speed bump. The one role is applied silently
-        and the user goes straight to work."""
+    def test_even_a_single_role_holder_sees_the_picker(self):
+        """Signing in always lands here — nobody is forwarded past it.
+
+        A one-role holder used to be skipped on the grounds that a question with one answer
+        is a speed bump. But the screen answers a second question too — what the other roles
+        are and how to ask for one — so the people who most needed that answer were the only
+        ones who never saw it. It is also the one moment the app states which hat you are
+        wearing, and arriving somewhere already scoped, having chosen nothing, is how you end
+        up unsure which estate you are looking at.
+        """
         self.client.login(username="single", password="pw12345!")
         resp = self.client.get(reverse("role_select"))
-        self.assertRedirects(resp, reverse("report_form"))
-        self.assertEqual(self.client.session.get("active_role"), "System Admin")
+        self.assertEqual(resp.status_code, 200)          # rendered, not redirected
+        self.assertFalse(self.client.session.get("active_role"))   # and nothing auto-applied
+
+    def test_nobody_lands_unscoped_by_default(self):
+        """Landing without a selection shows every screen from every role held at once —
+        precisely what picking a role exists to narrow. So the picker is the landing screen
+        and the scope is only ever set by choosing."""
+        for who in ("multi", "single"):
+            self.client.login(username=who, password="pw12345!")
+            self.assertEqual(self.client.get(reverse("role_select")).status_code, 200)
+            self.assertFalse(self.client.session.get("active_role"), who)
+            self.client.logout()
+
+    def test_the_roles_you_do_not_hold_are_shown_greyed_out(self):
+        """All six are listed whatever you hold: the ones that aren't yours are muted and
+        offer a request instead of a switch, so the catalogue is never a mystery."""
+        self.client.login(username="single", password="pw12345!")
+        body = self.client.get(reverse("role_select")).content.decode()
+        for role in ROLE_NAMES:
+            self.assertIn(role, body)
+        self.assertIn('name="role" value="System Admin"', body)      # held -> switch
+        self.assertIn('name="request_role" value="Network Admin"', body)   # not held -> ask
+        self.assertIn("is-locked", body)                             # and visibly muted
 
     def test_every_role_is_listed_held_or_not(self):
         """Showing only what you hold made the app look like it had two different ideas of
@@ -1942,7 +1970,7 @@ class RoleSelectScreen(TestCase):
         """With one role, "all my roles" and "my role" are the same thing — a tile that
         changes nothing is noise."""
         self.client.login(username="single", password="pw12345!")
-        resp = self.client.get(reverse("role_select") + "?stay=1")
+        resp = self.client.get(reverse("role_select"))
         self.assertNotContains(resp, "Load all my roles")
 
     def test_the_drawer_head_names_the_role_being_worn(self):
@@ -2031,13 +2059,17 @@ class RoleSelectCannotGrant(TestCase):
         self.client.login(username="netonly", password="pw12345!")
 
     def test_a_role_you_do_not_hold_is_refused(self):
-        """The refusal is the assertion. Following the redirect then lands on the picker,
-        which auto-applies this user's ONE role — correct behaviour, and the reason the
-        check below is 'not Administrator' rather than 'nothing at all'."""
+        """The refusal is the assertion, and it leaves the scope exactly as it found it.
+
+        This used to end by asserting the user's ONE role had been applied, because following
+        the redirect landed on a picker that auto-applied it. The picker no longer forwards
+        anyone, so a refused attempt now leaves no selection at all — which is the stronger
+        statement: a rejected choice changes nothing.
+        """
         resp = self.client.post(reverse("role_select"), {"role": "Administrator"}, follow=True)
         self.assertContains(resp, "not a role you hold")
         self.assertNotEqual(self.client.session.get("active_role"), "Administrator")
-        self.assertEqual(self.client.session.get("active_role"), "Network Admin")
+        self.assertFalse(self.client.session.get("active_role"))
 
     def test_a_forged_session_value_grants_nothing(self):
         """Even if the session key is set to a role the user does not hold, every gate must
@@ -3148,15 +3180,16 @@ class BackNavigationChain(TestCase):
         self.client.post(reverse("report"), {"include_system": "Efin"})
         self.assertNotEqual(self._back("report"), reverse("report"))
 
-    def test_a_single_role_holder_gets_no_back_from_the_picker(self):
-        """Role Select auto-applies one role and would bounce straight back, so the button
-        would return them to where they already are."""
+    def test_a_single_role_holder_can_still_get_back_to_the_picker(self):
+        """The picker no longer auto-applies one role, so Back to it is a real destination
+        rather than a button that returns them to where they already are — and it is where
+        they request the roles they do not have."""
         one = get_user_model().objects.create_user("justone", password="pw12345!")
         one.groups.add(Group.objects.get(name="System Admin"))
         self.client.logout()
         self.client.login(username="justone", password="pw12345!")
-        self.client.get(reverse("role_select"))
-        self.assertIsNone(self._back("report_form"))
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.assertEqual(self._back("report_form"), reverse("role_select"))
 
 
 class PlatformDerivedFromTheScrapeJob(TestCase):

@@ -192,11 +192,10 @@ def _back_nav(request):
     # Never send anyone to a screen their own role does not show. The tree is rooted at the
     # SYSTEMS dashboard, so without this a network admin's Back led to a systems screen that
     # is not in their menu — the tree describing the app, not the role using it.
-    # Role Select auto-applies a single role and would bounce straight back, so a user with
-    # one role gets no Back from the picker rather than a button that returns them to where
-    # they already are.
-    if parent == "role_select" and len(held_roles(user_of(request))) <= 1:
-        return None, None
+    # Role Select no longer auto-applies a single role, so Back to it is a real destination
+    # for everyone — including a one-role holder, for whom it is the only route to seeing the
+    # other roles and requesting one. The old rule suppressed it here because the picker
+    # would have bounced them straight back; it doesn't any more.
 
     if parent == "report_form" and scope and "System Admin" not in scope:
         home = ROLE_HOME.get(active_role(request))
@@ -263,7 +262,8 @@ def role_flags(request):
         "is_network_admin": is_network_admin(user) and in_scope("Network Admin"),
         "is_infra_admin": is_infra_admin(user) and in_scope("Infrastructure Admin"),
         "active_role": active_role(request) if user is not None else "",
-        # Only offer "switch role" to someone who actually has somewhere to switch to.
+        # Only offer "switch role" to someone who has somewhere to switch to. The canvas
+        # Back button is the one-role holder's route to the picker (see _back_nav).
         "can_switch_role": len(held_roles(user)) > 1,
         "home_url": _home_url(request) if user is not None else reverse("report_form"),
         "notif_count": 0,

@@ -241,12 +241,18 @@ def role_select(request):
             messages.error(request, "That is not a role you hold.")
         return redirect("role_select")
 
-    if len(held) <= 1 and not request.GET.get("stay"):
-        if held:
-            request.session[ROLE_SESSION_KEY] = held[0]
-            return redirect(ROLE_HOME.get(held[0], "report_form"))
-        return redirect("report_form")
-
+    # No auto-forward, for anyone. Signing in ALWAYS lands here.
+    #
+    # A single-role holder used to be skipped past this screen on the grounds that a question
+    # with one answer is a speed bump. But the screen answers a second question as well —
+    # what the other roles are, and how to ask for one — and skipping it meant the people who
+    # most needed that answer were the only ones who never saw it. It is also the one moment
+    # the app states plainly which hat you are wearing; arriving somewhere already scoped,
+    # having chosen nothing, is how you end up unsure which estate you are looking at.
+    #
+    # It also means nobody is ever dropped into the UNSCOPED state by default. Landing without
+    # a selection shows every screen from every role held at once, which is precisely what
+    # picking a role exists to narrow.
     return render(request, "reports/role_select.html", {
         # EVERY role in the catalogue, each with its standing. The first-login screen already
         # lists them all; showing only what you hold here made the app look like it had two
