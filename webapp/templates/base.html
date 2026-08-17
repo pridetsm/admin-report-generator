@@ -103,9 +103,7 @@
         <div class="nm-head">Settings</div>
         <div class="nm-children">
           {% if is_role_admin %}
-          <a href="{% url 'system_settings' %}" class="navmenu-item nm-child">Configuration</a>
-          <a href="{% url 'grafana_config' %}" class="navmenu-item nm-child">Grafana Config</a>
-          <a href="{% url 'prometheus_config' %}" class="navmenu-item nm-child">Prometheus Config</a>
+          <a href="{% url 'configuration' %}" class="navmenu-item nm-child">Configuration</a>
           {% endif %}
           <button type="button" id="themeToggle" class="navmenu-item nm-child">Theme</button>
         </div>
@@ -196,9 +194,7 @@
     {% endcomment %}
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}"{% if current_page == 'roles_console' %} class="is-current" aria-current="page"{% elif 'roles_console' in current_ancestors %} class="is-ancestor"{% endif %}>Roles</a>
-    <a href="{% url 'system_settings' %}"{% if current_page == 'system_settings' %} class="is-current" aria-current="page"{% elif 'system_settings' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
-    <a href="{% url 'grafana_config' %}"{% if current_page == 'grafana_config' %} class="is-current" aria-current="page"{% elif 'grafana_config' in current_ancestors %} class="is-ancestor"{% endif %}>Grafana Config</a>
-    <a href="{% url 'prometheus_config' %}"{% if current_page == 'prometheus_config' %} class="is-current" aria-current="page"{% elif 'prometheus_config' in current_ancestors %} class="is-ancestor"{% endif %}>Prometheus Config</a>
+    <a href="{% url 'configuration' %}"{% if current_page == 'configuration' %} class="is-current" aria-current="page"{% elif 'configuration' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
     {% endif %}
   </nav>
 

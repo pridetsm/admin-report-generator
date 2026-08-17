@@ -1077,6 +1077,7 @@ def grafana_config(request):
         form = GrafanaConfigForm(initial={"content": initial_content})
 
     return render(request, "reports/grafana_config.html", {
+        **_config_context("grafana_config"),
         "form": form,
         "current": current,
         "history": GrafanaConfigRevision.objects.all()[:20],
@@ -1124,6 +1125,7 @@ def prometheus_config(request):
         form = PrometheusConfigForm(initial=initial)
 
     return render(request, "reports/prometheus_config.html", {
+        **_config_context("prometheus_config"),
         "form": form,
         "current": current,
         "history": PrometheusConfigRevision.objects.all()[:20],
@@ -1176,6 +1178,7 @@ def prometheus_rule_file(request, filename):
         form = PrometheusConfigForm(initial=initial)
 
     return render(request, "reports/prometheus_rule_file.html", {
+        **_config_context("prometheus_config"),
         "form": form,
         "current": current,
         "filename": filename,

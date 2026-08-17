@@ -3,6 +3,8 @@
 
 {% block body %}
 <div class="container" style="max-width:1100px">
+  {% include "reports/_config_tabs.html" %}
+
   {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}" style="white-space:pre-wrap">{{ m }}</li>{% endfor %}</ul>{% endif %}
 
   <div class="section-label">Grafana configuration

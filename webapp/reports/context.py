@@ -53,8 +53,17 @@ _NAV_PARENT = {
     "history": "report_form",
     "submission_detail": "history",
     "roles_console": "report_form",
-    "system_settings": "report_form",
     "profile": "report_form",
+    # Every Configuration screen nests under the hub (see views._CONFIG_TABS) so the drawer's
+    # single "Configuration" entry lights up on all of them and Back always steps up to the hub,
+    # not straight to the dashboard.
+    "configuration": "report_form",
+    "config_yaml": "configuration",
+    "prometheus_config": "configuration",
+    "grafana_config": "configuration",
+    "system_settings": "configuration",
+    "config_role_scopes": "configuration",
+    "prometheus_rule_file": "prometheus_config",
 }
 #: the tree's root — a parent of everything, so never marked as "the branch you are in"
 _NAV_ROOT = "report_form"
@@ -71,7 +80,12 @@ _NAV_LABEL = {
     "network_report": "Core Switch",
     "history": "History",
     "roles_console": "Roles",
-    "system_settings": "Configuration",
+    "configuration": "Configuration",
+    "config_yaml": "Live YAML file",
+    "prometheus_config": "Prometheus Config",
+    "grafana_config": "Grafana",
+    "system_settings": "Data sources",
+    "config_role_scopes": "Role scopes",
     "profile": "Profile",
 }
 
