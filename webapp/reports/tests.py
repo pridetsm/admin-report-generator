@@ -28,8 +28,8 @@ import yaml
 from . import folders, network
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
-from .models import (PrometheusConfigRevision, ReportSubmission, RoleRequest,
-                     RoleScope, SystemConfig)
+from .models import (GrafanaConfigRevision, PrometheusConfigRevision, ReportSubmission,
+                     RoleRequest, RoleScope, SystemConfig)
 from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin, role_icon
 from .services import FlagVM, Snapshot, SystemVM, build_overview, list_systems
 
@@ -1895,18 +1895,48 @@ class RoleSelectScreen(TestCase):
         self.assertRedirects(resp, reverse("network_dashboard"))
         self.assertEqual(self.client.session["active_role"], "Network Admin")
 
-    def test_there_is_no_every_role_at_once_option(self):
-        """A role is the hat being worn. An everything-at-once mode let the menu show screens
-        from estates the admin was not working in — the thing this screen exists to prevent.
-        Removed from the page AND from the view, so it cannot be reached by posting a value
-        the screen no longer renders."""
+    def test_every_role_at_once_is_offered_again(self):
+        """"Load all my roles" is back, by request.
+
+        It was removed once because an everything-at-once mode lets the menu show screens from
+        estates the admin is not working in. That trade-off has not changed — it is now a
+        deliberate choice on the tile rather than something the app decides for you, and the
+        tile says so.
+
+        Unscoped is stored as the ABSENCE of a selection, which is the state a session that
+        never picked is already in, so nothing downstream needs to know a sentinel value.
+        """
         self.client.login(username="multi", password="pw12345!")
-        self.assertNotContains(self.client.get(reverse("role_select")), "Show every role I hold")
+        self.assertContains(self.client.get(reverse("role_select")), "Load all my roles")
 
         self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        resp = self.client.post(reverse("role_select"), {"role": "__all__"}, follow=True)
-        self.assertContains(resp, "not a role you hold")
-        self.assertEqual(self.client.session.get("active_role"), "Network Admin")   # unchanged
+        self.assertEqual(self.client.session.get("active_role"), "Network Admin")
+        self.client.post(reverse("role_select"), {"role": "__all__"})
+        self.assertFalse(self.client.session.get("active_role"))
+
+    def test_all_roles_widens_the_menu_to_every_estate(self):
+        """The point of the tile: one workspace spanning the roles you hold.
+
+        Read off History rather than either dashboard — History is common to every role and
+        renders without a live capture, so this measures the MENU and not whether Prometheus
+        happened to answer.
+        """
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        scoped = self.client.get(reverse("history")).content.decode()
+        self.assertNotIn(reverse("network_dashboard"), scoped)   # other estate hidden
+
+        self.client.post(reverse("role_select"), {"role": "__all__"})
+        unscoped = self.client.get(reverse("history")).content.decode()
+        self.assertIn(reverse("network_dashboard"), unscoped)    # both estates now shown
+        self.assertIn(reverse("folder_watch"), unscoped)
+
+    def test_a_single_role_holder_is_not_offered_it(self):
+        """With one role, "all my roles" and "my role" are the same thing — a tile that
+        changes nothing is noise."""
+        self.client.login(username="single", password="pw12345!")
+        resp = self.client.get(reverse("role_select") + "?stay=1")
+        self.assertNotContains(resp, "Load all my roles")
 
     def test_the_drawer_head_names_the_role_being_worn(self):
         """The head names the ROLE, not the account — the account is already on the profile
@@ -3435,6 +3465,33 @@ scrape_configs:
 """
 
 
+def _form_fields(html: str) -> dict:
+    """Every field a browser would submit from a rendered form — visible and hidden alike.
+
+    The two prometheus.yml screens each carry the other's half as hidden fields, and that
+    carrying is exactly what these tests need to exercise: scraping the real markup checks
+    what the browser would actually post, rather than a hand-written dict that could agree
+    with the parser while the template quietly disagrees with both.
+    """
+    import html as _html
+
+    fields = {}
+    for m in re.finditer(r"<input[^>]*>", html):
+        tag = m.group(0)
+        name = re.search(r'name="([^"]+)"', tag)
+        if not name or 'type="checkbox"' in tag or 'type="submit"' in tag:
+            continue
+        value = re.search(r'value="([^"]*)"', tag)
+        fields[name.group(1)] = _html.unescape(value.group(1)) if value else ""
+    for m in re.finditer(r"<textarea[^>]*name=\"([^\"]+)\"[^>]*>(.*?)</textarea>", html, re.S):
+        fields[m.group(1)] = _html.unescape(m.group(2))
+    for m in re.finditer(r"<select[^>]*name=\"([^\"]+)\"[^>]*>(.*?)</select>", html, re.S):
+        chosen = re.search(r'<option value="([^"]*)"[^>]*selected', m.group(2))
+        fields[m.group(1)] = chosen.group(1) if chosen else ""
+    fields.pop("note", None)
+    return fields
+
+
 class PrometheusConfigBase(TestCase):
     """The labelled form and the raw editor are two views of ONE file with ONE history.
 
@@ -3484,19 +3541,20 @@ class PrometheusConfigForm(PrometheusConfigBase):
         u = get_user_model().objects.create_user("cfgnope", password="pw12345!")
         u.groups.add(Group.objects.get(name="System Admin"))
         self.client.login(username="cfgnope", password="pw12345!")
-        for name in ("configuration", "config_yaml", "config_role_scopes"):
+        for name in ("configuration", "config_prometheus", "config_topology",
+                     "config_snmp", "config_yaml", "config_role_scopes"):
             self.assertEqual(self.client.get(reverse(name)).status_code, 302, name)
 
     def test_the_form_reads_the_same_revision_the_raw_editor_does(self):
         """The point of the merge: one source, not two."""
-        resp = self.client.get(reverse("configuration"))
+        resp = self.client.get(reverse("config_prometheus"))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context["yaml_source"]["from_revision"])
         self.assertEqual(resp.context["yaml_source"]["revision"],
                          PrometheusConfigRevision.current())
 
     def test_form_shows_every_value_in_the_config(self):
-        view = self.client.get(reverse("configuration")).context["view"]
+        view = self.client.get(reverse("config_prometheus")).context["view"]
         self.assertEqual(view["global"]["scrape_interval"], "15s")
         self.assertEqual(view["storage_out_of_order"], "30d")
         self.assertEqual(view["rule_files_text"], "alerts.yml")
@@ -3516,21 +3574,21 @@ class PrometheusConfigForm(PrometheusConfigBase):
 
     def test_saving_records_a_revision_and_does_not_touch_the_live_file(self):
         with mock.patch("reports.prometheus_admin.write_and_restart") as war:
-            resp = self.client.post(reverse("configuration"), self.post_data())
-        self.assertRedirects(resp, reverse("configuration"), fetch_redirect_response=False)
+            resp = self.client.post(reverse("config_prometheus"), self.post_data())
+        self.assertRedirects(resp, reverse("config_prometheus"), fetch_redirect_response=False)
         self.assertEqual(PrometheusConfigRevision.objects.count(), 2)
         war.assert_not_called()          # Save is not Apply — nothing live changed
 
     def test_saving_unchanged_leaves_the_config_equivalent(self):
         before = self.current()
-        self.client.post(reverse("configuration"), self.post_data())
+        self.client.post(reverse("config_prometheus"), self.post_data())
         self.assertEqual(self.current(), before)
 
     def test_apply_goes_through_promtool_and_restarts(self):
         """Apply must use the same gate as the raw editor — never write the file itself."""
         with mock.patch("reports.prometheus_admin.write_and_restart",
                         return_value=(True, "validated, rewritten and restarted")) as war:
-            self.client.post(reverse("configuration"), self.post_data(action="apply"))
+            self.client.post(reverse("config_prometheus"), self.post_data(action="apply"))
         war.assert_called_once()
         # what it was handed is the text of the revision it just recorded
         self.assertEqual(war.call_args.args[0], PrometheusConfigRevision.current().content)
@@ -3539,7 +3597,7 @@ class PrometheusConfigForm(PrometheusConfigBase):
         """promtool refusing must not throw the admin's work away."""
         with mock.patch("reports.prometheus_admin.write_and_restart",
                         return_value=(False, "Rejected — promtool found a problem")):
-            resp = self.client.post(reverse("configuration"),
+            resp = self.client.post(reverse("config_prometheus"),
                                     self.post_data(action="apply",
                                                    **{"sc__0__0__l_display": "Efin Database"}),
                                     follow=True)
@@ -3549,19 +3607,19 @@ class PrometheusConfigForm(PrometheusConfigBase):
         self.assertEqual(labels["display"], "Efin Database")
 
     def test_the_revision_note_is_recorded(self):
-        self.client.post(reverse("configuration"), self.post_data(note="widened Efin"))
+        self.client.post(reverse("config_prometheus"), self.post_data(note="widened Efin"))
         self.assertEqual(PrometheusConfigRevision.current().note, "widened Efin")
         self.assertEqual(PrometheusConfigRevision.current().created_by, self.admin)
 
     def test_editing_a_label_is_written_to_the_revision(self):
-        self.client.post(reverse("configuration"),
+        self.client.post(reverse("config_prometheus"),
                          self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
         labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
         self.assertEqual(labels["display"], "Efin Database")
         self.assertEqual(labels["system"], "Efin")
 
     def test_adding_a_target_group_lands_in_the_right_job(self):
-        self.client.post(reverse("configuration"), self.post_data(**{
+        self.client.post(reverse("config_prometheus"), self.post_data(**{
             "sc__0__2__targets": "10.0.201.9:9182\n10.0.201.10:9182",
             "sc__0__2__l_app": "windows", "sc__0__2__l_system": "Efin",
             "sc__0__2__l_display": "Efin App", "sc__0__2__l_role": "app",
@@ -3576,13 +3634,13 @@ class PrometheusConfigForm(PrometheusConfigBase):
         data = self.post_data()
         for k in [k for k in data if k.startswith("sc__0__0__")]:
             del data[k]
-        self.client.post(reverse("configuration"), data)
+        self.client.post(reverse("config_prometheus"), data)
         groups = self.current()["scrape_configs"][0]["static_configs"]
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0]["labels"]["system"], "Temenos")
 
     def test_unmodelled_job_keys_survive_a_save(self):
-        self.client.post(reverse("configuration"),
+        self.client.post(reverse("config_prometheus"),
                          self.post_data(**{"job__1__metrics_path": "/probe2"}))
         job = self.current()["scrape_configs"][1]
         self.assertEqual(job["metrics_path"], "/probe2")
@@ -3591,26 +3649,26 @@ class PrometheusConfigForm(PrometheusConfigBase):
                          [{"source_labels": ["__address__"], "target_label": "__param_target"}])
 
     def test_a_bad_duration_records_nothing(self):
-        resp = self.client.post(reverse("configuration"),
+        resp = self.client.post(reverse("config_prometheus"),
                                 self.post_data(g_scrape_interval="15 seconds"))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(any("15 seconds" in e for e in resp.context["errors"]))
         self.assertEqual(PrometheusConfigRevision.objects.count(), 1)
 
     def test_a_bad_label_name_records_nothing(self):
-        resp = self.client.post(reverse("configuration"), self.post_data(**{
+        resp = self.client.post(reverse("config_prometheus"), self.post_data(**{
             "sc__0__0__xkey__0": "2bad", "sc__0__0__xval__0": "x"}))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context["errors"])
         self.assertEqual(PrometheusConfigRevision.objects.count(), 1)
 
     def test_duplicate_job_names_are_rejected(self):
-        resp = self.client.post(reverse("configuration"),
+        resp = self.client.post(reverse("config_prometheus"),
                                 self.post_data(job__1__name="windows_exporter"))
         self.assertTrue(any("unique" in e for e in resp.context["errors"]))
 
     def test_a_rejected_save_gives_the_admin_their_own_typing_back(self):
-        resp = self.client.post(reverse("configuration"),
+        resp = self.client.post(reverse("config_prometheus"),
                                 self.post_data(g_scrape_interval="15 seconds"))
         self.assertEqual(resp.context["view"]["global"]["scrape_interval"], "15 seconds")
 
@@ -3618,13 +3676,13 @@ class PrometheusConfigForm(PrometheusConfigBase):
         # a tab for indentation — the classic hand-edit that YAML rejects outright, and
         # exactly the mistake this form exists to stop people making
         PrometheusConfigRevision.objects.create(note="broken", content="global:\n\ta: 1\n")
-        resp = self.client.get(reverse("configuration"))
+        resp = self.client.get(reverse("config_prometheus"))
         self.assertEqual(resp.status_code, 200)
         self.assertIn("not valid YAML", resp.context["load_error"])
 
     def test_the_saved_config_still_loads_as_topology(self):
         """The whole point: whatever the form writes, the report engine can still read."""
-        self.client.post(reverse("configuration"), self.post_data(**{
+        self.client.post(reverse("config_prometheus"), self.post_data(**{
             "sc__0__2__targets": "10.0.201.9:9182", "sc__0__2__l_system": "Efin",
             "sc__0__2__l_display": "Efin App",
         }))
@@ -3649,7 +3707,7 @@ class PrometheusYamlView(PrometheusConfigBase):
 
     def test_it_follows_the_form_after_a_save(self):
         """Proves the two screens share a source rather than each holding their own copy."""
-        self.client.post(reverse("configuration"),
+        self.client.post(reverse("config_prometheus"),
                          self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
         raw = self.client.get(reverse("config_yaml")).context["raw"]
         self.assertIn("Efin Database", raw)
@@ -3681,3 +3739,158 @@ class RoleScopeConfig(PrometheusConfigBase):
         self.client.post(reverse("config_role_scopes"),
                          {"systems__System Admin": ["Efin", "MadeUp"]})
         self.assertEqual(RoleScope.objects.get(role="System Admin").systems, ["Efin"])
+
+
+class ConfigurationNesting(PrometheusConfigBase):
+    """Configuration's children nest the way Folder Watch nests Temenos.
+
+    The convention is the point: one parent entry in the drawer, children indented under it,
+    the parent lit as the branch you are inside, and Back walking one level up rather than
+    jumping home. A screen that opts out of it is a screen users navigate differently for no
+    reason they could name.
+    """
+
+    CHILDREN = ["config_prometheus", "grafana_config", "config_snmp",
+                "config_topology", "system_settings", "config_role_scopes"]
+
+    def setUp(self):
+        super().setUp()
+        # Grafana's screen falls back to reading the live custom.ini when no revision exists,
+        # which is not on this machine. Seeding one keeps these tests about navigation.
+        GrafanaConfigRevision.objects.create(note="fixture", content="[server]\n")
+
+    def _drawer(self, url_name):
+        body = self.client.get(reverse(url_name)).content.decode()
+        return body[body.find('id="drawer"'):body.find("</nav>")]
+
+    def test_every_child_is_in_the_drawer_under_configuration(self):
+        drawer = self._drawer("configuration")
+        for name in self.CHILDREN:
+            self.assertIn(f'href="{reverse(name)}"', drawer, f"{name} missing from the drawer")
+            self.assertIn("drawer-children", drawer)
+
+    def test_a_child_lights_itself_and_its_parent(self):
+        """Exactly what folder_watch_temenos does: the child marks current, the hub marks
+        ancestor, so the drawer says both where you are and which branch you are in."""
+        for name in self.CHILDREN:
+            drawer = self._drawer(name)
+            child = re.search(r'<a href="([^"]+)"[^>]*drawer-child[^>]*is-current', drawer)
+            self.assertIsNotNone(child, f"{name} does not mark itself current")
+            self.assertEqual(child.group(1), reverse(name))
+            self.assertIn("is-ancestor", drawer, f"{name} does not light Configuration")
+
+    def test_back_walks_one_level_up_to_the_hub(self):
+        for name in self.CHILDREN:
+            resp = self.client.get(reverse(name))
+            self.assertEqual(resp.context["back_url"], reverse("configuration"), name)
+            self.assertEqual(resp.context["back_label"], "Configuration", name)
+
+    def test_the_hub_has_no_back_for_an_administrator(self):
+        """The tree is rooted at the systems dashboard, which an Administrator's menu does not
+        show — so _back_nav offers nothing rather than a button into another role's estate.
+        The children still step up to the hub, which is what the nesting is for."""
+        resp = self.client.get(reverse("configuration"))
+        self.assertIsNone(resp.context["back_url"])
+
+    def test_the_raw_editors_hang_off_prometheus_not_the_hub(self):
+        """Editing the raw YAML is an option ON the Prometheus screen, so Back returns there
+        rather than skipping up to the hub."""
+        for name in ("prometheus_config", "config_yaml"):
+            resp = self.client.get(reverse(name))
+            self.assertEqual(resp.context["back_url"], reverse("config_prometheus"), name)
+
+    def test_the_hub_links_every_child(self):
+        body = self.client.get(reverse("configuration")).content.decode()
+        for name in self.CHILDREN:
+            self.assertIn(f'href="{reverse(name)}"', body, f"{name} missing from the hub")
+
+    def test_snmp_is_present_but_says_it_is_empty(self):
+        """A named placeholder, not a stubbed form: nothing behind it could be mistaken for
+        working configuration."""
+        resp = self.client.get(reverse("config_snmp"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Not configured yet")
+        self.assertNotContains(resp, 'name="action"')      # nothing to save
+        self.assertNotContains(resp, "Save &amp; Apply")
+
+    def test_prometheus_offers_the_raw_yaml(self):
+        resp = self.client.get(reverse("config_prometheus"))
+        self.assertContains(resp, reverse("prometheus_config"))
+        self.assertContains(resp, reverse("config_yaml"))
+
+
+class TopologyScreen(PrometheusConfigBase):
+    """Hosts grouped by SYSTEM rather than by scrape job.
+
+    prometheus.yml is organised by exporter; the report is organised by system. This screen
+    does the translation, and the risk it carries is that a second view of one document
+    quietly drops the half it isn't showing — which is what most of these tests are about.
+    """
+
+    def test_it_groups_hosts_by_system(self):
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        # gr.SYSTEM_ORDER first, then alphabetically — the same order the report presents
+        self.assertEqual([s["name"] for s in topo["systems"]], ["RTGS", "Temenos", "Efin"])
+        efin = next(s for s in topo["systems"] if s["name"] == "Efin")
+        self.assertEqual(efin["hosts"], 1)
+        self.assertEqual(efin["rows"][0]["g"]["known"]["display"], "Efin DB")
+        self.assertEqual(efin["rows"][0]["job_name"], "windows_exporter")
+
+    def test_hosts_from_different_jobs_land_under_their_own_system(self):
+        """The whole point of the pivot: RTGS is in blackbox_http, Efin in windows_exporter,
+        and the admin should not have to know that to maintain either."""
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        rtgs = next(s for s in topo["systems"] if s["name"] == "RTGS")
+        self.assertEqual(rtgs["rows"][0]["job_name"], "blackbox_http")
+
+    def test_saving_from_topology_preserves_the_settings_it_does_not_show(self):
+        """Topology renders global/storage/rules as hidden fields. If it didn't, saving here
+        would silently wipe them — parse_post rebuilds the whole document from the POST."""
+        before = self.current()
+        body = self.client.get(reverse("config_topology")).content.decode()
+        fields = _form_fields(body)
+        fields["action"] = "save"
+        self.client.post(reverse("config_topology"), fields)
+        after = self.current()
+        self.assertEqual(after["global"], before["global"])
+        self.assertEqual(after["storage"], before["storage"])
+        self.assertEqual(after["rule_files"], before["rule_files"])
+        self.assertEqual(after, before)
+
+    def test_saving_from_prometheus_preserves_the_hosts_it_does_not_show(self):
+        """The mirror image: the Prometheus screen carries every target group hidden."""
+        before = self.current()
+        body = self.client.get(reverse("config_prometheus")).content.decode()
+        fields = _form_fields(body)
+        fields["action"] = "save"
+        self.client.post(reverse("config_prometheus"), fields)
+        self.assertEqual(self.current(), before)
+
+    def test_moving_a_host_to_another_system_rewrites_its_label(self):
+        body = self.client.get(reverse("config_topology")).content.decode()
+        fields = _form_fields(body)
+        fields["action"] = "save"
+        fields["sc__0__0__l_system"] = "Efin DR"
+        self.client.post(reverse("config_topology"), fields)
+        labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
+        self.assertEqual(labels["system"], "Efin DR")
+        # and the screen now groups it under the new name
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        self.assertIn("Efin DR", [s["name"] for s in topo["systems"]])
+
+    def test_a_host_with_no_system_is_listed_as_unassigned(self):
+        PrometheusConfigRevision.objects.create(note="orphan", content=_FIXTURE_YML.replace(
+            '          system: "Efin"\n', ""))
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        self.assertEqual(len(topo["unassigned"]), 1)
+        self.assertNotIn("Efin", [s["name"] for s in topo["systems"]])
+
+    def test_it_offers_the_jobs_a_new_host_could_join(self):
+        """A new host has to belong to some scrape job — that is what decides how it is
+        polled — so the job is chosen up front rather than guessed."""
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        self.assertEqual([j["name"] for j in topo["jobs"]],
+                         ["windows_exporter", "blackbox_http"])
+        # next free group index per job, so added rows never collide with existing ones
+        self.assertEqual(topo["jobs"][0]["next_group"], 2)
+        self.assertEqual(topo["jobs"][1]["next_group"], 1)

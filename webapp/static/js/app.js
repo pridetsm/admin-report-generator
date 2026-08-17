@@ -125,21 +125,25 @@
   // ---- collapsible system cards ----
   document.addEventListener("click", function (e) {
     var h = e.target.closest && e.target.closest("[data-collapsible] > header");
-    // buttons inside a header (e.g. "remove job") act on the card, not on its fold state
-    if (!h || (e.target.closest && e.target.closest("button[data-remove-job]"))) return;
+    // A button in the header acts on the card itself, so it must not also fold it. Matched on
+    // "any button" rather than a specific one: the next control added to a header would
+    // otherwise silently collapse the thing it was meant to act on.
+    if (!h || (e.target.closest && e.target.closest("header button"))) return;
     h.parentElement.classList.toggle("collapsed");
   });
 
-  // ---- Configuration form: prometheus.yml as add/remove rows ----------------------------
-  // Field names carry their own indexes (job__3__name, sc__3__0__targets, …) and the server
-  // discovers them by scanning the POST. So removing a row can just delete the DOM node —
-  // nothing renumbers, and nothing gets mis-mapped onto a neighbouring job.
+  // ---- Configuration screens: add/remove rows on the prometheus.yml forms ---------------
+  // Field names carry their own indexes (sc__3__0__targets, …) and the server discovers them
+  // by scanning the POST, so removing a row is just deleting the DOM node — nothing renumbers
+  // and nothing gets mis-mapped onto a neighbouring host.
+  //
+  // Shared by the Prometheus screen (external labels) and Topology (hosts), because both post
+  // the same field names into the same parser.
   var promForm = document.getElementById("promForm");
   if (promForm) {
-    var jobList = document.getElementById("jobList");
-
     function fill(tplId, values) {
       var tpl = document.getElementById(tplId);
+      if (!tpl) return null;
       var html = tpl.innerHTML;
       Object.keys(values).forEach(function (k) {
         html = html.split("__" + k + "__").join(values[k]);
@@ -148,16 +152,8 @@
       box.innerHTML = html.trim();
       return box.firstElementChild;
     }
-    // next index for a set of siblings: one past the highest in use, so new rows never
-    // collide with an existing (or previously removed) one
-    function nextIndex(scope, selector, attr) {
-      var max = -1;
-      scope.querySelectorAll(selector).forEach(function (el) {
-        var n = parseInt(attr ? el.getAttribute(attr) : el.name.match(/(\d+)/)[1], 10);
-        if (!isNaN(n) && n > max) max = n;
-      });
-      return max + 1;
-    }
+    // one past the highest index in use, so a new row never collides with an existing one —
+    // or with one that was removed earlier in this same editing session
     function nextNamedIndex(scope, prefixRe) {
       var max = -1;
       scope.querySelectorAll("input[name]").forEach(function (el) {
@@ -166,77 +162,51 @@
       });
       return max + 1;
     }
-    function refreshJob(job) {
-      var count = job.querySelectorAll("[data-groups] > .cfg-group").length;
-      var badge = job.querySelector("[data-group-count]");
-      if (badge) badge.textContent = count;
-    }
 
-    document.getElementById("addJob").addEventListener("click", function () {
-      var j = nextIndex(jobList, ".cfg-job", "data-job");
-      var job = fill("tplJob", { J: j });
-      jobList.appendChild(job);
-      job.querySelector("[data-job-name]").focus();
-    });
+    // ---- Topology: add a host to a chosen scrape job ----
+    var addHost = document.getElementById("addHost");
+    if (addHost) {
+      addHost.addEventListener("click", function () {
+        var select = document.getElementById("addHostJob");
+        var option = select.options[select.selectedIndex];
+        // The job's next free group index is carried on the option and bumped here, so adding
+        // several hosts to one job in a row does not hand them all the same index.
+        var g = parseInt(option.getAttribute("data-next-group"), 10);
+        option.setAttribute("data-next-group", g + 1);
+        var row = fill("tplHost", { J: select.value, G: g, JOBNAME: option.textContent });
+        var box = document.getElementById("newHosts");
+        box.appendChild(row);
+        row.querySelector("textarea").focus();
+      });
+    }
 
     promForm.addEventListener("click", function (e) {
       var t = e.target;
       if (!t.closest) return;
 
-      var addGroup = t.closest("[data-add-group]");
-      if (addGroup) {
-        var job = addGroup.closest(".cfg-job");
-        var groups = job.querySelector("[data-groups]");
-        var g = nextIndex(groups, ".cfg-group", "data-group");
-        groups.appendChild(fill("tplGroup", { J: job.getAttribute("data-job"), G: g }));
-        refreshJob(job);
-        return;
-      }
-      var addLabel = t.closest("[data-add-label]");
-      if (addLabel) {
-        var group = addLabel.closest(".cfg-group");
-        var kv = group.querySelector('[data-kv="labels"]');
-        var jIdx = group.closest(".cfg-job").getAttribute("data-job");
-        var gIdx = group.getAttribute("data-group");
-        kv.appendChild(fill("tplLabel", {
-          J: jIdx, G: gIdx, N: nextNamedIndex(kv, /__xkey__(\d+)$/)
-        }));
-        return;
-      }
       var addExt = t.closest("[data-add-extlabel]");
       if (addExt) {
         var box = document.querySelector('[data-kv="extlabels"]');
         box.appendChild(fill("tplExtLabel", { N: nextNamedIndex(box, /^g_extlabel_key__(\d+)$/) }));
         return;
       }
-      var rmJob = t.closest("[data-remove-job]");
-      if (rmJob) {
-        var card = rmJob.closest(".cfg-job");
-        var name = (card.querySelector("[data-job-name]") || {}).value || "this job";
-        if (confirm("Remove the scrape job “" + name + "”?\n\nNothing is written until you save.")) {
-          card.remove();
+      var rmHost = t.closest("[data-remove-host]");
+      if (rmHost) {
+        var host = rmHost.closest(".cfg-group");
+        var name = (host.querySelector("input[name$='__l_display']") || {}).value ||
+                   (host.querySelector("textarea") || {}).value || "this host";
+        if (confirm("Remove " + name + " from the configuration?
+
+Nothing is written until you save.")) {
+          host.remove();
         }
-        return;
-      }
-      var rmGroup = t.closest("[data-remove-group]");
-      if (rmGroup) {
-        var grp = rmGroup.closest(".cfg-group");
-        var owner = grp.closest(".cfg-job");
-        grp.remove();
-        refreshJob(owner);
         return;
       }
       var rm = t.closest("[data-remove]");
       if (rm) rm.closest(".cfg-kv-row").remove();
     });
-
-    // keep each collapsed job card's header in step with the name being typed inside it
-    promForm.addEventListener("input", function (e) {
-      if (!e.target.matches("[data-job-name]")) return;
-      var title = e.target.closest(".cfg-job").querySelector("[data-job-title]");
-      if (title) title.textContent = e.target.value || "(unnamed job)";
-    });
   }
+
 
   // ---- role scopes: select-all / clear per role ----
   document.querySelectorAll("[data-scope-all], [data-scope-none]").forEach(function (btn) {

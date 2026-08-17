@@ -268,6 +268,50 @@ def view_from_post(post, original: dict) -> dict:
     }
 
 
+def to_topology(view: dict) -> dict:
+    """Pivot the job-oriented view into system -> hosts, the way the REPORT sees the estate.
+
+    Same underlying document and the same field names — a host row here writes
+    ``sc__<job>__<group>__*`` exactly as the Prometheus screen's own fields do, so one parser
+    serves both screens and neither can drift from the other.
+
+    The pivot matters because prometheus.yml is organised by EXPORTER (one job for
+    windows_exporter, one for node_exporter) while the estate is organised by SYSTEM — RTGS's
+    hosts sit in the node_exporter job next to CMS's. Asking someone to maintain "which hosts
+    are RTGS" through a job-shaped form makes them do that translation in their head.
+    """
+    systems: Dict[str, list] = {}
+    unassigned: List[dict] = []
+    for job in view["jobs"]:
+        for group in job["groups"]:
+            row = {"job_i": job["i"], "job_name": job["job_name"], "g": group}
+            name = (group["known"].get("system") or "").strip()
+            if name:
+                systems.setdefault(name, []).append(row)
+            else:
+                unassigned.append(row)
+
+    order = {name: i for i, name in enumerate(gr.SYSTEM_ORDER)}
+    grouped = [
+        {"name": name,
+         "rows": rows,
+         "hosts": sum(r["g"]["targets_count"] for r in rows),
+         # the engine drops these from the report even though Prometheus still scrapes them
+         "skipped": name.lower() in gr.SKIP_SYSTEMS}
+        for name, rows in sorted(systems.items(),
+                                 key=lambda kv: (order.get(kv[0], len(order)), kv[0].lower()))
+    ]
+    return {
+        "systems": grouped,
+        "unassigned": unassigned,
+        "host_count": sum(s["hosts"] for s in grouped),
+        # where "add a host" can put one — a new row has to belong to some existing job
+        "jobs": [{"i": j["i"], "name": j["job_name"],
+                  "next_group": max([g["i"] for g in j["groups"]], default=-1) + 1}
+                 for j in view["jobs"]],
+    }
+
+
 def system_names(doc: dict) -> List[str]:
     """Every distinct `system` label in the file — the estate the report groups hosts by.
     Uses the engine's own skip-list so the list matches what the dashboard actually shows."""

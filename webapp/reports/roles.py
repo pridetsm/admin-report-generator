@@ -31,7 +31,8 @@ ROLE_PAGES = {
     NETWORK_ADMIN_ROLE:  {"network_dashboard", "network_report"},
     ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
                           "prometheus_config", "prometheus_rule_file",
-                          "configuration", "config_yaml", "config_role_scopes"},
+                          "configuration", "config_yaml", "config_role_scopes",
+                          "config_prometheus", "config_topology", "config_snmp"},
     # Two roles exist without an estate yet. Deliberately empty rather than borrowing
     # another role's dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),
@@ -102,6 +103,17 @@ ROLE_ICONS = {
 }
 
 
+# The "work across every role I hold" choice on the picker. Stored as the ABSENCE of a
+# selection rather than as a value: unscoped is a state the app already had (see active_role),
+# so nothing downstream has to learn a sentinel.
+ALL_ROLES = "__all__"
+ALL_ROLES_LABEL = "Load all my roles"
+# No image: all five glyphs belong to a role, and lending one to this tile would make it read
+# as that role's twin. It gets the accent square the tiles used before they had glyphs, which
+# is visibly not-a-role — which is exactly what it is.
+ALL_ROLES_GLYPH = "⊞"
+
+
 def role_icon(role: str) -> str:
     """The tile glyph for a role, or "" for one added outside this catalogue.
 
@@ -112,57 +124,6 @@ def role_icon(role: str) -> str:
 
 
 SESSION_KEY = "active_role"
-
-# Sentinel stored in the session when the user picks the "Load all my roles" tile: work
-# across every role they hold at once, instead of one role's slice of the estate.
-ALL_ROLES = "__all__"
-ALL_ROLES_LABEL = "All my roles"          # how the active scope reads once chosen ("Working as …")
-ALL_ROLES_TILE_LABEL = "Load all my roles"   # how the tile that chooses it reads
-
-# Tile presentation for the role-selection screen: the icon (static/img/roles/) and the
-# one-line description of what that role's workspace covers.
-ROLE_META = {
-    "System Admin": {
-        "icon": "roles/system-administration.png",
-        "blurb": "Servers, services, disks and backups across the core banking estate.",
-    },
-    "Network Admin": {
-        "icon": "roles/network-infrastructure.png",
-        "blurb": "Links, reachability, reverse proxies and web/TLS endpoints.",
-    },
-    "Gov Systems Admin": {
-        "icon": "roles/bank.png",
-        "blurb": "Government and national payment systems (RTGS, CSD, CEPECS, CEBAS).",
-    },
-    "Administrator": {
-        "icon": "roles/cyber-security.png",
-        "blurb": "Full oversight — plus roles, access requests and system configuration.",
-    },
-}
-ALL_ROLES_META = {
-    "icon": "roles/neural-networks.png",
-    "blurb": "One combined workspace spanning every system your roles can see.",
-}
-
-_FALLBACK_ICON = "roles/system-administration.png"
-
-
-def role_meta(role: str) -> dict:
-    """Icon + blurb for a role tile; falls back gracefully for roles added outside the
-    catalogue (e.g. a Keycloak realm role that has no entry here yet)."""
-    meta = ROLE_META.get(role)
-    if meta:
-        return dict(meta, name=role)
-    return {"name": role, "icon": _FALLBACK_ICON, "blurb": ""}
-
-
-def user_roles(user) -> list:
-    """The roles this user holds, catalogue order first then any extras, alphabetically."""
-    if not (user and getattr(user, "is_authenticated", False)):
-        return []
-    held = set(user.groups.values_list("name", flat=True))
-    known = [r for r in ROLE_NAMES if r in held]
-    return known + sorted(held - set(ROLE_NAMES))
 
 
 def is_role_admin(user) -> bool:

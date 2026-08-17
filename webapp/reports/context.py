@@ -58,11 +58,17 @@ _NAV_PARENT = {
     # single "Configuration" entry lights up on all of them and Back always steps up to the hub,
     # not straight to the dashboard.
     "configuration": "report_form",
-    "config_yaml": "configuration",
-    "prometheus_config": "configuration",
+    "config_prometheus": "configuration",
     "grafana_config": "configuration",
+    "config_snmp": "configuration",
+    "config_topology": "configuration",
     "system_settings": "configuration",
     "config_role_scopes": "configuration",
+    # The raw editors are how you edit the SAME file the screen above them presents as fields,
+    # so they hang off that screen rather than off the hub — Back from raw YAML returns to
+    # Prometheus, the way Temenos returns to Folder Watch.
+    "prometheus_config": "config_prometheus",
+    "config_yaml": "config_prometheus",
     "prometheus_rule_file": "prometheus_config",
 }
 #: the tree's root — a parent of everything, so never marked as "the branch you are in"
@@ -81,8 +87,11 @@ _NAV_LABEL = {
     "history": "History",
     "roles_console": "Roles",
     "configuration": "Configuration",
-    "config_yaml": "Live YAML file",
-    "prometheus_config": "Prometheus Config",
+    "config_prometheus": "Prometheus",
+    "config_topology": "Topology",
+    "config_snmp": "SNMP",
+    "config_yaml": "Raw YAML",
+    "prometheus_config": "Edit raw YAML",
     "grafana_config": "Grafana",
     "system_settings": "Data sources",
     "config_role_scopes": "Role scopes",

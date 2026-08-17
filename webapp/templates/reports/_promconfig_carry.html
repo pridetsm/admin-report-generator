@@ -1,0 +1,50 @@
+{% comment %}
+  Carries the half of prometheus.yml that THIS screen does not show.
+
+  Prometheus and Topology each edit one half of one document, but promconfig.parse_post
+  rebuilds the whole document from the posted fields — anything absent is a deletion. So each
+  screen posts the other's fields too, unchanged and hidden, and a save from either preserves
+  the file entire.
+
+  `carry` selects which half:  "jobs"    every scrape job and target group  (Prometheus screen)
+                              "globals" global / storage / rule files       (Topology screen)
+                              "jobmeta" job-level settings only             (Topology screen)
+
+  Targets use a hidden <textarea> rather than <input type="hidden">: the value is multi-line,
+  and a textarea round-trips newlines without any entity-escaping games.
+{% endcomment %}
+
+{% if carry == "globals" %}
+  <input type="hidden" name="g_scrape_interval" value="{{ view.global.scrape_interval }}">
+  <input type="hidden" name="g_evaluation_interval" value="{{ view.global.evaluation_interval }}">
+  <input type="hidden" name="g_scrape_timeout" value="{{ view.global.scrape_timeout }}">
+  {% for r in view.global.external_labels %}
+    <input type="hidden" name="g_extlabel_key__{{ r.i }}" value="{{ r.key }}">
+    <input type="hidden" name="g_extlabel_val__{{ r.i }}" value="{{ r.value }}">
+  {% endfor %}
+  <input type="hidden" name="storage_ooo_window" value="{{ view.storage_out_of_order }}">
+  <textarea name="rule_files" hidden>{{ view.rule_files_text }}</textarea>
+{% endif %}
+
+{% if carry == "jobs" or carry == "jobmeta" %}
+  {% for j in view.jobs %}
+    <input type="hidden" name="job__{{ j.i }}__name" value="{{ j.job_name }}">
+    <input type="hidden" name="job__{{ j.i }}__scrape_interval" value="{{ j.scrape_interval }}">
+    <input type="hidden" name="job__{{ j.i }}__scrape_timeout" value="{{ j.scrape_timeout }}">
+    <input type="hidden" name="job__{{ j.i }}__metrics_path" value="{{ j.metrics_path }}">
+    <input type="hidden" name="job__{{ j.i }}__scheme" value="{{ j.scheme }}">
+    {% if carry == "jobs" %}
+      {% for g in j.groups %}
+        <textarea name="sc__{{ j.i }}__{{ g.i }}__targets" hidden>{{ g.targets_text }}</textarea>
+        <input type="hidden" name="sc__{{ j.i }}__{{ g.i }}__l_system" value="{{ g.known.system }}">
+        <input type="hidden" name="sc__{{ j.i }}__{{ g.i }}__l_display" value="{{ g.known.display }}">
+        <input type="hidden" name="sc__{{ j.i }}__{{ g.i }}__l_role" value="{{ g.known.role }}">
+        <input type="hidden" name="sc__{{ j.i }}__{{ g.i }}__l_app" value="{{ g.known.app }}">
+        {% for r in g.extra %}
+          <input type="hidden" name="sc__{{ j.i }}__{{ g.i }}__xkey__{{ r.i }}" value="{{ r.key }}">
+          <input type="hidden" name="sc__{{ j.i }}__{{ g.i }}__xval__{{ r.i }}" value="{{ r.value }}">
+        {% endfor %}
+      {% endfor %}
+    {% endif %}
+  {% endfor %}
+{% endif %}

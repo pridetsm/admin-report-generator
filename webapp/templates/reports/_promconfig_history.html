@@ -1,0 +1,22 @@
+{# The revision history, shared by every screen that edits prometheus.yml — one file, one
+   history, so the same list appears wherever you edit it. #}
+{% if history %}
+<div class="section-label sub">Recent revisions <span style="text-transform:none;letter-spacing:0">— shared with the raw editor</span></div>
+<div class="card"><div class="body" style="padding:10px 18px 14px">
+  <table class="hist">
+    <thead><tr><th>Saved</th><th>By</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for rev in history %}
+      <tr>
+        <td>{{ rev.created_at|date:"d M Y, H:i" }}{% if forloop.first %} <span class="chip green">current</span>{% endif %}</td>
+        <td>{{ rev.created_by.get_username|default:"—" }}</td>
+        <td style="color:var(--muted)">{{ rev.note|default:"—" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p style="color:var(--muted);font-size:12.5px;margin:10px 0 0">
+    Restore an earlier revision from <a href="{% url 'prometheus_config' %}">the raw editor</a>.
+  </p>
+</div></div>
+{% endif %}

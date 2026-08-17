@@ -40,7 +40,8 @@ from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, System
 from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
                      SystemConfig, UserProfile)
-from .roles import (ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
+from .roles import (ALL_ROLES, ALL_ROLES_GLYPH, ALL_ROLES_LABEL,
+                    ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_network_admin, is_role_admin,
                     role_icon, role_screens,
@@ -215,12 +216,19 @@ def role_select(request):
                              if created else "Those roles are already held or already requested.")
             return redirect("role_select")
 
-        # No "every role at once" option. A role is the hat being worn, and an
-        # everything-at-once mode let the menu show screens from estates the admin was not
-        # working in — the thing this screen exists to prevent. The unscoped state still
-        # exists for a session that has never picked; it is simply not offered, and not
-        # reachable by posting a value the screen no longer renders.
         chosen = (request.POST.get("role") or "").strip()
+
+        # "Load all my roles" — the UNSCOPED state, which the app has always had internally
+        # for a session that never picked. It is offered again deliberately: someone who holds
+        # several roles and is doing a round of everything should not have to walk back through
+        # this screen between estates. Clearing the key rather than storing a sentinel keeps it
+        # the same state a fresh session is already in, so nothing downstream needs to know
+        # about a special value.
+        if chosen == ALL_ROLES:
+            request.session.pop(ROLE_SESSION_KEY, None)
+            messages.success(request, "Working across all your roles.")
+            return redirect("report_form")
+
         if chosen in held:
             request.session[ROLE_SESSION_KEY] = chosen
             messages.success(request, f"Working as {chosen}.")
@@ -247,6 +255,13 @@ def role_select(request):
                    "pending": r in pending} for r in ROLE_NAMES],
         "held_count": len(held),
         "current": active_role(request),
+        # offered only to someone with more than one role — for everyone else "all my roles"
+        # and "my role" are the same thing, and a tile that changes nothing is noise
+        "offer_all_roles": len(held) > 1,
+        "all_roles_value": ALL_ROLES,
+        "all_roles_label": ALL_ROLES_LABEL,
+        "all_roles_glyph": ALL_ROLES_GLYPH,
+        "unscoped": not active_role(request),
     })
 
 
@@ -834,17 +849,23 @@ def set_report_theme(request):
 # ---------------------------------------------------------------------------------------
 #  Configuration — every configuration screen lives under here (drawer › Configuration)
 # ---------------------------------------------------------------------------------------
-#  The default screen is the FORM: a labelled view of prometheus.yml, so the estate is edited
-#  through validated fields instead of hand-written YAML. "Live YAML file" shows the same file
-#  verbatim; the other tabs configure the app around it.
-#  Every configuration surface is listed here, including the two raw-text editors that already
-#  existed — an admin looking for "where do I configure things" should find one list, not this
-#  hub plus a couple of screens reachable only from the drawer.
-_CONFIG_TABS = [
-    ("configuration", "Configuration form", "Prometheus topology, in labelled fields"),
-    ("config_yaml", "Live YAML file", "prometheus.yml exactly as it is on disk"),
-    ("prometheus_config", "Prometheus (raw)", "The whole file as text, promtool-validated"),
+#  Configuration is a HUB with one child per thing being configured, nested in the drawer the
+#  way Temenos nests under Folder Watch. Each child owns its own screen; the raw-text editors
+#  hang off the child whose settings they hold, not off the hub, so "edit the raw YAML" is an
+#  option ON the Prometheus screen rather than a sibling of it.
+#
+#      Configuration
+#        ├─ Prometheus     global/storage/rules   → Edit raw YAML → rule files
+#        ├─ Grafana        custom.ini
+#        ├─ SNMP           (awaiting the server-side update)
+#        ├─ Topology       systems → hosts, pivoted out of the same prometheus.yml
+#        ├─ Data sources   which Prometheus/Grafana to read
+#        └─ Role scopes    which systems each role sees
+_CONFIG_CHILDREN = [
+    ("config_prometheus", "Prometheus", "Scrape intervals, storage and rule files"),
     ("grafana_config", "Grafana", "custom.ini, versioned and applied"),
+    ("config_snmp", "SNMP", "Network device polling"),
+    ("config_topology", "Topology", "Which hosts belong to which system"),
     ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
     ("config_role_scopes", "Role scopes", "Which systems each role sees"),
 ]
@@ -852,11 +873,31 @@ _CONFIG_TABS = [
 
 def _config_context(active: str) -> dict:
     return {
-        "config_tabs": [{"url_name": n, "label": lbl, "hint": hint, "active": n == active}
-                        for n, lbl, hint in _CONFIG_TABS],
+        "config_children": [{"url_name": n, "label": lbl, "hint": hint, "active": n == active}
+                            for n, lbl, hint in _CONFIG_CHILDREN],
         "yaml_source": promconfig.source_info(),
         "service_status": prometheus_admin.service_status(),
     }
+
+
+def _save_prometheus(request, doc):
+    """Shared save for the two screens that edit prometheus.yml as fields.
+
+    Both post the WHOLE document — each screen renders the half it doesn't show as hidden
+    fields — so either can save without needing to know what the other was displaying. The
+    write path is promconfig.save_revision, the same one the raw editor uses.
+    """
+    new_doc, errors = promconfig.parse_post(request.POST, doc)
+    if errors:
+        return errors, None
+    _, ok, message = promconfig.save_revision(
+        new_doc,
+        header=promconfig.header_comment(promconfig.current_text()),
+        user=request.user,
+        note=(request.POST.get("note") or "").strip(),
+        apply=request.POST.get("action") == "apply",
+    )
+    return [], (ok, message)
 
 
 def _require_admin(request):
@@ -881,54 +922,104 @@ def _topology_systems() -> list:
 @never_cache
 @login_required
 def configuration(request):
-    """DEFAULT configuration screen: prometheus.yml as labelled fields.
+    """The Configuration hub: one card per thing that can be configured.
 
-    The same file and the same history as the raw editor (prometheus_config) — this screen
-    reads the newest revision and writes a new one, so an edit made here shows up there and
-    is revertable from the same history list. "Save & Apply" goes through
-    prometheus_admin.write_and_restart, so promtool gates this form exactly as it gates the
-    raw text. See reports/promconfig.py.
+    A landing page rather than a screen that configures something itself. Its children are
+    real screens with their own URLs, nested under this one in the drawer and in the Back
+    hierarchy, so "where do I configure X" has one answer and one route to it.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    return render(request, "reports/configuration.html", _config_context("configuration"))
+
+
+def _prometheus_screen(request, *, active: str, template: str, extra=None):
+    """Shared body for the two screens that edit prometheus.yml as labelled fields.
+
+    Prometheus and Topology are two windows onto ONE document: each shows its own half and
+    carries the other half as hidden fields, so a save from either preserves the whole file.
+    They therefore need identical load/save/error handling, which lives here rather than
+    being written twice and drifting.
     """
     denied = _require_admin(request)
     if denied:
         return denied
 
     try:
-        raw = promconfig.current_text()
-        doc = promconfig.load(raw)
+        doc = promconfig.load()
     except promconfig.ConfigError as exc:
-        return render(request, "reports/configuration.html",
-                      {**_config_context("configuration"), "load_error": str(exc)}, status=200)
+        return render(request, template,
+                      {**_config_context(active), "load_error": str(exc)}, status=200)
 
     errors: list = []
     if request.method == "POST":
-        new_doc, errors = promconfig.parse_post(request.POST, doc)
-        if not errors:
-            try:
-                _, ok, message = promconfig.save_revision(
-                    new_doc,
-                    header=promconfig.header_comment(raw),
-                    user=request.user,
-                    note=(request.POST.get("note") or "").strip(),
-                    apply=request.POST.get("action") == "apply",
-                )
-            except promconfig.ConfigError as exc:
-                messages.error(request, str(exc))
-                return redirect("configuration")
+        try:
+            errors, outcome = _save_prometheus(request, doc)
+        except promconfig.ConfigError as exc:
+            messages.error(request, str(exc))
+            return redirect(active)
+        if outcome is not None:
+            ok, message = outcome
             # A rejected apply still recorded the revision — say so rather than implying the
             # edit was lost, and keep the promtool output visible so it can be acted on.
             (messages.success if ok or request.POST.get("action") != "apply"
              else messages.error)(request, message)
-            return redirect("configuration")
+            return redirect(active)
         view = promconfig.view_from_post(request.POST, doc)
     else:
         view = promconfig.to_view(doc)
 
-    return render(request, "reports/configuration.html", {
-        **_config_context("configuration"),
+    ctx = {
+        **_config_context(active),
         "view": view, "errors": errors,
         "history": PrometheusConfigRevision.objects.all()[:10],
-    })
+    }
+    if extra:
+        ctx.update(extra(view))
+    return render(request, template, ctx)
+
+
+@never_cache
+@login_required
+def config_prometheus(request):
+    """Prometheus settings as labelled fields: global intervals, storage, rule files.
+
+    The scrape jobs live here as hidden fields — they are edited on the Topology screen,
+    which presents them by system rather than by exporter. Same document, same revision
+    history, same promtool gate on apply.
+    """
+    return _prometheus_screen(request, active="config_prometheus",
+                              template="reports/config_prometheus.html")
+
+
+@never_cache
+@login_required
+def config_topology(request):
+    """Which hosts belong to which system — the estate, not the exporter layout.
+
+    prometheus.yml is organised by exporter; the report is organised by system. This screen
+    does that translation so nobody has to do it in their head: it lists every system with
+    its hosts, and writes edits back into whichever scrape job each host actually lives in.
+    """
+    return _prometheus_screen(request, active="config_topology",
+                              template="reports/config_topology.html",
+                              extra=lambda view: {"topo": promconfig.to_topology(view)})
+
+
+@never_cache
+@login_required
+def config_snmp(request):
+    """SNMP polling — deliberately empty until the server-side update lands.
+
+    A named, reachable placeholder rather than a missing menu entry: the drawer says what is
+    coming, and the screen says it is not here yet, which is a truthful answer. Nothing is
+    stubbed behind it that could be mistaken for working configuration.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    return render(request, "reports/config_snmp.html", _config_context("config_snmp"))
 
 
 @never_cache

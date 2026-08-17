@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}SNMP · Configuration{% endblock %}
+
+{% comment %}
+  Deliberately empty. The screen exists so the drawer entry is real and the nesting is in place
+  for the server-side update that fills it; what it must NOT do is show a stubbed form that
+  looks like working configuration. An honest "not here yet" is a better answer than a form
+  whose Save does nothing.
+{% endcomment %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+  {% include "reports/_config_tabs.html" %}
+
+  <div class="card"><div class="body" style="padding:34px 30px;text-align:center">
+    <div class="chip amber" style="margin-bottom:14px">Not configured yet</div>
+    <h2 style="margin:0 0 8px">SNMP</h2>
+    <p style="margin:0 auto;max-width:520px;color:var(--muted);line-height:1.6">
+      Network device polling will be configured here. Nothing is wired up yet — this screen is
+      waiting on the update being pushed from the server.
+    </p>
+    <p style="margin:18px auto 0;max-width:520px;color:var(--muted);font-size:13px">
+      Until then, the switch and its metrics come through the
+      <a href="{% url 'config_prometheus' %}">Prometheus</a> configuration like everything else.
+    </p>
+  </div></div>
+</div>
+{% endblock %}

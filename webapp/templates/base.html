@@ -194,7 +194,21 @@
     {% endcomment %}
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}"{% if current_page == 'roles_console' %} class="is-current" aria-current="page"{% elif 'roles_console' in current_ancestors %} class="is-ancestor"{% endif %}>Roles</a>
+    {% comment %}
+      Configuration nests its screens the way Folder Watch nests Temenos: the parent lights as
+      the branch you are inside, each child marks itself when you are on it. Prometheus and
+      Topology are two halves of one file; the raw editors hang off Prometheus rather than
+      appearing here, so the drawer lists what you configure, not every URL that can edit it.
+    {% endcomment %}
     <a href="{% url 'configuration' %}"{% if current_page == 'configuration' %} class="is-current" aria-current="page"{% elif 'configuration' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
+    <div class="drawer-children">
+      <a href="{% url 'config_prometheus' %}" class="drawer-child{% if current_page == 'config_prometheus' %} is-current{% elif 'config_prometheus' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_prometheus' %} aria-current="page"{% endif %}>Prometheus</a>
+      <a href="{% url 'grafana_config' %}" class="drawer-child{% if current_page == 'grafana_config' %} is-current{% endif %}"{% if current_page == 'grafana_config' %} aria-current="page"{% endif %}>Grafana</a>
+      <a href="{% url 'config_snmp' %}" class="drawer-child{% if current_page == 'config_snmp' %} is-current{% endif %}"{% if current_page == 'config_snmp' %} aria-current="page"{% endif %}>SNMP</a>
+      <a href="{% url 'config_topology' %}" class="drawer-child{% if current_page == 'config_topology' %} is-current{% endif %}"{% if current_page == 'config_topology' %} aria-current="page"{% endif %}>Topology</a>
+      <a href="{% url 'system_settings' %}" class="drawer-child{% if current_page == 'system_settings' %} is-current{% endif %}"{% if current_page == 'system_settings' %} aria-current="page"{% endif %}>Data sources</a>
+      <a href="{% url 'config_role_scopes' %}" class="drawer-child{% if current_page == 'config_role_scopes' %} is-current{% endif %}"{% if current_page == 'config_role_scopes' %} aria-current="page"{% endif %}>Role scopes</a>
+    </div>
     {% endif %}
   </nav>
 

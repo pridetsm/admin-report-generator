@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}Prometheus · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+  {% include "reports/_config_tabs.html" %}
+
+  {% if load_error %}
+    <div class="card"><div class="body" style="padding:18px">
+      <div class="errornote" style="margin-top:0">{{ load_error }}</div>
+      <p style="margin:12px 0 0;color:var(--muted)">
+        These fields can only be built from a config that parses. Fix it in
+        <a href="{% url 'prometheus_config' %}">the raw editor</a> — or restore an earlier
+        revision there — then come back.
+      </p>
+    </div></div>
+  {% else %}
+
+  <form method="post" id="promForm">
+  {% csrf_token %}
+  {# the estate lives on the Topology screen; carry it through untouched #}
+  {% include "reports/_promconfig_carry.html" with carry="jobs" %}
+
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <p style="margin:0 0 10px">
+      How Prometheus runs: how often it scrapes, how long it keeps out-of-order samples, and
+      which rule files it loads. <b>Which hosts it scrapes</b> is the
+      <a href="{% url 'config_topology' %}">Topology</a> screen — same file, same history.
+    </p>
+    <p style="margin:0;color:var(--muted);font-size:13px">
+      <b>Save</b> records a revision and changes nothing live. <b>Save &amp; Apply</b> runs the
+      real <code>promtool check config</code> first and only rewrites prometheus.yml and
+      restarts the service if it passes.
+      Prometheus service: <b>{{ service_status }}</b>.
+    </p>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <a class="btn ghost" href="{% url 'prometheus_config' %}">✎ Edit the raw YAML</a>
+      <a class="btn ghost" href="{% url 'config_yaml' %}">View raw YAML</a>
+    </div>
+  </div></div>
+
+  {% if errors %}
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <div class="errornote" style="margin-top:0">
+      <b>Nothing was saved — {{ errors|length }} problem{{ errors|pluralize }} to fix:</b>
+      <ul style="margin:8px 0 0 18px;padding:0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+    </div>
+  </div></div>
+  {% endif %}
+
+  {# ================= GLOBAL ================= #}
+  <div class="section-label sub">Global — defaults every scrape job inherits</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <div class="cfg-grid3">
+      <label class="field">
+        <span>Scrape interval</span>
+        <input type="text" name="g_scrape_interval" value="{{ view.global.scrape_interval }}" placeholder="15s">
+        <small class="cfg-hint">How often targets are scraped.</small>
+      </label>
+      <label class="field">
+        <span>Evaluation interval</span>
+        <input type="text" name="g_evaluation_interval" value="{{ view.global.evaluation_interval }}" placeholder="15s">
+        <small class="cfg-hint">How often rules are evaluated.</small>
+      </label>
+      <label class="field">
+        <span>Scrape timeout</span>
+        <input type="text" name="g_scrape_timeout" value="{{ view.global.scrape_timeout }}" placeholder="10s">
+        <small class="cfg-hint">Must be ≤ the scrape interval.</small>
+      </label>
+    </div>
+    <div class="cfg-sub-label">External labels <small class="cfg-hint">attached to every metric leaving this server</small></div>
+    <div class="cfg-kv" data-kv="extlabels">
+      {% for r in view.global.external_labels %}
+      <div class="cfg-kv-row">
+        <input type="text" name="g_extlabel_key__{{ r.i }}" value="{{ r.key }}" placeholder="label name" aria-label="External label name">
+        <input type="text" name="g_extlabel_val__{{ r.i }}" value="{{ r.value }}" placeholder="value" aria-label="External label value">
+        <button type="button" class="cfg-x" data-remove title="Remove">✕</button>
+      </div>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn ghost cfg-add" data-add-extlabel>＋ Add external label</button>
+  </div></div>
+
+  {# ================= STORAGE + RULES ================= #}
+  <div class="section-label sub">Storage &amp; rules</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <div class="cfg-grid2">
+      <label class="field">
+        <span>Out-of-order time window</span>
+        <input type="text" name="storage_ooo_window" value="{{ view.storage_out_of_order }}" placeholder="30d">
+        <small class="cfg-hint">How far back a late sample may still be accepted. Blank removes the setting.</small>
+      </label>
+      <label class="field">
+        <span>Rule files — one per line</span>
+        <textarea name="rule_files" rows="4" spellcheck="false" placeholder="alerts.yml">{{ view.rule_files_text }}</textarea>
+        <small class="cfg-hint">
+          Alerting/recording rule files. Edit their contents from
+          <a href="{% url 'prometheus_config' %}">the raw editor</a>, which has a sub-page per file.
+        </small>
+      </label>
+    </div>
+  </div></div>
+
+  {# ================= SCRAPE JOBS (read-only summary) ================= #}
+  <div class="section-label sub">Scrape jobs</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <table class="hist">
+      <thead><tr><th>Job</th><th>Interval</th><th>Metrics path</th><th style="text-align:right">Targets</th></tr></thead>
+      <tbody>
+      {% for j in view.jobs %}
+        <tr>
+          <td><b>{{ j.job_name }}</b>{% if j.preserved %} <span class="chip amber">advanced</span>{% endif %}</td>
+          <td style="color:var(--muted)">{{ j.scrape_interval|default:"inherits global" }}</td>
+          <td style="color:var(--muted)">{{ j.metrics_path|default:"/metrics" }}</td>
+          <td style="text-align:right">{{ j.targets_count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p style="color:var(--muted);font-size:12.5px;margin:10px 0 0">
+      Shown for orientation. Hosts and their system labels are edited on
+      <a href="{% url 'config_topology' %}">Topology</a>; a job's own advanced settings
+      (<code>params</code>, <code>relabel_configs</code>) in
+      <a href="{% url 'prometheus_config' %}">the raw editor</a>.
+    </p>
+  </div></div>
+
+  {% include "reports/_promconfig_history.html" %}
+
+  <div class="actionbar">
+    <div class="container-inner">
+      <input type="text" name="note" placeholder="What changed and why (optional)"
+             style="max-width:300px" aria-label="Revision note">
+      <button class="btn ghost" type="submit" name="action" value="save">Save revision</button>
+      <button class="btn primary" type="submit" name="action" value="apply">Save &amp; Apply</button>
+      <a class="btn ghost" href="{% url 'config_prometheus' %}">Discard changes</a>
+    </div>
+  </div>
+  </form>
+
+  <template id="tplExtLabel">
+    <div class="cfg-kv-row">
+      <input type="text" name="g_extlabel_key____N__" placeholder="label name" aria-label="External label name">
+      <input type="text" name="g_extlabel_val____N__" placeholder="value" aria-label="External label value">
+      <button type="button" class="cfg-x" data-remove title="Remove">✕</button>
+    </div>
+  </template>
+  {% endif %}
+</div>
+{% endblock %}

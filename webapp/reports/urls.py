@@ -32,6 +32,9 @@ urlpatterns = [
     # Separate URLs because they are two ways of editing one thing, not two things: both read
     # the newest PrometheusConfigRevision and both apply through promtool.
     path("configuration/", views.configuration, name="configuration"),
+    path("configuration/prometheus/", views.config_prometheus, name="config_prometheus"),
+    path("configuration/topology/", views.config_topology, name="config_topology"),
+    path("configuration/snmp/", views.config_snmp, name="config_snmp"),
     path("configuration/yaml/", views.config_yaml, name="config_yaml"),
     path("configuration/role-scopes/", views.config_role_scopes, name="config_role_scopes"),
     path("settings/report-theme/", views.set_report_theme, name="set_report_theme"),

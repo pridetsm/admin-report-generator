@@ -1,335 +1,50 @@
 {% extends "base.html" %}
-{% block title %}Configuration · Admin Report Generator{% endblock %}
+{% block title %}Configuration · RBZ Monitoring Console{% endblock %}
+
+{% comment %}
+  The Configuration hub. A landing page, not a screen that configures anything itself — each
+  card opens a child with its own URL, nested under this one in the drawer and in the Back
+  hierarchy, exactly as Temenos nests under Folder Watch.
+
+  Cards rather than a bare list: each one says what it is FOR, so an admin looking for
+  "where do I change which hosts are RTGS" can tell Topology from Prometheus without opening
+  both.
+{% endcomment %}
 
 {% block body %}
 <div class="container" style="max-width:1040px">
-  {% include "reports/_config_tabs.html" %}
 
-  {% if load_error %}
-    <div class="card"><div class="body" style="padding:18px">
-      <div class="errornote" style="margin-top:0">{{ load_error }}</div>
-      <p style="color:var(--muted);margin:12px 0 0">
-        The form can only be built from a file it can parse. Fix the file on the server (or
-        restore one of its <code>.bak</code> copies), then reload this page.
-      </p>
-    </div></div>
-  {% else %}
+  <div class="section-label">Configuration</div>
+  <p style="color:var(--muted);margin:0 0 16px;font-size:13.5px">
+    Everything this console configures, in one place. Prometheus and Topology are two views of
+    the same <code>prometheus.yml</code> — settings on one, the estate on the other — and both
+    save through the same versioned history.
+  </p>
 
-  <form method="post" id="promForm">
-  {% csrf_token %}
+  <div class="cfg-hub">
+    {% for c in config_children %}
+    <a class="cfg-hub-card" href="{% url c.url_name %}">
+      <span class="cfg-hub-name">{{ c.label }}</span>
+      <span class="cfg-hub-hint">{{ c.hint }}</span>
+    </a>
+    {% endfor %}
+  </div>
 
-  {# ---- what this screen is, and how it relates to the raw editor ---- #}
-  <div class="card"><div class="body" style="padding:16px 18px">
-    <p style="margin:0 0 10px">
-      These fields are <code>{{ yaml_source.path }}</code>, shown one setting at a time.
-      It is the <b>same file and the same history</b> as
-      <a href="{% url 'prometheus_config' %}">Prometheus (raw)</a> — saving here records a revision
-      there, and vice versa. Filling in labelled fields instead of editing YAML by hand is what
-      keeps indentation, quoting and duration syntax from breaking the config.
-    </p>
-    <p style="margin:0;color:var(--muted);font-size:13px">
-      <b>Save</b> records a revision and changes nothing live. <b>Save &amp; Apply</b> runs the real
-      <code>promtool check config</code> first and only rewrites prometheus.yml and restarts the
-      service if it passes — a broken edit never reaches the live file.
-      Values this form doesn’t model (<code>params</code>, <code>relabel_configs</code>, …) are
-      preserved untouched and shown read-only.
-      <br><br>
-      <b>One caveat:</b> saving through this form drops the comments inside the file body (the
-      header block is kept). prometheus.yml carries a lot of hand-written rationale — if you need
-      to keep it, edit the <a href="{% url 'prometheus_config' %}">raw text</a> instead. Either way
-      the previous revision stays in the history below.
-      <br>
-      Editing {% if yaml_source.from_revision %}the revision saved
-        {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}{% if yaml_source.revision.created_by %}
-        by {{ yaml_source.revision.created_by.get_username }}{% endif %}
-      {% else %}the live file — no revision has been saved yet{% endif %}.
-      Prometheus service: <b>{{ service_status }}</b>.
-    </p>
-  </div></div>
-
-  {% if errors %}
+  <div class="section-label sub">Current state</div>
   <div class="card"><div class="body" style="padding:14px 18px">
-    <div class="errornote" style="margin-top:0">
-      <b>Nothing was saved — {{ errors|length }} problem{{ errors|pluralize }} to fix:</b>
-      <ul style="margin:8px 0 0 18px;padding:0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
-    </div>
-  </div></div>
-  {% endif %}
-
-  {# ================= GLOBAL ================= #}
-  <div class="section-label sub">Global — defaults every scrape job inherits</div>
-  <div class="card"><div class="body" style="padding:16px 18px">
-    <div class="cfg-grid3">
-      <label class="field">
-        <span>Scrape interval</span>
-        <input type="text" name="g_scrape_interval" value="{{ view.global.scrape_interval }}" placeholder="15s">
-        <small class="cfg-hint">How often targets are scraped.</small>
-      </label>
-      <label class="field">
-        <span>Evaluation interval</span>
-        <input type="text" name="g_evaluation_interval" value="{{ view.global.evaluation_interval }}" placeholder="15s">
-        <small class="cfg-hint">How often rules are evaluated.</small>
-      </label>
-      <label class="field">
-        <span>Scrape timeout</span>
-        <input type="text" name="g_scrape_timeout" value="{{ view.global.scrape_timeout }}" placeholder="10s">
-        <small class="cfg-hint">Must be ≤ the scrape interval.</small>
-      </label>
-    </div>
-    <div class="cfg-sub-label">External labels <small class="cfg-hint">attached to every metric leaving this server</small></div>
-    <div class="cfg-kv" data-kv="extlabels">
-      {% for r in view.global.external_labels %}
-      <div class="cfg-kv-row">
-        <input type="text" name="g_extlabel_key__{{ r.i }}" value="{{ r.key }}" placeholder="label name" aria-label="External label name">
-        <input type="text" name="g_extlabel_val__{{ r.i }}" value="{{ r.value }}" placeholder="value" aria-label="External label value">
-        <button type="button" class="cfg-x" data-remove title="Remove">✕</button>
-      </div>
-      {% endfor %}
-    </div>
-    <button type="button" class="btn ghost cfg-add" data-add-extlabel>＋ Add external label</button>
-  </div></div>
-
-  {# ================= STORAGE + RULES ================= #}
-  <div class="section-label sub">Storage &amp; rules</div>
-  <div class="card"><div class="body" style="padding:16px 18px">
-    <div class="cfg-grid2">
-      <label class="field">
-        <span>Out-of-order time window</span>
-        <input type="text" name="storage_ooo_window" value="{{ view.storage_out_of_order }}" placeholder="30d">
-        <small class="cfg-hint">How far back a late sample may still be accepted. Blank removes the setting.</small>
-      </label>
-      <label class="field">
-        <span>Rule files — one per line</span>
-        <textarea name="rule_files" rows="4" spellcheck="false" placeholder="alerts.yml">{{ view.rule_files_text }}</textarea>
-        <small class="cfg-hint">Alerting/recording rule files, relative to the Prometheus working directory.</small>
-      </label>
-    </div>
-  </div></div>
-
-  {# ================= SCRAPE JOBS ================= #}
-  <div class="section-label sub">
-    Scrape jobs — what Prometheus collects, and which system each host belongs to
-  </div>
-  <div class="card"><div class="body" style="padding:14px 18px 6px">
     <p style="margin:0;color:var(--muted);font-size:13px">
-      The report groups hosts by each target’s <b>System</b> label, names them from <b>Display</b>,
-      and uses <b>Role</b> as a component hint. A target with no System label is scraped by
-      Prometheus but left out of the report.
-      {% if view.systems %}
-      <br><span style="display:inline-block;margin-top:8px">This file defines
-      {{ view.systems|length }} system{{ view.systems|pluralize }}:</span>
-      {% for s in view.systems %}<span class="chip green" style="margin:2px">{{ s }}</span>{% endfor %}
-      {% endif %}
+      Prometheus service: <b>{{ service_status }}</b>.
+      Configuration in the editors:
+      {% if yaml_source.from_revision %}
+        revision saved {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}{% if yaml_source.revision.created_by %}
+        by {{ yaml_source.revision.created_by.get_username }}{% endif %}
+      {% else %}
+        read straight from the live file — nothing saved through the console yet
+      {% endif %}.
+      <br>
+      A saved revision is not necessarily the running one: applying is what rewrites
+      <code>{{ yaml_source.path }}</code> and restarts the service.
     </p>
   </div></div>
-
-  <div id="jobList">
-  {% for j in view.jobs %}
-    {# collapsed by default so the estate stays scannable; a failed save opens them all #}
-    <div class="card cfg-job{% if not errors %} collapsed{% endif %}" data-collapsible data-job="{{ j.i }}">
-      <header>
-        <h2><span data-job-title>{{ j.job_name|default:"(unnamed job)" }}</span></h2>
-        <span class="sub"><span data-group-count>{{ j.groups|length }}</span> target group{{ j.groups|length|pluralize }} · {{ j.targets_count }} target{{ j.targets_count|pluralize }}</span>
-        <span class="spacer"></span>
-        {% if j.preserved %}<span class="chip amber" title="This job has advanced settings this form preserves as-is">advanced</span>{% endif %}
-        <button type="button" class="cfg-x" data-remove-job title="Remove this job">✕</button>
-        <span class="chev">▾</span>
-      </header>
-      <div class="body">
-        <div class="cfg-grid4">
-          <label class="field">
-            <span>Job name</span>
-            <input type="text" name="job__{{ j.i }}__name" value="{{ j.job_name }}" data-job-name placeholder="node_exporter">
-          </label>
-          <label class="field">
-            <span>Scrape interval</span>
-            <input type="text" name="job__{{ j.i }}__scrape_interval" value="{{ j.scrape_interval }}" placeholder="inherits global">
-          </label>
-          <label class="field">
-            <span>Scrape timeout</span>
-            <input type="text" name="job__{{ j.i }}__scrape_timeout" value="{{ j.scrape_timeout }}" placeholder="inherits global">
-          </label>
-          <label class="field">
-            <span>Metrics path</span>
-            <input type="text" name="job__{{ j.i }}__metrics_path" value="{{ j.metrics_path }}" placeholder="/metrics">
-          </label>
-        </div>
-        <label class="field cfg-scheme">
-          <span>Scheme</span>
-          <select name="job__{{ j.i }}__scheme">
-            <option value="" {% if not j.scheme %}selected{% endif %}>Default (http)</option>
-            <option value="http" {% if j.scheme == "http" %}selected{% endif %}>http</option>
-            <option value="https" {% if j.scheme == "https" %}selected{% endif %}>https</option>
-          </select>
-        </label>
-
-        {% if j.preserved %}
-        <div class="cfg-sub-label">Advanced — preserved exactly as written <small class="cfg-hint">edit these on the server; this form never rewrites them</small></div>
-        <pre class="cfg-pre">{{ j.preserved }}</pre>
-        {% endif %}
-
-        <div class="cfg-sub-label">Target groups</div>
-        <div class="cfg-groups" data-groups>
-          {% for g in j.groups %}
-          <div class="cfg-group" data-group="{{ g.i }}">
-            <div class="cfg-group-head">
-              <b>{{ g.known.display|default:g.known.system|default:"Target group" }}</b>
-              <span class="spacer"></span>
-              <button type="button" class="cfg-x" data-remove-group title="Remove this target group">✕</button>
-            </div>
-            <label class="field">
-              <span>Targets — one per line</span>
-              <textarea name="sc__{{ j.i }}__{{ g.i }}__targets" rows="{% if g.targets_count > 6 %}8{% else %}{{ g.targets_count|default:1 }}{% endif %}" spellcheck="false" placeholder="10.0.0.11:9182">{{ g.targets_text }}</textarea>
-            </label>
-            <div class="cfg-grid4">
-              <label class="field">
-                <span>System <b class="cfg-req">· groups the report</b></span>
-                <input type="text" name="sc__{{ j.i }}__{{ g.i }}__l_system" value="{{ g.known.system }}" placeholder="e.g. RTGS">
-              </label>
-              <label class="field">
-                <span>Display name</span>
-                <input type="text" name="sc__{{ j.i }}__{{ g.i }}__l_display" value="{{ g.known.display }}" placeholder="e.g. RTGS Database">
-              </label>
-              <label class="field">
-                <span>Role</span>
-                <input type="text" name="sc__{{ j.i }}__{{ g.i }}__l_role" value="{{ g.known.role }}" placeholder="app / db / …">
-              </label>
-              <label class="field">
-                <span>Platform (app)</span>
-                <input type="text" name="sc__{{ j.i }}__{{ g.i }}__l_app" value="{{ g.known.app }}" placeholder="windows / linux">
-              </label>
-            </div>
-            <div class="cfg-kv" data-kv="labels">
-              {% for r in g.extra %}
-              <div class="cfg-kv-row">
-                <input type="text" name="sc__{{ j.i }}__{{ g.i }}__xkey__{{ r.i }}" value="{{ r.key }}" placeholder="label name" aria-label="Label name">
-                <input type="text" name="sc__{{ j.i }}__{{ g.i }}__xval__{{ r.i }}" value="{{ r.value }}" placeholder="value" aria-label="Label value">
-                <button type="button" class="cfg-x" data-remove title="Remove">✕</button>
-              </div>
-              {% endfor %}
-            </div>
-            <button type="button" class="btn ghost cfg-add" data-add-label>＋ Add another label</button>
-          </div>
-          {% endfor %}
-        </div>
-        <button type="button" class="btn ghost cfg-add" data-add-group>＋ Add target group</button>
-      </div>
-    </div>
-  {% endfor %}
-  </div>
-
-  <button type="button" class="btn ghost" id="addJob" style="margin-bottom:10px">＋ Add scrape job</button>
-
-  {% if history %}
-  <div class="section-label sub">Recent revisions <span style="text-transform:none;letter-spacing:0">— shared with the raw editor</span></div>
-  <div class="card"><div class="body" style="padding:10px 18px 14px">
-    <table class="hist">
-      <thead><tr><th>Saved</th><th>By</th><th>Note</th></tr></thead>
-      <tbody>
-      {% for rev in history %}
-        <tr>
-          <td>{{ rev.created_at|date:"d M Y, H:i" }}{% if forloop.first %} <span class="chip green">current</span>{% endif %}</td>
-          <td>{{ rev.created_by.get_username|default:"—" }}</td>
-          <td style="color:var(--muted)">{{ rev.note|default:"—" }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    <p style="color:var(--muted);font-size:12.5px;margin:10px 0 0">
-      The same history the <a href="{% url 'prometheus_config' %}">raw editor</a> shows — restore an
-      earlier revision from there.
-    </p>
-  </div></div>
-  {% endif %}
-
-  <div class="actionbar">
-    <div class="container-inner">
-      <input type="text" name="note" placeholder="What changed and why (optional)"
-             style="max-width:320px" aria-label="Revision note">
-      <button class="btn ghost" type="submit" name="action" value="save">Save revision</button>
-      <button class="btn primary" type="submit" name="action" value="apply">Save &amp; Apply</button>
-      <a class="btn ghost" href="{% url 'configuration' %}">Discard changes</a>
-      <span style="color:var(--muted);font-size:12.5px;margin-left:auto">
-        Apply runs promtool first, then rewrites prometheus.yml and restarts the service.
-      </span>
-    </div>
-  </div>
-  </form>
-
-  {# ---- clone sources for the add buttons (never submitted: no name attributes yet) ---- #}
-  <template id="tplJob">
-    <div class="card cfg-job" data-collapsible data-job="__J__">
-      <header>
-        <h2><span data-job-title>(new job)</span></h2>
-        <span class="sub"><span data-group-count>0</span> target groups</span>
-        <span class="spacer"></span>
-        <button type="button" class="cfg-x" data-remove-job title="Remove this job">✕</button>
-        <span class="chev">▾</span>
-      </header>
-      <div class="body">
-        <div class="cfg-grid4">
-          <label class="field"><span>Job name</span>
-            <input type="text" name="job____J____name" data-job-name placeholder="node_exporter"></label>
-          <label class="field"><span>Scrape interval</span>
-            <input type="text" name="job____J____scrape_interval" placeholder="inherits global"></label>
-          <label class="field"><span>Scrape timeout</span>
-            <input type="text" name="job____J____scrape_timeout" placeholder="inherits global"></label>
-          <label class="field"><span>Metrics path</span>
-            <input type="text" name="job____J____metrics_path" placeholder="/metrics"></label>
-        </div>
-        <label class="field cfg-scheme"><span>Scheme</span>
-          <select name="job____J____scheme">
-            <option value="" selected>Default (http)</option>
-            <option value="http">http</option>
-            <option value="https">https</option>
-          </select>
-        </label>
-        <div class="cfg-sub-label">Target groups</div>
-        <div class="cfg-groups" data-groups></div>
-        <button type="button" class="btn ghost cfg-add" data-add-group>＋ Add target group</button>
-      </div>
-    </div>
-  </template>
-
-  <template id="tplGroup">
-    <div class="cfg-group" data-group="__G__">
-      <div class="cfg-group-head">
-        <b>New target group</b><span class="spacer"></span>
-        <button type="button" class="cfg-x" data-remove-group title="Remove this target group">✕</button>
-      </div>
-      <label class="field"><span>Targets — one per line</span>
-        <textarea name="sc____J______G____targets" rows="3" spellcheck="false" placeholder="10.0.0.11:9182"></textarea></label>
-      <div class="cfg-grid4">
-        <label class="field"><span>System <b class="cfg-req">· groups the report</b></span>
-          <input type="text" name="sc____J______G____l_system" placeholder="e.g. RTGS"></label>
-        <label class="field"><span>Display name</span>
-          <input type="text" name="sc____J______G____l_display" placeholder="e.g. RTGS Database"></label>
-        <label class="field"><span>Role</span>
-          <input type="text" name="sc____J______G____l_role" placeholder="app / db / …"></label>
-        <label class="field"><span>Platform (app)</span>
-          <input type="text" name="sc____J______G____l_app" placeholder="windows / linux"></label>
-      </div>
-      <div class="cfg-kv" data-kv="labels"></div>
-      <button type="button" class="btn ghost cfg-add" data-add-label>＋ Add another label</button>
-    </div>
-  </template>
-
-  <template id="tplLabel">
-    <div class="cfg-kv-row">
-      <input type="text" name="sc____J______G____xkey____N__" placeholder="label name" aria-label="Label name">
-      <input type="text" name="sc____J______G____xval____N__" placeholder="value" aria-label="Label value">
-      <button type="button" class="cfg-x" data-remove title="Remove">✕</button>
-    </div>
-  </template>
-
-  <template id="tplExtLabel">
-    <div class="cfg-kv-row">
-      <input type="text" name="g_extlabel_key____N__" placeholder="label name" aria-label="External label name">
-      <input type="text" name="g_extlabel_val____N__" placeholder="value" aria-label="External label value">
-      <button type="button" class="cfg-x" data-remove title="Remove">✕</button>
-    </div>
-  </template>
-
-  {% endif %}
 </div>
 {% endblock %}
