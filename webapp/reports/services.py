@@ -226,12 +226,16 @@ def build_overview(store, systems, cfg) -> dict:
     return {"glance": glance, "immediate": immediate, "watch": watch, "banners": banners}
 
 
-def list_systems() -> List[dict]:
+def list_systems(*, infra: bool = False) -> List[dict]:
     """The system name + host count from the topology (prometheus.yml) WITHOUT any live capture.
     This is a plain file read, so the selection screen can be rendered on every landing without
-    touching Prometheus — the expensive capture is deferred until the admin actually proceeds."""
+    touching Prometheus — the expensive capture is deferred until the admin actually proceeds.
+
+    `infra=True` returns Infrastructure Admin's own estate (hyper-converged clusters,
+    standalone DB hosts) instead of the business-systems topology — see
+    gr.load_topology's `scope` and webapp/reports/views.infra_form."""
     cfg = gr.load_config()
-    systems = gr.load_topology(cfg.prometheus_yml)
+    systems = gr.load_topology(cfg.prometheus_yml, scope="infra" if infra else "business")
     return [{"name": s.name, "hosts": len(s.components),
              # "windows" / "linux" / "hybrid" / "" — derived from the scrape job, so it costs
              # the same file read the rest of this function already paid for.
@@ -249,11 +253,14 @@ def _scope_links_to_systems(store, systems) -> None:
                    if gr.assign_link(u, systems) is not None}
 
 
-def capture_snapshot(token: str, only: Optional[set] = None) -> Snapshot:
+def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = False) -> Snapshot:
     """Load config + topology, capture a FRESH set of live metrics from Prometheus, and compute
     the per-system flagged items. `only` (a set of system names) scopes the capture to just those
     systems — so we only pay for what the admin selected. Raises PrometheusUnavailable if the
-    endpoint is unreachable."""
+    endpoint is unreachable.
+
+    `infra=True` loads Infrastructure Admin's own estate instead of the business-systems
+    topology — see list_systems."""
     cfg = gr.load_config()
     # runtime overrides an Administrator set in the app (which Prometheus/Grafana to use)
     from .models import SystemConfig
@@ -262,7 +269,7 @@ def capture_snapshot(token: str, only: Optional[set] = None) -> Snapshot:
         cfg.prom = sc.prometheus_url
     if sc.grafana_url:
         cfg.grafana = sc.grafana_url
-    systems = gr.load_topology(cfg.prometheus_yml)
+    systems = gr.load_topology(cfg.prometheus_yml, scope="infra" if infra else "business")
     if only is not None:
         want = {n for n in only}
         systems = [s for s in systems if s.name in want]

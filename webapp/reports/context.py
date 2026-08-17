@@ -11,7 +11,7 @@ from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
 from .roles import (ROLE_HOME, ROLE_PAGES, active_role, effective_roles, held_roles,
-                    is_network_admin, is_role_admin, is_system_admin)
+                    is_infra_admin, is_network_admin, is_role_admin, is_system_admin)
 
 
 def _asset_version() -> str:
@@ -42,6 +42,8 @@ _NAV_PARENT = {
     # one you are working in. Both therefore lead back to Role Select rather than dead-ending.
     "report_form": "role_select",
     "network_dashboard": "role_select",
+    "infra_form": "role_select",
+    "infra_report": "infra_form",
     # Each report sits under the picker that opened it, so Back steps out of the report
     # rather than dead-ending on it. The network report already worked this way; the systems
     # one had no Back at all and relied solely on the "Change systems" button in its header.
@@ -84,6 +86,8 @@ _NAV_LABEL = {
     "network_dashboard": "Network Device Picker",
     "role_empty": "Home",
     "network_report": "Core Switch",
+    "infra_form": "Infrastructure Picker",
+    "infra_report": "Infrastructure Report",
     "history": "History",
     "roles_console": "Roles",
     "configuration": "Configuration",
@@ -150,15 +154,21 @@ def _back_nav(request):
     # retrace the report rather than the screen it was started from.
     # ...but never when you are ALREADY on that report: the override would hand its own URL
     # back as "Back", so the button pointed at the page you were standing on and did nothing.
-    on_the_open_report = name in ("report", "network_report")
-    on_a_picker = name in ("report_form", "network_dashboard")
+    on_the_open_report = name in ("report", "network_report", "infra_report")
+    on_a_picker = name in ("report_form", "network_dashboard", "infra_form")
     # A picker's Back steps OUT of the estate, so the open-report override does not apply
     # there — the picker already offers "Continue that report" in its own widget, and having
     # Back do the same thing would leave no way up at all.
-    if parent in ("report_form", "network_dashboard") and not on_the_open_report and not on_a_picker:
+    if (parent in ("report_form", "network_dashboard", "infra_form")
+            and not on_the_open_report and not on_a_picker):
         if "Network Admin" in scope and request.session.get("network_devices"):
             try:
                 return reverse("network_report"), "Report"
+            except NoReverseMatch:
+                pass
+        if "Infrastructure Admin" in scope and request.session.get("infra_report_systems"):
+            try:
+                return reverse("infra_report"), "Report"
             except NoReverseMatch:
                 pass
         # An empty scope means the user holds no catalogue role at all — the pre-picker
@@ -241,6 +251,7 @@ def role_flags(request):
         # drives the Folder Watch nav group
         "is_system_admin": is_system_admin(user) and in_scope("System Admin"),
         "is_network_admin": is_network_admin(user) and in_scope("Network Admin"),
+        "is_infra_admin": is_infra_admin(user) and in_scope("Infrastructure Admin"),
         "active_role": active_role(request) if user is not None else "",
         # Only offer "switch role" to someone who actually has somewhere to switch to.
         "can_switch_role": len(held_roles(user)) > 1,

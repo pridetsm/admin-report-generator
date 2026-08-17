@@ -297,7 +297,10 @@ def to_topology(view: dict) -> dict:
          "rows": rows,
          "hosts": sum(r["g"]["targets_count"] for r in rows),
          # the engine drops these from the report even though Prometheus still scrapes them
-         "skipped": name.lower() in gr.SKIP_SYSTEMS}
+         "skipped": name.lower() in gr.SKIP_SYSTEMS,
+         # routed to Infrastructure Admin's own picker/report instead of System Admin's —
+         # scraped AND reported, just under a different estate (see gr.INFRA_SYSTEMS)
+         "infra": name.lower() in gr.INFRA_SYSTEMS}
         for name, rows in sorted(systems.items(),
                                  key=lambda kv: (order.get(kv[0], len(order)), kv[0].lower()))
     ]

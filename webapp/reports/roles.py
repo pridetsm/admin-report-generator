@@ -4,6 +4,7 @@ realm roles later). A user may hold several. 'Administrator' is the role that ma
 ROLE_NAMES = [
     "System Admin",
     "Network Admin",
+    "Infrastructure Admin",
     "Gov Systems Admin",
     "Security Admin",
     "Administrator",
@@ -12,6 +13,7 @@ ROLE_NAMES = [
 ADMIN_ROLE = "Administrator"
 SYSTEM_ADMIN_ROLE = "System Admin"
 NETWORK_ADMIN_ROLE = "Network Admin"
+INFRA_ADMIN_ROLE = "Infrastructure Admin"
 
 # Which pages each role unlocks. Anything not listed here is COMMON — the report builder,
 # history, connect and the personal pages belong to every role, because they are the job
@@ -29,6 +31,11 @@ ROLE_PAGES = {
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.
     NETWORK_ADMIN_ROLE:  {"network_dashboard", "network_report"},
+    # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
+    # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
+    # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
+    # so that one page belongs to every estate rather than needing an infra_generate twin.
+    INFRA_ADMIN_ROLE:    {"infra_form", "infra_report"},
     ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
                           "prometheus_config", "prometheus_rule_file",
                           "configuration", "config_yaml", "config_role_scopes",
@@ -45,6 +52,7 @@ ROLE_PAGES = {
 ROLE_HOME = {
     SYSTEM_ADMIN_ROLE:   "report_form",
     NETWORK_ADMIN_ROLE:  "network_dashboard",
+    INFRA_ADMIN_ROLE:    "infra_form",
     ADMIN_ROLE:          "roles_console",
     # The roles with no estate yet land on a screen that says so, rather than on History or
     # on another role's dashboard.
@@ -75,6 +83,9 @@ ROLE_DESCRIPTIONS = {
                          "system reports and the Temenos interface folders.",
     NETWORK_ADMIN_ROLE:  "For the team running the network — switches, links and the traffic "
                          "moving across them.",
+    INFRA_ADMIN_ROLE:    "For the team running the underlying hardware — hyper-converged "
+                         "clusters and standalone database hosts, separate from the "
+                         "business systems that run on them.",
     "Gov Systems Admin": "For the administrators of the government systems estate.",
     "Security Admin":    "For the security team.",
     ADMIN_ROLE:          "For whoever manages people's access — who holds which role, and "
@@ -94,6 +105,11 @@ ROLE_DESCRIPTIONS = {
 # The node graph deliberately does NOT go to Network Admin, whose cloud-over-racks glyph
 # already says "network"; two link-diagrams side by side would read as one domain split in
 # half rather than as two different jobs.
+#
+# Infrastructure Admin has no entry here deliberately, rather than reusing Network Admin's
+# cloud-over-racks glyph for want of a dedicated one — that would read as the same twin
+# problem the node graph was kept off Network Admin to avoid. role_icon() falls back to the
+# role's initial letter, which is honest rather than borrowed.
 ROLE_ICONS = {
     SYSTEM_ADMIN_ROLE:   "img/roles/neural-networks.png",
     NETWORK_ADMIN_ROLE:  "img/roles/network-infrastructure.png",
@@ -176,6 +192,20 @@ def is_network_admin(user) -> bool:
     return bool(user and user.is_authenticated
                 and (user.is_superuser
                      or user.groups.filter(name=NETWORK_ADMIN_ROLE).exists()))
+
+
+def is_infra_admin(user) -> bool:
+    """Who may see the Infrastructure Admin picker/report — the hardware estate (HCI
+    clusters, standalone DB hosts) that generate_report.load_topology's scope="infra" reads.
+
+    Same shape as is_network_admin: a dedicated role rather than folded into System Admin,
+    so a system admin's menu stays full of business systems and does not also fill up with
+    the clusters those systems happen to run on. A superuser passes, holding every role by
+    definition.
+    """
+    return bool(user and user.is_authenticated
+                and (user.is_superuser
+                     or user.groups.filter(name=INFRA_ADMIN_ROLE).exists()))
 
 
 def held_roles(user) -> list:

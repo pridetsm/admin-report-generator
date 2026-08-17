@@ -451,6 +451,13 @@ LDAP_DEPENDENTS = {"GCMS", "GMS"}
 # never appears among RTGS and Temenos on the System Admin side.
 SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network"}
 
+# `system` label values that ARE real systems, but belong to Infrastructure Admin's own
+# estate (hyper-converged clusters, standalone DB hosts — the underlying hardware) rather
+# than System Admin's business-systems topology. Same split SKIP_SYSTEMS already makes for
+# "rbz network" above, just for a second, non-network estate with its own report screens
+# (see webapp/reports/roles.py's Infrastructure Admin role and views.infra_form/infra_report).
+INFRA_SYSTEMS = {"hci cluster", "oracle hosts"}
+
 # Web links (blackbox HTTP probes) become a "WEB LINKS" service class inside a
 # system's Services table. A link is auto-attributed to the system whose name
 # appears in its URL (e.g. 'cepecs' in 'cepecsrpt.excon.rbz.co.zw' -> CEPECS).
@@ -559,8 +566,20 @@ def platform_of_system(components: List[Component]) -> str:
     return kinds.pop() if len(kinds) == 1 else "hybrid"
 
 
-def load_topology(prometheus_yml: str) -> List[System]:
-    """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label)."""
+def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[System]:
+    """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label).
+
+    `scope` picks which estate comes back:
+      "business" (default, every existing caller) — everything except SKIP_SYSTEMS and
+          INFRA_SYSTEMS. This is the System Admin topology.
+      "infra"    — ONLY the INFRA_SYSTEMS entries, for Infrastructure Admin's own picker/
+          report (see webapp/reports/views.infra_form/infra_report).
+      "all"      — everything except SKIP_SYSTEMS (both estates together) — used by the
+          webapp's Connect screen, which quick-launches to any monitored host regardless of
+          which report estate owns it.
+    "business" and "infra" are mutually exclusive, so a system never appears in both
+    estates' reports.
+    """
     import yaml  # PyYAML — see requirements.txt
     with open(prometheus_yml, encoding="utf-8") as fh:
         doc = yaml.safe_load(fh) or {}
@@ -571,6 +590,11 @@ def load_topology(prometheus_yml: str) -> List[System]:
             labels = sc.get("labels", {}) or {}
             system = (labels.get("system") or "").strip()
             if system.lower() in SKIP_SYSTEMS:
+                continue
+            is_infra = system.lower() in INFRA_SYSTEMS
+            if scope == "business" and is_infra:
+                continue
+            if scope == "infra" and not is_infra:
                 continue
             role, display = labels.get("role"), labels.get("display")
             for target in sc.get("targets", []) or []:

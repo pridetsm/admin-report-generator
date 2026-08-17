@@ -65,6 +65,7 @@
         <span class="sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
         <span class="spacer"></span>
         {% if s.skipped %}<span class="chip amber" title="Prometheus scrapes these, but the report skips this system name">not reported</span>{% endif %}
+        {% if s.infra %}<span class="chip accent" title="Reported on the Infrastructure Admin picker, not the System Admin one">Infrastructure Admin</span>{% endif %}
         <span class="chev">▾</span>
       </header>
       <div class="body">

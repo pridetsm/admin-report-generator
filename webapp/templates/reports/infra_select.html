@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}Choose infrastructure · RBZ Monitoring Console{% endblock %}
+
+{% block body %}
+{# ---- selection screen polish; scoped here so app.css stays untouched ---- #}
+<form method="post" action="{% url 'infra_report' %}" id="selectForm">
+{% csrf_token %}
+
+<div class="container">
+  <div class="snap" style="align-items:flex-start">
+    <div style="min-width:0">
+      <h1>Infrastructure Picker</h1>
+      <div class="meta">Choose the infrastructure for this report — live metrics are captured only for what you pick.</div>
+      <div class="sys-stats">
+        <span class="sys-stat">{{ select_systems|length }} item{{ select_systems|length|pluralize }}</span>
+        <span class="sys-stat">{{ total_hosts }} host{{ total_hosts|pluralize }}</span>
+        {% if recent_count %}<span class="sys-stat">{{ recent_count }} reported recently</span>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% if open_report %}
+  {% comment %}
+    A report is already open. This screen is the picker, so without this the only way
+    forward is to choose infrastructure again — which clears the snapshot token and discards
+    answers already typed. Landing here does not throw anything away; this simply makes
+    the way back visible, and says plainly what starting again would cost.
+  {% endcomment %}
+  <div class="resume-bar">
+    <div class="resume-text">
+      <b>You have a report open <span class="resume-cd" id="resumeCountdown" data-left="{{ open_seconds }}"></span></b>
+      <span>{{ open_report|join:", " }} — your answers are still there.</span>
+    </div>
+    <a class="btn primary" href="{% url 'infra_report' %}">Continue that report</a>
+  </div>
+  <p class="meta" style="margin:-4px 2px 14px">Choosing infrastructure below starts a new report and
+    discards the open one.</p>
+  {% endif %}
+
+  <div class="section-label">Infrastructure to include</div>
+  <div class="card"><div class="body" style="padding-top:14px">
+    <p class="meta" style="margin:0 0 4px;line-height:1.5">Infrastructure reported in the last
+      {{ recent_hours }} hour{{ recent_hours|pluralize }} carry a
+      <span class="badge-reported">↻ recently reported</span> flag so you can avoid re-reporting
+      the same one — it's only a heads-up, you can still include them.</p>
+
+    <div class="sys-toolbar">
+      <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All infrastructure</span></label>
+      <span class="sys-search">
+        <span class="sys-search-ico" aria-hidden="true">⌕</span>
+        <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter…"
+               autocomplete="off" aria-label="Filter infrastructure">
+        <button type="button" class="sys-clear" id="sysClear" hidden aria-label="Clear filter">×</button>
+      </span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="select-count" id="selectCountTop"></span>
+    </div>
+
+    <div class="sys-grid" id="selectList">
+      {% for s in select_systems %}
+      <label class="sys-tile" data-name="{{ s.name|lower }}">
+        <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}">
+        {% comment %}
+          The platform glyph stands in for the monogram. An item whose scrape jobs don't
+          identify an OS keeps the letter, so the badge is never empty.
+
+          A hybrid item gets TWO badges rather than one badge holding both glyphs — each the
+          same size as every other badge, so the tile with the most to say isn't the one whose
+          glyphs are smallest. Each names its own platform for a screen reader; the pair is
+          just a layout wrapper, so it stays out of the accessibility tree.
+        {% endcomment %}
+        {% if s.platform == 'hybrid' %}
+        <span class="sys-os-pair" style="--mono-h:{{ s.mono_hue }}">
+          <span class="sys-mono" role="img" aria-label="Windows" title="Windows">
+            <i class="os-glyph os-windows"></i>
+          </span>
+          <span class="sys-mono" role="img" aria-label="Linux" title="Linux">
+            <i class="os-glyph os-linux"></i>
+          </span>
+        </span>
+        {% else %}
+        <span class="sys-mono"
+              style="--mono-h:{{ s.mono_hue }}"
+              {% if s.platform %}role="img" aria-label="{{ s.platform_label }}"
+              title="{{ s.platform_label }}"{% endif %}>
+          {% if s.platform %}<i class="os-glyph os-{{ s.platform }}"></i>
+          {% else %}{{ s.name.0|upper }}{% endif %}
+        </span>
+        {% endif %}
+        <span class="sys-body">
+          <span class="sys-name">{{ s.name }}</span>
+          <span class="sys-sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
+          {% if s.reported %}<span class="badge-reported" title="Reported by {{ s.reported.by|default:'—' }}">↻ reported {{ s.reported.at|timesince }} ago</span>{% endif %}
+        </span>
+        <span class="sys-tick" aria-hidden="true">✓</span>
+      </label>
+      {% empty %}
+      <div class="sys-empty"><span class="big">⌸</span>No infrastructure found in the topology.</div>
+      {% endfor %}
+    </div>
+    <div class="sys-empty" id="sysNoResults" hidden><span class="big">⌕</span>No infrastructure match your filter.</div>
+  </div></div>
+</div>
+
+{# ---- sticky action bar ---- #}
+<div class="actionbar">
+  <div class="container-inner">
+    <span class="sel-pill"><b id="selCountNum">0</b><span id="selectCount"></span></span>
+    <button type="button" class="sel-clear" id="selClear" hidden>Clear</button>
+    <div class="spacer" style="flex:1"></div>
+    <button class="btn primary" type="submit">Capture &amp; continue ▸</button>
+  </div>
+</div>
+</form>
+
+<div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("selectForm");
+  var tiles = Array.prototype.slice.call(document.querySelectorAll(".sys-tile"));
+  var checks = tiles.map(function (t) { return t.querySelector(".select-check"); });
+  var allBox = document.getElementById("selectAll");
+  var counts = [document.getElementById("selectCount"), document.getElementById("selectCountTop")];
+  var filter = document.getElementById("sysFilter");
+  var noResults = document.getElementById("sysNoResults");
+  var grid = document.getElementById("selectList");
+  var countNum = document.getElementById("selCountNum");
+  var selClear = document.getElementById("selClear");
+  var sysClear = document.getElementById("sysClear");
+
+  function sync() {
+    var n = 0;
+    tiles.forEach(function (t) {
+      var on = t.querySelector(".select-check").checked;
+      t.classList.toggle("checked", on);
+      if (on) n++;
+    });
+    if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
+    counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
+    // only dim the unselected tiles once something IS selected
+    if (grid) grid.classList.toggle("has-selection", n > 0);
+    if (countNum) countNum.textContent = n;
+    if (selClear) selClear.hidden = n === 0;
+  }
+  checks.forEach(function (c) { c.addEventListener("change", sync); });
+
+  if (allBox) allBox.addEventListener("change", function () {
+    checks.forEach(function (c) { c.checked = allBox.checked; });
+    sync();
+  });
+
+  if (selClear) selClear.addEventListener("click", function () {
+    checks.forEach(function (c) { c.checked = false; });
+    sync();
+  });
+
+  function applyFilter() {
+    var q = filter.value.trim().toLowerCase(), shown = 0;
+    tiles.forEach(function (t) {
+      var hit = !q || t.getAttribute("data-name").indexOf(q) > -1;
+      t.classList.toggle("hidden-by-filter", !hit);
+      if (hit) shown++;
+    });
+    if (noResults) noResults.hidden = shown > 0 || tiles.length === 0;
+    if (sysClear) sysClear.hidden = !q;
+  }
+  if (filter) {
+    filter.addEventListener("input", applyFilter);
+    filter.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && filter.value) { e.preventDefault(); filter.value = ""; applyFilter(); }
+    });
+  }
+  if (sysClear) sysClear.addEventListener("click", function () {
+    filter.value = ""; applyFilter(); filter.focus();
+  });
+
+  if (form) form.addEventListener("submit", function (e) {
+    if (!checks.some(function (c) { return c.checked; })) {
+      e.preventDefault();
+      window.alert("Select at least one item to include in the report.");
+    }
+  });
+
+  sync();
+})();
+</script>
+
+{% comment %}
+  The open report expires on the same clock as its snapshot, so the widget counts down to the
+  moment it stops being true rather than offering to continue a report whose numbers went
+  stale hours ago. At zero the page reloads; the server has already dropped the session keys
+  by then, so the widget is simply gone.
+{% endcomment %}
+{% if open_seconds %}
+<script>
+(function () {
+  "use strict";
+  var el = document.getElementById("resumeCountdown");
+  if (!el) { return; }
+  var deadline = Date.now() + (parseInt(el.getAttribute("data-left"), 10) || 0) * 1000;
+  function tick() {
+    var left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    var m = Math.floor(left / 60), s = left % 60;
+    el.textContent = m + ":" + (s < 10 ? "0" : "") + s;
+    el.classList.toggle("warn", left <= 60);
+    if (left <= 0) { clearInterval(iv); window.location.reload(); }
+  }
+  tick();
+  var iv = setInterval(tick, 1000);
+})();
+</script>
+{% endif %}
+{% endblock %}

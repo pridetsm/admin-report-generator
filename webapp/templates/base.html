@@ -174,6 +174,9 @@
       <a href="{% url 'network_report' %}" class="drawer-child{% if current_page == 'network_report' %} is-current{% endif %}"{% if current_page == 'network_report' %} aria-current="page"{% endif %}>Core Switch</a>
     </div>
     {% endif %}
+    {% if is_infra_admin %}
+    <a href="{% url 'infra_form' %}"{% if current_page == 'infra_form' %} class="is-current" aria-current="page"{% elif 'infra_form' in current_ancestors %} class="is-ancestor"{% endif %}>Infrastructure Picker</a>
+    {% endif %}
     <a href="{% url 'connect' %}"{% if current_page == 'connect' %} class="is-current" aria-current="page"{% elif 'connect' in current_ancestors %} class="is-ancestor"{% endif %}>Connect</a>
     {% comment %}
       Folder Watch is a parent: one child today (Temenos), more as other hosts start

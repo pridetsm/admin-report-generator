@@ -43,7 +43,7 @@ from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
 from .roles import (ALL_ROLES, ALL_ROLES_GLYPH, ALL_ROLES_LABEL,
                     ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
-                    active_role, held_roles, is_network_admin, is_role_admin,
+                    active_role, held_roles, is_infra_admin, is_network_admin, is_role_admin,
                     role_icon, role_screens,
                     is_superuser, is_system_admin)
 from .services import (
@@ -268,7 +268,15 @@ def role_select(request):
 #: session keys holding when an open report lapses, per estate. An open report is a claim on
 #: the admin's attention ("your answers are still there"), so it has to expire on its own —
 #: otherwise the resume bar offers to continue a report whose numbers went stale hours ago.
-_OPEN_UNTIL = {"systems": "report_expires_at", "network": "network_expires_at"}
+_OPEN_UNTIL = {"systems": "report_expires_at", "network": "network_expires_at",
+              "infra": "infra_report_expires_at"}
+
+#: session keys an estate's open report claims, cleared together once it lapses or is closed.
+_ESTATE_SESSION_KEYS = {
+    "systems": {"report_systems", "snapshot_token", "report_expires_at"},
+    "network": {"network_devices", "network_token", "network_expires_at"},
+    "infra":   {"infra_report_systems", "infra_snapshot_token", "infra_report_expires_at"},
+}
 
 
 def _open_report_seconds(request, estate: str) -> int:
@@ -287,9 +295,7 @@ def _open_report_seconds(request, estate: str) -> int:
 
 
 def _close_open_report(request, estate: str) -> None:
-    keys = ({"report_systems", "snapshot_token", "report_expires_at"} if estate == "systems"
-            else {"network_devices", "network_token", "network_expires_at"})
-    for k in keys:
+    for k in _ESTATE_SESSION_KEYS.get(estate, ()):
         request.session.pop(k, None)
 
 
@@ -819,6 +825,103 @@ def network_generate(request):
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
     return resp
+
+
+@never_cache
+@login_required
+def infra_form(request):
+    """Infrastructure Admin's landing page — the SAME lightweight selection screen shape as
+    report_form, scoped to the hardware estate (HCI clusters, standalone DB hosts) instead of
+    business systems. See gr.INFRA_SYSTEMS / load_topology's `scope` for how the two
+    topologies split — a device added there never appears on both pickers.
+    """
+    if not is_infra_admin(request.user):
+        return redirect("report_form")
+    recent = _recently_reported()
+    select_systems = [
+        {"name": s["name"], "hosts": s["hosts"], "reported": recent.get(s["name"]),
+         "mono_hue": _mono_hue(s["name"]),
+         "platform": s["platform"],
+         "platform_label": PLATFORM_LABELS.get(s["platform"], PLATFORM_LABELS[""])}
+        for s in list_systems(infra=True)
+    ]
+    open_seconds = _open_report_seconds(request, "infra")
+    open_systems = (request.session.get("infra_report_systems") or []) if open_seconds else []
+    return render(request, "reports/infra_select.html", {
+        "select_systems": select_systems,
+        "recent_hours": _RECENT_REPORT_HOURS,
+        "total_hosts": sum(s["hosts"] for s in select_systems),
+        "recent_count": sum(1 for s in select_systems if s["reported"]),
+        "open_report": list(open_systems),
+        "open_seconds": open_seconds,
+    })
+
+
+@login_required
+def infra_report(request):
+    """The report / annotation screen for the SELECTED infrastructure — mirrors `report`
+    exactly (see its docstring for the always-fresh-capture rationale), scoped to
+    Infrastructure Admin's own estate. Posts straight to the SHARED `generate` view: that
+    view is purely snapshot-driven, with nothing business-systems-specific in it, so this
+    estate needs no infra_generate twin — one download/e-mail path serves every estate.
+    """
+    if not is_infra_admin(request.user):
+        return redirect("report_form")
+
+    if request.method == "POST":
+        names = [n for n in request.POST.getlist("include_system") if n]
+        if not names:
+            messages.error(request, "Select at least one item to include in the report.")
+            return redirect("infra_form")
+        request.session["infra_report_systems"] = names
+        request.session.pop("infra_snapshot_token", None)
+        return redirect("infra_report")
+
+    names = request.session.get("infra_report_systems")
+    if not names:
+        return redirect("infra_form")
+
+    token = uuid.uuid4().hex
+    try:
+        snapshot = capture_snapshot(token, only=set(names), infra=True)
+    except PrometheusUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "None of the selected infrastructure were found. Please choose again.")
+        request.session.pop("infra_report_systems", None)
+        return redirect("infra_form")
+    cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
+    request.session["infra_snapshot_token"] = token
+    request.session["infra_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+
+    elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
+    remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    hosts_by_system = connect.hosts_from_snapshot(snapshot._systems, snapshot._store)
+    connect.attach_flag_severity(hosts_by_system, snapshot.systems)
+    platforms = {s.name: gr.platform_of_system(s.components) for s in snapshot._systems}
+    for svm in snapshot.systems:
+        svm.connect_hosts = hosts_by_system.get(svm.name, [])
+        svm.platform = platforms.get(svm.name, "")
+        svm.platform_label = PLATFORM_LABELS.get(svm.platform, PLATFORM_LABELS[""])
+
+    return render(request, "reports/form.html", {
+        "generate_default": reverse("generate"),
+        "dash_title": "Infrastructure Analyses Dashboard",
+        "subject": "system",
+        "draft_key": "draft:infra:" + ",".join(sorted(names)),
+        "picker_url": reverse("infra_form"),
+        "snapshot": snapshot,
+        "token": token,
+        "selected_count": len(snapshot.systems),
+        "suggested_author": _profile_author(request.user),
+        "suggested_recipients": default_recipients(),
+        "recipient_options": recipient_options(),
+        "default_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        "ttl_minutes": settings.SNAPSHOT_TTL // 60,
+        "ttl_seconds": settings.SNAPSHOT_TTL,
+        "remaining_seconds": remaining,
+    })
 
 
 @login_required

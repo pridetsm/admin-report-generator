@@ -129,7 +129,9 @@ def inventory(only: Optional[set] = None, with_reachability: bool = True) -> Lis
     """Every monitored host, grouped by system: [{name, hosts:[...]}, ...].
        Reads the topology file only — no capture — so the page is cheap to open."""
     cfg = gr.load_config()
-    systems = gr.load_topology(cfg.prometheus_yml)
+    # scope="all": Connect is a common quick-launch screen, not the System Admin picker — it
+    # should keep listing every monitored host, business AND infrastructure estates alike.
+    systems = gr.load_topology(cfg.prometheus_yml, scope="all")
     if only:
         systems = [s for s in systems if s.name in only]
     up = fetch_up(cfg) if with_reachability else None
@@ -203,7 +205,7 @@ def find_host(instance: str) -> Optional[dict]:
     if not instance:
         return None
     cfg = gr.load_config()
-    for s in gr.load_topology(cfg.prometheus_yml):
+    for s in gr.load_topology(cfg.prometheus_yml, scope="all"):
         for c in s.components:
             if c.instance == instance:
                 return build_host(s.name, c.label, c.instance, None)
