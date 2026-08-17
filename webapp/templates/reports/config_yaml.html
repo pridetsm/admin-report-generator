@@ -3,35 +3,18 @@
 
 {% block body %}
 <div class="container" style="max-width:1040px">
-  {% include "reports/_config_tabs.html" %}
 
-  <div class="card"><div class="body" style="padding:16px 18px">
-    <p style="margin:0 0 10px">
-      The current <code>{{ yaml_source.path }}</code> as text — the exact content the
-      <a href="{% url 'configuration' %}">configuration form</a> is showing you as fields, and the
-      same content the <a href="{% url 'prometheus_config' %}">raw editor</a> holds. One file, one
-      history, three ways of looking at it.
-    </p>
-    <p style="margin:0;color:var(--muted);font-size:13px">
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
       {{ line_count }} line{{ line_count|pluralize }} ·
-      {% if yaml_source.from_revision %}
-        revision saved {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}{% if yaml_source.revision.created_by %}
-        by {{ yaml_source.revision.created_by.get_username }}{% endif %}
-      {% else %}
-        read from the live file — no revision saved yet
-      {% endif %}.
-      This is the newest SAVED revision, which is only what Prometheus is running if it was also
-      applied. Prometheus service: <b>{{ service_status }}</b>.
-      <br>
-      Read-only here on purpose — two editable boxes for one file is how they drift apart. Edit
-      as fields, or as raw text; both write the same revision.
-    </p>
-    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
-      <a class="btn primary" href="{% url 'configuration' %}">Edit as fields</a>
-      <a class="btn ghost" href="{% url 'prometheus_config' %}">Edit as raw text</a>
-      {% if raw %}<a class="btn ghost" href="?download=1" download>⬇ Download a copy</a>{% endif %}
-    </div>
-  </div></div>
+      {% if yaml_source.from_revision %}revision {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}
+      {% else %}live file{% endif %} · service <b>{{ service_status }}</b>
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_prometheus' %}">Edit as fields</a>
+    <a class="btn ghost" href="{% url 'prometheus_config' %}">✎ Edit raw</a>
+    {% if raw %}<a class="btn ghost" href="?download=1" download>⬇ Download</a>{% endif %}
+  </div>
 
   {% if error %}
     <div class="card"><div class="body" style="padding:18px">

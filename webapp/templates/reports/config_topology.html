@@ -13,7 +13,6 @@
 
 {% block body %}
 <div class="container" style="max-width:1040px">
-  {% include "reports/_config_tabs.html" %}
 
   {% if load_error %}
     <div class="card"><div class="body" style="padding:18px">
@@ -31,22 +30,16 @@
   {% include "reports/_promconfig_carry.html" with carry="globals" %}
   {% include "reports/_promconfig_carry.html" with carry="jobmeta" %}
 
-  <div class="card"><div class="body" style="padding:16px 18px">
-    <p style="margin:0 0 10px">
-      Which hosts belong to which system. <b>System</b> is what groups a host into a card on the
-      report, <b>Display name</b> is what it is called there, and <b>Role</b> is a component hint
-      (app, db, …). Retyping a host's System moves it; typing a new name creates that system.
-    </p>
-    <p style="margin:0;color:var(--muted);font-size:13px">
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
       {{ topo.systems|length }} system{{ topo.systems|pluralize }} ·
-      {{ topo.host_count }} host{{ topo.host_count|pluralize }}
-      {% if topo.unassigned %}· {{ topo.unassigned|length }} not assigned to any system{% endif %}.
-      This is the same <code>prometheus.yml</code> the
-      <a href="{% url 'config_prometheus' %}">Prometheus</a> screen holds; scrape intervals and
-      rule files live there, and the whole file as text is in
-      <a href="{% url 'prometheus_config' %}">the raw editor</a>.
-    </p>
-  </div></div>
+      {{ topo.host_count }} host{{ topo.host_count|pluralize }}{% if topo.unassigned %} ·
+      {{ topo.unassigned|length }} unassigned{% endif %}
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_prometheus' %}">Prometheus settings</a>
+    <a class="btn ghost" href="{% url 'prometheus_config' %}">✎ Edit raw YAML</a>
+  </div>
 
   {% if errors %}
   <div class="card"><div class="body" style="padding:14px 18px">
@@ -80,8 +73,7 @@
     <div class="section-label sub">Not assigned to a system</div>
     <div class="card"><div class="body" style="padding:14px 18px 6px">
       <p style="margin:0 0 12px;color:var(--muted);font-size:13px">
-        Prometheus scrapes these, but with no <b>System</b> label the report has nowhere to put
-        them, so they are left out of it. Give one a system name to bring it in.
+        No <b>System</b> label, so the report leaves them out. Give one a system name to include it.
       </p>
       {% for row in topo.unassigned %}
         {% include "reports/_topology_host.html" with row=row %}
@@ -103,10 +95,6 @@
         </select>
       </label>
       <button type="button" class="btn ghost" id="addHost">＋ Add host</button>
-      <span style="color:var(--muted);font-size:12.5px">
-        The job decides how it is scraped (Windows, Linux, blackbox); the System label decides
-        where it appears in the report.
-      </span>
     </div>
     <div id="newHosts" class="cfg-groups" style="margin-top:12px"></div>
   </div></div>

@@ -3852,14 +3852,18 @@ class ConfigurationNesting(PrometheusConfigBase):
         for name in self.CHILDREN:
             self.assertIn(f'href="{reverse(name)}"', body, f"{name} missing from the hub")
 
-    def test_snmp_is_present_but_says_it_is_empty(self):
-        """A named placeholder, not a stubbed form: nothing behind it could be mistaken for
-        working configuration."""
+    def test_snmp_renders_without_the_deleted_tab_strip(self):
+        """SNMP was a placeholder that this class used to assert was empty; c9faf65 wired it
+        up for real, so "is it still blank" is no longer a fact worth pinning.
+
+        What IS worth pinning is that it renders at all. It inherited the tab-strip include
+        from the placeholder, and that partial no longer exists — leaving it would have raised
+        TemplateDoesNotExist on a screen that had only just started working, and no other test
+        loads this page.
+        """
         resp = self.client.get(reverse("config_snmp"))
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "Not configured yet")
-        self.assertNotContains(resp, 'name="action"')      # nothing to save
-        self.assertNotContains(resp, "Save &amp; Apply")
+        self.assertNotContains(resp, "cfg-tabs")
 
     def test_prometheus_offers_the_raw_yaml(self):
         resp = self.client.get(reverse("config_prometheus"))

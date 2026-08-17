@@ -487,7 +487,30 @@ table.hist tr:last-child td { border-bottom: 0; }
 .sys-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .sys-name { font-weight: 650; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sys-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.sys-tile .badge-reported { margin-top: 6px; align-self: flex-start; }
+
+/* ---- recently reported: tint the tile, don't badge it ----
+   The badge was a third line inside the tile: it pushed the layout around, competed with the
+   name for attention, and only ever appeared on some tiles, so the grid's rows never settled.
+   The tint carries the same one bit of information using space the tile already occupies.
+
+   Background only. The border stays free to mean "selected", which is the state the user is
+   actively changing — two colours fighting over one border is how you end up unable to tell
+   what you have picked. */
+.sys-tile.is-recent { background: var(--amber-bg); }
+.sys-tile.is-recent .sys-sub { color: var(--amber); }
+/* Selected wins the border and the tick; the amber wash stays underneath, so a tile can say
+   "recently reported" and "you picked it anyway" at the same time. */
+.sys-tile.is-recent.checked { border-color: var(--accent); }
+
+/* the key for that tint, sat above the grid */
+.sys-key {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 12px;
+  color: var(--muted); font-size: 12.5px; line-height: 1.5;
+}
+.sys-key-swatch {
+  flex: none; width: 26px; height: 16px; border-radius: 5px;
+  background: var(--amber-bg); border: 1px solid var(--amber);
+}
 .sys-tick {
   flex: none; width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center;
   border: 1.5px solid var(--line-strong); color: transparent; font-size: 13px; font-weight: 800;
@@ -498,11 +521,6 @@ table.hist tr:last-child td { border-bottom: 0; }
 .sys-tile:not(.checked) { opacity: .6; }
 .sys-tile:not(.checked):hover { opacity: 1; }
 .sys-tile.hidden-by-filter { display: none; }
-
-.badge-reported {
-  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
-  background: var(--amber-bg); color: var(--amber); font-size: 11px; font-weight: 600;
-}
 
 /* ---- toasts (bottom-center, above the action bar) ---- */
 .toast-wrap {
@@ -535,16 +553,17 @@ table.hist tr:last-child td { border-bottom: 0; }
 .cfg-hub-name { font-weight: 650; font-size: 15px; }
 .cfg-hub-hint { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 
-.cfg-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
-.cfg-tab {
-  display: flex; flex-direction: column; gap: 2px; padding: 10px 14px; min-width: 170px;
-  border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel);
-  color: var(--ink); text-decoration: none;
+/* One line at the top of a configuration screen: the state on the left, the ways out on the
+   right. Replaces the paragraphs that used to explain each screen — the drawer says where you
+   are, the field labels say what each field is, and prose repeating both was the third telling. */
+.cfg-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel);
 }
-.cfg-tab:hover { border-color: var(--accent); text-decoration: none; }
-.cfg-tab.is-active { border-color: var(--accent); background: var(--panel-2); box-shadow: inset 0 -2px 0 var(--accent); }
-.cfg-tab-label { font-weight: 650; font-size: 14px; }
-.cfg-tab-hint { color: var(--muted); font-size: 12px; }
+.cfg-bar .spacer { flex: 1; }
+.cfg-bar-state { color: var(--muted); font-size: 13px; }
+.cfg-note { color: var(--muted); font-size: 12.5px; margin: 0 2px 14px; }
 
 .cfg-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
 .cfg-grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
@@ -689,8 +708,16 @@ table.hist tr:last-child td { border-bottom: 0; }
   .sys-grid.has-selection .sys-tile:not(.checked) { opacity: .55; }
   .sys-grid.has-selection .sys-tile:not(.checked):hover { opacity: 1; }
 
-  /* stretch, so a tile fills the equal-height row its grid gives it */
-  .sys-tile { align-items: flex-start; min-height: 66px; height: 100%;
+  /* Stretch, so a tile fills the equal-height row its grid gives it.
+
+     Contents are CENTRED now, and the tile is shorter. Both follow from the "recently
+     reported" badge becoming a tint: the tile is two lines on every row instead of two or
+     three depending on the system, so top-alignment (which existed to stop that third line
+     shoving things around) leaves the badge and the name floating above dead space.
+
+     The badge column sizes itself — one glyph for a single-platform system, two for a hybrid
+     — so the body flexes around it rather than the row being cut to a fixed measure. */
+  .sys-tile { align-items: center; min-height: 58px; height: 100%;
               transition: border-color .13s ease, opacity .13s ease, background .13s ease,
                           transform .13s ease, box-shadow .13s ease; }
   .sys-tile:hover { transform: translateY(-1px); box-shadow: 0 3px 12px rgba(0,0,0,.09); }

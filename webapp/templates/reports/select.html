@@ -39,10 +39,15 @@
 
   <div class="section-label">Systems to include</div>
   <div class="card"><div class="body" style="padding-top:14px">
-    <p class="meta" style="margin:0 0 4px;line-height:1.5">Systems reported in the last
-      {{ recent_hours }} hour{{ recent_hours|pluralize }} carry a
-      <span class="badge-reported">↻ recently reported</span> flag so you can avoid re-reporting
-      the same one — it's only a heads-up, you can still include them.</p>
+    {% if recent_count %}
+    {# Key for the amber tiles. Shown only when some tile is actually amber — a legend for a
+       colour nothing on the page is wearing is just a sentence in the way. #}
+    <p class="sys-key">
+      <span class="sys-key-swatch" aria-hidden="true"></span>
+      Amber = reported in the last {{ recent_hours }} hour{{ recent_hours|pluralize }}.
+      A heads-up so the same one isn't reported twice — you can still include them.
+    </p>
+    {% endif %}
 
     <div class="sys-toolbar">
       <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All systems</span></label>
@@ -58,7 +63,14 @@
 
     <div class="sys-grid" id="selectList">
       {% for s in select_systems %}
-      <label class="sys-tile" data-name="{{ s.name|lower }}">
+      {% comment %}
+        A recently-reported tile is tinted amber rather than carrying a badge: the badge was a
+        third line inside the tile, which pushed the layout around and read as loud as the
+        name. The tint says the same thing at a glance, costs no space, and leaves the tile
+        to be a tile. Who and when stay on the title, for anyone who wants the detail.
+      {% endcomment %}
+      <label class="sys-tile{% if s.reported %} is-recent{% endif %}" data-name="{{ s.name|lower }}"
+             {% if s.reported %}title="Reported {{ s.reported.at|timesince }} ago by {{ s.reported.by|default:'—' }}"{% endif %}>
         <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}">
         {% comment %}
           The platform glyph stands in for the monogram. A system whose scrape jobs don't
@@ -90,7 +102,6 @@
         <span class="sys-body">
           <span class="sys-name">{{ s.name }}</span>
           <span class="sys-sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
-          {% if s.reported %}<span class="badge-reported" title="Reported by {{ s.reported.by|default:'—' }}">↻ reported {{ s.reported.at|timesince }} ago</span>{% endif %}
         </span>
         <span class="sys-tick" aria-hidden="true">✓</span>
       </label>

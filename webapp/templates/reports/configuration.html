@@ -15,11 +15,6 @@
 <div class="container" style="max-width:1040px">
 
   <div class="section-label">Configuration</div>
-  <p style="color:var(--muted);margin:0 0 16px;font-size:13.5px">
-    Everything this console configures, in one place. Prometheus and Topology are two views of
-    the same <code>prometheus.yml</code> — settings on one, the estate on the other — and both
-    save through the same versioned history.
-  </p>
 
   <div class="cfg-hub">
     {% for c in config_children %}
@@ -30,21 +25,6 @@
     {% endfor %}
   </div>
 
-  <div class="section-label sub">Current state</div>
-  <div class="card"><div class="body" style="padding:14px 18px">
-    <p style="margin:0;color:var(--muted);font-size:13px">
-      Prometheus service: <b>{{ service_status }}</b>.
-      Configuration in the editors:
-      {% if yaml_source.from_revision %}
-        revision saved {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}{% if yaml_source.revision.created_by %}
-        by {{ yaml_source.revision.created_by.get_username }}{% endif %}
-      {% else %}
-        read straight from the live file — nothing saved through the console yet
-      {% endif %}.
-      <br>
-      A saved revision is not necessarily the running one: applying is what rewrites
-      <code>{{ yaml_source.path }}</code> and restarts the service.
-    </p>
-  </div></div>
+  <p class="cfg-note">Prometheus service: <b>{{ service_status }}</b></p>
 </div>
 {% endblock %}

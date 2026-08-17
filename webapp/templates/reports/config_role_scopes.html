@@ -4,21 +4,8 @@
 
 {% block body %}
 <div class="container" style="max-width:1040px">
-  {% include "reports/_config_tabs.html" %}
 
-  <div class="card"><div class="body" style="padding:16px 18px">
-    <p style="margin:0 0 8px">
-      Which systems each role’s workspace covers. This is what the tiles on the sign-in
-      <a href="{% url 'role_select' %}">role-selection screen</a> choose between — picking a role
-      scopes the dashboard, the report and the e-mail to that role’s systems.
-    </p>
-    <p style="margin:0;color:var(--muted);font-size:13px">
-      Tick nothing to leave a role <b>unrestricted</b> — it sees the whole estate. “Load all my
-      roles” is the union of every role the signed-in user holds. Systems come from
-      <a href="{% url 'configuration' %}">prometheus.yml</a>, so add a system there first and it
-      appears here.
-    </p>
-  </div></div>
+  <p class="cfg-note">Tick nothing to leave a role unrestricted — it sees every system.</p>
 
   {% if not systems %}
     <div class="card"><div class="body" style="padding:18px;color:var(--muted)">
