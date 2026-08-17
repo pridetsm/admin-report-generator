@@ -195,9 +195,7 @@
         var host = rmHost.closest(".cfg-group");
         var name = (host.querySelector("input[name$='__l_display']") || {}).value ||
                    (host.querySelector("textarea") || {}).value || "this host";
-        if (confirm("Remove " + name + " from the configuration?
-
-Nothing is written until you save.")) {
+        if (confirm("Remove " + name + " from the configuration?\n\nNothing is written until you save.")) {
           host.remove();
         }
         return;

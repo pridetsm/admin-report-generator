@@ -3916,3 +3916,92 @@ class TopologyScreen(PrometheusConfigBase):
         # next free group index per job, so added rows never collide with existing ones
         self.assertEqual(topo["jobs"][0]["next_group"], 2)
         self.assertEqual(topo["jobs"][1]["next_group"], 1)
+
+
+class JavaScriptParses(TestCase):
+    """app.js must actually parse.
+
+    A syntax error in it is the most damaging failure this app has, and the least visible: the
+    browser abandons the WHOLE file, so every listener in it dies at once — the nav drawer, the
+    top-bar menus, the theme toggle, the page spinner, the pickers — while Django serves 200s,
+    every template renders, and the entire test suite passes. It cost exactly that: a literal
+    newline inside a confirm() string shipped in 214298a and took the drawer down with it.
+
+    Checked by scanning for the failure directly rather than shelling out to node, so it runs
+    the same everywhere. Covers static/js/ — inline <script> blocks in templates are Django
+    templates first and JavaScript second, so they are not parseable in isolation.
+    """
+
+    def _unterminated_strings(self, src: str):
+        """Line numbers where a quoted string is left open at end-of-line.
+
+        A tiny state machine rather than a regex: quotes inside comments, comment markers
+        inside quotes, and escaped quotes all have to be read in context, and a regex that
+        gets those right is harder to trust than this is.
+        """
+        bad, state, escaped = [], None, False
+        line = 1
+        for i, ch in enumerate(src):
+            nxt = src[i + 1] if i + 1 < len(src) else ""
+            if ch == "\n":
+                if state in ('"', "'"):
+                    bad.append(line)
+                    state = None            # resynchronise; report one fault per string
+                elif state == "//":
+                    state = None
+                line += 1
+                escaped = False
+                continue
+            if state in ('"', "'", "`"):
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == state:
+                    state = None
+                continue
+            if state == "//":
+                continue
+            if state == "/*":
+                if ch == "*" and nxt == "/":
+                    state = None
+                continue
+            if ch == "/" and nxt == "/":
+                state = "//"
+            elif ch == "/" and nxt == "*":
+                state = "/*"
+            elif ch in ('"', "'", "`"):
+                state = ch
+        return bad
+
+    def test_no_javascript_file_has_an_unterminated_string(self):
+        import pathlib
+
+        js_dir = pathlib.Path(settings.BASE_DIR) / "static" / "js"
+        checked = 0
+        for path in sorted(js_dir.glob("*.js")):
+            checked += 1
+            bad = self._unterminated_strings(path.read_text(encoding="utf-8"))
+            self.assertEqual(bad, [], f"{path.name}: string left open at line(s) {bad}")
+        self.assertGreater(checked, 0, "no JavaScript found to check — has static/js moved?")
+
+    def test_the_check_catches_the_bug_it_exists_for(self):
+        """The guard is worthless if it cannot see the failure that motivated it."""
+        broken = 'var a = 1;\nif (confirm("Remove this?\n\nNothing is saved.")) { a = 2; }\n'
+        # line 2 is where the string opens; the tail of the split string trips it again on
+        # line 4, which is honest — one broken literal really does corrupt what follows it
+        self.assertIn(2, self._unterminated_strings(broken))
+        # ...and does not cry wolf over the things that legitimately contain quotes.
+        # Raw string: every backslash here belongs to the JavaScript, not to Python.
+        fine = "\n".join([
+            r"""// a comment with "quotes" and an apostrophe's""",
+            r"""/* a block "comment" spanning""",
+            r"""   two lines */""",
+            r'''var s = "a \" escaped quote";''',
+            r"""var t = 'it\'s fine';""",
+            r'''var u = "line one\nline two";''',
+            r"""var v = `a template""",
+            r"""literal spanning lines`;""",
+            "",
+        ])
+        self.assertEqual(self._unterminated_strings(fine), [])
