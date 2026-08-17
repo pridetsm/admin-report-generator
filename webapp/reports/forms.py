@@ -53,6 +53,20 @@ class GrafanaConfigForm(forms.Form):
     execute_alerts = forms.BooleanField(required=False)
 
 
+class PrometheusConfigForm(forms.Form):
+    """The whole prometheus.yml as one text field — see PrometheusConfigRevision for why this
+    isn't decomposed into per-setting fields the way Grafana's config is."""
+
+    note = forms.CharField(
+        max_length=200, required=False,
+        widget=forms.TextInput(attrs={"placeholder": "What changed and why (optional)"}))
+    content = forms.CharField(
+        widget=forms.Textarea(attrs={
+            "rows": 40, "spellcheck": "false", "class": "mono",
+            "style": "font-family:Consolas,monospace;font-size:12.5px;white-space:pre;"
+                     "tab-size:2;width:100%;box-sizing:border-box"}))
+
+
 class UserAccountForm(forms.ModelForm):
     """Auth-adjacent fields the user may edit. E-mail is OPTIONAL (nullable) — a profile can
     be created by an admin or completed on first LDAP login without one."""

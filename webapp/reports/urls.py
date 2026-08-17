@@ -24,6 +24,7 @@ urlpatterns = [
     path("profile/", views.profile, name="profile"),
     path("settings/", views.system_settings, name="system_settings"),
     path("settings/grafana/", views.grafana_config, name="grafana_config"),
+    path("settings/prometheus/", views.prometheus_config, name="prometheus_config"),
     path("settings/report-theme/", views.set_report_theme, name="set_report_theme"),
     path("notifications/seen/", views.mark_notifications_seen, name="mark_notifications_seen"),
 ]

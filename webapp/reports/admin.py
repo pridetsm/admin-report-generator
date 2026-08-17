@@ -2,8 +2,8 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import (EmailRecipient, GrafanaConfigRevision, ReportSubmission, RoleRequest,
-                     SystemConfig, UserProfile)
+from .models import (EmailRecipient, GrafanaConfigRevision, PrometheusConfigRevision,
+                     ReportSubmission, RoleRequest, SystemConfig, UserProfile)
 
 
 @admin.register(SystemConfig)
@@ -20,6 +20,20 @@ class GrafanaConfigRevisionAdmin(admin.ModelAdmin):
     readonly_fields = tuple(f.name for f in GrafanaConfigRevision._meta.fields
                             if f.name != "smtp_password_encrypted")
     exclude = ("smtp_password_encrypted",)
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PrometheusConfigRevision)
+class PrometheusConfigRevisionAdmin(admin.ModelAdmin):
+    """Read-only browsing — revisions are only ever created through the prometheus_config view."""
+    list_display = ("__str__", "note", "created_by")
+    readonly_fields = tuple(f.name for f in PrometheusConfigRevision._meta.fields)
     date_hierarchy = "created_at"
 
     def has_add_permission(self, request):

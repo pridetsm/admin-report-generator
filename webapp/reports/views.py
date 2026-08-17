@@ -32,11 +32,13 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
-from . import connect, crypto, folders, grafana_admin, network
+from . import connect, crypto, folders, grafana_admin, network, prometheus_admin
 from . import keycloak as keycloak_mod
 from .directory import search_directory
-from .forms import GrafanaConfigForm, ProfileForm, SystemConfigForm, UserAccountForm
-from .models import GrafanaConfigRevision, ReportSubmission, RoleRequest, SystemConfig, UserProfile
+from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
+                    UserAccountForm)
+from .models import (GrafanaConfigRevision, PrometheusConfigRevision, ReportSubmission,
+                     RoleRequest, SystemConfig, UserProfile)
 from .roles import (ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_network_admin, is_role_admin,
@@ -893,6 +895,53 @@ def grafana_config(request):
         "history": GrafanaConfigRevision.objects.all()[:20],
         "bootstrapped_from_file": current is None,
         "service_status": grafana_admin.service_status(),
+    })
+
+
+@login_required
+def prometheus_config(request):
+    """Administrator-only: edit the WHOLE prometheus.yml as raw text, kept as DB-versioned
+    revisions (see PrometheusConfigRevision) rather than files on disk. 'Save' only records a
+    revision; 'Save & Apply' validates with the real promtool FIRST (see
+    prometheus_admin.validate) and only rewrites prometheus.yml + restarts the service if that
+    passes — a broken edit never reaches the live file."""
+    if not is_role_admin(request.user):
+        return redirect("report_form")
+
+    current = PrometheusConfigRevision.current()
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        form = PrometheusConfigForm(request.POST)
+        if action == "restore":
+            rev_id = request.POST.get("rev_id")
+            restore_rev = get_object_or_404(PrometheusConfigRevision, pk=rev_id)
+            form = PrometheusConfigForm(initial={"content": restore_rev.content})
+            messages.info(request, f"Loaded the {restore_rev.created_at:%d %b %Y %H:%M} "
+                                   "revision — review below, then Save or Save & Apply to "
+                                   "make it current.")
+        elif form.is_valid():
+            data = form.cleaned_data
+            rev = PrometheusConfigRevision(
+                created_by=request.user, note=data["note"], content=data["content"])
+            rev.save()
+            if action == "apply":
+                ok, message = prometheus_admin.write_and_restart(rev.content)
+                (messages.success if ok else messages.error)(request, message)
+            else:
+                messages.success(request, "Revision saved (not applied — prometheus.yml is unchanged).")
+            return redirect("prometheus_config")
+    else:
+        initial = {"content": current.content if current is not None
+                   else prometheus_admin.parse_live_config()}
+        form = PrometheusConfigForm(initial=initial)
+
+    return render(request, "reports/prometheus_config.html", {
+        "form": form,
+        "current": current,
+        "history": PrometheusConfigRevision.objects.all()[:20],
+        "bootstrapped_from_file": current is None,
+        "service_status": prometheus_admin.service_status(),
     })
 
 

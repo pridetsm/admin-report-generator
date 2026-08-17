@@ -213,6 +213,33 @@ class GrafanaConfigRevision(models.Model):
         return cls.objects.first()
 
 
+class PrometheusConfigRevision(models.Model):
+    """A point-in-time snapshot of the ENTIRE prometheus.yml text. APPEND-ONLY, same shape as
+    GrafanaConfigRevision — but the file (443 lines, 11 scrape jobs, ~60 host targets, and
+    extensive hand-written rationale comments) is edited as raw YAML text rather than
+    decomposed into per-setting fields: a generic re-serialization would either be enormous
+    or would silently drop every comment. See reports/prometheus_admin.py — `validate()` runs
+    the real `promtool check config` (not just a YAML parse) before anything is ever applied."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    content = models.TextField(help_text="The entire prometheus.yml text.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Prometheus config revision"
+
+    def __str__(self):
+        return f"Prometheus config @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first()
+
+
 class RoleRequest(models.Model):
     """A user's request for a role (Django group). Administrators approve/reject these."""
 
