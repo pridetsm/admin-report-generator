@@ -786,12 +786,12 @@ def _network_overview(data: dict, devices: list) -> dict:
             {"label": "Carrying traffic", "value": data["carrying_count"], "state": "info"},
             {"label": "Throughput in", "value": data["total_in_text"], "state": "info"},
             {"label": "MAC / ARP entries", "value": f"{data.get('mac_count', 0)} | {data.get('arp_count', 0)}",
-             "sub": "size only — no vendor max yet", "state": "info"},
+             "sub": "entry count, not % of capacity", "state": "info"},
         ],
         "immediate": [
             {"label": "Not responding", "value": f"{len(unreachable)} | {dev_total}",
              "sub": "devices | total", "state": bad(len(unreachable))},
-            {"label": "Never scraped", "value": f"{len(unscraped)} | {dev_total}",
+            {"label": "Never monitored", "value": f"{len(unscraped)} | {dev_total}",
              "sub": "devices | total", "state": bad(len(unscraped))},
             {"label": "PSU / fan failed", "value": f"{psu_failed} | {psu_total}",
              "sub": "failed | total", "state": bad(psu_failed)},
@@ -813,8 +813,15 @@ def _network_overview(data: dict, devices: list) -> dict:
              "sub": "receive optics | total", "state": warn(optics_low)},
             {"label": "Metrics not collected", "value": f"{missing} | {len(CATALOGUE)}",
              "sub": "metrics | total requested", "state": warn(missing)},
-            {"label": "Counter width", "value": "32-bit" if not data.get("counters_are_64bit") else "64-bit",
-             "sub": ("under-reports throughput" if not data.get("counters_are_64bit") else "accurate"),
+            # Leads with the JUDGEMENT ("can the throughput figures above be trusted"), not
+            # the SNMP mechanism behind it — "Counter width: accurate" told the reader a fact
+            # about a counter's bit-width without saying what that fact means for them; this
+            # says the thing that actually matters and puts the mechanism in the sub-caption
+            # for whoever wants to know why.
+            {"label": "Throughput accuracy",
+             "value": "Accurate" if data.get("counters_are_64bit") else "Understated",
+             "sub": ("64-bit counters" if data.get("counters_are_64bit")
+                     else "32-bit counters — wrap and lose data on a fast link"),
              "state": "info" if data.get("counters_are_64bit") else "warn"},
         ],
         "banners": [],
