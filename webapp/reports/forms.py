@@ -14,48 +14,11 @@ class SystemConfigForm(forms.ModelForm):
         }
 
 
-class GrafanaConfigForm(forms.Form):
-    """A plain Form, not a ModelForm — `password` must NEVER be pre-populated from a stored
-    value (it's shown once, on submit, and never round-tripped back to the browser), which a
-    model-bound field can't express. Every other field mirrors GrafanaConfigRevision 1:1."""
-
-    note = forms.CharField(
-        max_length=200, required=False,
-        widget=forms.TextInput(attrs={"placeholder": "What changed and why (optional)"}))
-
-    # [server]
-    protocol = forms.ChoiceField(choices=[("https", "https"), ("http", "http")])
-    cert_file = forms.CharField(max_length=512, required=False)
-    cert_key = forms.CharField(max_length=512, required=False)
-    root_url = forms.CharField(max_length=512, required=False,
-                               widget=forms.TextInput(attrs={"placeholder": "https://…:3000"}))
-
-    # [security]
-    allow_embedding = forms.BooleanField(required=False)
-
-    # [smtp]
-    smtp_enabled = forms.BooleanField(required=False)
-    smtp_host = forms.CharField(max_length=256, required=False,
-                                widget=forms.TextInput(attrs={"placeholder": "smtp.office365.com:587"}))
-    smtp_user = forms.CharField(max_length=256, required=False)
-    password = forms.CharField(
-        max_length=256, required=False, widget=forms.PasswordInput(render_value=False),
-        help_text="Leave blank to keep the current password")
-    smtp_skip_verify = forms.BooleanField(required=False)
-    smtp_from_address = forms.CharField(max_length=256, required=False)
-    smtp_from_name = forms.CharField(max_length=128, required=False)
-    smtp_ehlo_identity = forms.CharField(max_length=128, required=False)
-    smtp_starttls_policy = forms.ChoiceField(choices=[
-        ("Always", "Always"), ("OpportunisticStartTLS", "OpportunisticStartTLS"),
-        ("MandatoryStartTLS", "MandatoryStartTLS"), ("NoStartTLS", "NoStartTLS")])
-
-    # [alerting]
-    execute_alerts = forms.BooleanField(required=False)
-
-
-class PrometheusConfigForm(forms.Form):
-    """The whole prometheus.yml as one text field — see PrometheusConfigRevision for why this
-    isn't decomposed into per-setting fields the way Grafana's config is."""
+class RawConfigForm(forms.Form):
+    """Base shape shared by every whole-file raw-text config editor on this app (Grafana's
+    custom.ini, Prometheus's prometheus.yml, and its three rule files): a free-text changelog
+    note plus one big textarea holding the entire file. Subclassed per screen only so each has
+    its own name in forms.py/views.py — the fields are identical."""
 
     note = forms.CharField(
         max_length=200, required=False,
@@ -65,6 +28,17 @@ class PrometheusConfigForm(forms.Form):
             "rows": 40, "spellcheck": "false", "class": "mono",
             "style": "font-family:Consolas,monospace;font-size:12.5px;white-space:pre;"
                      "tab-size:2;width:100%;box-sizing:border-box"}))
+
+
+class GrafanaConfigForm(RawConfigForm):
+    """The whole custom.ini as text — see GrafanaConfigRevision for why this isn't decomposed
+    into per-setting fields, and for how the SMTP password line is masked in `content`."""
+
+
+class PrometheusConfigForm(RawConfigForm):
+    """The whole prometheus.yml as text — see PrometheusConfigRevision for why this isn't
+    decomposed into per-setting fields. Also reused as-is for the rule-file sub-pages
+    (prometheus_rule_file view) — same note+content shape, no secrets involved either way."""
 
 
 class UserAccountForm(forms.ModelForm):

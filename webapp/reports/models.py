@@ -160,44 +160,28 @@ class SystemConfig(models.Model):
 class GrafanaConfigRevision(models.Model):
     """A point-in-time snapshot of Grafana's custom.ini. APPEND-ONLY — a save always creates
     a new row, never edits or deletes one, so the full history is browsable and the live file
-    can be regenerated from any row. `current()` (the most recent row) is what the edit
-    screen shows and what the live file was last rendered from; see reports/grafana_admin.py
-    for the render/write/restart logic. The DB is the version history — there is no per-version
-    file kept on disk, only the one live custom.ini, fully overwritten on every apply."""
+    can be regenerated from any row. `current()` (the most recent row) is what the edit screen
+    shows and what the live file was last written from; see reports/grafana_admin.py for the
+    mask/unmask/write/restart logic. The DB is the version history — there is no per-version
+    file kept on disk, only the one live custom.ini, fully overwritten on every apply.
+
+    `content` holds the WHOLE file as raw text (not one field per setting — custom.ini can hold
+    any Grafana directive, and a field-per-setting form can only ever cover the ones already
+    modeled). It is ALWAYS the MASKED text — the `password = ...` line under [smtp] is replaced
+    with grafana_admin.PASSWORD_PLACEHOLDER, never the real value — so browsing history, or
+    viewing this in Django admin, never exposes the real secret. `smtp_password_encrypted`
+    holds the real value, separately, at rest as Fernet ciphertext (see reports/crypto.py);
+    it's spliced back into `content` only at the moment the live file is actually written."""
 
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name="+")
     note = models.CharField(max_length=200, blank=True,
                             help_text="What changed and why (optional)")
-
-    # [server]
-    protocol = models.CharField(max_length=8, default="https",
-                                choices=[("https", "https"), ("http", "http")])
-    cert_file = models.CharField(max_length=512, blank=True)
-    cert_key = models.CharField(max_length=512, blank=True)
-    root_url = models.CharField(max_length=512, blank=True, validators=[_url_validator])
-
-    # [security]
-    allow_embedding = models.BooleanField(default=True)
-
-    # [smtp]
-    smtp_enabled = models.BooleanField(default=True)
-    smtp_host = models.CharField(max_length=256, blank=True)
-    smtp_user = models.CharField(max_length=256, blank=True)
+    content = models.TextField(
+        default="", help_text="The entire custom.ini text, MASKED (see class docstring).")
     smtp_password_encrypted = models.TextField(
         blank=True, help_text="Fernet ciphertext — see reports/crypto.py. Never plaintext.")
-    smtp_skip_verify = models.BooleanField(default=False)
-    smtp_from_address = models.CharField(max_length=256, blank=True)
-    smtp_from_name = models.CharField(max_length=128, blank=True)
-    smtp_ehlo_identity = models.CharField(max_length=128, blank=True)
-    smtp_starttls_policy = models.CharField(
-        max_length=32, default="Always",
-        choices=[("Always", "Always"), ("OpportunisticStartTLS", "OpportunisticStartTLS"),
-                 ("MandatoryStartTLS", "MandatoryStartTLS"), ("NoStartTLS", "NoStartTLS")])
-
-    # [alerting]
-    execute_alerts = models.BooleanField(default=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -238,6 +222,40 @@ class PrometheusConfigRevision(models.Model):
     @classmethod
     def current(cls):
         return cls.objects.first()
+
+
+class PrometheusRuleFileRevision(models.Model):
+    """Same append-only/raw-text shape as PrometheusConfigRevision, for the three files
+    prometheus.yml's `rule_files:` list references (confirmed via `promtool check config`:
+    alerts.yml, t24_services.yml, folder_exporter_rules.yml). One shared model/table for all
+    three rather than three near-identical models — `filename` distinguishes them, `current()`
+    and the view/URL are parametrized by it. See reports/prometheus_admin.py — validated with
+    `promtool check rules` (standalone rule syntax check, independent of prometheus.yml)."""
+
+    RULE_FILE_CHOICES = [
+        ("alerts.yml", "alerts.yml"),
+        ("t24_services.yml", "t24_services.yml"),
+        ("folder_exporter_rules.yml", "folder_exporter_rules.yml"),
+    ]
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    filename = models.CharField(max_length=64, choices=RULE_FILE_CHOICES)
+    content = models.TextField(help_text="The entire rule file's text.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Prometheus rule file revision"
+
+    def __str__(self):
+        return f"{self.filename} @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls, filename):
+        return cls.objects.filter(filename=filename).first()
 
 
 class RoleRequest(models.Model):

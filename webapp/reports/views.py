@@ -37,8 +37,9 @@ from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
-from .models import (GrafanaConfigRevision, PrometheusConfigRevision, ReportSubmission,
-                     RoleRequest, SystemConfig, UserProfile)
+from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
+                     PrometheusRuleFileRevision, ReportSubmission, RoleRequest, SystemConfig,
+                     UserProfile)
 from .roles import (ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_network_admin, is_role_admin,
@@ -834,9 +835,11 @@ def system_settings(request):
 
 @login_required
 def grafana_config(request):
-    """Administrator-only: edit Grafana's custom.ini, kept as DB-versioned revisions (see
-    GrafanaConfigRevision) rather than files on disk. 'Save' only records a revision; 'Save &
-    Apply' also rewrites custom.ini and restarts the Grafana service — see grafana_admin.py."""
+    """Administrator-only: edit the WHOLE custom.ini as raw text, kept as DB-versioned
+    revisions (see GrafanaConfigRevision) rather than files on disk. The SMTP password line is
+    always MASKED in `content` (never the real value) — see grafana_admin.mask_password/
+    extract_password/unmask_password. 'Save' only records a revision; 'Save & Apply' unmasks
+    the real password back in, rewrites custom.ini, and restarts Grafana."""
     if not is_role_admin(request.user):
         return redirect("report_form")
 
@@ -848,46 +851,45 @@ def grafana_config(request):
         if action == "restore":
             rev_id = request.POST.get("rev_id")
             restore_rev = get_object_or_404(GrafanaConfigRevision, pk=rev_id)
-            form = GrafanaConfigForm(initial={
-                f.name: getattr(restore_rev, f.name) for f in GrafanaConfigRevision._meta.fields
-                if f.name not in ("id", "created_at", "created_by", "smtp_password_encrypted")
-            })
+            form = GrafanaConfigForm(initial={"content": restore_rev.content})
             messages.info(request, f"Loaded the {restore_rev.created_at:%d %b %Y %H:%M} "
                                    "revision — review below, then Save or Save & Apply to "
                                    "make it current.")
         elif form.is_valid():
             data = form.cleaned_data
-            rev = GrafanaConfigRevision(
-                created_by=request.user, note=data["note"],
-                protocol=data["protocol"], cert_file=data["cert_file"], cert_key=data["cert_key"],
-                root_url=data["root_url"], allow_embedding=data["allow_embedding"],
-                smtp_enabled=data["smtp_enabled"], smtp_host=data["smtp_host"],
-                smtp_user=data["smtp_user"], smtp_skip_verify=data["smtp_skip_verify"],
-                smtp_from_address=data["smtp_from_address"], smtp_from_name=data["smtp_from_name"],
-                smtp_ehlo_identity=data["smtp_ehlo_identity"],
-                smtp_starttls_policy=data["smtp_starttls_policy"],
-                execute_alerts=data["execute_alerts"],
-            )
-            # "leave blank" means "keep the current password" — only re-encrypt when the
-            # admin actually typed a new one; otherwise carry the previous ciphertext forward.
-            if data["password"]:
-                rev.smtp_password_encrypted = crypto.encrypt(data["password"])
-            elif current is not None:
-                rev.smtp_password_encrypted = current.smtp_password_encrypted
+            content = data["content"]
+            submitted_password = grafana_admin.extract_password(content)
+            if submitted_password is None or submitted_password == grafana_admin.PASSWORD_PLACEHOLDER:
+                # Unchanged — carry the real password forward. On the very first-ever save
+                # there's no previous revision to carry it from, so fall back to what's
+                # actually in the live file right now.
+                if current is not None:
+                    password_encrypted = current.smtp_password_encrypted
+                else:
+                    live_password = grafana_admin.extract_password(grafana_admin.parse_live_config()) or ""
+                    password_encrypted = crypto.encrypt(live_password)
+                stored_content = content
+            else:
+                # The admin typed a real new value over the placeholder line — encrypt it, then
+                # re-mask before storing so `content` in the DB is NEVER the real password.
+                password_encrypted = crypto.encrypt(submitted_password)
+                stored_content = grafana_admin.mask_password(content)
+            rev = GrafanaConfigRevision(created_by=request.user, note=data["note"],
+                                        content=stored_content,
+                                        smtp_password_encrypted=password_encrypted)
             rev.save()
             if action == "apply":
-                ok, message = grafana_admin.write_and_restart(rev)
+                real_content = grafana_admin.unmask_password(
+                    rev.content, crypto.decrypt(rev.smtp_password_encrypted))
+                ok, message = grafana_admin.write_and_restart(real_content)
                 (messages.success if ok else messages.error)(request, message)
             else:
                 messages.success(request, "Revision saved (not applied — custom.ini is unchanged).")
             return redirect("grafana_config")
     else:
-        initial = (
-            {f.name: getattr(current, f.name) for f in GrafanaConfigRevision._meta.fields
-             if f.name not in ("id", "created_at", "created_by", "smtp_password_encrypted")}
-            if current is not None else grafana_admin.parse_live_config()
-        )
-        form = GrafanaConfigForm(initial=initial)
+        initial_content = (current.content if current is not None
+                           else grafana_admin.mask_password(grafana_admin.parse_live_config()))
+        form = GrafanaConfigForm(initial={"content": initial_content})
 
     return render(request, "reports/grafana_config.html", {
         "form": form,
@@ -942,6 +944,61 @@ def prometheus_config(request):
         "history": PrometheusConfigRevision.objects.all()[:20],
         "bootstrapped_from_file": current is None,
         "service_status": prometheus_admin.service_status(),
+        "rule_files": prometheus_admin.RULE_FILES,
+        "active_file": "prometheus.yml",
+    })
+
+
+@login_required
+def prometheus_rule_file(request, filename):
+    """Administrator-only: edit one of prometheus.yml's rule_files (alerts.yml,
+    t24_services.yml, folder_exporter_rules.yml) as raw text — a sub-page of the Prometheus
+    config screen (see the tab strip in prometheus_config.html/prometheus_rule_file.html).
+    Same DB-versioned/validate-before-apply shape as prometheus_config, but validated with
+    `promtool check rules` (standalone rule syntax check) instead of `check config`."""
+    if not is_role_admin(request.user):
+        return redirect("report_form")
+    if filename not in prometheus_admin.RULE_FILES:
+        raise Http404(f"not a recognised rule file: {filename}")
+
+    current = PrometheusRuleFileRevision.current(filename)
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        form = PrometheusConfigForm(request.POST)
+        if action == "restore":
+            rev_id = request.POST.get("rev_id")
+            restore_rev = get_object_or_404(PrometheusRuleFileRevision, pk=rev_id, filename=filename)
+            form = PrometheusConfigForm(initial={"content": restore_rev.content})
+            messages.info(request, f"Loaded the {restore_rev.created_at:%d %b %Y %H:%M} "
+                                   "revision — review below, then Save or Save & Apply to "
+                                   "make it current.")
+        elif form.is_valid():
+            data = form.cleaned_data
+            rev = PrometheusRuleFileRevision(
+                created_by=request.user, note=data["note"], filename=filename,
+                content=data["content"])
+            rev.save()
+            if action == "apply":
+                ok, message = prometheus_admin.write_rule_file_and_restart(filename, rev.content)
+                (messages.success if ok else messages.error)(request, message)
+            else:
+                messages.success(request, f"Revision saved (not applied — {filename} is unchanged).")
+            return redirect("prometheus_rule_file", filename=filename)
+    else:
+        initial = {"content": current.content if current is not None
+                   else prometheus_admin.parse_live_rule_file(filename)}
+        form = PrometheusConfigForm(initial=initial)
+
+    return render(request, "reports/prometheus_rule_file.html", {
+        "form": form,
+        "current": current,
+        "filename": filename,
+        "history": PrometheusRuleFileRevision.objects.filter(filename=filename)[:20],
+        "bootstrapped_from_file": current is None,
+        "service_status": prometheus_admin.service_status(),
+        "rule_files": prometheus_admin.RULE_FILES,
+        "active_file": filename,
     })
 
 

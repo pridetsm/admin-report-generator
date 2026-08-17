@@ -10,6 +10,8 @@
           style="margin-left:8px">{{ service_status }}</span>
   </div>
 
+  {% include "reports/_prometheus_tabs.html" %}
+
   {% if bootstrapped_from_file %}
   <div class="card"><div class="body" style="padding:12px 18px">
     <p style="margin:0;color:var(--muted)">No revisions saved yet — this is the live
@@ -22,11 +24,12 @@
     <p style="margin:0 0 16px;color:var(--muted)">
       The whole file, edited as text — it's 400+ lines with a lot of hand-written rationale
       comments, so this isn't a per-field form; it's the same content <code>prometheus.yml</code>
-      holds today. Every Save creates a new, permanent revision below — nothing is ever edited
-      or deleted. <b>Save</b> only records the revision. <b>Save &amp; Apply</b> validates it
-      with <code>promtool check config</code> first — a broken edit is rejected and the live
-      file is left untouched — then rewrites <code>prometheus.yml</code> and restarts
-      Prometheus, a brief scrape gap while it comes back up.
+      holds today. Its <code>rule_files:</code> (alerts, T24 services, folder watch) are edited
+      on their own tabs above, not here. Every Save creates a new, permanent revision below —
+      nothing is ever edited or deleted. <b>Save</b> only records the revision. <b>Save &amp;
+      Apply</b> validates it with <code>promtool check config</code> first — a broken edit is
+      rejected and the live file is left untouched — then rewrites <code>prometheus.yml</code>
+      and restarts Prometheus, a brief scrape gap while it comes back up.
     </p>
     <form method="post" id="prometheusConfigForm">
       {% csrf_token %}

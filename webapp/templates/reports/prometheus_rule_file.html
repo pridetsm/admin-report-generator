@@ -1,41 +1,40 @@
 {% extends "base.html" %}
-{% block title %}Grafana Config · RBZ Monitoring Console{% endblock %}
+{% block title %}{{ filename }} · RBZ Monitoring Console{% endblock %}
 
 {% block body %}
 <div class="container" style="max-width:1100px">
   {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}" style="white-space:pre-wrap">{{ m }}</li>{% endfor %}</ul>{% endif %}
 
-  <div class="section-label">Grafana configuration
+  <div class="section-label">Prometheus configuration
     <span class="chip {% if service_status == 'Running' %}green{% elif service_status == 'Stopped' %}red{% else %}amber{% endif %}"
           style="margin-left:8px">{{ service_status }}</span>
   </div>
 
+  {% include "reports/_prometheus_tabs.html" %}
+
   {% if bootstrapped_from_file %}
   <div class="card"><div class="body" style="padding:12px 18px">
     <p style="margin:0;color:var(--muted)">No revisions saved yet — this is the live
-    <code>custom.ini</code> text, read straight from disk. Nothing is tracked in history until
-    you Save.</p>
+    <code>{{ filename }}</code> text, read straight from disk. Nothing is tracked in history
+    until you Save.</p>
   </div></div>
   {% endif %}
 
   <div class="card"><div class="body" style="padding:18px">
     <p style="margin:0 0 16px;color:var(--muted)">
-      The whole <code>custom.ini</code>, edited as text — not <code>defaults.ini</code> (Grafana's
-      own 105KB shipped reference of every setting, overwritten on every upgrade; never hand-edit
-      it). Any directive can be added here, not just the ones already present. The
-      <code>password = …</code> line under <code>[smtp]</code> always shows a placeholder —
-      leave it untouched to keep the current password, or type a new value over it to change
-      it; the real value never round-trips to this screen. Every Save creates a new, permanent
-      revision below — nothing is ever edited or deleted. <b>Save</b> only records the revision.
-      <b>Save &amp; Apply</b> also rewrites <code>custom.ini</code> (with the real password
-      spliced back in) and restarts the Grafana service — a brief dashboard outage while it
-      comes back up.
+      One of <code>prometheus.yml</code>'s <code>rule_files:</code> entries, edited as text.
+      Every Save creates a new, permanent revision below — nothing is ever edited or deleted.
+      <b>Save</b> only records the revision. <b>Save &amp; Apply</b> validates it with
+      <code>promtool check rules</code> first — a broken rule is rejected and the live file is
+      left untouched — then rewrites <code>{{ filename }}</code> and restarts Prometheus (rule
+      files aren't hot-reloaded on this install, so this is the same full restart as the main
+      config), a brief scrape gap while it comes back up.
     </p>
-    <form method="post" id="grafanaConfigForm">
+    <form method="post" id="prometheusRuleFileForm">
       {% csrf_token %}
 
       <label class="field" style="margin-bottom:12px">
-        <span>custom.ini</span>
+        <span>{{ filename }}</span>
         {{ form.content }}
         {% if form.content.errors %}<div class="errornote">{{ form.content.errors|striptags }}</div>{% endif %}
       </label>
@@ -48,15 +47,15 @@
 
       <label class="field" style="margin-bottom:14px;flex-direction:row;align-items:center;gap:8px">
         <input type="checkbox" id="confirmApply">
-        <span>I understand Save &amp; Apply restarts Grafana now</span>
+        <span>I understand Save &amp; Apply restarts Prometheus now</span>
       </label>
 
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button class="btn ghost" type="submit" name="action" value="save">Save</button>
         <button class="btn primary" type="submit" name="action" value="apply"
                 id="applyBtn" disabled
-                onclick="return confirm('This rewrites custom.ini and restarts the Grafana service now. Continue?');">
-          Save &amp; Apply (restarts Grafana)
+                onclick="return confirm('This validates {{ filename }} with promtool, then (if it passes) rewrites it and restarts Prometheus now. Continue?');">
+          Save &amp; Apply (validates, then restarts Prometheus)
         </button>
         <a class="btn ghost" href="{% url 'report_form' %}">Back</a>
       </div>
@@ -97,9 +96,6 @@
 </div>
 
 <script>
-  // Save & Apply stays disabled until the confirmation checkbox is ticked — the checkbox
-  // has no name (never submitted itself), it only gates the button; the real "are you sure"
-  // is the confirm() on the button itself.
   (function () {
     var box = document.getElementById("confirmApply");
     var btn = document.getElementById("applyBtn");

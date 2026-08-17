@@ -1,99 +1,60 @@
 """Grafana config management: read the live custom.ini for the first-ever edit-screen load,
-render a GrafanaConfigRevision back into that same file, and restart the service.
+mask/unmask the SMTP password so it never round-trips to the browser or sits in the DB in the
+clear, and restart the service.
 
 Grafana itself runs as the NSSM-wrapped 'Grafana' Windows service (LocalSystem — same account
 this webapp's own service runs as, so no extra permissions are needed to write its config or
 restart it). CONFIG_PATH is custom.ini specifically, never defaults.ini (Grafana's own 105KB
 shipped reference of every possible setting) — custom.ini is the small file of overrides this
-install actually uses.
+install actually uses, and the only file an admin is meant to hand-edit (defaults.ini is
+overwritten on every Grafana upgrade, which is why custom.ini exists as a separate overlay).
+
+The edit screen is a raw-text editor of the WHOLE custom.ini (not a field per setting) so any
+directive can be added, not just the ones already present today — see PrometheusConfigRevision
+for why prometheus.yml took the same approach. The one wrinkle text-editing a file with a
+plaintext password in it: the password line is MASKED with a placeholder everywhere except at
+the moment the live file is actually written (see mask_password/extract_password/unmask_password
+and how views.grafana_config uses them).
 """
 from __future__ import annotations
 
-import configparser
+import re
 import subprocess
 from pathlib import Path
-from typing import Tuple
-
-from . import crypto
-from .models import GrafanaConfigRevision
+from typing import Optional, Tuple
 
 CONFIG_PATH = Path(r"C:\Program Files\GrafanaLabs\grafana\conf\custom.ini")
 SERVICE_NAME = "Grafana"
 
-
-def parse_live_config() -> dict:
-    """Read custom.ini off disk into the same field names GrafanaConfigRevision/the form use —
-    used ONLY to prefill the edit screen the very first time, before any revision exists yet.
-    The password is deliberately left out: the form's password field always starts blank."""
-    cp = configparser.ConfigParser()
-    cp.read(CONFIG_PATH, encoding="utf-8")
-    server = cp["server"] if cp.has_section("server") else {}
-    security = cp["security"] if cp.has_section("security") else {}
-    smtp = cp["smtp"] if cp.has_section("smtp") else {}
-    alerting = cp["alerting"] if cp.has_section("alerting") else {}
-    return {
-        "protocol": server.get("protocol", "https"),
-        "cert_file": server.get("cert_file", ""),
-        "cert_key": server.get("cert_key", ""),
-        "root_url": server.get("root_url", ""),
-        "allow_embedding": security.get("allow_embedding", "true").strip().lower() == "true",
-        "smtp_enabled": smtp.get("enabled", "true").strip().lower() == "true",
-        "smtp_host": smtp.get("host", ""),
-        "smtp_user": smtp.get("user", ""),
-        "smtp_skip_verify": smtp.get("skip_verify", "false").strip().lower() == "true",
-        "smtp_from_address": smtp.get("from_address", ""),
-        "smtp_from_name": smtp.get("from_name", ""),
-        "smtp_ehlo_identity": smtp.get("ehlo_identity", ""),
-        "smtp_starttls_policy": smtp.get("starttls_policy", "Always"),
-        "execute_alerts": alerting.get("execute_alerts", "true").strip().lower() == "true",
-    }
+# Never a value someone would plausibly type as a real password — safe to use as a sentinel.
+PASSWORD_PLACEHOLDER = "{{KEEP-EXISTING-PASSWORD}}"
+_PASSWORD_RE = re.compile(r"^(password\s*=\s*)(.*)$", re.MULTILINE)
 
 
-def _bool(v: bool) -> str:
-    return "true" if v else "false"
+def parse_live_config() -> str:
+    """The live file's exact RAW text (password included) — callers mask it themselves before
+    ever showing it anywhere. Used for the very first edit-screen load, before any revision
+    exists yet, and to seed the real password baseline for that first save."""
+    return CONFIG_PATH.read_text(encoding="utf-8")
 
 
-def render_custom_ini(rev: GrafanaConfigRevision) -> str:
-    """The exact structure/section headers/comments of the live custom.ini this session found
-    on disk, with values substituted from `rev`. Not a generic configparser dump (which would
-    drop every comment and reflow the file) — a template, so a diff against the previous file
-    is just the values that actually changed."""
-    password = crypto.decrypt(rev.smtp_password_encrypted)
-    return f"""#################################### Server ####################################
-[server]
-protocol = {rev.protocol}
-# same self-signed cert as Prometheus (C:\\metrics\\prometheus\\web-config.yml) — CN=prometheus.internal,
-# so browsers will still warn on hostname mismatch until it's swapped for a real cert.
-cert_file = {rev.cert_file}
-cert_key = {rev.cert_key}
-# The public facing domain name used to access grafana from a browser
-root_url = {rev.root_url}
-
-#################################### Security ####################################
-[security]
-# allow browsers to render Grafana in a <frame>, <iframe>, <embed> or <object>
-allow_embedding = {_bool(rev.allow_embedding)}
-
-#################################### SMTP / Emailing ####################################
-[smtp]
-enabled = {_bool(rev.smtp_enabled)}
-host = {rev.smtp_host}
-user = {rev.smtp_user}
-# Note: Grafana does not need the username without domain, include full email
-password = {password}
-;cert_file =
-;key_file =
-skip_verify = {_bool(rev.smtp_skip_verify)}
-from_address = {rev.smtp_from_address}
-from_name = {rev.smtp_from_name}
-ehlo_identity = {rev.smtp_ehlo_identity}
-starttls_policy = {rev.smtp_starttls_policy}
+def mask_password(content: str) -> str:
+    """Replace the real `password = ...` value with the placeholder. Idempotent — masking an
+    already-masked text is a no-op."""
+    return _PASSWORD_RE.sub(lambda m: m.group(1) + PASSWORD_PLACEHOLDER, content, count=1)
 
 
-#################################### Alerts / Notifications ####################################
-[alerting]
-# Whether Grafana should send notifications
-execute_alerts = {_bool(rev.execute_alerts)}"""
+def extract_password(content: str) -> Optional[str]:
+    """The current value of the `password = ...` line (could BE the placeholder — callers check
+    for that), or None if the line isn't present at all."""
+    m = _PASSWORD_RE.search(content)
+    return m.group(2).strip() if m else None
+
+
+def unmask_password(content: str, real_password: str) -> str:
+    """Substitute the placeholder back with the real value. Only ever called at the moment the
+    live file is actually written — never for anything stored in the DB or shown in a browser."""
+    return content.replace(PASSWORD_PLACEHOLDER, real_password, 1)
 
 
 def service_status() -> str:
@@ -102,17 +63,16 @@ def service_status() -> str:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", f"(Get-Service {SERVICE_NAME}).Status"],
             capture_output=True, text=True, timeout=15)
-        status = result.stdout.strip()
-        return status or "unknown"
+        return result.stdout.strip() or "unknown"
     except Exception:
         return "unknown"
 
 
-def write_and_restart(rev: GrafanaConfigRevision) -> Tuple[bool, str]:
-    """Overwrite custom.ini from `rev` and restart the Grafana service. Returns (ok, message)
-    — message is either a short success note or the captured PowerShell error, for display."""
+def write_and_restart(full_content: str) -> Tuple[bool, str]:
+    """Overwrite custom.ini with `full_content` (the REAL, unmasked text — callers must unmask
+    first) and restart the Grafana service. Returns (ok, message)."""
     try:
-        CONFIG_PATH.write_text(render_custom_ini(rev), encoding="utf-8")
+        CONFIG_PATH.write_text(full_content, encoding="utf-8")
     except OSError as exc:
         return False, f"Could not write {CONFIG_PATH}: {exc}"
 
