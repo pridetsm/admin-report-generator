@@ -40,7 +40,7 @@ from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, System
 from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
                      SystemConfig, UserProfile)
-from .roles import (ALL_ROLES, ALL_ROLES_GLYPH, ALL_ROLES_LABEL,
+from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_LABEL,
                     ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_infra_admin, is_network_admin, is_role_admin,
@@ -260,7 +260,8 @@ def role_select(request):
         "offer_all_roles": len(held) > 1,
         "all_roles_value": ALL_ROLES,
         "all_roles_label": ALL_ROLES_LABEL,
-        "all_roles_glyph": ALL_ROLES_GLYPH,
+        "all_roles_icon": ALL_ROLES_ICON,
+        "all_roles_description": ALL_ROLES_DESCRIPTION,
         "unscoped": not active_role(request),
     })
 

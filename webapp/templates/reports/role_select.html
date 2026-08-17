@@ -99,12 +99,6 @@
   .rs-ask { display:block; margin-top:9px; font-size:12px; font-weight:650; color:var(--accent); }
   .rs-btn.is-locked[disabled] .rs-ask { color:var(--muted); }
 
-  /* The unscoped choice: full width under the grid, laid out horizontally so it reads as a
-     different KIND of thing from the role tiles rather than a wider one. */
-  .rs-allroles { margin-top:10px; }
-  .rs-btn-wide { flex-direction:row; align-items:center; gap:13px; }
-  .rs-btn-wide.is-on { border-color:var(--accent); background:var(--panel-2); }
-
   .rs-all { margin-top:20px; text-align:center; }
   .rs-all button { background:none; border:0; color:var(--muted); font:inherit; font-size:12.5px;
                    cursor:pointer; text-decoration:underline; padding:6px; }
@@ -178,35 +172,37 @@
       {% endif %}
     </form>
     {% endfor %}
-  </div>
 
-  {% comment %}
-    "Load all my roles" — the UNSCOPED state, which the app has always had internally for a
-    session that never picked, offered again as a deliberate choice.
+    {% comment %}
+      "Load all my roles" — the UNSCOPED state, which the app has always had internally for a
+      session that never picked, offered as a deliberate choice.
 
-    It is the full width of the grid and sits below it, not among the roles: it is not a sixth
-    hat, it is the decision not to wear one. Only shown to someone holding more than one role,
-    because for everyone else it is the same thing as the single tile above it.
+      A tile in the grid like any other: same markup, same glyph treatment, same size. It is a
+      choice you make on this screen, so it belongs among the choices — set apart underneath,
+      it read as a footnote to the question rather than one of its answers. Its glyph is its
+      own (overlapping circles) rather than one borrowed from a role, so it is still visibly
+      not a sixth hat.
 
-    The trade-off is real and named on the tile: the menu then shows every screen you are
-    entitled to, including estates you are not currently working in. That is the thing this
-    screen otherwise exists to narrow.
-  {% endcomment %}
-  {% if offer_all_roles %}
-  <form method="post" class="rs-card rs-allroles">{% csrf_token %}
-    <input type="hidden" name="role" value="{{ all_roles_value }}">
-    <button class="rs-btn rs-btn-wide{% if unscoped %} is-on{% endif %}" type="submit">
-      <span class="rs-mono" aria-hidden="true">{{ all_roles_glyph }}</span>
-      <span class="rs-body">
-        <span class="rs-name">{{ all_roles_label }}{% if unscoped %}<span class="rs-current">Current</span>{% endif %}</span>
-        <span class="rs-pages">
-          One workspace across every role you hold — the menu shows all their screens at once.
-          Pick a single role instead to narrow it to that estate.
+      Only offered to someone holding more than one role: for everyone else it is the same
+      thing as their single tile, and a choice that changes nothing is noise.
+
+      The trade-off is real and named on the tile: the menu then shows every screen you are
+      entitled to, including estates you are not currently working in — the thing this screen
+      otherwise exists to narrow.
+    {% endcomment %}
+    {% if offer_all_roles %}
+    <form method="post" class="rs-card">{% csrf_token %}
+      <input type="hidden" name="role" value="{{ all_roles_value }}">
+      <button class="rs-btn" type="submit">
+        <span class="rs-icon" aria-hidden="true"><img src="{% static all_roles_icon %}" alt=""></span>
+        <span class="rs-body">
+          <span class="rs-name">{{ all_roles_label }}{% if unscoped %}<span class="rs-current">Current</span>{% endif %}</span>
+          <span class="rs-pages">{{ all_roles_description }}</span>
         </span>
-      </span>
-    </button>
-  </form>
-  {% endif %}
+      </button>
+    </form>
+    {% endif %}
+  </div>
 
   <div class="rs-all">
     <form method="post" action="{% url 'logout' %}" style="margin:0">{% csrf_token %}

@@ -124,10 +124,12 @@ ROLE_ICONS = {
 # so nothing downstream has to learn a sentinel.
 ALL_ROLES = "__all__"
 ALL_ROLES_LABEL = "Load all my roles"
-# No image: all five glyphs belong to a role, and lending one to this tile would make it read
-# as that role's twin. It gets the accent square the tiles used before they had glyphs, which
-# is visibly not-a-role — which is exactly what it is.
-ALL_ROLES_GLYPH = "⊞"
+ALL_ROLES_DESCRIPTION = ("Every role you hold at once — the menu shows all their screens "
+                         "together. Pick a single role instead to narrow it to that estate.")
+# Its own glyph (overlapping circles), so the tile is a peer of the role tiles rather than the
+# odd one out. Deliberately NOT one of the five role glyphs: borrowing one would make this read
+# as that role's twin.
+ALL_ROLES_ICON = "img/roles/all-roles.png"
 
 
 def role_icon(role: str) -> str:

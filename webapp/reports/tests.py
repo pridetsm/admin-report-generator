@@ -1907,7 +1907,13 @@ class RoleSelectScreen(TestCase):
         never picked is already in, so nothing downstream needs to know a sentinel value.
         """
         self.client.login(username="multi", password="pw12345!")
-        self.assertContains(self.client.get(reverse("role_select")), "Load all my roles")
+        resp = self.client.get(reverse("role_select"))
+        self.assertContains(resp, "Load all my roles")
+        # a peer of the role tiles: inside the same grid, with the same tile markup
+        grid = resp.content.decode()
+        grid = grid[grid.find('class="rs-list"'):grid.find('class="rs-all"')]
+        self.assertIn("all-roles", grid)
+        self.assertIn('value="__all__"', grid)
 
         self.client.post(reverse("role_select"), {"role": "Network Admin"})
         self.assertEqual(self.client.session.get("active_role"), "Network Admin")
@@ -3408,6 +3414,16 @@ class RoleGlyphs(TestCase):
         for role in ROLE_NAMES:
             stem = role_icon(role).rsplit("/", 1)[-1].rsplit(".", 1)[0]
             self.assertIn(stem, body, f"{role}'s glyph is missing from the picker")
+
+    def test_the_all_roles_tile_has_its_own_glyph(self):
+        """It is a tile like the others, so it needs a glyph like the others — and its own,
+        not one borrowed from a role, which would read as that role's twin."""
+        import pathlib
+
+        from .roles import ALL_ROLES_ICON
+        self.assertTrue(ALL_ROLES_ICON)
+        self.assertNotIn(ALL_ROLES_ICON, [role_icon(r) for r in ROLE_NAMES])
+        self.assertTrue((pathlib.Path(settings.BASE_DIR) / "static" / ALL_ROLES_ICON).is_file())
 
     def test_an_uncatalogued_role_falls_back_to_its_initial(self):
         """A Keycloak realm role with no entry here must not borrow another role's symbol."""
