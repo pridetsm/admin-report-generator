@@ -160,22 +160,19 @@
       <span aria-hidden="true">‹</span> Back to role select
     </a>
     {% endif %}
-    {% if is_system_admin %}
-    <a href="{% url 'report_form' %}"{% if current_page == 'report_form' %} class="is-current" aria-current="page"{% elif 'report_form' in current_ancestors %} class="is-ancestor"{% endif %}>System Picker</a>
-    {% endif %}
     {% comment %}
-      The network dashboard is a parent in the same shape as Folder Watch: the device picker,
-      with one child per monitored device. One today; the firewall and wireless controller
-      join the same list rather than needing a new place to live.
+      One Reports entry in place of a picker per estate. The pickers still exist — they are
+      what a report tile opens — but they are a step inside running a report, not three
+      separate destinations. Administrator has no entry here at all: it configures the app
+      rather than reporting on it.
     {% endcomment %}
+    {% if has_reports %}
+    <a href="{% url 'reports' %}"{% if current_page == 'reports' %} class="is-current" aria-current="page"{% elif 'reports' in current_ancestors %} class="is-ancestor"{% endif %}>Reports</a>
     {% if is_network_admin %}
-    <a href="{% url 'network_dashboard' %}"{% if current_page == 'network_dashboard' %} class="is-current" aria-current="page"{% elif 'network_dashboard' in current_ancestors %} class="is-ancestor"{% endif %}>Network Device Picker</a>
     <div class="drawer-children">
       <a href="{% url 'network_report' %}" class="drawer-child{% if current_page == 'network_report' %} is-current{% endif %}"{% if current_page == 'network_report' %} aria-current="page"{% endif %}>Core Switch</a>
     </div>
     {% endif %}
-    {% if is_infra_admin %}
-    <a href="{% url 'infra_form' %}"{% if current_page == 'infra_form' %} class="is-current" aria-current="page"{% elif 'infra_form' in current_ancestors %} class="is-ancestor"{% endif %}>Infrastructure Picker</a>
     {% endif %}
     <a href="{% url 'connect' %}"{% if current_page == 'connect' %} class="is-current" aria-current="page"{% elif 'connect' in current_ancestors %} class="is-ancestor"{% endif %}>Connect</a>
     {% comment %}

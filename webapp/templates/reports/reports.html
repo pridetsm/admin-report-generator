@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Reports · RBZ Monitoring Console{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:760px">
+
+  <div class="rs-head">
+    <h1>Reports</h1>
+    <p>Choose the report to run. You pick which systems it covers on the next screen.</p>
+  </div>
+
+  <div class="rs-list">
+    {% for o in options %}
+    <a class="rs-btn rp-tile" href="{{ o.url }}">
+      <span class="rs-mono" aria-hidden="true">{{ o.initial }}</span>
+      <span class="rs-body">
+        <span class="rs-name">{{ o.label }}</span>
+        <span class="rs-pages">{{ o.blurb }}</span>
+      </span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

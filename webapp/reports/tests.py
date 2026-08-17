@@ -23,6 +23,7 @@ from django.utils.html import escape
 from unittest import mock
 
 import generate_report as gr
+import openpyxl
 import yaml
 
 from . import folders, network
@@ -1647,10 +1648,10 @@ class NetworkReportAccess(TestCase):
         The network screens are reached through their own dashboard now, so the link to
         look for is that dashboard rather than the report directly."""
         self.client.login(username="ga", password="pw12345!")
-        self.assertNotContains(self.client.get(reverse("history")), "Network Device Picker")
+        self.assertNotContains(self.client.get(reverse("history")), reverse("network_report"))
         self.client.logout()
         self.client.login(username="na", password="pw12345!")
-        self.assertContains(self.client.get(reverse("history")), "Network Device Picker")
+        self.assertContains(self.client.get(reverse("history")), reverse("network_report"))
 
     def test_only_network_admin_holds_it(self):
         """Systems and network are separated deliberately: the System Analyses Dashboard is
@@ -1921,7 +1922,7 @@ class RoleSelectScreen(TestCase):
         screen your own role no longer shows."""
         self.client.login(username="multi", password="pw12345!")
         resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        self.assertRedirects(resp, reverse("network_dashboard"))
+        self.assertRedirects(resp, reverse("reports"), fetch_redirect_response=False)
         self.assertEqual(self.client.session["active_role"], "Network Admin")
 
     def test_every_role_at_once_is_offered_again(self):
@@ -2115,7 +2116,7 @@ class RoleScopedMenu(TestCase):
         """Unscoped is a real state, not an unfinished one — a bookmark or a deep link must
         not dead-end at a chooser."""
         body = self._menu()
-        for link in ("Folder Watch", "Network Device Picker", "Roles"):
+        for link in ("Folder Watch", "Reports", "Roles"):
             self.assertIn(link, body)
 
     def test_choosing_system_admin_hides_the_other_roles_screens(self):
@@ -2149,17 +2150,21 @@ class RoleScopedMenu(TestCase):
             for link in ("Connect", "History"):
                 self.assertIn(link, body, f"{link} vanished under {role}")
 
-    def test_each_role_sees_only_its_own_dashboard(self):
-        """The counterpart to the test above: the dashboards are exactly what is NOT common."""
+    def test_each_role_sees_only_its_own_report(self):
+        """The counterpart to the test above: the estates are exactly what is NOT common.
+
+        The drawer names Reports once for every role, so what differs is the tiles behind
+        it rather than the entry itself."""
         expected = {
-            "System Admin":  ("System Picker", "Network Device Picker"),
-            "Network Admin": ("Network Device Picker", "System Picker"),
+            "System Admin":  ("System Health Report", "Network Report"),
+            "Network Admin": ("Network Report", "System Health Report"),
         }
         for role, (present, absent) in expected.items():
             self.client.post(reverse("role_select"), {"role": role})
-            body = self._menu()
-            self.assertIn(present, body, f"{present} missing under {role}")
-            self.assertNotIn(absent, body, f"{absent} leaked into {role}")
+            self.assertIn(reverse("reports"), self._menu(), role)
+            labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+            self.assertIn(present, labels, f"{present} missing under {role}")
+            self.assertNotIn(absent, labels, f"{absent} leaked into {role}")
 
 
     def test_every_screen_a_role_owns_is_reachable_from_its_drawer(self):
@@ -2191,9 +2196,12 @@ class EmptyRoles(TestCase):
         self.u.groups.add(Group.objects.get(name="Gov Systems Admin"))
         self.client.login(username="gov2", password="pw12345!")
 
-    def test_both_empty_roles_own_no_screens(self):
-        for role in ("Gov Systems Admin", "Security Admin"):
-            self.assertEqual(ROLE_PAGES[role], set(), role)
+    def test_the_remaining_empty_role_owns_no_screens(self):
+        """Security Admin left this group when it gained the System Health and OS Inventory
+        reports. Gov Systems Admin is still deliberately empty — a role with nothing in it
+        should look like one, rather than borrowing another role's dashboard."""
+        self.assertEqual(ROLE_PAGES["Gov Systems Admin"], set())
+        self.assertTrue(ROLE_PAGES["Security Admin"])
 
     def test_security_admin_exists_as_a_group(self):
         """Seeded by migration, so a fresh deployment has it without anyone running a
@@ -2269,7 +2277,7 @@ class GenerateBelongsToEveryEstate(TestCase):
 
     def test_generate_is_owned_by_no_single_role(self):
         from .roles import PAGE_OWNER
-        self.assertIsNone(PAGE_OWNER.get("generate"))
+        self.assertFalse(PAGE_OWNER.get("generate"))
 
     def test_generating_as_infrastructure_admin_is_not_redirected_to_the_picker(self):
         """The assertion is 'not sent to Role Select'. Reaching the view and being refused an
@@ -2344,20 +2352,24 @@ class DashboardsAreSeparate(TestCase):
         body = self.client.get(reverse("history")).content.decode()
         return body[body.find('id="drawer"'):body.find("</nav>")]
 
-    def test_the_systems_dashboard_belongs_to_the_systems_role(self):
-        self.assertIn("System Picker", self._drawer("sysadm"))
+    def test_both_roles_reach_their_estate_through_one_reports_entry(self):
+        """The drawer used to name a picker per estate. It now names Reports once for
+        everyone, and the scoping moved behind it — onto which tiles that screen offers."""
+        for who in ("sysadm", "netadm2"):
+            self.assertIn(reverse("reports"), self._drawer(who), who)
 
-    def test_a_network_admin_is_not_shown_the_systems_dashboard(self):
-        self.assertNotIn("System Picker", self._drawer("netadm2"))
-
-    def test_the_network_dashboard_belongs_to_the_network_role(self):
-        self.assertIn("Network Device Picker", self._drawer("netadm2"))
-
-    def test_a_system_admin_is_not_shown_the_network_dashboard(self):
+    def test_neither_role_is_offered_the_other_s_report(self):
         """An earlier draft let System Admin read the network screens. The roles have since
         been separated deliberately, and a systems menu full of switch screens is exactly
-        what that separation exists to prevent."""
-        self.assertNotIn("Network Device Picker", self._drawer("sysadm"))
+        what that separation exists to prevent — now enforced on the Reports tiles."""
+        for who, role, mine, theirs in (
+                ("sysadm", "System Admin", "System Health Report", "Network Report"),
+                ("netadm2", "Network Admin", "Network Report", "System Health Report")):
+            self.client.login(username=who, password="pw12345!")
+            self.client.post(reverse("role_select"), {"role": role})
+            labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+            self.assertIn(mine, labels, role)
+            self.assertNotIn(theirs, labels, role)
 
     def test_a_system_admin_is_refused_the_network_urls(self):
         """Hiding the link is not access control."""
@@ -2366,12 +2378,15 @@ class DashboardsAreSeparate(TestCase):
             resp = self.client.get(reverse(name))
             self.assertEqual(resp.status_code, 302, name)
 
-    def test_each_role_lands_on_its_own_dashboard(self):
+    def test_each_role_lands_on_the_reports_screen(self):
         """Picking a role and then being dropped on another role's screen would undo the
-        choice with the very redirect that follows it."""
+        choice with the very redirect that follows it. Every reporting role now lands on
+        Reports, and it is that screen — not the redirect — which is role-scoped."""
         self.client.login(username="netadm2", password="pw12345!")
         resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        self.assertRedirects(resp, reverse("network_dashboard"))
+        self.assertRedirects(resp, reverse("reports"), fetch_redirect_response=False)
+        labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+        self.assertEqual(labels, ["Network Report"])
 
 
 class NetworkDevicePicker(TestCase):
@@ -2573,21 +2588,30 @@ class DrawerCurrentIndicator(TestCase):
 
     def test_a_child_screen_also_lights_its_parent(self):
         """On Temenos, Folder Watch shows which branch you are inside rather than going dark
-        while its own child is open."""
-        drawer = self._drawer("folder_watch_temenos", "System Admin")
-        parent = re.search(r'<a href="([^"]+)"[^>]*is-ancestor', drawer)
-        self.assertIsNotNone(parent)
-        self.assertEqual(parent.group(1), reverse("folder_watch"))
+        while its own child is open.
 
-    def test_the_home_screen_is_never_marked_as_a_branch(self):
-        """Every page descends from home, so marking it would accent the dashboard on all of
-        them — and a marker that is nearly always lit stops meaning "you are here"."""
+        Matched on Folder Watch's own anchor rather than the first is-ancestor in the drawer:
+        Reports now sits above it and lights too, which is correct — both are branches the
+        page is inside — but it made "the first one" the wrong thing to assert.
+        """
+        drawer = self._drawer("folder_watch_temenos", "System Admin")
+        own = re.search(r'<a href="' + reverse("folder_watch") + r'"([^>]*)>', drawer)
+        self.assertIsNotNone(own)
+        self.assertIn("is-ancestor", own.group(1))
+
+    def test_the_tree_root_is_not_a_drawer_entry_at_all(self):
+        """The systems picker used to be home AND a drawer entry, so it had to be excluded
+        from branch-marking or it would have been accented on every page. It is now reached
+        through Reports and is not in the drawer, which settles the same problem outright.
+
+        Reports itself is only ever CURRENT on Reports — lighting as a branch elsewhere is
+        the point of it."""
         for url_name in ("folder_watch", "folder_watch_temenos"):
             drawer = self._drawer(url_name, "System Admin")
-            dash = re.search(r'<a href="' + reverse("report_form") + r'"([^>]*)>', drawer)
-            self.assertIsNotNone(dash)
-            self.assertNotIn("is-ancestor", dash.group(1))
-            self.assertNotIn("is-current", dash.group(1))
+            self.assertNotIn('<a href="%s"' % reverse("report_form"), drawer)
+            entry = re.search(r'<a href="' + reverse("reports") + r'"([^>]*)>', drawer)
+            self.assertIsNotNone(entry)
+            self.assertNotIn("is-current", entry.group(1))
 
     def test_the_marker_is_not_colour_alone(self):
         """A screen reader gets the same information from aria-current that a sighted user
@@ -2653,7 +2677,8 @@ class BrandBackCaret(TestCase):
         """Without a caret there is nothing to merge, so the crest keeps its old job."""
         self.client.login(username="caret1", password="pw12345!")
         _, pill = self._caret("history")
-        self.assertIn(('brand-icon', reverse("report_form")),
+        # home is the role's own landing screen, which is Reports for every reporting role
+        self.assertIn(('brand-icon', reverse("reports")),
                       re.findall(r'class="(brand-[a-z-]+)" href="([^"]+)"', pill))
 
     def test_it_is_hidden_when_there_is_only_one_role(self):
@@ -2961,7 +2986,9 @@ class NetworkOpenReportParity(TestCase):
         """The nav tree is rooted at the SYSTEMS dashboard, so without a role-aware fallback a
         network admin's Back led to a screen that is not in their menu."""
         body = self.client.get(reverse("history")).content.decode()
-        self.assertIn('class="backnav" href="%s"' % reverse("network_dashboard"), body)
+        # Back goes to the role's own landing screen — Reports — never to another estate's
+        # picker, which is the failure this test was written for.
+        self.assertIn('class="backnav" href="%s"' % reverse("reports"), body)
         self.assertNotIn('class="backnav" href="%s"' % reverse("report_form"), body)
 
     def test_the_systems_flow_is_untouched(self):
@@ -3211,7 +3238,9 @@ class BackNavigationChain(TestCase):
         with _snmp_prom(_snmp_series()):
             self.client.post(reverse("network_report"), {"include_device": "core-switch"})
             self.assertEqual(self._back("network_report"), reverse("network_dashboard"))
-            self.assertEqual(self._back("network_dashboard"), reverse("role_select"))
+            # a picker steps out to the report choice, which steps out to the role choice
+            self.assertEqual(self._back("network_dashboard"), reverse("reports"))
+            self.assertEqual(self._back("reports"), reverse("role_select"))
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_back_from_a_report_never_points_at_itself(self, _cap):
@@ -4355,3 +4384,206 @@ class ScriptScreens(TestCase):
         .gitignore, not by the app, so the rule itself is what gets tested."""
         root = pathlib.Path(settings.BASE_DIR).parent
         self.assertIn("/configuration/generated/", (root / ".gitignore").read_text(encoding="utf-8"))
+
+
+_OS_SERIES = {
+    "windows_os_info": [{"labels": {"instance": "10.0.212.3:9182", "job": "windows_exporter",
+                                    "system": "Temenos", "display": "Temenos/T24 App",
+                                    "product": "Windows Server 2019 Standard",
+                                    "version": "10.0.17763", "build_number": "17763",
+                                    "revision": "5576"}, "value": 1}],
+    "node_os_info": [{"labels": {"instance": "10.100.249.244:9100", "job": "node_exporter",
+                                 "system": "RTGS", "display": "RTGS Backend", "role": "backend",
+                                 "pretty_name": "Oracle Linux Server 8.10", "id": "ol",
+                                 "version_id": "8.10"}, "value": 1}],
+}
+
+
+class _FakeProm:
+    """Stands in for a live Prometheus for the two constant gauges the inventory reads."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def ping(self):
+        return True
+
+    def query(self, expr):
+        for name, series in _OS_SERIES.items():
+            if expr.startswith(name):
+                return series
+        return []
+
+
+class ReportsScreen(TestCase):
+    """Which report am I running — the choice that comes before which systems it covers."""
+
+    def _user(self, name, *roles):
+        u = get_user_model().objects.create_user(name, password="pw12345!")
+        for r in roles:
+            u.groups.add(Group.objects.get_or_create(name=r)[0])
+        return u
+
+    def _as(self, name, role):
+        self.client.login(username=name, password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": role})
+
+    def test_security_admin_gets_both_reports(self):
+        """The case that made a screen necessary rather than a menu entry per report."""
+        self._user("sec", "Security Admin")
+        self._as("sec", "Security Admin")
+        labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+        self.assertEqual(labels, ["System Health Report", "OS Inventory Report"])
+
+    def test_each_other_role_gets_its_one_report(self):
+        for name, role, expected in (("sys", "System Admin", "System Health Report"),
+                                     ("net", "Network Admin", "Network Report"),
+                                     ("inf", "Infrastructure Admin", "Infrastructure Report")):
+            self._user(name, role)
+            self._as(name, role)
+            labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+            self.assertEqual(labels, [expected], role)
+            self.client.logout()
+
+    def test_administrator_has_no_reports_screen(self):
+        """It configures the app rather than reporting on it, so the entry is absent and the
+        URL sends it somewhere real instead of showing an empty grid."""
+        self._user("adm", "Administrator")
+        self._as("adm", "Administrator")
+        resp = self.client.get(reverse("reports"))
+        self.assertRedirects(resp, reverse("roles_console"), fetch_redirect_response=False)
+        drawer = self.client.get(reverse("history")).content.decode()
+        self.assertNotIn(reverse("reports"), drawer)
+
+    def test_a_role_with_no_estate_is_sent_to_its_own_screen(self):
+        self._user("gov", "Gov Systems Admin")
+        self._as("gov", "Gov Systems Admin")
+        self.assertRedirects(self.client.get(reverse("reports")),
+                             reverse("role_empty"), fetch_redirect_response=False)
+
+    def test_it_is_where_each_role_lands_after_picking(self):
+        from .roles import ROLE_HOME
+        for role in ("System Admin", "Network Admin", "Infrastructure Admin", "Security Admin"):
+            self.assertEqual(ROLE_HOME[role], "reports", role)
+
+    def test_the_drawer_shows_one_reports_entry_not_a_picker_each(self):
+        self._user("sys2", "System Admin")
+        self._as("sys2", "System Admin")
+        body = self.client.get(reverse("history")).content.decode()
+        drawer = body[body.find('id="drawer"'):body.find("</nav>")]
+        self.assertIn(reverse("reports"), drawer)
+        self.assertNotIn("System Picker", drawer)
+
+    def test_back_from_a_picker_steps_out_to_the_report_choice(self):
+        """A picker is a step inside running a report, not a destination beside it."""
+        self._user("sec2", "Security Admin")
+        self._as("sec2", "Security Admin")
+        resp = self.client.get(reverse("os_inventory"))
+        self.assertEqual(resp.context["back_url"], reverse("reports"))
+        self.assertEqual(resp.context["back_label"], "Reports")
+
+
+class OsInventoryReport(TestCase):
+    """Security Admin's second report."""
+
+    def setUp(self):
+        self.sec = get_user_model().objects.create_user("secadm", password="pw12345!")
+        self.sec.groups.add(Group.objects.get_or_create(name="Security Admin")[0])
+        self.client.login(username="secadm", password="pw12345!")
+
+    def test_only_security_admin_can_run_it(self):
+        other = get_user_model().objects.create_user("sysadm", password="pw12345!")
+        other.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="sysadm", password="pw12345!")
+        self.assertRedirects(self.client.get(reverse("os_inventory")),
+                             reverse("reports"), fetch_redirect_response=False)
+
+    def test_the_screen_offers_no_system_picker(self):
+        """An inventory that covered only the systems someone ticked would answer "what is
+        the oldest OS we run" with a number that depends on the ticking."""
+        resp = self.client.get(reverse("os_inventory"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, 'name="include_system"')
+
+    def test_it_downloads_a_real_workbook(self):
+        with mock.patch("reports.services.gr.Prometheus", _FakeProm):
+            resp = self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("attachment", resp["Content-Disposition"])
+        wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+        self.assertEqual(wb.sheetnames, ["Summary", "OS Inventory", "Needs attention"])
+
+    def test_it_records_an_audit_row_like_every_other_report(self):
+        """History is common to every role, so a report that skipped it would be a download
+        with no record of who took it."""
+        with mock.patch("reports.services.gr.Prometheus", _FakeProm):
+            self.client.post(reverse("os_inventory"), {"theme": "light"})
+        sub = ReportSubmission.objects.get()
+        self.assertEqual(sub.generated_by, self.sec)
+        self.assertEqual(sub.theme, "light")
+        self.assertEqual(sub.hosts_count, 2)
+        self.assertEqual(sub.report_content["kind"], "os_inventory")
+        self.assertIn("OS Inventory", sub.filename)
+
+    def test_lifecycle_banding_reaches_the_audit_row(self):
+        """immediate/watch carry the report's red and amber bands — end-of-life hosts and
+        extended-support-only ones — so History reads the same as it does for the others."""
+        with mock.patch("reports.services.gr.Prometheus", _FakeProm):
+            self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        sub = ReportSubmission.objects.get()
+        self.assertEqual(sub.immediate_count, 0)      # neither host is end-of-life
+        self.assertEqual(sub.watch_count, 1)          # Windows 2019 is extended-support only
+
+    def test_an_unreachable_prometheus_explains_itself(self):
+        class Dead(_FakeProm):
+            def ping(self):
+                raise OSError("connection refused")
+
+        with mock.patch("reports.services.gr.Prometheus", Dead):
+            resp = self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        self.assertEqual(resp.status_code, 502)
+        self.assertContains(resp, "connection refused", status_code=502)
+
+    def test_no_series_at_all_names_the_likely_cause(self):
+        """Blank output would look like an estate with no operating systems."""
+        class Empty(_FakeProm):
+            def query(self, expr):
+                return []
+
+        with mock.patch("reports.services.gr.Prometheus", Empty):
+            resp = self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        self.assertEqual(resp.status_code, 502)
+        self.assertContains(resp, "os` collector", status_code=502)
+
+
+class SharedReportsBelongToBothRoles(TestCase):
+    """PAGE_OWNER became a set so one screen can belong to two roles."""
+
+    def test_system_health_is_owned_by_both_roles_that_run_it(self):
+        from .roles import PAGE_OWNER
+        self.assertEqual(PAGE_OWNER["report_form"], {"System Admin", "Security Admin"})
+
+    def test_neither_role_is_bounced_off_the_shared_picker(self):
+        """As a single owner, whichever role lost the tie was redirected off a screen that is
+        genuinely theirs — with a message naming a role they might not even hold.
+
+        Asserted on page_in_scope, the decision RoleScopeMiddleware actually makes, rather
+        than by rendering the picker: that would drag a live topology file into a test about
+        role scoping, and fail for a reason that has nothing to do with it.
+        """
+        from django.test import RequestFactory
+
+        from .roles import page_in_scope
+
+        u = get_user_model().objects.create_user("shared", password="pw12345!")
+        for role in ("System Admin", "Security Admin"):
+            u.groups.add(Group.objects.get_or_create(name=role)[0])
+        for role in ("System Admin", "Security Admin"):
+            request = RequestFactory().get("/")
+            request.user = u
+            request.session = {"active_role": role}
+            for page in ("report_form", "report"):
+                self.assertTrue(page_in_scope(request, page), f"{role} / {page}")

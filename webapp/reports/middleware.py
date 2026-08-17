@@ -63,14 +63,17 @@ class RoleScopeMiddleware:
         if not name:
             return None
 
-        owner = PAGE_OWNER.get(name)
-        if owner is None:                       # a page common to every role
+        owners = PAGE_OWNER.get(name)
+        if not owners:                          # a page common to every role
             return None
         current = active_role(request)
-        if not current or owner == current:     # unscoped, or already the right role
+        if not current or current in owners:    # unscoped, or already one of its roles
             return None
-        if owner not in held_roles(user):       # not theirs — let the view refuse
+        # Name a role they actually hold, where there is one — telling someone to switch to a
+        # role they cannot have is worse than saying nothing.
+        theirs = owners & set(held_roles(user))
+        if not theirs:                          # not theirs at all — let the view refuse
             return None
-
+        owner = sorted(theirs)[0]
         messages.info(request, f"That page belongs to the {owner} role. Switch to it to open it.")
         return redirect("role_select")

@@ -48,9 +48,13 @@ from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_
                     ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_infra_admin, is_network_admin, is_role_admin,
+                    effective_roles, is_security_admin, reports_for,
                     role_icon, role_screens,
                     is_superuser, is_system_admin)
 from .services import (
+    OsInventoryUnavailable,
+    build_os_inventory,
+    default_os_inventory_filename,
     EmailNotConfigured,
     PrometheusUnavailable,
     build_report,
@@ -308,6 +312,85 @@ def _open_report_seconds(request, estate: str) -> int:
 def _close_open_report(request, estate: str) -> None:
     for k in _ESTATE_SESSION_KEYS.get(estate, ()):
         request.session.pop(k, None)
+# ---------------------------------------------------------------------------------------
+#  Reports — the landing screen after Role Select
+# ---------------------------------------------------------------------------------------
+@never_cache
+@login_required
+def reports(request):
+    """Which report am I running?
+
+    The choice that comes BEFORE which systems it covers, so it sits in front of the pickers
+    rather than beside them. Most roles have one and go straight through; Security Admin has
+    two, which is what made a screen necessary rather than a menu entry per report.
+
+    Tiles rather than a list, matching Role Select: the two screens ask the same shape of
+    question one after the other, and answering them in two different visual languages makes
+    the second look like a different kind of decision than it is.
+    """
+    available = reports_for(effective_roles(request))
+    if not available:
+        # Administrator configures the app rather than reporting on it; a role with no estate
+        # yet has its own screen that says so. Neither should meet an empty grid.
+        return redirect("roles_console" if is_role_admin(request.user) else "role_empty")
+    return render(request, "reports/reports.html", {
+        "options": [{"key": r.key, "label": r.label, "blurb": r.blurb,
+                     "url": reverse(r.url_name), "initial": r.label[:1]}
+                    for r in available],
+    })
+
+
+@never_cache
+@login_required
+def os_inventory(request):
+    """OS Inventory — every host's operating system, patch level and support status.
+
+    No system picker, unlike the other reports. An inventory that covered only the systems
+    someone happened to tick would answer "what is the oldest OS we run" with a number that
+    depends on the ticking; the question is only meaningful across the whole estate.
+
+    Built on demand rather than from a cached snapshot: it reads two constant gauges rather
+    than the wide metric sweep the health report needs, so there is nothing expensive to
+    amortise and nothing to go stale between choosing and downloading.
+    """
+    if not (is_security_admin(request.user) or request.user.is_superuser):
+        return redirect("reports")
+
+    if request.method == "POST":
+        theme = request.POST.get("theme")
+        if theme not in ("dark", "light"):
+            theme = getattr(getattr(request.user, "profile", None),
+                            "default_report_theme", "dark")
+        try:
+            data, hosts, eol, extended = build_os_inventory(theme)
+        except OsInventoryUnavailable as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+        filename = default_os_inventory_filename(timezone.localtime())
+        ReportSubmission.objects.create(
+            generated_by=request.user,
+            author=_profile_author(request.user),
+            theme=theme,
+            delivery="download",
+            prom_url=SystemConfig.get().prometheus_url or gr.load_config().prom,
+            hosts_count=hosts,
+            immediate_count=eol,          # end-of-life hosts are the report's red band
+            watch_count=extended,         # extended-support-only are its amber
+            filename=filename,
+            report_content={"kind": "os_inventory", "hosts": hosts,
+                            "end_of_life": eol, "extended_support": extended},
+        )
+        response = HttpResponse(
+            data,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return response
+
+    return render(request, "reports/os_inventory.html", {
+        "default_theme": getattr(getattr(request.user, "profile", None),
+                                 "default_report_theme", "dark"),
+    })
+
+
 
 
 @login_required

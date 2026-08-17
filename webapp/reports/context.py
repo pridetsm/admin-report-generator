@@ -11,7 +11,8 @@ from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
 from .roles import (ROLE_HOME, ROLE_PAGES, active_role, effective_roles, held_roles,
-                    is_infra_admin, is_network_admin, is_role_admin, is_system_admin)
+                    is_infra_admin, is_network_admin, is_role_admin, is_system_admin,
+                    reports_for)
 
 
 def _asset_version() -> str:
@@ -40,9 +41,13 @@ def _asset_version() -> str:
 _NAV_PARENT = {
     # The pickers are the top of each estate, and the step above an estate is choosing which
     # one you are working in. Both therefore lead back to Role Select rather than dead-ending.
-    "report_form": "role_select",
-    "network_dashboard": "role_select",
-    "infra_form": "role_select",
+    "reports": "role_select",
+    # Each picker is a step inside running a report, so Back steps out to the report choice
+    # rather than all the way to the role choice.
+    "report_form": "reports",
+    "network_dashboard": "reports",
+    "infra_form": "reports",
+    "os_inventory": "reports",
     "infra_report": "infra_form",
     # Each report sits under the picker that opened it, so Back steps out of the report
     # rather than dead-ending on it. The network report already worked this way; the systems
@@ -84,6 +89,8 @@ _NAV_ROOT = "report_form"
 
 _NAV_LABEL = {
     "role_select": "Role Select",
+    "reports": "Reports",
+    "os_inventory": "OS Inventory",
     "report_form": "System Picker",
     "report": "Report",
     "connect": "Connect",
@@ -265,6 +272,9 @@ def role_flags(request):
         # Only offer "switch role" to someone who has somewhere to switch to. The canvas
         # Back button is the one-role holder's route to the picker (see _back_nav).
         "can_switch_role": len(held_roles(user)) > 1,
+        # drives the single Reports drawer entry — Administrator has none
+        "has_reports": bool(reports_for(effective_roles(request)))
+                       if user is not None else False,
         "home_url": _home_url(request) if user is not None else reverse("report_form"),
         "notif_count": 0,
         "notifications": [],

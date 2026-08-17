@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from django.conf import settings
 
@@ -411,3 +411,61 @@ def default_recipients() -> str:
         return ", ".join(mr.load_mail_config(str(gr.DEFAULT_CONFIG)).get("recipients", []))
     except Exception:      # noqa: BLE001 — config optional; empty is fine
         return ""
+
+
+class OsInventoryUnavailable(RuntimeError):
+    """Raised when the OS inventory cannot be built — unreachable Prometheus, or the `os`
+    collector not enabled on the exporters so no host reports a version at all."""
+
+
+def build_os_inventory(theme: str = "dark") -> Tuple[bytes, int, int, int]:
+    """The OS Inventory workbook, as bytes, plus (hosts, end-of-life, extended-support).
+
+    Estate-wide by design: an inventory that covered only the systems someone happened to
+    tick would answer "what is the oldest OS we run" with a number that depends on the
+    ticking. generate_os_inventory.fetch() reads every host Prometheus knows about.
+
+    Thin wrapper over send_report/generate_os_inventory.py, the same shape as build_report's
+    wrapper over the daily report — the engine stays the single source of truth for what a
+    report contains, and the webapp only decides when to run it and who may.
+    """
+    import datetime as _dt
+    import io
+
+    import generate_os_inventory as osi
+
+    cfg = gr.load_config()
+    from .models import SystemConfig
+    sc = SystemConfig.get()
+    if sc.prometheus_url:
+        cfg.prom = sc.prometheus_url
+
+    prom = gr.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
+    try:
+        prom.ping()
+    except Exception as exc:                      # noqa: BLE001 — surfaced to the admin
+        raise OsInventoryUnavailable(f"{cfg.prom}: {exc}") from exc
+
+    today = _dt.date.today()
+    hosts = osi.fetch(prom)
+    if not hosts:
+        raise OsInventoryUnavailable(
+            "No windows_os_info or node_os_info series came back — the `os` collector is "
+            "probably not enabled on the exporters.")
+    osi.annotate(hosts, today)
+
+    with gr.palette(theme if theme in gr.PALETTES else "dark"):
+        workbook = osi.Report(hosts, cfg.prom, today).build()
+
+    buf = io.BytesIO()
+    workbook.save(buf)
+    eol = sum(1 for h in hosts if h.band == "red")
+    extended = sum(1 for h in hosts if h.band == "amber")
+    return buf.getvalue(), len(hosts), eol, extended
+
+
+def default_os_inventory_filename(when=None) -> str:
+    import datetime as _dt
+
+    when = when or _dt.datetime.now()
+    return f"OS Inventory - {when:%Y-%m-%d %H%M}.xlsx"
