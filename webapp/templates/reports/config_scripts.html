@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Scripts · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">Generated into <code>{{ output_dir }}</code> — gitignored</span>
+  </div>
+
+  {% for entry in catalogue %}
+  <div class="section-label sub">
+    {{ entry.spec.label }}
+    {% if not entry.spec.available %}<span class="chip amber" style="text-transform:none;letter-spacing:0">not yet</span>{% endif %}
+  </div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <p style="margin:0 0 10px;color:var(--muted);font-size:13px">{{ entry.spec.blurb }}</p>
+
+    {% if not entry.spec.available %}
+      <p class="cfg-note" style="margin:0">{{ entry.spec.unavailable_note }}</p>
+    {% elif entry.definitions %}
+      <table class="hist">
+        <thead><tr><th>Name</th><th>System</th><th>Host</th><th>Last generated</th><th></th></tr></thead>
+        <tbody>
+        {% for d in entry.definitions %}
+          <tr class="rowlink" data-href="{% url 'config_script_edit' d.pk %}">
+            <td><b>{{ d.name }}</b>{% if d.secret_names %} <span class="chip green" title="Secrets stored encrypted: {{ d.secret_names|join:', ' }}">🔒 {{ d.secret_names|length }}</span>{% endif %}</td>
+            <td style="color:var(--muted)">{{ d.system|default:"—" }}</td>
+            <td style="color:var(--muted)">{{ d.host|default:"—" }}</td>
+            <td style="color:var(--muted)">
+              {% if d.last_generated_at %}{{ d.last_generated_at|date:"d M Y, H:i" }}
+              {% else %}<span class="chip amber">never</span>{% endif %}
+            </td>
+            <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+                 href="{% url 'config_script_edit' d.pk %}">Open</a></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p style="margin:0;color:var(--muted);font-size:13px">None defined yet.</p>
+    {% endif %}
+  </div></div>
+  {% endfor %}
+
+  {% if creatable %}
+  <div class="section-label sub">Add a script</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <form method="post">{% csrf_token %}
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Type</span>
+          <select name="script_type">
+            {% for t in creatable %}<option value="{{ t.key }}">{{ t.label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Name</span>
+          <input type="text" name="name" placeholder="BSA SQL backup" required>
+          <small class="cfg-hint">Becomes the filename stem.</small>
+        </label>
+        <label class="field">
+          <span>System</span>
+          <input type="text" name="system" list="topoSystems" placeholder="e.g. BSA">
+          <datalist id="topoSystems">
+            {% for s in systems %}<option value="{{ s }}">{% endfor %}
+          </datalist>
+        </label>
+        <label class="field">
+          <span>Host</span>
+          <input type="text" name="host" placeholder="10.100.248.20">
+        </label>
+      </div>
+      <button class="btn primary cfg-add" type="submit">＋ Create</button>
+    </form>
+  </div></div>
+  {% endif %}
+</div>
+{% endblock %}

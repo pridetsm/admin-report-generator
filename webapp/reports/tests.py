@@ -28,8 +28,9 @@ import yaml
 from . import folders, network
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
-from .models import (GrafanaConfigRevision, PrometheusConfigRevision, ReportSubmission,
-                     RoleRequest, RoleScope, SystemConfig)
+from .models import (GeneratedScript, GrafanaConfigRevision, PrometheusConfigRevision,
+                     ReportSubmission, RoleRequest, RoleScope, SystemConfig)
+from . import crypto, scripts
 from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin, role_icon
 from .services import FlagVM, Snapshot, SystemVM, build_overview, list_systems
 
@@ -4035,3 +4036,248 @@ class JavaScriptParses(TestCase):
             "",
         ])
         self.assertEqual(self._unterminated_strings(fine), [])
+
+
+class ScriptGeneration(TestCase):
+    """Rendering a checker script from a stored definition.
+
+    These files run unattended on production hosts and publish the metrics the report is built
+    from, so the failure that matters is not a crash — it is a script that runs cleanly and
+    reports the wrong thing. Most of what follows guards that.
+    """
+
+    WIN = {"backup_root": r"E:\BACKUP", "file_glob": "BSAV50_FULL_*.bak",
+           "textfile_dir": r"C:\Program Files\windows_exporter\textfile_inputs",
+           "out_file": "backup_file.prom", "time_field": "LastWriteTime",
+           "min_bytes": "1", "max_age_days": "3"}
+    LNX = {"backup_root": "/var/backups/cms", "file_glob": "*.dmp",
+           "textfile_dir": "/var/lib/node_exporter/textfile_collector",
+           "out_file": "backup_file.prom", "min_bytes": "1",
+           "max_age_days": "1", "cron_schedule": "30 2 * * *"}
+
+    def test_every_token_is_filled(self):
+        """A leftover @@TOKEN@@ would ship as literal text into a path or a number."""
+        for stype, params in (("backup_windows", self.WIN), ("backup_linux", self.LNX)):
+            for name, content in scripts.render(stype, "CMS backup", "CMS", params).items():
+                self.assertNotIn("@@", content, f"{name} still has an unfilled token")
+
+    def test_an_unknown_token_is_an_error_not_a_blank(self):
+        """Silently substituting '' would produce a script that monitors nothing and says
+        nothing — the worst shape of failure for something that runs unattended."""
+        with self.assertRaises(scripts.ScriptError):
+            scripts._substitute("root = @@NOT_A_FIELD@@", {"SLUG": "x"})
+
+    def test_the_parameters_actually_reach_the_script(self):
+        files = scripts.render("backup_windows", "BSA SQL backup", "BSA", self.WIN)
+        ps1 = next(v for k, v in files.items() if k.endswith(".ps1"))
+        self.assertIn(r"$BackupRoot  = 'E:\BACKUP'", ps1)
+        self.assertIn("'BSAV50_FULL_*.bak'", ps1)
+        self.assertIn("$MaxAgeDays     = 3", ps1)
+
+    def test_the_metric_schema_is_fixed_on_both_platforms(self):
+        """generate_report.py scans for exactly these names, and the textfile collector errors
+        if two .prom files in one directory describe the same metric differently. No field may
+        reach them, and Windows and Linux must not drift apart."""
+        wanted = ["backup_file", "backup_file_count",
+                  "backup_check_success", "backup_check_timestamp_seconds"]
+        for stype, params, ext in (("backup_windows", self.WIN, ".ps1"),
+                                   ("backup_linux", self.LNX, ".sh")):
+            files = scripts.render(stype, "CMS backup", "CMS", params)
+            body = next(v for k, v in files.items() if k.endswith(ext))
+            for metric in wanted:
+                self.assertIn(metric, body, f"{stype} does not emit {metric}")
+
+    def test_the_wrapper_launches_the_script_it_was_generated_with(self):
+        """The .bat hard-codes the .ps1's filename, so a rename that missed one would leave a
+        scheduled task pointing at a file that isn't there."""
+        files = scripts.render("backup_windows", "BSA SQL backup", "BSA", self.WIN)
+        ps1_name = next(k for k in files if k.endswith(".ps1"))
+        bat = next(v for k, v in files.items() if k.endswith(".bat"))
+        self.assertIn(ps1_name, bat)
+
+    def test_the_generated_header_says_it_is_generated(self):
+        """A file that can be overwritten has to warn the person editing it."""
+        for stype, params in (("backup_windows", self.WIN), ("backup_linux", self.LNX)):
+            for content in scripts.render(stype, "CMS backup", "CMS", params).values():
+                self.assertIn("GENERATED", content)
+                self.assertIn("regenerate", content.lower())
+
+    def test_a_type_awaiting_its_source_refuses_to_generate(self):
+        """COB and SWIFT are registered so the catalogue is honest about them, but guessing at
+        their data source would produce a script that runs and reports the wrong number."""
+        for key in ("cob", "swift"):
+            self.assertFalse(scripts.get_type(key).available)
+            with self.assertRaises(scripts.ScriptError):
+                scripts.render(key, "x", "y", {})
+
+    def test_names_become_safe_filenames(self):
+        self.assertEqual(scripts.slugify("BSA SQL backup"), "bsa_sql_backup")
+        self.assertEqual(scripts.slugify("RTGS / Oracle (prod)"), "rtgs_oracle_prod")
+        self.assertEqual(scripts.slugify("   "), "script")      # never a bare extension
+
+    def test_generated_shell_parses(self):
+        """The lesson from the app.js outage: generated code nothing ever parses is a silent
+        failure. Skipped rather than faked where the interpreter is absent."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash not available on this host")
+        files = scripts.render("backup_linux", "CMS backup", "CMS", self.LNX)
+        sh = next(v for k, v in files.items() if k.endswith(".sh"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "check.sh"
+            path.write_text(sh, encoding="utf-8", newline="")
+            result = subprocess.run([bash, "-n", str(path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class ScriptSecrets(TestCase):
+    """Secrets belong in the database, encrypted, and never in a file or the browser."""
+
+    def test_a_secret_is_encrypted_at_rest(self):
+        d = GeneratedScript.objects.create(name="s", script_type="backup_windows")
+        d.secrets_encrypted = scripts.merge_secrets("", {"db_password": "hunter2"})
+        d.save()
+        d.refresh_from_db()
+        self.assertNotIn("hunter2", d.secrets_encrypted)       # ciphertext, not plaintext
+        self.assertEqual(d.secret_values(), {"db_password": "hunter2"})
+        self.assertEqual(d.secret_names, ["db_password"])      # names only, never values
+
+    def test_the_placeholder_keeps_the_stored_secret(self):
+        """So editing a definition never requires re-typing a secret, and the real value never
+        travels to the browser and back."""
+        enc = scripts.merge_secrets("", {"db_password": "hunter2"})
+        kept = scripts.merge_secrets(enc, {"db_password": scripts.SECRET_PLACEHOLDER})
+        self.assertEqual(crypto.decrypt(kept), crypto.decrypt(enc))
+
+    def test_a_new_value_replaces_and_an_empty_one_clears(self):
+        enc = scripts.merge_secrets("", {"db_password": "hunter2"})
+        changed = scripts.merge_secrets(enc, {"db_password": "correct-horse"})
+        self.assertEqual(json.loads(crypto.decrypt(changed))["db_password"], "correct-horse")
+        cleared = scripts.merge_secrets(changed, {"db_password": ""})
+        self.assertEqual(crypto.decrypt(cleared) or "{}", "{}")
+
+    def test_parameters_never_hold_a_secret(self):
+        """The definition's plain JSON is what a DB dump or a screenshot exposes."""
+        d = GeneratedScript.objects.create(
+            name="s2", script_type="backup_windows",
+            parameters={"backup_root": r"E:\BACKUP"},
+            secrets_encrypted=scripts.merge_secrets("", {"db_password": "hunter2"}))
+        self.assertNotIn("hunter2", json.dumps(d.parameters))
+
+
+class ScriptScreens(TestCase):
+    """The Administrator screens around all that."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="scriptout_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.override = override_settings(SCRIPT_OUTPUT_DIR=self.dir)
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.admin = get_user_model().objects.create_user("scadmin", password="pw12345!")
+        self.admin.groups.add(Group.objects.get(name="Administrator"))
+        self.client.login(username="scadmin", password="pw12345!")
+
+    def _make(self, name="BSA SQL backup"):
+        self.client.post(reverse("config_scripts"),
+                         {"script_type": "backup_windows", "name": name,
+                          "system": "BSA", "host": "10.100.248.20"})
+        return GeneratedScript.objects.get(name=name)
+
+    def test_administrator_only(self):
+        u = get_user_model().objects.create_user("scnope", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="scnope", password="pw12345!")
+        self.assertEqual(self.client.get(reverse("config_scripts")).status_code, 302)
+
+    def test_creating_then_generating_writes_the_files(self):
+        d = self._make()
+        self.assertIsNone(d.last_generated_at)          # creating writes nothing
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict({"action": "generate", "name": d.name, "system": "BSA"},
+                              **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()}))
+        d.refresh_from_db()
+        self.assertIsNotNone(d.last_generated_at)
+        self.assertEqual(len(d.last_generated_files), 2)
+        for path in d.last_generated_files:
+            p = pathlib.Path(path)
+            self.assertTrue(p.is_file(), f"{p} was not written")
+            # per-type sub-folder, so a folder listing says what each script is for
+            self.assertEqual(p.parent.name, "backup_windows")
+            self.assertNotIn("@@", p.read_text(encoding="utf-8"))
+
+    def test_save_does_not_write_anything(self):
+        """Correcting a note should not overwrite a live script on the way past."""
+        d = self._make()
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict({"action": "save", "name": d.name, "notes": "after the 23:30 job"},
+                              **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()}))
+        d.refresh_from_db()
+        self.assertEqual(d.notes, "after the 23:30 job")
+        self.assertIsNone(d.last_generated_at)
+        self.assertEqual(list(pathlib.Path(self.dir).rglob("*.ps1")), [])
+
+    def test_editing_and_regenerating_changes_the_file(self):
+        """The whole point of storing the definition: change a parameter, regenerate."""
+        d = self._make()
+        base = dict({"name": d.name, "system": "BSA"},
+                    **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()})
+        self.client.post(reverse("config_script_edit", args=[d.pk]), dict(base, action="generate"))
+        d.refresh_from_db()
+        ps1 = next(pathlib.Path(p) for p in d.last_generated_files if p.endswith(".ps1"))
+        self.assertIn("$MaxAgeDays     = 3", ps1.read_text(encoding="utf-8"))
+
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict(base, action="generate", p_max_age_days="7"))
+        self.assertIn("$MaxAgeDays     = 7", ps1.read_text(encoding="utf-8"))
+
+    def test_preview_shows_the_files_without_writing_them(self):
+        d = self._make()
+        resp = self.client.get(reverse("config_script_preview", args=[d.pk]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([n for n, _ in resp.context["files"]],
+                         ["check_backup_bsa_sql_backup.ps1", "run_bsa_sql_backup.bat"])
+        self.assertEqual(list(pathlib.Path(self.dir).rglob("*")), [])   # nothing on disk
+
+    def test_preview_can_download_one_file(self):
+        d = self._make()
+        resp = self.client.get(reverse("config_script_preview", args=[d.pk]),
+                               {"file": "run_bsa_sql_backup.bat"})
+        self.assertIn("attachment", resp["Content-Disposition"])
+        self.assertIn(b"@echo off", resp.content)
+
+    def test_a_duplicate_name_is_refused(self):
+        """Two definitions of one type and name render to the same filename and would silently
+        overwrite each other in the configuration folder."""
+        self._make()
+        self.client.post(reverse("config_scripts"),
+                         {"script_type": "backup_windows", "name": "BSA SQL backup"})
+        self.assertEqual(GeneratedScript.objects.filter(name="BSA SQL backup").count(), 1)
+
+    def test_a_type_awaiting_its_source_cannot_be_created(self):
+        self.client.post(reverse("config_scripts"), {"script_type": "cob", "name": "T24 COB"})
+        self.assertFalse(GeneratedScript.objects.filter(name="T24 COB").exists())
+
+    def test_removing_a_definition_leaves_the_files_alone(self):
+        """Removing a definition stops MANAGING a script; it does not stop a host running one
+        — that needs the scheduled task removing too, on the host."""
+        d = self._make()
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict({"action": "generate", "name": d.name},
+                              **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()}))
+        d.refresh_from_db()
+        written = [pathlib.Path(p) for p in d.last_generated_files]
+        self.client.post(reverse("config_script_edit", args=[d.pk]), {"action": "delete"})
+        self.assertFalse(GeneratedScript.objects.filter(pk=d.pk).exists())
+        for p in written:
+            self.assertTrue(p.is_file(), f"{p} should have been left in place")
+
+    def test_the_output_folder_is_gitignored(self):
+        """The requirement is that nothing generated reaches Git. That is enforced by
+        .gitignore, not by the app, so the rule itself is what gets tested."""
+        root = pathlib.Path(settings.BASE_DIR).parent
+        self.assertIn("/configuration/generated/", (root / ".gitignore").read_text(encoding="utf-8"))

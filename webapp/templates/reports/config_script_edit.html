@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}{{ definition.name }} · Scripts{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {{ spec.label }} ·
+      {% if definition.last_generated_at %}generated {{ definition.last_generated_at|date:"d M Y, H:i" }}
+      {% else %}never generated{% endif %} ·
+      <code>{{ output_dir }}</code>
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_script_preview' definition.pk %}">Preview</a>
+    <a class="btn ghost" href="{% url 'config_scripts' %}">All scripts</a>
+  </div>
+
+  <form method="post">{% csrf_token %}
+    <div class="section-label sub">What this is</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" name="name" value="{{ definition.name }}" required>
+        </label>
+        <label class="field">
+          <span>System</span>
+          <input type="text" name="system" value="{{ definition.system }}" list="topoSystems">
+          <datalist id="topoSystems">
+            {% for s in systems %}<option value="{{ s }}">{% endfor %}
+          </datalist>
+        </label>
+        <label class="field">
+          <span>Host</span>
+          <input type="text" name="host" value="{{ definition.host }}">
+        </label>
+        <label class="field">
+          <span>Notes</span>
+          <input type="text" name="notes" value="{{ definition.notes }}">
+        </label>
+      </div>
+    </div></div>
+
+    <div class="section-label sub">Parameters</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <div class="cfg-grid2">
+        {% for f in fields %}
+        <label class="field">
+          <span>{{ f.spec.label }}{% if f.spec.secret %} <b class="cfg-req">· secret</b>{% endif %}</span>
+          {% if f.spec.kind == "select" %}
+            <select name="p_{{ f.spec.name }}">
+              {% for c in f.spec.choices %}
+              <option value="{{ c }}"{% if c == f.value %} selected{% endif %}>{{ c }}</option>
+              {% endfor %}
+            </select>
+          {% else %}
+            <input type="{% if f.spec.kind == 'number' %}number{% else %}text{% endif %}"
+                   name="p_{{ f.spec.name }}" value="{{ f.value }}"
+                   {% if f.spec.secret %}autocomplete="off"{% endif %}>
+          {% endif %}
+          {% if f.spec.hint %}<small class="cfg-hint">{{ f.spec.hint }}</small>{% endif %}
+        </label>
+        {% endfor %}
+      </div>
+    </div></div>
+
+    {% if definition.last_generated_files %}
+    <div class="section-label sub">Last written</div>
+    <div class="card"><div class="body" style="padding:12px 18px">
+      <ul class="mono" style="margin:0;padding-left:18px;font-size:12.5px;color:var(--muted)">
+        {% for f in definition.last_generated_files %}<li>{{ f }}</li>{% endfor %}
+      </ul>
+    </div></div>
+    {% endif %}
+
+    <div class="actionbar">
+      <div class="container-inner">
+        <button class="btn ghost" type="submit" name="action" value="save">Save</button>
+        <button class="btn primary" type="submit" name="action" value="generate">Generate</button>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn ghost" type="submit" name="action" value="delete"
+                style="color:var(--red)"
+                onclick="return confirm('Remove the definition for “{{ definition.name }}”?\n\nFiles already written are left in place — this stops managing the script, it does not stop a host running it.');">
+          Remove definition
+        </button>
+      </div>
+    </div>
+  </form>
+</div>
+{% endblock %}

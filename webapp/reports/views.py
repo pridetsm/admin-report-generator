@@ -32,13 +32,16 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
+from pathlib import Path
+
 from . import (backup_policy_admin, connect, crypto, folders, grafana_admin, network,
-              promconfig, prometheus_admin, snmp_admin)
+               promconfig, prometheus_admin, scripts, snmp_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
-from .models import (BackupPolicyRevision, GrafanaConfigRevision, PrometheusConfigRevision,
+from .models import (BackupPolicyRevision, GeneratedScript, GrafanaConfigRevision,
+                     PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
                      SnmpConfigRevision, SystemConfig, UserProfile)
 from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_LABEL,
@@ -973,6 +976,7 @@ _CONFIG_CHILDREN = [
     ("config_snmp", "SNMP", "Network device polling"),
     ("config_topology", "Topology", "Which hosts belong to which system"),
     ("config_backup_policy", "Backup policy", "Per-host backup-frequency overrides"),
+    ("config_scripts", "Scripts", "Generate the checker scripts hosts run"),
     ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
     ("config_role_scopes", "Role scopes", "Which systems each role sees"),
 ]
@@ -1342,6 +1346,178 @@ def config_yaml(request):
         "line_count": len(raw.splitlines()),
         "history": PrometheusConfigRevision.objects.all()[:10],
     })
+# ---------------------------------------------------------------------------------------
+#  Scripts — generate the checker scripts the monitored hosts run
+# ---------------------------------------------------------------------------------------
+@never_cache
+@login_required
+def config_scripts(request):
+    """The catalogue of script definitions, and the form that adds one.
+
+    Lists every TYPE, not only the generatable ones: a type that is registered but waiting on
+    its source (COB, SWIFT) should be visible as a known gap rather than absent, which reads
+    as "not supported" to whoever comes looking for it.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    if request.method == "POST":
+        stype = (request.POST.get("script_type") or "").strip()
+        name = (request.POST.get("name") or "").strip()
+        try:
+            spec = scripts.get_type(stype)
+        except scripts.ScriptError as exc:
+            messages.error(request, str(exc))
+            return redirect("config_scripts")
+        if not spec.available:
+            messages.error(request, f"{spec.label} cannot be generated yet.")
+            return redirect("config_scripts")
+        if not name:
+            messages.error(request, "Give the script a name — it becomes the filename.")
+            return redirect("config_scripts")
+        if GeneratedScript.objects.filter(script_type=stype, name=name).exists():
+            messages.error(request, f"A {spec.label} called \u201c{name}\u201d already exists.")
+            return redirect("config_scripts")
+        definition = GeneratedScript.objects.create(
+            name=name, script_type=stype,
+            system=(request.POST.get("system") or "").strip(),
+            host=(request.POST.get("host") or "").strip(),
+            parameters={f.name: f.default for f in spec.fields},
+            updated_by=request.user,
+        )
+        messages.success(request, f"Created \u201c{name}\u201d. Set its parameters, then generate.")
+        return redirect("config_script_edit", pk=definition.pk)
+
+    by_type = {}
+    for d in GeneratedScript.objects.all():
+        by_type.setdefault(d.script_type, []).append(d)
+    catalogue = [{"spec": spec, "definitions": by_type.get(key, [])}
+                 for key, spec in scripts.SCRIPT_TYPES.items()]
+    return render(request, "reports/config_scripts.html", {
+        **_config_context("config_scripts"),
+        "catalogue": catalogue,
+        "creatable": scripts.available_types(),
+        "output_dir": scripts.configuration_dir(),
+        "systems": _topology_systems(),
+    })
+
+
+@never_cache
+@login_required
+def config_script_edit(request, pk):
+    """One definition: its parameters, and the two things you can do with them.
+
+    Save records the parameters; Generate writes the files. Separate, because writing to disk
+    is the side effect — correcting a typo in a note should not overwrite a live script on
+    the way past.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    definition = get_object_or_404(GeneratedScript, pk=pk)
+    try:
+        spec = scripts.get_type(definition.script_type)
+    except scripts.ScriptError as exc:
+        messages.error(request, str(exc))
+        return redirect("config_scripts")
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action == "delete":
+            name = definition.name
+            definition.delete()
+            # Deliberately does NOT delete the generated files. They are on a monitored host by
+            # now; removing a definition is how you stop managing a script, not how you stop a
+            # host running one — that needs the scheduled task removing too.
+            messages.success(request, f"Removed the definition for \u201c{name}\u201d. Files "
+                                      "already written are left in place.")
+            return redirect("config_scripts")
+
+        definition.name = (request.POST.get("name") or definition.name).strip()
+        definition.system = (request.POST.get("system") or "").strip()
+        definition.host = (request.POST.get("host") or "").strip()
+        definition.notes = (request.POST.get("notes") or "").strip()
+        definition.parameters = {
+            f.name: (request.POST.get("p_" + f.name) or "").strip()
+            for f in spec.fields if not f.secret
+        }
+        posted_secrets = {
+            f.name: (request.POST.get("p_" + f.name) or "")
+            for f in spec.fields if f.secret
+        }
+        definition.secrets_encrypted = scripts.merge_secrets(
+            definition.secrets_encrypted, posted_secrets)
+        definition.updated_by = request.user
+
+        if action == "generate":
+            try:
+                written = scripts.write(definition)
+            except scripts.ScriptError as exc:
+                # Save the edit anyway: the parameters are the admin's work, and losing them
+                # because a folder was read-only would be its own bug.
+                definition.save()
+                messages.error(request, str(exc))
+                return redirect("config_script_edit", pk=definition.pk)
+            definition.last_generated_at = timezone.now()
+            definition.last_generated_files = written
+            definition.save()
+            messages.success(request, "Generated: " + ", ".join(Path(p).name for p in written))
+        else:
+            definition.save()
+            messages.success(request, "Saved. Nothing written yet — use Generate for that.")
+        return redirect("config_script_edit", pk=definition.pk)
+
+    secrets_set = set(definition.secret_names)
+    fields = [{
+        "spec": f,
+        # A secret shows the placeholder, never the value. Posting it back means "keep what is
+        # stored", so editing never requires re-typing it and the value never reaches the browser.
+        "value": (scripts.SECRET_PLACEHOLDER if f.secret and f.name in secrets_set
+                  else (definition.parameters or {}).get(f.name, f.default)),
+    } for f in spec.fields]
+    return render(request, "reports/config_script_edit.html", {
+        **_config_context("config_scripts"),
+        "definition": definition, "spec": spec, "fields": fields,
+        "output_dir": scripts.configuration_dir() / definition.script_type,
+        "systems": _topology_systems(),
+    })
+
+
+@never_cache
+@login_required
+def config_script_preview(request, pk):
+    """The exact bytes Generate would write, without writing them.
+
+    Worth its own screen: these files run unattended on production hosts, and reading one
+    before it lands is the only review step between a mistyped path and a check that silently
+    monitors nothing.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    definition = get_object_or_404(GeneratedScript, pk=pk)
+    try:
+        files = scripts.render(definition.script_type, definition.name, definition.system,
+                               definition.parameters or {}, definition.secret_values())
+        error = ""
+    except scripts.ScriptError as exc:
+        files, error = {}, str(exc)
+
+    wanted = request.GET.get("file")
+    if wanted and wanted in files:
+        resp = HttpResponse(files[wanted], content_type="text/plain; charset=utf-8")
+        resp["Content-Disposition"] = 'attachment; filename="%s"' % wanted
+        return resp
+    return render(request, "reports/config_script_preview.html", {
+        **_config_context("config_scripts"),
+        "definition": definition,
+        "files": sorted(files.items()),
+        "error": error,
+    })
+
+
 @never_cache
 @login_required
 def config_role_scopes(request):

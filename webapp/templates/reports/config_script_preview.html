@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Preview · {{ definition.name }}{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      Exactly what Generate would write for <b>{{ definition.name }}</b> — nothing on disk has changed.
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_script_edit' definition.pk %}">Back to parameters</a>
+  </div>
+
+  {% if error %}
+    <div class="card"><div class="body" style="padding:18px">
+      <div class="errornote" style="margin-top:0">{{ error }}</div>
+    </div></div>
+  {% endif %}
+
+  {% for filename, content in files %}
+  <div class="section-label sub">
+    {{ filename }}
+    <a href="?file={{ filename|urlencode }}" download
+       style="text-transform:none;letter-spacing:0;margin-left:8px">download</a>
+  </div>
+  <div class="card"><div class="body" style="padding:0">
+    <pre class="cfg-yaml"><code>{{ content }}</code></pre>
+  </div></div>
+  {% endfor %}
+</div>
+{% endblock %}

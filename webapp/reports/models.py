@@ -416,3 +416,79 @@ class EmailRecipient(models.Model):
     @property
     def label(self) -> str:
         return f"{self.name} · {self.email}" if self.name else self.email
+
+
+class GeneratedScript(models.Model):   # noqa: E303 — appended after EmailRecipient
+    """The definition of one agent-side checker script — the thing the script is generated FROM.
+
+    EDITABLE, unlike the *ConfigRevision models beside it. Those are append-only because they
+    hold a whole file whose previous versions you may need to restore. This holds a handful of
+    parameters for a script that is regenerated from them on demand: the definition IS the
+    current state, and "restore the old one" means changing a path back and regenerating. An
+    append-only history of two-line diffs would be ceremony, not safety.
+
+    Secrets never live in `parameters`. They go in `secrets_encrypted` as a Fernet-encrypted
+    JSON map (reports/crypto.py) and are substituted into the script only as it is written to
+    the configuration folder, which is gitignored. See reports/scripts.py.
+    """
+
+    name = models.CharField(
+        max_length=120,
+        help_text="What this checks, e.g. 'BSA SQL backup'. Becomes the filename stem.")
+    script_type = models.CharField(
+        max_length=32, help_text="Key from reports.scripts.SCRIPT_TYPES")
+    system = models.CharField(
+        max_length=120, blank=True,
+        help_text="The system in prometheus.yml this belongs to — for the generated header, "
+                  "so a file on a host says which estate it serves.")
+    host = models.CharField(
+        max_length=200, blank=True,
+        help_text="Where it runs. Recorded for the operator; the script itself doesn't use it.")
+    parameters = models.JSONField(
+        default=dict, blank=True,
+        help_text="Non-secret field values. NEVER put a credential here — see secrets_encrypted.")
+    secrets_encrypted = models.TextField(
+        blank=True, help_text="Fernet ciphertext — see reports/crypto.py. Never plaintext.")
+    notes = models.TextField(blank=True, help_text="Anything the next person needs to know.")
+
+    last_generated_at = models.DateTimeField(null=True, blank=True)
+    last_generated_files = models.JSONField(
+        default=list, blank=True, help_text="Paths written by the last generate.")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["script_type", "name"]
+        verbose_name = "generated script"
+        constraints = [
+            # one definition per name per type: two would render to the same filename and
+            # silently overwrite each other in the configuration folder
+            models.UniqueConstraint(fields=["script_type", "name"],
+                                    name="unique_script_name_per_type"),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.script_type})"
+
+    def secret_values(self) -> dict:
+        """The decrypted secret map. {} when unset or undecryptable (e.g. SECRET_KEY rotated),
+        which callers treat the same as "none set" rather than failing the render."""
+        import json
+
+        from . import crypto
+
+        raw = crypto.decrypt(self.secrets_encrypted or "")
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+
+    @property
+    def secret_names(self) -> list:
+        """Which secrets are set, for display. Names only — never the values."""
+        return sorted(self.secret_values().keys())

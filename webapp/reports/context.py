@@ -65,6 +65,11 @@ _NAV_PARENT = {
     "config_snmp": "configuration",
     "config_topology": "configuration",
     "config_backup_policy": "configuration",
+    "config_scripts": "configuration",
+    # a definition and its preview hang off the catalogue, so Back walks
+    # preview -> definition -> catalogue -> hub one step at a time
+    "config_script_edit": "config_scripts",
+    "config_script_preview": "config_script_edit",
     "system_settings": "configuration",
     "config_role_scopes": "configuration",
     # The raw editors are how you edit the SAME file the screen above them presents as fields,
@@ -94,6 +99,9 @@ _NAV_LABEL = {
     "configuration": "Configuration",
     "config_prometheus": "Prometheus",
     "config_topology": "Topology",
+    "config_scripts": "Scripts",
+    "config_script_edit": "Script",
+    "config_script_preview": "Preview",
     "config_snmp": "SNMP",
     "config_backup_policy": "Backup policy",
     "config_yaml": "Raw YAML",

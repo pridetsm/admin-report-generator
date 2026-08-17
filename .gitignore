@@ -6,6 +6,13 @@ webapp/.env
 .env
 *.env
 
+# Generated agent-side scripts (Configuration > Scripts). Only the generated/ SUBFOLDER —
+# configuration/ itself holds committed reference samples (see its README). Ignored for the
+# same reason deploy/ is: these are rendered per host with real paths, and any carrying a
+# credential would carry it in plaintext. The DEFINITIONS live in the database; the templates
+# they are rendered from are committed under webapp/reports/script_templates/.
+/configuration/generated/
+
 # Real runtime config that lives at these paths once deployed (samples ARE committed):
 /send_report/config.ini
 /prometheus.yml

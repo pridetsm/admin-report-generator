@@ -342,12 +342,113 @@ The drawer's "Configuration" entry opens one place with four tabs:
   4. Role scopes
        Role → systems mapping used by the sign-in role tiles (see section 10).
 
+  5. Scripts
+       Generates the checker scripts the MONITORED HOSTS run — the other half of the
+       stack from the report engine, which only ever reads what they publish.
+
+       Types today: Backup checker (Windows, PowerShell + a .bat for Task Scheduler)
+       and Backup checker (Linux, bash + a cron.d file). COB time and SWIFT
+       transactions are listed but not generatable until their working scripts are
+       in the repo — a guessed script would run cleanly and report the wrong number,
+       which is worse than one that does not exist.
+
+       The DEFINITION (paths, globs, freshness window) lives in the database and the
+       script is generated from it, so changing a host means editing the definition
+       and regenerating rather than forking last host's script by hand. The generated
+       file says as much in its own header, because a regenerate overwrites it.
+
+       Output lands in  configuration/generated/<type>/ . That SUBFOLDER is gitignored;
+       configuration/ itself is committed and holds the reference samples (see its
+       README), so generated output never sits tracked beside them. Copy from there to
+       the target host; the .bat/cron header says where each file goes.
+
+       Secrets are never stored in the definition's parameters. They live encrypted
+       in the database (reports/crypto.py, keyed off SECRET_KEY) and are substituted
+       in only as the file is written. The form shows a placeholder rather than the
+       value, so editing a definition never sends a secret to the browser. No type
+       needs one yet; the plumbing exists so the first that does (a COB/SWIFT check
+       querying T24) is not the moment someone pastes a password into a parameter.
+
+       Preview shows the exact bytes Generate would write, without writing them.
+       Worth using: these run unattended, and reading one is the only review step
+       between a mistyped path and a check that silently monitors nothing.
+
 "⟳ Reload Prometheus" on the form POSTs to <prometheus-url>/-/reload so the
 running server picks the new file up. That needs Prometheus started with
   --web.enable-lifecycle
 otherwise the button reports that the lifecycle API is disabled and you reload
 on the server instead (systemctl reload prometheus). Saving never reloads on its
 own — the file changes, and Prometheus keeps running the old config until told.
+
+
+────────────────────────────────────────────────────────────────────────────
+10b. RESTARTING THE STACK FROM ITS OWN CONFIG FILES
+────────────────────────────────────────────────────────────────────────────
+Each service reads ONE config file, and the console writes that same file. So
+"start it from our config" is not a special mode — it is what a plain restart
+already does, provided the config on disk is the one the console last applied.
+
+Do this AFTER a config change that was Saved but never Applied, after restoring
+a machine, or whenever you are unsure what a service is actually running.
+
+  Service         Config file it reads                                Written by
+  ─────────────── ─────────────────────────────────────────────────── ──────────────
+  Prometheus      C:\metrics\prometheus\prometheus.yml                Configuration ›
+                                                                      Prometheus / Topology
+  Grafana         C:\Program Files\GrafanaLabs\grafana\conf\          Configuration ›
+                  custom.ini                                          Grafana
+  SNMPExporter    ...\snmp_exporter-0.30.1.windows-amd64\snmp.yml     Configuration › SNMP
+  windows_exporter / node_exporter — no config to restore; they read the
+                  textfile directories the generated checker scripts write into
+                  (Configuration › Scripts).
+
+ORDER MATTERS ONLY IN ONE PLACE
+  Exporters first, Prometheus last. Prometheus marks a target DOWN the moment it
+  cannot scrape it, so restarting it while an exporter is still coming up writes a
+  gap into the data that then shows up in the next report as an outage that never
+  happened. Grafana is independent — it reads from Prometheus and can restart at
+  any point.
+
+BEFORE YOU RESTART ANYTHING
+  1. Confirm the config on disk is the one you want. In the console, open
+     Configuration › Prometheus. If it says "revision saved …", that revision is
+     what the editors hold — but it is only what Prometheus is RUNNING if it was
+     Applied. Save records; Apply writes the file and restarts. When in doubt,
+     hit Save & Apply and stop here: that does everything below for Prometheus.
+  2. Validate before restarting, never after:
+         cd C:\metrics\prometheus
+         .\promtool.exe check config prometheus.yml
+     A service that fails to start on a bad config leaves you with no metrics AND
+     no easy way back. promtool is the same check Save & Apply runs.
+
+THE RESTART
+     # one at a time, verifying each before moving on
+     Restart-Service SNMPExporter   ; Get-Service SNMPExporter
+     Restart-Service windows_exporter ; Get-Service windows_exporter
+     Restart-Service Prometheus     ; Get-Service Prometheus
+     Restart-Service Grafana        ; Get-Service Grafana
+
+  Get-Service must say Running. A service that starts and then stops seconds later
+  has almost always rejected its config file — check its own log before retrying,
+  because a second Restart-Service will fail the same way.
+
+VERIFY THE STACK, NOT JUST THE SERVICES
+  A running service proves the process started, not that it is doing its job.
+     * http://<prometheus>:9090/-/healthy      -> Prometheus OK
+     * http://<prometheus>:9090/targets        -> every target UP. A target DOWN
+       here is a host or an exporter, not this restart — unless ALL of them are
+       down, which means Prometheus is running a config that lists nothing.
+     * Open the console's System Picker. It reads the topology from the same
+       prometheus.yml, so if the systems you expect are listed, the file that was
+       applied is the file you meant.
+     * Generate a report for one system. That exercises the whole path —
+       Prometheus, the exporters and the checker scripts publishing into them.
+
+IF A SERVICE WILL NOT COME BACK
+  Restore the previous revision rather than hand-editing the live file: the
+  console's raw editor (Configuration › Prometheus › Edit raw YAML) lists every
+  revision, and loading one then Save & Apply puts it back and restarts. That path
+  is promtool-validated; a hand edit at 2am is not.
 
 
 ────────────────────────────────────────────────────────────────────────────
