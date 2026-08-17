@@ -2,13 +2,31 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import EmailRecipient, ReportSubmission, RoleRequest, SystemConfig, UserProfile
+from .models import (EmailRecipient, GrafanaConfigRevision, ReportSubmission, RoleRequest,
+                     SystemConfig, UserProfile)
 
 
 @admin.register(SystemConfig)
 class SystemConfigAdmin(admin.ModelAdmin):
     list_display = ("__str__", "prometheus_url", "grafana_url", "updated_at", "updated_by")
     readonly_fields = ("updated_at", "updated_by")
+
+
+@admin.register(GrafanaConfigRevision)
+class GrafanaConfigRevisionAdmin(admin.ModelAdmin):
+    """Read-only browsing — revisions are only ever created through the grafana_config view
+    (which handles password encryption); the admin never shows/edits the encrypted field."""
+    list_display = ("__str__", "note", "created_by", "root_url", "smtp_host")
+    readonly_fields = tuple(f.name for f in GrafanaConfigRevision._meta.fields
+                            if f.name != "smtp_password_encrypted")
+    exclude = ("smtp_password_encrypted",)
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 class UserProfileInline(admin.StackedInline):

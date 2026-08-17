@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% block title %}Grafana Config · RBZ Monitoring Console{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:760px">
+  {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
+
+  <div class="section-label">Grafana configuration
+    <span class="chip {% if service_status == 'Running' %}green{% elif service_status == 'Stopped' %}red{% else %}amber{% endif %}"
+          style="margin-left:8px">{{ service_status }}</span>
+  </div>
+
+  {% if bootstrapped_from_file %}
+  <div class="card"><div class="body" style="padding:12px 18px">
+    <p style="margin:0;color:var(--muted)">No revisions saved yet — these values were read
+    straight from the live <code>custom.ini</code>. Nothing is tracked in history until you
+    Save.</p>
+  </div></div>
+  {% endif %}
+
+  <div class="card"><div class="body" style="padding:18px">
+    <p style="margin:0 0 16px;color:var(--muted)">
+      Every Save creates a new, permanent revision below — nothing is ever edited or deleted,
+      so you can always see who changed what and when. <b>Save</b> only records the revision.
+      <b>Save &amp; Apply</b> also rewrites <code>custom.ini</code> and restarts the Grafana
+      service — a brief dashboard outage while it comes back up.
+    </p>
+    <form method="post" id="grafanaConfigForm">
+      {% csrf_token %}
+
+      <div class="section-label" style="margin-top:0">Server</div>
+      <label class="field" style="margin-bottom:12px">
+        <span>Protocol</span>
+        {{ form.protocol }}
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>Root URL</span>
+        {{ form.root_url }}
+        {% if form.root_url.errors %}<div class="errornote">{{ form.root_url.errors|striptags }}</div>{% endif %}
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>TLS cert file</span>
+        {{ form.cert_file }}
+      </label>
+      <label class="field" style="margin-bottom:16px">
+        <span>TLS key file</span>
+        {{ form.cert_key }}
+      </label>
+
+      <div class="section-label">Security</div>
+      <label class="field" style="margin-bottom:16px;flex-direction:row;align-items:center;gap:8px">
+        {{ form.allow_embedding }} <span>Allow embedding in an iframe/frame</span>
+      </label>
+
+      <div class="section-label">SMTP / e-mailing</div>
+      <label class="field" style="margin-bottom:12px;flex-direction:row;align-items:center;gap:8px">
+        {{ form.smtp_enabled }} <span>SMTP enabled</span>
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>Host</span>
+        {{ form.smtp_host }}
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>User (full e-mail)</span>
+        {{ form.smtp_user }}
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>Password</span>
+        {{ form.password }}
+        <small style="color:var(--muted)">{{ form.password.help_text }}</small>
+      </label>
+      <label class="field" style="margin-bottom:12px;flex-direction:row;align-items:center;gap:8px">
+        {{ form.smtp_skip_verify }} <span>Skip TLS certificate verification</span>
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>From address</span>
+        {{ form.smtp_from_address }}
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>From name</span>
+        {{ form.smtp_from_name }}
+      </label>
+      <label class="field" style="margin-bottom:12px">
+        <span>EHLO identity</span>
+        {{ form.smtp_ehlo_identity }}
+      </label>
+      <label class="field" style="margin-bottom:16px">
+        <span>STARTTLS policy</span>
+        {{ form.smtp_starttls_policy }}
+      </label>
+
+      <div class="section-label">Alerting</div>
+      <label class="field" style="margin-bottom:16px;flex-direction:row;align-items:center;gap:8px">
+        {{ form.execute_alerts }} <span>Execute alerts / send notifications</span>
+      </label>
+
+      <div class="section-label">This revision</div>
+      <label class="field" style="margin-bottom:16px">
+        <span>Note (optional)</span>
+        {{ form.note }}
+      </label>
+
+      <label class="field" style="margin-bottom:14px;flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" id="confirmApply">
+        <span>I understand Save &amp; Apply restarts Grafana now</span>
+      </label>
+
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn ghost" type="submit" name="action" value="save">Save</button>
+        <button class="btn primary" type="submit" name="action" value="apply"
+                id="applyBtn" disabled
+                onclick="return confirm('This rewrites custom.ini and restarts the Grafana service now. Continue?');">
+          Save &amp; Apply (restarts Grafana)
+        </button>
+        <a class="btn ghost" href="{% url 'report_form' %}">Back</a>
+      </div>
+    </form>
+  </div></div>
+
+  <div class="section-label">History</div>
+  <div class="card"><div class="body" style="padding:6px 18px">
+    {% if history %}
+    <table class="hist">
+      <thead><tr><th>Saved</th><th>By</th><th>Note</th><th>Root URL</th><th></th></tr></thead>
+      <tbody>
+      {% for rev in history %}
+        <tr>
+          <td>{{ rev.created_at|date:"d M Y, H:i" }}</td>
+          <td>{{ rev.created_by.get_username|default:"—" }}</td>
+          <td>{{ rev.note|default:"—" }}</td>
+          <td>{{ rev.root_url|default:"—" }}</td>
+          <td style="text-align:right">
+            {% if not forloop.first %}
+            <form method="post" style="display:inline">
+              {% csrf_token %}
+              <input type="hidden" name="rev_id" value="{{ rev.pk }}">
+              <button class="btn ghost" type="submit" name="action" value="restore">Restore</button>
+            </form>
+            {% else %}
+            <span style="color:var(--muted)">current</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="color:var(--muted)">No revisions saved yet.</p>
+    {% endif %}
+  </div></div>
+</div>
+
+<script>
+  // Save & Apply stays disabled until the confirmation checkbox is ticked — the checkbox
+  // has no name (never submitted itself), it only gates the button; the real "are you sure"
+  // is the confirm() on the button itself.
+  (function () {
+    var box = document.getElementById("confirmApply");
+    var btn = document.getElementById("applyBtn");
+    box.addEventListener("change", function () { btn.disabled = !box.checked; });
+  })();
+</script>
+{% endblock %}

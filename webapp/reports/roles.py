@@ -29,7 +29,7 @@ ROLE_PAGES = {
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.
     NETWORK_ADMIN_ROLE:  {"network_dashboard", "network_report"},
-    ADMIN_ROLE:          {"roles_console", "system_settings"},
+    ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config"},
     # Two roles exist without an estate yet. Deliberately empty rather than borrowing
     # another role's dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),

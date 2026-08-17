@@ -32,11 +32,11 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
-from . import connect, folders, network
+from . import connect, crypto, folders, grafana_admin, network
 from . import keycloak as keycloak_mod
 from .directory import search_directory
-from .forms import ProfileForm, SystemConfigForm, UserAccountForm
-from .models import ReportSubmission, RoleRequest, SystemConfig, UserProfile
+from .forms import GrafanaConfigForm, ProfileForm, SystemConfigForm, UserAccountForm
+from .models import GrafanaConfigRevision, ReportSubmission, RoleRequest, SystemConfig, UserProfile
 from .roles import (ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_network_admin, is_role_admin,
@@ -827,6 +827,72 @@ def system_settings(request):
     return render(request, "reports/settings.html", {
         "form": form, "sc": sc,
         "config_prom": defaults.prom, "config_grafana": defaults.grafana,
+    })
+
+
+@login_required
+def grafana_config(request):
+    """Administrator-only: edit Grafana's custom.ini, kept as DB-versioned revisions (see
+    GrafanaConfigRevision) rather than files on disk. 'Save' only records a revision; 'Save &
+    Apply' also rewrites custom.ini and restarts the Grafana service — see grafana_admin.py."""
+    if not is_role_admin(request.user):
+        return redirect("report_form")
+
+    current = GrafanaConfigRevision.current()
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        form = GrafanaConfigForm(request.POST)
+        if action == "restore":
+            rev_id = request.POST.get("rev_id")
+            restore_rev = get_object_or_404(GrafanaConfigRevision, pk=rev_id)
+            form = GrafanaConfigForm(initial={
+                f.name: getattr(restore_rev, f.name) for f in GrafanaConfigRevision._meta.fields
+                if f.name not in ("id", "created_at", "created_by", "smtp_password_encrypted")
+            })
+            messages.info(request, f"Loaded the {restore_rev.created_at:%d %b %Y %H:%M} "
+                                   "revision — review below, then Save or Save & Apply to "
+                                   "make it current.")
+        elif form.is_valid():
+            data = form.cleaned_data
+            rev = GrafanaConfigRevision(
+                created_by=request.user, note=data["note"],
+                protocol=data["protocol"], cert_file=data["cert_file"], cert_key=data["cert_key"],
+                root_url=data["root_url"], allow_embedding=data["allow_embedding"],
+                smtp_enabled=data["smtp_enabled"], smtp_host=data["smtp_host"],
+                smtp_user=data["smtp_user"], smtp_skip_verify=data["smtp_skip_verify"],
+                smtp_from_address=data["smtp_from_address"], smtp_from_name=data["smtp_from_name"],
+                smtp_ehlo_identity=data["smtp_ehlo_identity"],
+                smtp_starttls_policy=data["smtp_starttls_policy"],
+                execute_alerts=data["execute_alerts"],
+            )
+            # "leave blank" means "keep the current password" — only re-encrypt when the
+            # admin actually typed a new one; otherwise carry the previous ciphertext forward.
+            if data["password"]:
+                rev.smtp_password_encrypted = crypto.encrypt(data["password"])
+            elif current is not None:
+                rev.smtp_password_encrypted = current.smtp_password_encrypted
+            rev.save()
+            if action == "apply":
+                ok, message = grafana_admin.write_and_restart(rev)
+                (messages.success if ok else messages.error)(request, message)
+            else:
+                messages.success(request, "Revision saved (not applied — custom.ini is unchanged).")
+            return redirect("grafana_config")
+    else:
+        initial = (
+            {f.name: getattr(current, f.name) for f in GrafanaConfigRevision._meta.fields
+             if f.name not in ("id", "created_at", "created_by", "smtp_password_encrypted")}
+            if current is not None else grafana_admin.parse_live_config()
+        )
+        form = GrafanaConfigForm(initial=initial)
+
+    return render(request, "reports/grafana_config.html", {
+        "form": form,
+        "current": current,
+        "history": GrafanaConfigRevision.objects.all()[:20],
+        "bootstrapped_from_file": current is None,
+        "service_status": grafana_admin.service_status(),
     })
 
 

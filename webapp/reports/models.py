@@ -157,6 +157,62 @@ class SystemConfig(models.Model):
         return obj
 
 
+class GrafanaConfigRevision(models.Model):
+    """A point-in-time snapshot of Grafana's custom.ini. APPEND-ONLY — a save always creates
+    a new row, never edits or deletes one, so the full history is browsable and the live file
+    can be regenerated from any row. `current()` (the most recent row) is what the edit
+    screen shows and what the live file was last rendered from; see reports/grafana_admin.py
+    for the render/write/restart logic. The DB is the version history — there is no per-version
+    file kept on disk, only the one live custom.ini, fully overwritten on every apply."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+
+    # [server]
+    protocol = models.CharField(max_length=8, default="https",
+                                choices=[("https", "https"), ("http", "http")])
+    cert_file = models.CharField(max_length=512, blank=True)
+    cert_key = models.CharField(max_length=512, blank=True)
+    root_url = models.CharField(max_length=512, blank=True, validators=[_url_validator])
+
+    # [security]
+    allow_embedding = models.BooleanField(default=True)
+
+    # [smtp]
+    smtp_enabled = models.BooleanField(default=True)
+    smtp_host = models.CharField(max_length=256, blank=True)
+    smtp_user = models.CharField(max_length=256, blank=True)
+    smtp_password_encrypted = models.TextField(
+        blank=True, help_text="Fernet ciphertext — see reports/crypto.py. Never plaintext.")
+    smtp_skip_verify = models.BooleanField(default=False)
+    smtp_from_address = models.CharField(max_length=256, blank=True)
+    smtp_from_name = models.CharField(max_length=128, blank=True)
+    smtp_ehlo_identity = models.CharField(max_length=128, blank=True)
+    smtp_starttls_policy = models.CharField(
+        max_length=32, default="Always",
+        choices=[("Always", "Always"), ("OpportunisticStartTLS", "OpportunisticStartTLS"),
+                 ("MandatoryStartTLS", "MandatoryStartTLS"), ("NoStartTLS", "NoStartTLS")])
+
+    # [alerting]
+    execute_alerts = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Grafana config revision"
+
+    def __str__(self):
+        return f"Grafana config @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        """The most recent revision, or None if nothing has ever been saved yet (the edit
+        screen falls back to parsing the live file in that case — see grafana_admin.py)."""
+        return cls.objects.first()
+
+
 class RoleRequest(models.Model):
     """A user's request for a role (Django group). Administrators approve/reject these."""
 
