@@ -1,8 +1,8 @@
-"""Network Admin Report — phase 1.
+"""Network Admin Report — phase 2.
 
-The admins specified the metrics they want. Most are not being collected yet, so this
-module does two things at once: it renders what IS there, and it states plainly what is
-not, with the reason and what collecting it would take.
+The admins specified the metrics they want. This module does two things at once: it
+renders what IS there, and it states plainly what is not, with the reason and what
+collecting it would take.
 
 WHY IT IS BUILT THAT WAY
     A report that silently omits the metrics it cannot get looks complete. A network admin
@@ -10,33 +10,32 @@ WHY IT IS BUILT THAT WAY
     and that is worse than no panel at all — it is a false all-clear on the exact question
     they asked. So every requested metric appears, and every one carries its state.
 
-WHAT IS ACTUALLY COLLECTED TODAY
-    The `snmp` job polls one device (the core switch) with snmp_exporter's `if_mib_v3`
-    module, which yields exactly three series of interest:
+WHAT IS ACTUALLY COLLECTED TODAY (phase 2 — the exporter is a real service now)
+    The core switch (a Cisco Catalyst 9400 stack, IOS-XE 17.9.4a) is polled with
+    snmp_exporter's stock `if_mib` + `cisco_device` + `system` modules, plus two modules
+    added this phase (`ospf_nbr`, `table_capacity`) for what those didn't cover:
 
-        ifOperStatus   per-interface link state       (1 up, 2 down)
-        ifInOctets     32-bit inbound byte counter
-        ifOutOctets    32-bit outbound byte counter
+        ifOperStatus / ifAdminStatus      per-interface link + admin state
+        ifHCInOctets / ifHCOutOctets      64-bit counters (no wrap at this switch's rates)
+        ifHighSpeed                       capacity, so % utilisation is real, not guessed
+        ifInErrors/Discards, ifOut...     rate()'d, never a raw counter
+        ifDescr / ifName (as labels)      real interface names, not bare index numbers
+        cpmCPUTotal5minRev, ciscoMemoryPoolUsed/Free, sysUpTime
+        entSensorValue                    filtered by entSensorType: 8=celsius (temperature),
+                                          14=dBm (optical Tx/Rx power, /100 — see collect())
+        cefcFRUPowerOperStatus            PSU/fan/linecard/supervisor state (EnumAsStateSet —
+                                          see collect() for why it needs `== 1` filtering)
+        ospfNbrState / ospfNbrEvents      OSPF neighbour adjacency (confirmed live: 3
+                                          neighbours, all Full, across many VLANs)
+        dot1dTpFdbPort, ipNetToMediaIfIndex   MAC / ARP table entry counts (count() at query
+                                              time — no per-table hardware MAX from SNMP, so
+                                              % used is not computed)
 
-    Nothing else the admins listed is polled: no CPU, memory, uptime, temperature, fans or
-    PSU (vendor MIBs, not IF-MIB), no error or discard counters, no ifHighSpeed, no
-    ifAdminStatus, no BGP/OSPF, no connection counts, no wireless client counts.
-
-TWO LIMITS THAT AFFECT THE NUMBERS ON SCREEN, NOT JUST THE GAPS
-    * 32-bit counters wrap, and EVERY wrap loses traffic. ifInOctets holds 4.29 GB before
-      rolling over — of the order of 35-50 s on the busiest port here (it runs near 1 Gbps
-      line rate; the page computes the exact figure from the live peak),
-      against a 15 s scrape interval. rate() handles the rollover the only way it can: it
-      sees the value drop, assumes a counter restart at zero, and discards everything the
-      counter held above that point. And if enough traffic passes that the counter lands
-      HIGHER than where it started, there is no drop to detect at all and a full 4.29 GB
-      disappears with nothing to signal it. Note this is not the "multiple wraps between
-      scrapes" edge case people usually cite — a single wrap already under-reports. This is
-      exactly what the 64-bit ifHC* counters exist to fix, which is why the admins asked for
-      them by name. Until they are polled, throughput here is a floor, not a measurement.
-    * There is no ifHighSpeed, so percentage utilisation cannot be derived at all. A port
-      doing 900 Mbps is either bored or saturated depending on whether it is a 10 G or a
-      1 G link, and nothing collected today distinguishes them.
+    Confirmed genuinely NOT applicable, not just uncollected: BGP (bgpLocalAs=0, walked
+    directly via BGP4-MIB — this device does not speak BGP). Still genuinely missing, and
+    would need real new infrastructure, not just a module: firewall/VPN connection counts
+    (no firewall onboarded), Wi-Fi client counts (no WLC onboarded), PoE budget, config
+    backup/lifecycle, licence/EOL tracking, and NetFlow.
 """
 from __future__ import annotations
 
@@ -89,17 +88,25 @@ CATALOGUE = [
          needs="The cheapest gap to close: sysUpTime is standard SNMPv2-MIB, available on "
                "every device, and only needs adding to the module's walk.",
          probe="sysUpTime"),
-    dict(section="System & Hardware Health", name="Temperature & fans",
-         what="Internal heat levels and fan speeds, to prevent hardware burnouts.",
+    dict(section="System & Hardware Health", name="Temperature",
+         what="Internal heat levels, to prevent hardware burnouts.",
          state="missing", oid="entPhySensorValue",
-         needs="ENTITY-SENSOR-MIB is the standard route and is widely supported; some "
-               "vendors only populate their own MIB.",
+         needs="Confirmed live via ENTITY-SENSOR-MIB (entSensorType=8, celsius).",
          probe="entSensorValue"),
-    dict(section="System & Hardware Health", name="Power supplies",
-         what="Whether redundant power sources are working.",
-         state="missing", oid="entPhySensorValue / vendor",
-         needs="ENTITY-MIB / ENTITY-SENSOR-MIB, or the vendor's environment MIB.",
-         probe="ciscoEnvMonSupplyState"),
+    dict(section="Interface Performance & Bandwidth", name="Optical Tx/Rx power",
+         what="Per-interface transceiver signal strength — a slow decline warns of a "
+              "failing optic before the link actually drops.",
+         state="missing", oid="entPhySensorValue (entSensorType=14, dBm)",
+         needs="Confirmed live via the SAME ENTITY-SENSOR-MIB walk as Temperature above "
+               "(entSensorType=14 rather than 8) — no separate module needed, only "
+               "per-sensor-type filtering on the report side.",
+         probe="entSensorValue"),
+    dict(section="System & Hardware Health", name="Power supplies & fans",
+         what="Whether redundant power sources and fans are working.",
+         state="missing", oid="cefcFRUPowerOperStatus",
+         needs="Confirmed live via CISCO-ENTITY-FRU-CONTROL-MIB (this platform does not "
+               "populate the older CISCO-ENVMON-MIB).",
+         probe="cefcFRUPowerOperStatus"),
 
     # ---- 2. Interface Performance & Bandwidth -----------------------------------------
     dict(section="Interface Performance & Bandwidth", name="Inbound traffic",
@@ -147,12 +154,27 @@ CATALOGUE = [
          probe="ifInDiscards"),
 
     # ---- 3. Protocol & Network State ---------------------------------------------------
-    dict(section="Protocol & Network State", name="Routing status (BGP / OSPF)",
-         what="Whether sessions to other networks or ISPs are alive.",
-         state="missing", oid="bgpPeerState / ospfNbrState",
-         needs="BGP4-MIB / OSPF-MIB modules. Only meaningful on devices that route — the "
-               "core switch may not, so confirm which devices these belong to.",
+    dict(section="Protocol & Network State", name="OSPF adjacencies",
+         what="Whether OSPF neighbour relationships to other routing devices are Full.",
+         state="missing", oid="ospfNbrState",
+         needs="Confirmed live via OSPF-MIB (this device is an L3 switch actively running "
+               "OSPF across multiple interfaces).",
+         probe="ospfNbrState"),
+    dict(section="Protocol & Network State", name="BGP sessions",
+         what="Whether sessions to external networks or ISPs (via BGP) are alive.",
+         state="missing", oid="bgpPeerState",
+         needs="Confirmed NOT configured on this device (bgpLocalAs=0, walked directly via "
+               "BGP4-MIB) — not a collection gap. Only relevant if a device that actually "
+               "speaks BGP (e.g. an edge router) is added to the estate.",
          probe="bgpPeerState"),
+    dict(section="Protocol & Network State", name="MAC / ARP table size",
+         what="How full the switch's MAC address and ARP tables are, against their "
+              "hardware limits — a table at capacity silently drops new entries.",
+         state="missing", oid="dot1dTpFdbTable / ipNetToMediaTable",
+         needs="The entry COUNT is confirmed live via BRIDGE-MIB/IP-MIB (count() over the "
+               "walked table). The platform's hardware MAX per table is not — that comes "
+               "from the vendor datasheet, not SNMP, so % used cannot be computed yet.",
+         probe="dot1dTpFdbPort"),
     dict(section="Protocol & Network State", name="Active connections",
          what="Firewall and VPN connection counts, to catch a device being overwhelmed.",
          state="missing", oid="vendor firewall MIB",
@@ -196,11 +218,12 @@ def _fmt_bps(bits: Optional[float]) -> str:
 def _iface_label(labels: Dict[str, str]) -> str:
     """What to call an interface.
 
-    ifDescr is not collected, so there is nothing to call it but its index. Said plainly —
-    "ifIndex 103" is at least honestly unhelpful, where "Interface 103" would imply a name
-    the report does not actually have.
+    ifAlias (the admin's own description of the port, e.g. "-> ISP-A") beats a generated
+    name when set, but nobody has labelled a port on this switch yet, so today every
+    interface falls through to ifDescr/ifName — the switch's own name for it (e.g.
+    "AppGigabitEthernet1/2/0/1"), not a bare index. The ifIndex fallback below only fires if
+    even those are absent, which "Interface 103" would wrongly imply is a real name.
     """
-    # ifAlias is the admin's own description of the port and beats a generated name when set
     for key in ("ifAlias", "ifDescr", "ifName"):
         if labels.get(key):
             return labels[key]
@@ -394,8 +417,56 @@ def collect(only: Optional[set] = None) -> dict:
     up_rows = _one("sysUpTime")
     # sysUpTime is in hundredths of a second (TimeTicks), not seconds
     uptime_days = round(max(r["value"] for r in up_rows) / 100.0 / 86400.0, 1) if up_rows else None
-    temps = [r["value"] for r in _one("entSensorValue") if 0 < r["value"] < 200]
+    sensors = _one("entSensorValue")
+    temps = [r["value"] for r in sensors
+             if r["labels"].get("entSensorType") == "8" and 0 < r["value"] < 200]
     temp_max = max(temps) if temps else None
+
+    # ---- PSU / fan status (CISCO-ENTITY-FRU-CONTROL-MIB) --------------------------------
+    # This module exposes cefcFRUPowerOperStatus as EnumAsStateSet: one row per
+    # (component, possible state) pair, value 1 on the row naming that component's ACTUAL
+    # current state and 0 on every other state for it — so a plain query without the "== 1"
+    # filter returns every component many times over (once per state it is NOT in), which
+    # looks like "everything is failed" if read as a flat row count. Filtering to just the
+    # true row first is what turns this into one row per physical component.
+    psu_rows = _one("cefcFRUPowerOperStatus == 1")
+    psu_failed = [r for r in psu_rows if r["labels"].get("cefcFRUPowerOperStatus") != "on"]
+    psu_total = len(psu_rows)
+
+    # ---- OSPF neighbour adjacency (OSPF-MIB) ---------------------------------------------
+    # ospfNbrState: 1 down, 2 attempt, 3 init, 4 twoWay, 5 exchangeStart, 6 exchange,
+    # 7 loading, 8 full. 2-Way is the NORMAL steady state for a non-DR/BDR router on a
+    # broadcast segment — not a fault, so it is excluded from "down" alongside Full.
+    ospf_rows = _one("ospfNbrState")
+    ospf_down = [r for r in ospf_rows if int(r["value"]) not in (4, 8)]
+    ospf_total = len(ospf_rows)
+
+    # ---- optical Tx/Rx power (ENTITY-SENSOR-MIB, entSensorType 14 = dBm) -----------------
+    # Cisco's optical DOM sensors report centi-dBm regardless of what entSensorScale claims
+    # for them (a documented quirk, not a guess — dividing by the claimed scale here would
+    # produce numbers three orders of magnitude off a real reading).
+    optics = []
+    for r in sensors:
+        if r["labels"].get("entSensorType") != "14":
+            continue
+        name = r["labels"].get("entPhysicalName", "")
+        optics.append({
+            "name": name,
+            "instance": r["labels"].get("instance"),
+            "dbm": r["value"] / 100.0,
+            "direction": "Tx" if "Transmit" in name else ("Rx" if "Receive" in name else "?"),
+        })
+    # No MIB here states the vendor's actual receiver sensitivity floor — this is a
+    # conservative, industry-typical figure for SFP/SFP+ optics, not a per-optic vendor
+    # value, and is stated as such wherever it is shown.
+    OPTICS_RX_MIN_DBM = -20.0
+    optics_low = [o for o in optics if o["direction"] == "Rx" and o["dbm"] <= OPTICS_RX_MIN_DBM + 3]
+
+    # ---- MAC / ARP table size (BRIDGE-MIB / IP-MIB) --------------------------------------
+    # Entry counts only — the platform's hardware MAX per table is a datasheet figure, not
+    # an SNMP one, so % used is deliberately not computed (see the catalogue entry).
+    mac_count = len(_one("dot1dTpFdbPort"))
+    arp_count = len(_one("ipNetToMediaIfIndex"))
 
     # How long a 32-bit octet counter survives at the fastest rate actually observed here.
     # Computed, never hardcoded: the peak moves with the traffic, and a stale constant on a
@@ -448,6 +519,16 @@ def collect(only: Optional[set] = None) -> dict:
         "mem_pct": mem_pct,
         "uptime_days": uptime_days,
         "temp_max": temp_max,
+        "psu_failed": psu_failed,
+        "psu_total": psu_total,
+        "ospf_rows": ospf_rows,
+        "ospf_down": ospf_down,
+        "ospf_total": ospf_total,
+        "optics": optics,
+        "optics_low": optics_low,
+        "optics_rx_min_dbm": OPTICS_RX_MIN_DBM,
+        "mac_count": mac_count,
+        "arp_count": arp_count,
         "wrap_seconds": round(wrap_seconds) if wrap_seconds else None,
         "scrape_interval_s": SCRAPE_INTERVAL,
         # How many scrapes the counter survives on the busiest port. Not a safety margin:
@@ -608,6 +689,31 @@ def _device_flags(dev: dict, data: dict) -> list:
         flags.append(FlagVM("recent_reboot",
                             f"Device restarted {data['uptime_days'] * 24:.0f} hours ago",
                             "red", "unreachable"))
+    psu_failed = [r for r in data.get("psu_failed", [])
+                 if r["labels"].get("instance") == dev["target"]]
+    if psu_failed:
+        flags.append(FlagVM(
+            "psu_fan_failed",
+            f"{len(psu_failed)} of {data.get('psu_total', 0)} power/fan component(s) not in "
+            f"a normal operating state",
+            "red", "unreachable"))
+    ospf_down = [r for r in data.get("ospf_down", [])
+                if r["labels"].get("instance") == dev["target"]]
+    if ospf_down:
+        flags.append(FlagVM(
+            "ospf_adjacency_lost",
+            f"{len(ospf_down)} of {data.get('ospf_total', 0)} OSPF neighbour(s) not Full "
+            f"(stuck below the 2-Way/Full states)",
+            "red", "service"))
+    optics_low = [o for o in data.get("optics_low", []) if o["instance"] == dev["target"]]
+    if optics_low:
+        worst = min(optics_low, key=lambda o: o["dbm"])
+        flags.append(FlagVM(
+            "optics_low",
+            f"{len(optics_low)} receive optic(s) within 3 dB of a typical SFP sensitivity "
+            f"floor ({data.get('optics_rx_min_dbm', 0):.0f} dBm) — worst {worst['name']} at "
+            f"{worst['dbm']:.2f} dBm",
+            "amber", "service"))
 
     # ---- interface health, once the counters are collected --------------------------
     sat = [i for i in data.get("saturated", []) if i["device"] == dev["target"]]
@@ -647,6 +753,9 @@ def _network_overview(data: dict, devices: list) -> dict:
     unscraped = [d for d in devices if not d.get("known")]
     down = data["down_count"]
     missing = sum(1 for m in CATALOGUE if m["state"] == "missing")
+    psu_failed = len(data.get("psu_failed", []))
+    ospf_down = len(data.get("ospf_down", []))
+    optics_low = len(data.get("optics_low", []))
     bad = lambda n: "good" if not n else "bad"
     warn = lambda n: "good" if not n else "warn"
     return {
@@ -662,10 +771,16 @@ def _network_overview(data: dict, devices: list) -> dict:
             {"label": "Links up", "value": data["up_count"], "state": "info"},
             {"label": "Carrying traffic", "value": data["carrying_count"], "state": "info"},
             {"label": "Throughput in", "value": data["total_in_text"], "state": "info"},
+            {"label": "OSPF neighbours", "value": f"{data.get('ospf_total', 0) - ospf_down} of {data.get('ospf_total', 0)}",
+             "sub": "Full", "state": "info"},
         ],
         "immediate": [
             {"label": "Not responding", "value": len(unreachable), "state": bad(len(unreachable))},
             {"label": "Never scraped", "value": len(unscraped), "state": bad(len(unscraped))},
+            {"label": "PSU / fan failed", "value": psu_failed, "sub": f"of {data.get('psu_total', 0)}",
+             "state": bad(psu_failed)},
+            {"label": "OSPF adjacencies lost", "value": ospf_down, "sub": f"of {data.get('ospf_total', 0)}",
+             "state": bad(ospf_down)},
         ],
         "watch": [
             {"label": "Links not up", "value": down, "sub": "interfaces", "state": warn(down)},
@@ -673,10 +788,15 @@ def _network_overview(data: dict, devices: list) -> dict:
              "state": warn(len(data.get("saturated", [])))},
             {"label": "With errors", "value": len(data.get("erroring", [])), "sub": "interfaces",
              "state": warn(len(data.get("erroring", [])))},
+            {"label": "Optics near floor", "value": optics_low, "sub": "receive power",
+             "state": warn(optics_low)},
+            {"label": "MAC / ARP entries", "value": f"{data.get('mac_count', 0)} | {data.get('arp_count', 0)}",
+             "sub": "size only — no vendor max yet", "state": "info"},
             {"label": "Metrics not collected", "value": missing,
              "sub": f"of {len(CATALOGUE)} requested", "state": warn(missing)},
-            {"label": "Counter width", "value": "32-bit", "sub": "under-reports throughput",
-             "state": "warn"},
+            {"label": "Counter width", "value": "32-bit" if not data.get("counters_are_64bit") else "64-bit",
+             "sub": ("under-reports throughput" if not data.get("counters_are_64bit") else "accurate"),
+             "state": "info" if data.get("counters_are_64bit") else "warn"},
         ],
         "banners": [],
     }
