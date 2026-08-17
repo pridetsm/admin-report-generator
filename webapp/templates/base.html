@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Admin Report Generator{% endblock %}</title>
+  <title>{% block title %}RBZ Monitoring Console{% endblock %}</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230e6e82'/><rect x='9' y='8' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='14' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='20' width='9' height='2.5' rx='1.2' fill='white'/></svg>">
   <link rel="stylesheet" href="{% static 'css/app.css' %}?v={{ asset_v }}">
   <script>
@@ -79,7 +79,7 @@
       {% else %}
       <a class="brand-icon" href="{{ home_url }}" title="Home"><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
       {% endif %}
-      <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Grafana Reports</button>
+      <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">RBZ Monitoring Console</button>
     </div>
     <div class="spacer"></div>
 
@@ -104,6 +104,7 @@
         <div class="nm-children">
           {% if is_role_admin %}
           <a href="{% url 'system_settings' %}" class="navmenu-item nm-child">Configuration</a>
+          <a href="{% url 'grafana_config' %}" class="navmenu-item nm-child">Grafana Config</a>
           {% endif %}
           <button type="button" id="themeToggle" class="navmenu-item nm-child">Theme</button>
         </div>
@@ -195,6 +196,7 @@
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}"{% if current_page == 'roles_console' %} class="is-current" aria-current="page"{% elif 'roles_console' in current_ancestors %} class="is-ancestor"{% endif %}>Roles</a>
     <a href="{% url 'system_settings' %}"{% if current_page == 'system_settings' %} class="is-current" aria-current="page"{% elif 'system_settings' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
+    <a href="{% url 'grafana_config' %}"{% if current_page == 'grafana_config' %} class="is-current" aria-current="page"{% elif 'grafana_config' in current_ancestors %} class="is-ancestor"{% endif %}>Grafana Config</a>
     {% endif %}
   </nav>
 
