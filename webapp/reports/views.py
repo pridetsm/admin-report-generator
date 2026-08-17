@@ -854,7 +854,8 @@ def _config_context(active: str) -> dict:
     return {
         "config_tabs": [{"url_name": n, "label": lbl, "hint": hint, "active": n == active}
                         for n, lbl, hint in _CONFIG_TABS],
-        "yaml_file": promconfig.file_info(),
+        "yaml_source": promconfig.source_info(),
+        "service_status": prometheus_admin.service_status(),
     }
 
 
@@ -880,19 +881,21 @@ def _topology_systems() -> list:
 @never_cache
 @login_required
 def configuration(request):
-    """DEFAULT configuration screen: prometheus.yml as a labelled form.
+    """DEFAULT configuration screen: prometheus.yml as labelled fields.
 
-    Reads the live file on every request and writes it back on save, so this is a view of the
-    file rather than a copy of it. Validation happens before anything is written, and the
-    previous file is kept as a timestamped .bak — see reports/promconfig.py.
+    The same file and the same history as the raw editor (prometheus_config) — this screen
+    reads the newest revision and writes a new one, so an edit made here shows up there and
+    is revertable from the same history list. "Save & Apply" goes through
+    prometheus_admin.write_and_restart, so promtool gates this form exactly as it gates the
+    raw text. See reports/promconfig.py.
     """
     denied = _require_admin(request)
     if denied:
         return denied
 
     try:
-        doc = promconfig.load()
-        raw = promconfig.read_text()
+        raw = promconfig.current_text()
+        doc = promconfig.load(raw)
     except promconfig.ConfigError as exc:
         return render(request, "reports/configuration.html",
                       {**_config_context("configuration"), "load_error": str(exc)}, status=200)
@@ -902,13 +905,20 @@ def configuration(request):
         new_doc, errors = promconfig.parse_post(request.POST, doc)
         if not errors:
             try:
-                backup = promconfig.save(new_doc, header=promconfig.header_comment(raw),
-                                         author=request.user.get_full_name() or request.user.get_username())
+                _, ok, message = promconfig.save_revision(
+                    new_doc,
+                    header=promconfig.header_comment(raw),
+                    user=request.user,
+                    note=(request.POST.get("note") or "").strip(),
+                    apply=request.POST.get("action") == "apply",
+                )
             except promconfig.ConfigError as exc:
                 messages.error(request, str(exc))
                 return redirect("configuration")
-            messages.success(request, "prometheus.yml saved." + (
-                f" Previous version kept as {backup}." if backup else ""))
+            # A rejected apply still recorded the revision — say so rather than implying the
+            # edit was lost, and keep the promtool output visible so it can be acted on.
+            (messages.success if ok or request.POST.get("action") != "apply"
+             else messages.error)(request, message)
             return redirect("configuration")
         view = promconfig.view_from_post(request.POST, doc)
     else:
@@ -917,20 +927,23 @@ def configuration(request):
     return render(request, "reports/configuration.html", {
         **_config_context("configuration"),
         "view": view, "errors": errors,
-        "prom_url": SystemConfig.get().prometheus_url or gr.load_config().prom,
-        "backups": promconfig.backups(),
+        "history": PrometheusConfigRevision.objects.all()[:10],
     })
 
 
 @never_cache
 @login_required
 def config_yaml(request):
-    """The live prometheus.yml, verbatim — the source of truth behind the form."""
+    """The current prometheus.yml as text — what the labelled form would save right now.
+
+    Read-only on purpose: this is the same content the raw editor holds, so editing belongs
+    there (one editable text box for one file, not two).
+    """
     denied = _require_admin(request)
     if denied:
         return denied
     try:
-        raw, error = promconfig.read_text(), ""
+        raw, error = promconfig.current_text(), ""
     except promconfig.ConfigError as exc:
         raw, error = "", str(exc)
     if request.GET.get("download") == "1" and raw:
@@ -941,23 +954,8 @@ def config_yaml(request):
         **_config_context("config_yaml"),
         "raw": raw, "error": error,
         "line_count": len(raw.splitlines()),
-        "backups": promconfig.backups(),
+        "history": PrometheusConfigRevision.objects.all()[:10],
     })
-
-
-@login_required
-@require_POST
-def prometheus_reload(request):
-    """Ask the running Prometheus to re-read the config we just wrote (POST /-/reload)."""
-    denied = _require_admin(request)
-    if denied:
-        return denied
-    url = SystemConfig.get().prometheus_url or gr.load_config().prom
-    ok, detail = promconfig.reload_prometheus(url)
-    (messages.success if ok else messages.error)(request, detail)
-    return redirect(request.POST.get("next") or "configuration")
-
-
 @never_cache
 @login_required
 def config_role_scopes(request):

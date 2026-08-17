@@ -7,19 +7,28 @@
 
   <div class="card"><div class="body" style="padding:16px 18px">
     <p style="margin:0 0 10px">
-      <code>{{ yaml_file.path }}</code> exactly as it is on disk — the file the report engine reads
-      and the <a href="{% url 'configuration' %}">configuration form</a> writes.
+      The current <code>{{ yaml_source.path }}</code> as text — the exact content the
+      <a href="{% url 'configuration' %}">configuration form</a> is showing you as fields, and the
+      same content the <a href="{% url 'prometheus_config' %}">raw editor</a> holds. One file, one
+      history, three ways of looking at it.
     </p>
     <p style="margin:0;color:var(--muted);font-size:13px">
-      {% if yaml_file.exists %}
-        {{ line_count }} line{{ line_count|pluralize }} · {{ yaml_file.size }} bytes · last modified
-        {{ yaml_file.modified|date:"d M Y, H:i:s" }}.
-      {% endif %}
-      Read-only here on purpose: edit through the form, where values are validated and the previous
-      file is backed up before anything is written.
+      {{ line_count }} line{{ line_count|pluralize }} ·
+      {% if yaml_source.from_revision %}
+        revision saved {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}{% if yaml_source.revision.created_by %}
+        by {{ yaml_source.revision.created_by.get_username }}{% endif %}
+      {% else %}
+        read from the live file — no revision saved yet
+      {% endif %}.
+      This is the newest SAVED revision, which is only what Prometheus is running if it was also
+      applied. Prometheus service: <b>{{ service_status }}</b>.
+      <br>
+      Read-only here on purpose — two editable boxes for one file is how they drift apart. Edit
+      as fields, or as raw text; both write the same revision.
     </p>
     <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
-      <a class="btn primary" href="{% url 'configuration' %}">Edit in the configuration form</a>
+      <a class="btn primary" href="{% url 'configuration' %}">Edit as fields</a>
+      <a class="btn ghost" href="{% url 'prometheus_config' %}">Edit as raw text</a>
       {% if raw %}<a class="btn ghost" href="?download=1" download>⬇ Download a copy</a>{% endif %}
     </div>
   </div></div>
@@ -35,14 +44,18 @@
     </div></div>
   {% endif %}
 
-  {% if backups %}
-  <div class="section-label sub">Recent backups</div>
+  {% if history %}
+  <div class="section-label sub">Recent revisions</div>
   <div class="card"><div class="body" style="padding:10px 18px 14px">
     <table class="hist">
-      <thead><tr><th>File</th><th>Written</th><th style="text-align:right">Size</th></tr></thead>
+      <thead><tr><th>Saved</th><th>By</th><th>Note</th></tr></thead>
       <tbody>
-      {% for b in backups %}
-        <tr><td class="mono">{{ b.name }}</td><td>{{ b.modified|date:"d M Y, H:i:s" }}</td><td style="text-align:right">{{ b.size }} bytes</td></tr>
+      {% for rev in history %}
+        <tr>
+          <td>{{ rev.created_at|date:"d M Y, H:i" }}{% if forloop.first %} <span class="chip green">current</span>{% endif %}</td>
+          <td>{{ rev.created_by.get_username|default:"—" }}</td>
+          <td style="color:var(--muted)">{{ rev.note|default:"—" }}</td>
+        </tr>
       {% endfor %}
       </tbody>
     </table>

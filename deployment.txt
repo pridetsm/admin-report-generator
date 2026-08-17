@@ -148,11 +148,6 @@ Minimum production values:
         admin-report.rbz.co.zw,localhost,127.0.0.1
   POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_HOST / POSTGRES_PORT
   REPORT_SNAPSHOT_TTL   optional, default 300 (seconds a snapshot stays valid)
-  PROMETHEUS_YML      optional, absolute path to the prometheus.yml the app reads
-        AND writes (Configuration form, section 10a). Blank = wherever
-        config.ini [prometheus] yml points, which is the normal case. Whichever
-        path wins, the OS user running the app needs WRITE access to that file
-        and to its directory (backups are written alongside it).
   KEYCLOAK_CLIENT_SECRET   only if you enable Keycloak (section 10)
 
 CSRF_TRUSTED_ORIGINS is derived automatically from DJANGO_ALLOWED_HOSTS

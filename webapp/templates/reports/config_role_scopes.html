@@ -22,7 +22,7 @@
 
   {% if not systems %}
     <div class="card"><div class="body" style="padding:18px;color:var(--muted)">
-      No systems found in <code>{{ yaml_file.path }}</code> — nothing to map yet.
+      No systems found in <code>{{ yaml_source.path }}</code> — nothing to map yet.
     </div></div>
   {% else %}
   <form method="post">{% csrf_token %}

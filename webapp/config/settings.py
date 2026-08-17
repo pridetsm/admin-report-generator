@@ -85,10 +85,6 @@ CSRF_FAILURE_VIEW = "reports.views.csrf_failure"
 # see deployment.txt for the loopback-binding note.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
-# The prometheus.yml the Configuration form reads and writes. Blank = wherever the report
-# engine's config.ini ([prometheus] yml) points, which is the normal deployment.
-PROMETHEUS_YML = os.environ.get("PROMETHEUS_YML", "")
-
 # How long a captured snapshot stays valid between loading the form and generating the
 # report (seconds). Keeps the answers married to the exact numbers the admin reviewed.
 SNAPSHOT_TTL = int(os.environ.get("REPORT_SNAPSHOT_TTL", "600"))   # 10 minutes

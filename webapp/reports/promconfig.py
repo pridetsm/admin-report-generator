@@ -1,14 +1,24 @@
-"""The abstraction layer over ``prometheus.yml``.
+"""The labelled-fields VIEW of prometheus.yml — the same file, and the same revisions, as the
+raw-text editor.
 
-The Configuration form is a *view of this file*, not a second copy of it: everything it shows
-is read straight from the YAML on every request, and saving writes the YAML back. Nothing is
-mirrored into the database, so the file and the form can never drift apart.
+There is one prometheus.yml and one history of it. This module does not own either. It is a
+presentation layer: YAML text in, labelled fields out, labelled fields back to YAML text. The
+text it reads and the text it produces travel the identical path as the raw editor's —
 
-Why it exists: hand-editing prometheus.yml is where the syntax errors come from — a mis-indented
-target, an unquoted duration, a stray tab. Here the admin fills in labelled fields; this module
-does the YAML. Values are validated *before* anything is written, the previous file is copied to
-a timestamped ``.bak`` alongside it, and the write itself is atomic (temp file + os.replace), so
-a failed save can never leave a half-written config behind.
+    read     PrometheusConfigRevision.current().content
+             ...or prometheus_admin.parse_live_config() before any revision exists
+    write    a new PrometheusConfigRevision  (Save)
+    apply    prometheus_admin.write_and_restart -> promtool check config -> live file -> restart
+
+— so the two screens are two ways of editing one thing, and a change made in either is visible
+and revertable in the other. An earlier draft of this module wrote prometheus.yml directly with
+its own .bak files, which made a second, competing history of the same file; that is gone.
+
+Why the labelled form exists at all: hand-editing YAML is where the syntax errors come from — a
+mis-indented target, an unquoted duration, a stray tab. Here the admin fills in fields and this
+module writes the YAML. It validates what it can (durations, label names, job names) before
+producing text at all, but it is NOT the safety net — `promtool check config` is, and it runs on
+apply exactly as it does for the raw editor.
 
 What is editable vs preserved:
   editable   global intervals · storage retention · rule files · scrape jobs (name, intervals,
@@ -17,18 +27,16 @@ What is editable vs preserved:
              ``basic_auth``, … — kept byte-for-byte in meaning and shown read-only in the form,
              so this simplified view can never silently drop a key it doesn't model.
 
-Comments inside the body are NOT preserved (PyYAML round-trips values, not trivia); the leading
-header comment block is carried over, and the .bak file holds the original verbatim.
+One real limitation, and the reason the raw editor remains the primary screen: PyYAML
+round-trips VALUES, not trivia, so saving through this form drops the comments inside the file
+body (the leading header block is carried over). prometheus.yml carries extensive hand-written
+rationale, so an admin who needs to keep it should edit the raw text. Nothing is lost
+irrecoverably either way — the previous revision is one click away in the history.
 """
 from __future__ import annotations
 
 import datetime
-import os
 import re
-import shutil
-import urllib.error
-import urllib.request
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import yaml
@@ -76,33 +84,52 @@ _Dumper.add_representer(
 )
 
 
-# ---- reading ---------------------------------------------------------------------------
-def yaml_path() -> Path:
-    """The topology file the report engine itself reads (config.ini ``[prometheus] yml``).
+# ---- reading: the SAME source the raw editor reads --------------------------------------
+def current_text() -> str:
+    """The config text both editors work from.
 
-    ``settings.PROMETHEUS_YML`` (env ``PROMETHEUS_YML``) overrides it, for deployments that keep
-    the file somewhere else than config.ini says — and for tests, which point it at a fixture.
+    The newest saved revision, or — before anyone has ever saved one — the live file, which is
+    exactly how prometheus_config bootstraps its own textarea. Note this is the latest SAVED
+    revision, which is not necessarily the APPLIED one: saving records history, applying
+    rewrites the live file. Both screens say so rather than implying otherwise.
     """
-    from django.conf import settings
-    override = getattr(settings, "PROMETHEUS_YML", "")
-    return Path(override) if override else Path(gr.load_config().prometheus_yml)
+    from .models import PrometheusConfigRevision
+    from . import prometheus_admin
 
-
-def read_text(path: Optional[Path] = None) -> str:
-    p = Path(path or yaml_path())
+    revision = PrometheusConfigRevision.current()
+    if revision is not None:
+        return revision.content
     try:
-        return p.read_text(encoding="utf-8")
+        return prometheus_admin.parse_live_config()
     except OSError as exc:
-        raise ConfigError(f"Could not read {p}: {exc}") from exc
+        raise ConfigError(
+            f"No saved revision yet, and the live file could not be read: {exc}") from exc
 
 
-def load(path: Optional[Path] = None) -> dict:
-    """Parse the file into a plain dict. Raises ConfigError on unreadable/invalid YAML."""
-    text = read_text(path)
+def source_info() -> dict:
+    """Where the text on screen came from, for the form to state plainly."""
+    from .models import PrometheusConfigRevision
+
+    revision = PrometheusConfigRevision.current()
+    if revision is None:
+        return {"from_revision": False, "revision": None,
+                "path": str(_live_path()), "applied_hint": "the live file"}
+    return {"from_revision": True, "revision": revision,
+            "path": str(_live_path()), "applied_hint": "the newest saved revision"}
+
+
+def _live_path():
+    from . import prometheus_admin
+    return prometheus_admin.CONFIG_PATH
+
+
+def load(text: Optional[str] = None) -> dict:
+    """Parse the current config into a plain dict. Raises ConfigError on invalid YAML."""
+    raw = current_text() if text is None else text
     try:
-        doc = yaml.safe_load(text)
+        doc = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"{Path(path or yaml_path()).name} is not valid YAML: {exc}") from exc
+        raise ConfigError(f"prometheus.yml is not valid YAML: {exc}") from exc
     if doc is None:
         return {}
     if not isinstance(doc, dict):
@@ -123,35 +150,6 @@ def header_comment(text: str) -> str:
     return ("\n".join(lines) + "\n") if lines else ""
 
 
-def file_info(path: Optional[Path] = None) -> dict:
-    p = Path(path or yaml_path())
-    try:
-        st = p.stat()
-        return {"path": str(p), "exists": True, "size": st.st_size,
-                "modified": datetime.datetime.fromtimestamp(st.st_mtime)}
-    except OSError:
-        return {"path": str(p), "exists": False, "size": 0, "modified": None}
-
-
-def backups(path: Optional[Path] = None, limit: int = 8) -> List[dict]:
-    """Recent timestamped backups written by save(), newest first."""
-    p = Path(path or yaml_path())
-    try:
-        found = sorted(p.parent.glob(f"{p.name}.*.bak"), reverse=True)
-    except OSError:
-        return []
-    out = []
-    for b in found[:limit]:
-        try:
-            st = b.stat()
-        except OSError:
-            continue
-        out.append({"name": b.name, "size": st.st_size,
-                    "modified": datetime.datetime.fromtimestamp(st.st_mtime)})
-    return out
-
-
-# ---- doc -> form model -----------------------------------------------------------------
 def _kv_rows(mapping: Optional[dict]) -> List[dict]:
     return [{"i": i, "key": str(k), "value": "" if v is None else str(v)}
             for i, (k, v) in enumerate((mapping or {}).items())]
@@ -496,55 +494,40 @@ def dump(doc: dict, header: str = "", *, author: str = "") -> str:
     return "\n".join(parts) + "\n" + body
 
 
-def save(doc: dict, *, path: Optional[Path] = None, header: str = "",
-         author: str = "") -> Optional[str]:
-    """Validate, back up, and atomically replace prometheus.yml. Returns the backup filename.
+def save_revision(doc: dict, *, header: str = "", user=None, note: str = "", apply: bool = False):
+    """Record the edited config as a new revision, exactly as the raw editor does.
 
-    The rendered text is re-parsed before anything is written, so a document that would not
-    load back cannot reach the file.
+    This is the ONLY write path out of the labelled form, and it is the same one the raw
+    text editor uses, so both screens append to one history of one file:
+
+        Save          -> a new PrometheusConfigRevision. The live prometheus.yml is untouched
+                         and Prometheus keeps running what it already had.
+        Save & Apply  -> the revision, then prometheus_admin.write_and_restart, which runs the
+                         real `promtool check config` and rewrites/restarts ONLY if it passes.
+
+    A revision is recorded even when apply fails. That is deliberate: the edit is the admin's
+    work and belongs in the history whether or not promtool liked it, and the returned message
+    says plainly what happened. Returns (revision, applied_ok, message).
     """
-    p = Path(path or yaml_path())
+    from .models import PrometheusConfigRevision
+    from . import prometheus_admin
+
+    author = ""
+    if user is not None:
+        author = user.get_full_name() or user.get_username()
     text = dump(doc, header, author=author)
     try:
-        yaml.safe_load(text)                                   # never write what won't parse
-    except yaml.YAMLError as exc:                              # pragma: no cover — defensive
+        yaml.safe_load(text)                         # never record what will not parse back
+    except yaml.YAMLError as exc:                    # pragma: no cover — defensive
         raise ConfigError(f"Refusing to save — the generated YAML is invalid: {exc}") from exc
 
-    backup_name = None
-    if p.exists():
-        backup = p.with_name(f"{p.name}.{datetime.datetime.now():%Y%m%d-%H%M%S}.bak")
-        shutil.copy2(p, backup)
-        backup_name = backup.name
-
-    tmp = p.with_name(f".{p.name}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, p)                                     # atomic on POSIX and Windows
-    except OSError as exc:
-        tmp.unlink(missing_ok=True)
-        raise ConfigError(f"Could not write {p}: {exc}") from exc
-    return backup_name
-
-
-def reload_prometheus(base_url: str, timeout: int = 8) -> Tuple[bool, str]:
-    """Ask the running Prometheus to re-read its config (POST /-/reload).
-
-    Returns (ok, message). A 404/405 means the server was started without
-    ``--web.enable-lifecycle``; that is a configuration fact worth reporting plainly rather
-    than an error to retry.
-    """
-    url = (base_url or "").rstrip("/") + "/-/reload"
-    req = urllib.request.Request(url, method="POST", data=b"")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if 200 <= resp.status < 300:
-                return True, f"Prometheus reloaded its configuration ({url} → {resp.status})."
-            return False, f"{url} returned HTTP {resp.status}."
-    except urllib.error.HTTPError as exc:
-        if exc.code in (404, 405):
-            return False, ("Prometheus refused the reload — its lifecycle API is disabled. "
-                           "Start Prometheus with --web.enable-lifecycle, or reload it on the "
-                           "server (systemctl reload prometheus).")
-        return False, f"{url} returned HTTP {exc.code}."
-    except Exception as exc:                                   # noqa: BLE001 — shown to the admin
-        return False, f"Could not reach {url}: {exc}"
+    revision = PrometheusConfigRevision.objects.create(
+        created_by=user if (user is not None and user.is_authenticated) else None,
+        note=note or "Edited in the configuration form",
+        content=text,
+    )
+    if not apply:
+        return revision, False, ("Revision saved. prometheus.yml is unchanged — use "
+                                 "Save & Apply to make it live.")
+    ok, message = prometheus_admin.write_and_restart(text)
+    return revision, ok, message

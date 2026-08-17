@@ -28,7 +28,8 @@ import yaml
 from . import folders, network
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
-from .models import ReportSubmission, RoleRequest, RoleScope, SystemConfig
+from .models import (PrometheusConfigRevision, ReportSubmission, RoleRequest,
+                     RoleScope, SystemConfig)
 from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin, role_icon
 from .services import FlagVM, Snapshot, SystemVM, build_overview, list_systems
 
@@ -3435,27 +3436,28 @@ scrape_configs:
 
 
 class PrometheusConfigBase(TestCase):
-    """Every Configuration test works against a throwaway prometheus.yml, never the real one."""
+    """The labelled form and the raw editor are two views of ONE file with ONE history.
+
+    Nothing here touches disk: the config both screens work from is the newest
+    PrometheusConfigRevision, so seeding one is the whole fixture. The live file is only ever
+    reached through prometheus_admin, which is mocked — these tests must never invoke promtool
+    or restart a Windows service.
+    """
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="promcfg_")
-        self.addCleanup(shutil.rmtree, self.dir, True)
-        self.path = pathlib.Path(self.dir) / "prometheus.yml"
-        self.path.write_text(_FIXTURE_YML, encoding="utf-8")
-        self.override = override_settings(PROMETHEUS_YML=str(self.path))
-        self.override.enable()
-        self.addCleanup(self.override.disable)
-
+        PrometheusConfigRevision.objects.create(note="fixture", content=_FIXTURE_YML)
         self.admin = get_user_model().objects.create_user("cfgadmin", password="pw12345!")
         self.admin.groups.add(Group.objects.get(name="Administrator"))
         self.client.login(username="cfgadmin", password="pw12345!")
 
     def current(self) -> dict:
-        return yaml.safe_load(self.path.read_text(encoding="utf-8"))
+        """The newest revision, parsed — what the next form load will show."""
+        return yaml.safe_load(PrometheusConfigRevision.current().content)
 
     def post_data(self, **overrides) -> dict:
         """The exact fields the rendered form submits for the fixture, unchanged."""
         data = {
+            "action": "save",
             "g_scrape_interval": "15s", "g_evaluation_interval": "15s", "g_scrape_timeout": "10s",
             "storage_ooo_window": "30d", "rule_files": "alerts.yml",
             "job__0__name": "windows_exporter", "job__0__scrape_interval": "15s",
@@ -3485,10 +3487,16 @@ class PrometheusConfigForm(PrometheusConfigBase):
         for name in ("configuration", "config_yaml", "config_role_scopes"):
             self.assertEqual(self.client.get(reverse(name)).status_code, 302, name)
 
-    def test_form_shows_every_value_in_the_file(self):
+    def test_the_form_reads_the_same_revision_the_raw_editor_does(self):
+        """The point of the merge: one source, not two."""
         resp = self.client.get(reverse("configuration"))
         self.assertEqual(resp.status_code, 200)
-        view = resp.context["view"]
+        self.assertTrue(resp.context["yaml_source"]["from_revision"])
+        self.assertEqual(resp.context["yaml_source"]["revision"],
+                         PrometheusConfigRevision.current())
+
+    def test_form_shows_every_value_in_the_config(self):
+        view = self.client.get(reverse("configuration")).context["view"]
         self.assertEqual(view["global"]["scrape_interval"], "15s")
         self.assertEqual(view["storage_out_of_order"], "30d")
         self.assertEqual(view["rule_files_text"], "alerts.yml")
@@ -3506,13 +3514,46 @@ class PrometheusConfigForm(PrometheusConfigBase):
         self.assertIn("relabel_configs", view["jobs"][1]["preserved"])
         self.assertIn("params", view["jobs"][1]["preserved"])
 
-    def test_saving_unchanged_leaves_the_file_equivalent(self):
-        before = self.current()
-        resp = self.client.post(reverse("configuration"), self.post_data())
+    def test_saving_records_a_revision_and_does_not_touch_the_live_file(self):
+        with mock.patch("reports.prometheus_admin.write_and_restart") as war:
+            resp = self.client.post(reverse("configuration"), self.post_data())
         self.assertRedirects(resp, reverse("configuration"), fetch_redirect_response=False)
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 2)
+        war.assert_not_called()          # Save is not Apply — nothing live changed
+
+    def test_saving_unchanged_leaves_the_config_equivalent(self):
+        before = self.current()
+        self.client.post(reverse("configuration"), self.post_data())
         self.assertEqual(self.current(), before)
 
-    def test_editing_a_label_is_written_to_the_file(self):
+    def test_apply_goes_through_promtool_and_restarts(self):
+        """Apply must use the same gate as the raw editor — never write the file itself."""
+        with mock.patch("reports.prometheus_admin.write_and_restart",
+                        return_value=(True, "validated, rewritten and restarted")) as war:
+            self.client.post(reverse("configuration"), self.post_data(action="apply"))
+        war.assert_called_once()
+        # what it was handed is the text of the revision it just recorded
+        self.assertEqual(war.call_args.args[0], PrometheusConfigRevision.current().content)
+
+    def test_a_rejected_apply_still_keeps_the_edit_as_a_revision(self):
+        """promtool refusing must not throw the admin's work away."""
+        with mock.patch("reports.prometheus_admin.write_and_restart",
+                        return_value=(False, "Rejected — promtool found a problem")):
+            resp = self.client.post(reverse("configuration"),
+                                    self.post_data(action="apply",
+                                                   **{"sc__0__0__l_display": "Efin Database"}),
+                                    follow=True)
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 2)
+        self.assertContains(resp, "promtool found a problem")
+        labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
+        self.assertEqual(labels["display"], "Efin Database")
+
+    def test_the_revision_note_is_recorded(self):
+        self.client.post(reverse("configuration"), self.post_data(note="widened Efin"))
+        self.assertEqual(PrometheusConfigRevision.current().note, "widened Efin")
+        self.assertEqual(PrometheusConfigRevision.current().created_by, self.admin)
+
+    def test_editing_a_label_is_written_to_the_revision(self):
         self.client.post(reverse("configuration"),
                          self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
         labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
@@ -3549,21 +3590,19 @@ class PrometheusConfigForm(PrometheusConfigBase):
         self.assertEqual(job["relabel_configs"],
                          [{"source_labels": ["__address__"], "target_label": "__param_target"}])
 
-    def test_a_bad_duration_writes_nothing(self):
-        before = self.path.read_text(encoding="utf-8")
+    def test_a_bad_duration_records_nothing(self):
         resp = self.client.post(reverse("configuration"),
                                 self.post_data(g_scrape_interval="15 seconds"))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(any("15 seconds" in e for e in resp.context["errors"]))
-        self.assertEqual(self.path.read_text(encoding="utf-8"), before)
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 1)
 
-    def test_a_bad_label_name_writes_nothing(self):
-        before = self.path.read_text(encoding="utf-8")
+    def test_a_bad_label_name_records_nothing(self):
         resp = self.client.post(reverse("configuration"), self.post_data(**{
             "sc__0__0__xkey__0": "2bad", "sc__0__0__xval__0": "x"}))
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context["errors"])
-        self.assertEqual(self.path.read_text(encoding="utf-8"), before)
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 1)
 
     def test_duplicate_job_names_are_rejected(self):
         resp = self.client.post(reverse("configuration"),
@@ -3575,33 +3614,30 @@ class PrometheusConfigForm(PrometheusConfigBase):
                                 self.post_data(g_scrape_interval="15 seconds"))
         self.assertEqual(resp.context["view"]["global"]["scrape_interval"], "15 seconds")
 
-    def test_saving_keeps_a_timestamped_backup(self):
-        original = self.path.read_text(encoding="utf-8")
-        self.client.post(reverse("configuration"),
-                         self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
-        baks = list(pathlib.Path(self.dir).glob("prometheus.yml.*.bak"))
-        self.assertEqual(len(baks), 1)
-        self.assertEqual(baks[0].read_text(encoding="utf-8"), original)
-
-    def test_an_unparseable_file_explains_itself_instead_of_crashing(self):
-        self.path.write_text("global:\n  scrape_interval: 15s\n :::\n", encoding="utf-8")
+    def test_an_unparseable_revision_explains_itself_instead_of_crashing(self):
+        # a tab for indentation — the classic hand-edit that YAML rejects outright, and
+        # exactly the mistake this form exists to stop people making
+        PrometheusConfigRevision.objects.create(note="broken", content="global:\n\ta: 1\n")
         resp = self.client.get(reverse("configuration"))
         self.assertEqual(resp.status_code, 200)
         self.assertIn("not valid YAML", resp.context["load_error"])
 
-    def test_the_saved_file_still_loads_as_topology(self):
+    def test_the_saved_config_still_loads_as_topology(self):
         """The whole point: whatever the form writes, the report engine can still read."""
         self.client.post(reverse("configuration"), self.post_data(**{
             "sc__0__2__targets": "10.0.201.9:9182", "sc__0__2__l_system": "Efin",
             "sc__0__2__l_display": "Efin App",
         }))
-        systems = gr.load_topology(str(self.path))
+        out = pathlib.Path(tempfile.mkdtemp(prefix="promtopo_")) / "prometheus.yml"
+        self.addCleanup(shutil.rmtree, str(out.parent), True)
+        out.write_text(PrometheusConfigRevision.current().content, encoding="utf-8")
+        systems = gr.load_topology(str(out))
         self.assertEqual(sorted(s.name for s in systems), ["Efin", "RTGS", "Temenos"])
         self.assertEqual(len(next(s for s in systems if s.name == "Efin").components), 2)
 
 
 class PrometheusYamlView(PrometheusConfigBase):
-    def test_live_yaml_shows_the_file_verbatim(self):
+    def test_it_shows_the_current_revision_verbatim(self):
         resp = self.client.get(reverse("config_yaml"))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.context["raw"], _FIXTURE_YML)
@@ -3611,26 +3647,24 @@ class PrometheusYamlView(PrometheusConfigBase):
         self.assertIn("attachment", resp["Content-Disposition"])
         self.assertEqual(resp.content.decode(), _FIXTURE_YML)
 
-    @mock.patch("reports.promconfig.reload_prometheus", return_value=(True, "reloaded"))
-    def test_reload_button_asks_prometheus(self, rl):
-        sc = SystemConfig.get()
-        sc.prometheus_url = "http://p:9090"
-        sc.save()
-        resp = self.client.post(reverse("prometheus_reload"))
-        self.assertRedirects(resp, reverse("configuration"), fetch_redirect_response=False)
-        rl.assert_called_once_with("http://p:9090")
+    def test_it_follows_the_form_after_a_save(self):
+        """Proves the two screens share a source rather than each holding their own copy."""
+        self.client.post(reverse("configuration"),
+                         self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
+        raw = self.client.get(reverse("config_yaml")).context["raw"]
+        self.assertIn("Efin Database", raw)
+        self.assertEqual(raw, PrometheusConfigRevision.current().content)
 
-    def test_reload_requires_administrator(self):
-        u = get_user_model().objects.create_user("noreload", password="pw12345!")
-        u.groups.add(Group.objects.get(name="System Admin"))
-        self.client.login(username="noreload", password="pw12345!")
-        with mock.patch("reports.promconfig.reload_prometheus") as rl:
-            self.assertEqual(self.client.post(reverse("prometheus_reload")).status_code, 302)
-        rl.assert_not_called()
+    def test_there_is_no_second_write_path(self):
+        """promconfig must not grow its own file-writing/reload back door again."""
+        from . import promconfig
+        for gone in ("save", "reload_prometheus", "backups", "file_info", "yaml_path"):
+            self.assertFalse(hasattr(promconfig, gone),
+                             f"promconfig.{gone} is back — writes belong to prometheus_admin")
 
 
 class RoleScopeConfig(PrometheusConfigBase):
-    def test_systems_come_from_the_live_yaml(self):
+    def test_systems_come_from_the_same_config(self):
         resp = self.client.get(reverse("config_role_scopes"))
         self.assertEqual(resp.context["systems"], ["Efin", "RTGS", "Temenos"])
 
@@ -3643,7 +3677,7 @@ class RoleScopeConfig(PrometheusConfigBase):
                          {"Efin", "Temenos"})
         self.assertEqual(RoleScope.objects.get(role="Gov Systems Admin").systems, [])
 
-    def test_a_system_not_in_the_yaml_is_ignored(self):
+    def test_a_system_not_in_the_config_is_ignored(self):
         self.client.post(reverse("config_role_scopes"),
                          {"systems__System Admin": ["Efin", "MadeUp"]})
         self.assertEqual(RoleScope.objects.get(role="System Admin").systems, ["Efin"])

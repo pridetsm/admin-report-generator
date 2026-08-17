@@ -28,13 +28,11 @@ urlpatterns = [
     path("settings/prometheus/", views.prometheus_config, name="prometheus_config"),
     path("settings/prometheus/rules/<str:filename>/", views.prometheus_rule_file, name="prometheus_rule_file"),
 
-    # ---- The labelled prometheus.yml form, and the screens around it. Kept on their own
-    # /configuration/ prefix rather than folded into /settings/prometheus/ above: that one is
-    # the raw-YAML editor, this one is the field-by-field view of the same file, and merging
-    # the two URLs would imply a single screen that does not exist yet.
+    # ---- The labelled-fields view of the SAME prometheus.yml the raw editor above holds.
+    # Separate URLs because they are two ways of editing one thing, not two things: both read
+    # the newest PrometheusConfigRevision and both apply through promtool.
     path("configuration/", views.configuration, name="configuration"),
     path("configuration/yaml/", views.config_yaml, name="config_yaml"),
-    path("configuration/reload/", views.prometheus_reload, name="prometheus_reload"),
     path("configuration/role-scopes/", views.config_role_scopes, name="config_role_scopes"),
     path("settings/report-theme/", views.set_report_theme, name="set_report_theme"),
     path("notifications/seen/", views.mark_notifications_seen, name="mark_notifications_seen"),

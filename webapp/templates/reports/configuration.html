@@ -18,19 +18,32 @@
   <form method="post" id="promForm">
   {% csrf_token %}
 
-  {# ---- what this screen is, and the guard rails it puts around the file ---- #}
+  {# ---- what this screen is, and how it relates to the raw editor ---- #}
   <div class="card"><div class="body" style="padding:16px 18px">
     <p style="margin:0 0 10px">
-      These fields <b>are</b> <code>{{ yaml_file.path }}</code> — read on every visit, written back
-      on save. Filling in labelled fields instead of editing YAML by hand is what keeps indentation,
-      quoting and duration syntax from breaking the file.
+      These fields are <code>{{ yaml_source.path }}</code>, shown one setting at a time.
+      It is the <b>same file and the same history</b> as
+      <a href="{% url 'prometheus_config' %}">Prometheus (raw)</a> — saving here records a revision
+      there, and vice versa. Filling in labelled fields instead of editing YAML by hand is what
+      keeps indentation, quoting and duration syntax from breaking the config.
     </p>
     <p style="margin:0;color:var(--muted);font-size:13px">
-      Everything is validated before anything is written, and the previous file is kept beside it as
-      a timestamped <code>.bak</code>. Values this form doesn’t model (<code>params</code>,
-      <code>relabel_configs</code>, …) are preserved untouched and shown read-only. Comments inside
-      the body are not carried across — the header block is, and the backup keeps the original.
-      {% if yaml_file.exists %}<br>Last modified {{ yaml_file.modified|date:"d M Y, H:i" }} · {{ yaml_file.size }} bytes.{% endif %}
+      <b>Save</b> records a revision and changes nothing live. <b>Save &amp; Apply</b> runs the real
+      <code>promtool check config</code> first and only rewrites prometheus.yml and restarts the
+      service if it passes — a broken edit never reaches the live file.
+      Values this form doesn’t model (<code>params</code>, <code>relabel_configs</code>, …) are
+      preserved untouched and shown read-only.
+      <br><br>
+      <b>One caveat:</b> saving through this form drops the comments inside the file body (the
+      header block is kept). prometheus.yml carries a lot of hand-written rationale — if you need
+      to keep it, edit the <a href="{% url 'prometheus_config' %}">raw text</a> instead. Either way
+      the previous revision stays in the history below.
+      <br>
+      Editing {% if yaml_source.from_revision %}the revision saved
+        {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}{% if yaml_source.revision.created_by %}
+        by {{ yaml_source.revision.created_by.get_username }}{% endif %}
+      {% else %}the live file — no revision has been saved yet{% endif %}.
+      Prometheus service: <b>{{ service_status }}</b>.
     </p>
   </div></div>
 
@@ -207,42 +220,40 @@
 
   <button type="button" class="btn ghost" id="addJob" style="margin-bottom:10px">＋ Add scrape job</button>
 
-  {% if backups %}
-  <div class="section-label sub">Recent backups</div>
+  {% if history %}
+  <div class="section-label sub">Recent revisions <span style="text-transform:none;letter-spacing:0">— shared with the raw editor</span></div>
   <div class="card"><div class="body" style="padding:10px 18px 14px">
     <table class="hist">
-      <thead><tr><th>File</th><th>Written</th><th style="text-align:right">Size</th></tr></thead>
+      <thead><tr><th>Saved</th><th>By</th><th>Note</th></tr></thead>
       <tbody>
-      {% for b in backups %}
-        <tr><td class="mono">{{ b.name }}</td><td>{{ b.modified|date:"d M Y, H:i:s" }}</td><td style="text-align:right">{{ b.size }} bytes</td></tr>
+      {% for rev in history %}
+        <tr>
+          <td>{{ rev.created_at|date:"d M Y, H:i" }}{% if forloop.first %} <span class="chip green">current</span>{% endif %}</td>
+          <td>{{ rev.created_by.get_username|default:"—" }}</td>
+          <td style="color:var(--muted)">{{ rev.note|default:"—" }}</td>
+        </tr>
       {% endfor %}
       </tbody>
     </table>
     <p style="color:var(--muted);font-size:12.5px;margin:10px 0 0">
-      Kept next to <code>prometheus.yml</code>. Restoring one is a file copy on the server.
+      The same history the <a href="{% url 'prometheus_config' %}">raw editor</a> shows — restore an
+      earlier revision from there.
     </p>
   </div></div>
   {% endif %}
 
   <div class="actionbar">
     <div class="container-inner">
-      <button class="btn primary" type="submit">Save configuration</button>
+      <input type="text" name="note" placeholder="What changed and why (optional)"
+             style="max-width:320px" aria-label="Revision note">
+      <button class="btn ghost" type="submit" name="action" value="save">Save revision</button>
+      <button class="btn primary" type="submit" name="action" value="apply">Save &amp; Apply</button>
       <a class="btn ghost" href="{% url 'configuration' %}">Discard changes</a>
       <span style="color:var(--muted);font-size:12.5px;margin-left:auto">
-        Saving writes the file. Prometheus keeps running the old config until it is reloaded.
+        Apply runs promtool first, then rewrites prometheus.yml and restarts the service.
       </span>
     </div>
   </div>
-  </form>
-
-  {# Reload is its own form so it can never submit the editor's fields by accident. #}
-  <form method="post" action="{% url 'prometheus_reload' %}" id="reloadForm" style="margin-top:14px">
-    {% csrf_token %}
-    <input type="hidden" name="next" value="{% url 'configuration' %}">
-    <button class="btn ghost" type="submit" title="POST {{ prom_url }}/-/reload">⟳ Reload Prometheus</button>
-    <span style="color:var(--muted);font-size:12.5px;margin-left:8px">
-      Asks {{ prom_url }} to re-read its configuration. Needs <code>--web.enable-lifecycle</code>.
-    </span>
   </form>
 
   {# ---- clone sources for the add buttons (never submitted: no name attributes yet) ---- #}
