@@ -1100,12 +1100,11 @@ class ReportBuilder:
     # D=9 (not the tighter 2 you'd expect for a mere gap column): the overview tile band
     # reuses these same sheet columns, and HIGH RAM USAGE's "HOSTS" sub-column lands
     # entirely on D — at width 2 that clipped the label. 9 matches C so both KPI sub-columns
-    # read fully, and D still just merges into the wider Services card body below. F/G/M
-    # were bumped the same way for a while when HIGH DISK USAGE briefly carried 4 sub-columns
-    # (needing a whole extra physical column, which pushed BACKUP TRACKING onto M) — that grew
-    # the NEEDS ATTENTION row wider than the bands above it. Reverted: HIGH DISK USAGE's disk
-    # count and its total now share one cell ("11/140"), so the row fits back in its original
-    # 11 columns and F/G/M return to the narrower widths that were already proven fine here.
+    # read fully, and D still just merges into the wider Services card body below. HIGH DISK
+    # USAGE occupies F-I (4 real, divided sub-columns: HOSTS/TOTAL/DISKS/TOTAL) — the extra
+    # physical column it needs comes from BACKUP TRACKING dropping its own TOTAL (see
+    # _band_spans/the watch_tiles list below), not from widening these columns, so the row
+    # still lands on its original 11 columns without pushing anything onto M.
     WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 8,
               "G": 8, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
               "M": 2, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
@@ -1175,21 +1174,22 @@ class ReportBuilder:
 
     def _band_spans(self, tiles) -> List[int]:
         """Column counts for a row of overview tiles across cols 2..12. Every tile gets AT
-           LEAST 2 physical columns — 1 is never enough for a 2-number panel (HOSTS | TOTAL):
-           with only 1 column, the split degenerates to a single sub-column holding BOTH
-           labels merged into one narrow cell and clips (this is what happened to HIGH RAM
-           USAGE's "HOSTS" label before the column was widened). A panel with MORE
-           sub-columns than 2 gets that many instead, so it never straddles a too-narrow
-           column either — but keep an eye on the total: every tile here stays at its 2-column
-           floor deliberately, because a panel needing a 3rd/4th column pushes the row's total
-           past 11 and out of alignment with the bands above/below it (this happened once,
-           when HIGH DISK USAGE briefly carried 4 sub-columns — fixed by combining two of its
-           numbers into one cell instead of widening the row). The row's total width grows to
-           fit whatever these tiles need (at least the historical 11 columns), and any spare
-           width beyond each tile's own minimum goes first to the widest-need panel(s)."""
+           LEAST as many physical columns as it has sub-columns, with a 2-column floor for
+           any panel that splits into 2+ sub-columns — 1 column is never enough for a
+           2-number panel (HOSTS | TOTAL): the split would degenerate to a single sub-column
+           holding both labels merged into one narrow cell and clip (this is what happened to
+           HIGH RAM USAGE's "HOSTS" label before the column was widened). A single-number
+           panel (no divider to draw) is exempt from that floor and can sit in just 1 column.
+           A panel needing a 3rd/4th sub-column (HIGH DISK USAGE) gets that many real,
+           divided columns rather than cramming two numbers into one cell — the row's total
+           must still land on the historical 11 columns to stay aligned with the bands
+           above/below it, so BACKUP TRACKING (the least time-sensitive tile here) drops its
+           own TOTAL — already shown as SYSTEMS in the row above — to free the column HIGH
+           DISK USAGE's 4th sub-column needs. Any further spare width beyond each tile's own
+           minimum goes first to the widest-need panel(s)."""
         n = len(tiles)
         subcols = lambda t: len(t[2]) if t[0] == "panel" else 1
-        spans = [max(2, subcols(t)) for t in tiles]
+        spans = [max(2, subcols(t)) if subcols(t) > 1 else 1 for t in tiles]
         ncols = max(11, sum(spans))
         spare = ncols - sum(spans)
         order = sorted(range(n), key=lambda i: (-subcols(tiles[i]), i))   # widest need first
@@ -1412,21 +1412,23 @@ class ReportBuilder:
         watch_tiles = [
             ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts), ("TOTAL", total_hosts)], cpu_state),
             ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts), ("TOTAL", total_hosts)], ram_state),
-            # DISKS and its TOTAL share one cell ("11 | 140" — same "affected | total"
-            # convention every other tile uses) rather than each getting a
-            # full-size number of their own — a 4th sub-column would force this whole row a
-            # column wider than the bands above/below it (see _band_spans), and there's no
-            # way to claw that back without either this or shrinking some OTHER tile below
-            # its own safe minimum. Keeping the row's total at 11 columns, matching every
-            # other band, was worth more than a 4th big number here.
+            # 4 real, divided sub-columns — HOSTS/TOTAL alongside DISKS/TOTAL, same bordered
+            # divider every other panel uses (see _band_spans/panel()). The 4th column comes
+            # from BACKUP TRACKING dropping its own TOTAL below, so the row still lands on
+            # the historical 11 columns.
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
              [("HOSTS", disk_high_h), ("TOTAL", total_hosts),
-              ("DISKS", f"{disk_high_d} | {total_disks(store, systems)}")],
+              ("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
              disk_high_state),
             # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
             # encrypted estate read "12 | 0", which looks like half a number, not a pass.
             ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("TOTAL", n_https + n_http)], web_state),
-            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("TOTAL", len(systems))],
+            # TRACKED alone, no TOTAL — that denominator is already on screen as SYSTEMS in
+            # the AT A GLANCE row above, so repeating it here would just be the 3rd copy of
+            # the same number in this section. Freeing its own divider column is what lets
+            # HIGH DISK USAGE show a real 4th sub-column instead of cramming two numbers into
+            # one cell — see _band_spans.
+            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked)],
              "good" if n_untracked == 0 else "warn"),
         ]
 

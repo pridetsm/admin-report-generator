@@ -534,17 +534,19 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                    AMBER if cpu_hosts else GREEN),
         _kpi_panel("High RAM usage", [("Hosts", ram_hosts), ("Total", hosts)],
                    AMBER if ram_hosts else GREEN),
-        # Disks and its total share one cell ("11 | 150", the same "affected | total"
-        # convention every other tile uses) — matches the xlsx, where a 4th sub-column would
-        # push this tile's row a column wider than the ones above/below it.
+        # 4 real, divided cells — matches the xlsx (Hosts/Total alongside Disks/Total, same
+        # bordered-divider convention every tile uses). The Backup tracking tile below drops
+        # its own Total to match.
         _kpi_panel(f"High disk usage &middot; &#8805;{thr}%",
                    [("Hosts", disk_high_h), ("Total", hosts),
-                    ("Disks", f"{disk_high_d} | {engine.total_disks(store, systems)}")],
+                    ("Disks", disk_high_d), ("Total", engine.total_disks(store, systems))],
                    disk_high_color),
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
         _kpi_panel("Web encryption", [("HTTPS", n_https), ("Total", n_https + n_http)], web_color),
-        _kpi_panel("Backup tracking", [("Tracked", n_tracked), ("Total", len(systems))],
+        # Tracked alone, no Total — that denominator is already shown as Systems in the row
+        # above, and matches the xlsx (see generate_report.py's BACKUP TRACKING tile).
+        _kpi_panel("Backup tracking", [("Tracked", n_tracked)],
                    AMBER if n_untracked else GREEN),
     ]
     immediate_kpis = "".join(immediate_kpis)
