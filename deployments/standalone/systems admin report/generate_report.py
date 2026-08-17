@@ -1412,7 +1412,8 @@ class ReportBuilder:
         watch_tiles = [
             ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts), ("TOTAL", total_hosts)], cpu_state),
             ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts), ("TOTAL", total_hosts)], ram_state),
-            # DISKS and its TOTAL share one cell ("11/140") rather than each getting a
+            # DISKS and its TOTAL share one cell ("11 | 140" — same "affected | total"
+            # convention every other tile uses) rather than each getting a
             # full-size number of their own — a 4th sub-column would force this whole row a
             # column wider than the bands above/below it (see _band_spans), and there's no
             # way to claw that back without either this or shrinking some OTHER tile below
@@ -1420,7 +1421,7 @@ class ReportBuilder:
             # other band, was worth more than a 4th big number here.
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
              [("HOSTS", disk_high_h), ("TOTAL", total_hosts),
-              ("DISKS", f"{disk_high_d}/{total_disks(store, systems)}")],
+              ("DISKS", f"{disk_high_d} | {total_disks(store, systems)}")],
              disk_high_state),
             # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
             # encrypted estate read "12 | 0", which looks like half a number, not a pass.

@@ -534,11 +534,12 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                    AMBER if cpu_hosts else GREEN),
         _kpi_panel("High RAM usage", [("Hosts", ram_hosts), ("Total", hosts)],
                    AMBER if ram_hosts else GREEN),
-        # Disks and its total share one cell ("11/150") — matches the xlsx, where a 4th
-        # sub-column would push this tile's row a column wider than the ones above/below it.
+        # Disks and its total share one cell ("11 | 150", the same "affected | total"
+        # convention every other tile uses) — matches the xlsx, where a 4th sub-column would
+        # push this tile's row a column wider than the ones above/below it.
         _kpi_panel(f"High disk usage &middot; &#8805;{thr}%",
                    [("Hosts", disk_high_h), ("Total", hosts),
-                    ("Disks", f"{disk_high_d}/{engine.total_disks(store, systems)}")],
+                    ("Disks", f"{disk_high_d} | {engine.total_disks(store, systems)}")],
                    disk_high_color),
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
