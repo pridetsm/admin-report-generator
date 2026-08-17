@@ -647,6 +647,35 @@ table.hist tr:last-child td { border-bottom: 0; }
     background: color-mix(in srgb, var(--accent) 12%, var(--panel));
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
+
+  /* PLATFORM GLYPHS  (Windows / Linux / hybrid, in place of the monogram letter)
+     ------------------------------------------------------------------------------------
+     .os-glyph is SHARED — the systems picker uses it here, and connect.html / form.html
+     both reuse it, restyling only the size and tone for their context. Moving or deleting
+     this block silently unpaints the glyph on those two screens as well.
+
+     The source icons are flat BLACK silhouettes on transparency. Dropped in as <img> they
+     would sit as a black smudge on the dark theme and ignore the badge's grey -> accent
+     transition entirely. Masking paints them in `currentColor` instead, so they inherit
+     every colour rule the letter already had — the badge keeps ONE definition of its colour
+     across both themes and both states, and the glyph simply follows it. */
+  .os-glyph {
+    display: block; background: currentColor;
+    -webkit-mask: var(--os-src) center / contain no-repeat;
+            mask: var(--os-src) center / contain no-repeat;
+  }
+  /* sized apart on purpose: the Windows mark is a filled square that carries to the edges of
+     its canvas, so at a matched box it reads noticeably heavier than the penguin. */
+  .os-windows { --os-src: url("../img/os/windows.png"); width: 19px; height: 19px; }
+  .os-linux   { --os-src: url("../img/os/linux.png");   width: 22px; height: 22px; }
+
+  /* Hybrid shows both stacks side by side rather than picking whichever OS holds the
+     majority — the mixed estate is the very thing worth knowing before you pick the system.
+     .sys-mono centres a single child; two children need an explicit column flow or they
+     stack vertically. Both shrink so the pair still fits the 40px square. */
+  .sys-os--hybrid { grid-auto-flow: column; gap: 3px; }
+  .sys-os--hybrid .os-windows { width: 14px; height: 14px; }
+  .sys-os--hybrid .os-linux   { width: 16px; height: 16px; }
   .sys-tick { margin-top: 1px; }
   .sys-body { gap: 1px; }
 

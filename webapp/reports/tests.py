@@ -3115,3 +3115,213 @@ class BackNavigationChain(TestCase):
         self.client.login(username="justone", password="pw12345!")
         self.client.get(reverse("role_select"))
         self.assertIsNone(self._back("report_form"))
+
+
+class PlatformDerivedFromTheScrapeJob(TestCase):
+    """The pickers label each system Windows / Linux / hybrid straight from prometheus.yml.
+
+    Deriving it from the SCRAPE JOB (not a `windows_os_info` / `node_os_info` query) is what
+    keeps the picker free — that screen deliberately does no Prometheus round-trip at all —
+    so these tests pin the derivation to the topology file and nothing else.
+    """
+
+    def _topology(self, yml: str):
+        import tempfile, os
+        fd, path = tempfile.mkstemp(suffix=".yml", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(yml)
+        self.addCleanup(os.unlink, path)
+        return gr.load_topology(path)
+
+    def _platform(self, yml: str) -> str:
+        systems = self._topology(yml)
+        return gr.platform_of_system(systems[0].components)
+
+    def test_a_windows_exporter_job_reads_as_windows(self):
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+"""), "windows")
+
+    def test_a_node_exporter_job_reads_as_linux(self):
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: node_exporter
+    static_configs:
+      - targets: ["10.0.0.21:9100"]
+        labels: {system: Alpha}
+"""), "linux")
+
+    def test_a_system_scraped_by_both_exporters_is_hybrid(self):
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+  - job_name: node_exporter
+    static_configs:
+      - targets: ["10.0.0.21:9100"]
+        labels: {system: Alpha}
+"""), "hybrid")
+
+    def test_a_web_probe_does_not_make_a_system_hybrid(self):
+        """blackbox targets are URLs that carry a `system` label and land in the same grouping.
+        Counting one as a platform would put a hybrid badge on every system with a web link."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+  - job_name: blackbox_http
+    static_configs:
+      - targets: ["https://portal.example.org"]
+        labels: {system: Alpha}
+"""), "windows")
+
+    def test_an_unrecognised_job_leaves_the_platform_unknown(self):
+        """Better a monogram letter than a confidently wrong penguin."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: swift_transactions
+    static_configs:
+      - targets: ["10.0.0.99:8080"]
+        labels: {system: Alpha}
+"""), "")
+
+    def test_the_port_classifies_a_job_whose_name_says_nothing(self):
+        """A site that named its jobs by location still gets a platform: the exporter default
+        ports are a convention firm enough to read when the name offers nothing."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: hosts-datacentre-2
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+"""), "windows")
+
+    def test_a_probe_job_on_a_host_port_is_still_not_a_platform(self):
+        """The port fallback must not fire for blackbox — its targets are URLs, and a probe
+        job pointed at :9100 would otherwise be labelled a Linux host."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+  - job_name: blackbox_probe
+    static_configs:
+      - targets: ["10.0.0.30:9100"]
+        labels: {system: Alpha}
+"""), "windows")
+
+
+class TheSystemPickerShowsThePlatform(TestCase):
+    """The glyph replaces the monogram letter, so the tile must never end up blank."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("platadm", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="platadm", password="pw12345!")
+
+    def _picker(self, systems):
+        with mock.patch("reports.views.list_systems", return_value=systems):
+            return self.client.get(reverse("report_form")).content.decode()
+
+    def test_a_windows_system_gets_the_windows_glyph_and_an_accessible_name(self):
+        html = self._picker([{"name": "Alpha", "hosts": 2, "platform": "windows"}])
+        self.assertIn("os-glyph os-windows", html)
+        self.assertIn('aria-label="Windows"', html)
+
+    def test_a_hybrid_system_shows_both_glyphs(self):
+        html = self._picker([{"name": "Alpha", "hosts": 6, "platform": "hybrid"}])
+        self.assertIn("os-windows", html)
+        self.assertIn("os-linux", html)
+        self.assertIn("sys-os--hybrid", html)
+
+    def test_an_unknown_platform_falls_back_to_the_monogram_letter(self):
+        html = self._picker([{"name": "Zeta", "hosts": 1, "platform": ""}])
+        self.assertNotIn("os-glyph", html)
+        # the badge is the ONLY thing in that slot, so an empty one is an empty tile
+        self.assertRegex(html, r'class="sys-mono"[^>]*>\s*Z\s*</span>')
+
+    def test_no_template_comment_text_reaches_the_screen(self):
+        """Django's {# #} is SINGLE-LINE. Spanning it across lines renders it as literal
+        prose — and inside the tile loop that would print a paragraph of developer notes on
+        every system. The same guard the network report already carries, on the picker that
+        now explains its glyph in a comment."""
+        html = self._picker([{"name": "Alpha", "hosts": 2, "platform": "windows"}])
+        visible = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+        visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        for leak in ("{#", "#}", "endcomment", "comment %}"):
+            self.assertNotIn(leak, visible, "template comment syntax leaked: " + leak)
+
+
+class TheTopologyPlatformDrivesConnect(TestCase):
+    """Connect used to read the OS from the exporter PORT alone. The job name is the better
+    signal, so a host scraped on a non-default port now still gets offered its protocol."""
+
+    def test_the_job_derived_os_wins_over_the_port(self):
+        from .connect import build_host
+        h = build_host("Alpha", "app", "10.0.0.11:9999", None, "windows")
+        self.assertEqual(h["os"], "windows")
+        self.assertEqual(h["protocol"], "rdp")
+        self.assertTrue(h["connectable"])
+
+    def test_the_port_still_answers_when_no_hint_is_given(self):
+        from .connect import build_host
+        self.assertEqual(build_host("A", "l", "10.0.0.21:9100", None)["os"], "linux")
+
+    def _connect_page(self, hosts):
+        from .connect import build_host
+        systems = [{"name": "Alpha",
+                    "hosts": [build_host("Alpha", lbl, inst, {}, os_) for lbl, inst, os_ in hosts],
+                    "up_count": 0, "down_count": 0}]
+        with mock.patch("reports.connect.inventory", return_value=systems):
+            return self.client.get(reverse("connect")).content.decode()
+
+    def test_the_connect_row_carries_the_platform_glyph(self):
+        u = get_user_model().objects.create_user("cxadm", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="cxadm", password="pw12345!")
+        html = self._connect_page([("app", "10.0.0.11:9182", "windows"),
+                                   ("db", "10.0.0.21:9100", "linux")])
+        self.assertIn("os-glyph os-windows", html)
+        self.assertIn("os-glyph os-linux", html)
+
+    def test_no_template_comment_text_reaches_the_connect_screen(self):
+        """Django's {# #} is SINGLE-LINE; the glyph on this page is introduced by a comment."""
+        u = get_user_model().objects.create_user("cxadm2", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="cxadm2", password="pw12345!")
+        html = self._connect_page([("app", "10.0.0.11:9182", "windows")])
+        visible = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+        visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        for leak in ("{#", "#}", "endcomment", "comment %}"):
+            self.assertNotIn(leak, visible, "template comment syntax leaked: " + leak)
+
+    def test_a_legacy_component_degrades_to_unknown_rather_than_raising(self):
+        """The report page derives the card's platform from the CACHED snapshot's components.
+        One pickled before the field existed must read as unknown, not raise."""
+        class Legacy:
+            label, instance = "app", "10.0.0.11:9182"
+
+        self.assertEqual(gr.platform_of_system([Legacy()]), "")
+
+    def test_an_old_cached_snapshot_without_the_field_still_renders(self):
+        """Snapshots are pickled into the cache. One captured BEFORE Component gained `os`
+        unpickles without the attribute, and the connect strip must not 500 on it."""
+        from .connect import hosts_from_snapshot
+
+        class Legacy:                      # a Component as it was pickled pre-change
+            label, instance = "app", "10.0.0.11:9182"
+
+        systems = [type("S", (), {"name": "Alpha", "components": [Legacy()]})()]
+        hosts = hosts_from_snapshot(systems, type("St", (), {"up": {}})())
+        self.assertEqual(hosts["Alpha"][0]["os"], "windows")

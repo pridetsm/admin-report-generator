@@ -232,7 +232,11 @@ def list_systems() -> List[dict]:
     touching Prometheus — the expensive capture is deferred until the admin actually proceeds."""
     cfg = gr.load_config()
     systems = gr.load_topology(cfg.prometheus_yml)
-    return [{"name": s.name, "hosts": len(s.components)} for s in systems]
+    return [{"name": s.name, "hosts": len(s.components),
+             # "windows" / "linux" / "hybrid" / "" — derived from the scrape job, so it costs
+             # the same file read the rest of this function already paid for.
+             "platform": gr.platform_of_system(s.components)}
+            for s in systems]
 
 
 def _scope_links_to_systems(store, systems) -> None:

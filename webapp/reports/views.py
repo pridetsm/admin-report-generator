@@ -89,6 +89,17 @@ def _recently_reported(hours: int = _RECENT_REPORT_HOURS) -> dict:
     return recent
 
 
+#: How each platform is named to a human. The picker's glyph is decorative, so this supplies
+#: the accessible name and the tooltip — a screen reader announcing "R, RTGS, 4 hosts" learned
+#: nothing about the estate, and a penguin alone doesn't say "Linux" to everyone.
+PLATFORM_LABELS = {
+    "windows": "Windows",
+    "linux": "Linux",
+    "hybrid": "Mixed Windows and Linux",
+    "": "Platform not identified",
+}
+
+
 def _mono_hue(name: str) -> int:
     """A stable, well-spread hue (0-359) for a system's monogram tile, keyed by its FIRST LETTER
     so the same initial always gets the same colour. The golden-angle stride keeps neighbouring
@@ -278,7 +289,11 @@ def report_form(request):
     recent = _recently_reported()
     select_systems = [
         {"name": s["name"], "hosts": s["hosts"], "reported": recent.get(s["name"]),
-         "mono_hue": _mono_hue(s["name"])}
+         "mono_hue": _mono_hue(s["name"]),
+         # The tile shows the platform glyph in place of the monogram; mono_hue stays because
+         # a system whose scrape jobs don't identify an OS still falls back to its letter.
+         "platform": s["platform"],
+         "platform_label": PLATFORM_LABELS.get(s["platform"], PLATFORM_LABELS[""])}
         for s in list_systems()
     ]
     # This screen IS the picker, so arriving here mid-report used to leave only one way
@@ -353,8 +368,13 @@ def report(request):
     hosts_by_system = connect.hosts_from_snapshot(snapshot._systems, snapshot._store)
     # colour each chip by the worst flag on that host, taken from the flags this page renders
     connect.attach_flag_severity(hosts_by_system, snapshot.systems)
+    # Same platform the picker showed on the tile, carried onto the card the admin lands on,
+    # so the glyph they chose by is still beside the system while they write about it.
+    platforms = {s.name: gr.platform_of_system(s.components) for s in snapshot._systems}
     for svm in snapshot.systems:
         svm.connect_hosts = hosts_by_system.get(svm.name, [])
+        svm.platform = platforms.get(svm.name, "")
+        svm.platform_label = PLATFORM_LABELS.get(svm.platform, PLATFORM_LABELS[""])
 
     return render(request, "reports/form.html", {
         "generate_default": reverse("generate"),

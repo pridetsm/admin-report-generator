@@ -37,6 +37,9 @@ Thumbs.db
 # manifest entry for it and the header breaks. Same for the design references it came from.
 !webapp/static/img/brand-mark.png
 !webapp/design-assets/*.png
+# Platform glyphs for the system pickers. SHIPPED assets for the same reason as the header
+# mark: app.css masks them by url(), so collectstatic fails outright if they aren't committed.
+!webapp/static/img/os/*.png
 Screenshot*.png
 example.png
 .claude/

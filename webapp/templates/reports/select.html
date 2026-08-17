@@ -60,7 +60,20 @@
       {% for s in select_systems %}
       <label class="sys-tile" data-name="{{ s.name|lower }}">
         <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}">
-        <span class="sys-mono" style="--mono-h:{{ s.mono_hue }}">{{ s.name.0|upper }}</span>
+        {% comment %}
+          The platform glyph stands in for the monogram. A system whose scrape jobs don't
+          identify an OS keeps the letter, so the badge is never empty.
+        {% endcomment %}
+        <span class="sys-mono{% if s.platform %} sys-os sys-os--{{ s.platform }}{% endif %}"
+              style="--mono-h:{{ s.mono_hue }}"
+              {% if s.platform %}role="img" aria-label="{{ s.platform_label }}"
+              title="{{ s.platform_label }}"{% endif %}>
+          {% if s.platform == 'hybrid' %}
+            <i class="os-glyph os-windows"></i><i class="os-glyph os-linux"></i>
+          {% elif s.platform %}
+            <i class="os-glyph os-{{ s.platform }}"></i>
+          {% else %}{{ s.name.0|upper }}{% endif %}
+        </span>
         <span class="sys-body">
           <span class="sys-name">{{ s.name }}</span>
           <span class="sys-sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>

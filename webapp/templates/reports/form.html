@@ -155,6 +155,16 @@
   .cxs-chip.sev-amber .cxs-ct { background:var(--amber); color:#2a1e00; }
   .cxs-chip.sev-red   .cxs-ct { background:var(--red);   color:#fff; }
 
+  /* platform glyph in the card header — drawn by .os-glyph (app.css), sized and toned here.
+     Muted on purpose: the system NAME is what the admin scans for down a page of cards, so
+     the glyph confirms the platform without competing with it. The negative margin pulls back
+     the header's 12px flex gap — the glyph belongs TO the name, and at the full gap it floated
+     between the name and the card edge instead. */
+  .card-os { display:inline-flex; align-items:center; gap:3px; color:var(--muted);
+             flex:0 0 auto; margin-right:-5px; }
+  .card-os .os-windows { width:15px; height:15px; }
+  .card-os .os-linux   { width:17px; height:17px; }
+
 </style>
 
   {# ---- per-system flagged items ---- #}
@@ -163,6 +173,18 @@
   {% for sys in snapshot.systems %}
   <div class="card {% if sys.healthy %}collapsed{% endif %}" data-collapsible data-system="{{ sys.name }}">
     <header>
+      {% comment %}
+        Mirrors the glyph the picker showed on this system's tile. Network reports render
+        through this same template and set no platform, so the card simply goes without.
+      {% endcomment %}
+      {% if sys.platform %}
+        <span class="card-os" role="img" aria-label="{{ sys.platform_label }}"
+              title="{{ sys.platform_label }}">
+          {% if sys.platform == 'hybrid' %}
+            <i class="os-glyph os-windows"></i><i class="os-glyph os-linux"></i>
+          {% else %}<i class="os-glyph os-{{ sys.platform }}"></i>{% endif %}
+        </span>
+      {% endif %}
       <h2>{{ sys.name }}</h2>
       {% if sys.healthy %}
         <span class="sub">{{ sys.hosts }} host{{ sys.hosts|pluralize }}</span>

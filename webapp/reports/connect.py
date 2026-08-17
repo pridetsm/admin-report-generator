@@ -84,9 +84,16 @@ def _ssh_command(address: str, user: str = "") -> str:
     return f"ssh {user}@{address}" if user else f"ssh {address}"
 
 
-def build_host(system: str, label: str, instance: str, up: Optional[Dict[str, bool]]) -> dict:
+def build_host(system: str, label: str, instance: str, up: Optional[Dict[str, bool]],
+               os_hint: str = "") -> dict:
+    """`os_hint` is the platform the TOPOLOGY already established for this component (from its
+    scrape job — see gr.platform_of_job). It wins over the port lookup below, which is only a
+    convention: a site scraping windows_exporter on a non-default port used to fall through to
+    no OS at all, and so was offered no protocol and no Connect button on a host that is
+    perfectly reachable over RDP. The port stays as the fallback for callers that have an
+    instance string and nothing else."""
     addr, port = _split_instance(instance)
-    osname = _PORT_OS.get(port)
+    osname = os_hint or _PORT_OS.get(port)
     proto = _PROTOCOL.get(osname or "", {})
     reachable = None if up is None else bool(up.get(instance, False))
     return {
@@ -128,7 +135,8 @@ def inventory(only: Optional[set] = None, with_reachability: bool = True) -> Lis
     up = fetch_up(cfg) if with_reachability else None
     out = []
     for s in systems:
-        hosts = [build_host(s.name, c.label, c.instance, up) for c in s.components]
+        hosts = [build_host(s.name, c.label, c.instance, up, getattr(c, "os", ""))
+                 for c in s.components]
         out.append({
             "name": s.name,
             "hosts": hosts,
@@ -147,7 +155,8 @@ def hosts_from_snapshot(systems, store) -> Dict[str, List[dict]]:
     exactly (rather than drifting a few seconds ahead of them).
     """
     up = {inst: val >= 1 for inst, val in (getattr(store, "up", {}) or {}).items()}
-    return {s.name: [build_host(s.name, c.label, c.instance, up) for c in s.components]
+    return {s.name: [build_host(s.name, c.label, c.instance, up, getattr(c, "os", ""))
+                     for c in s.components]
             for s in systems}
 
 

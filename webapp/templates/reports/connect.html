@@ -13,6 +13,11 @@
   .cx-act { display:flex; align-items:center; gap:8px; flex:0 0 auto; margin-left:auto; }
   .cx-os { font-size:11px; letter-spacing:.4px; text-transform:uppercase; font-weight:700;
            padding:3px 8px; border-radius:999px; border:1px solid var(--line-strong); color:var(--muted); }
+  /* .os-glyph itself (app.css) masks the icon in currentColor; only the row-scale size and
+     the muted tone belong here, so both pages keep one definition of how the glyph is drawn. */
+  .cx-os-glyph { color:var(--muted); }
+  .cx-os-glyph.os-windows { width:13px; height:13px; }
+  .cx-os-glyph.os-linux   { width:15px; height:15px; }
   .cx-dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--muted); }
   .cx-dot.up { background:var(--green); } .cx-dot.down { background:var(--red); }
   .cx-reach { font-size:12px; color:var(--muted); white-space:nowrap; }
@@ -71,6 +76,12 @@
         </div>
 
         <div class="cx-meta">
+          {% comment %}
+            The protocol label already implied the platform (RDP -> Windows, SSH -> Linux);
+            the glyph says it outright, and still shows on a host with no shell protocol.
+          {% endcomment %}
+          {% if h.os %}<i class="os-glyph os-{{ h.os }} cx-os-glyph" role="img"
+                          aria-label="{{ h.os|capfirst }}" title="{{ h.os|capfirst }}"></i>{% endif %}
           <span class="cx-os">{{ h.protocol_label }}</span>
           {% if h.reachable is None %}
             <span class="cx-dot" title="Prometheus unreachable"></span><span class="cx-reach">unknown</span>
