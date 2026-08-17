@@ -1,0 +1,6 @@
+{
+  "_comment": "SAMPLE for the webapp's Backup policy config screen. Not read by the engine — that key is ignored by reload_backup_policy(), which only looks for 'frequency_days' inside each instance's entry (see generate_report.py). Sparse by design: a host absent here just gets the daily default (DEFAULT_BACKUP_MAX_AGE_DAYS = 1). Keyed by the exporter instance (host:port) that publishes backup_file, the same instance the backup_monitor script writes its .prom on for that host.",
+  "10.0.0.12:9182": {
+    "frequency_days": 3
+  }
+}

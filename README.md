@@ -21,6 +21,15 @@ admin-report-generator/
 │   ├── generate_report.py   builds the .xlsx
 │   ├── mail_report.py       renders + sends the e-mail
 │   └── logo.png
+├── standalone/               Per-role standalone report bundles (their own copy of the
+│                            engine + a scheduled run_and_mail.bat), synced by hand from
+│                            send_report/ whenever the engine changes.
+├── configuration/            Reference samples for the files the webapp's Administrator-
+│                            only Configuration menu (Prometheus, Grafana, SNMP, backup
+│                            policy, ...) generates and rewrites at runtime — see its
+│                            own README for the full screen -> file mapping.
+├── backup_monitor/           The BSA backup-check script(s) that WRITE the backup_file
+│                            metric the report/Backup-policy screen READS.
 ├── config.sample.ini        sample engine config  (real one -> send_report/config.ini)
 ├── prometheus.sample.yml    sample topology for local dev only — production points
 │                            config.ini's `yml` setting straight at the real Prometheus
