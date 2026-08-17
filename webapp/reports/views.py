@@ -740,6 +740,12 @@ def network_report(request):
         request.session["network_token"] = token
         request.session["network_expires_at"] = time.time() + settings.SNAPSHOT_TTL
 
+    # Anchor the countdown to the capture time so a refresh continues it (never restarts) —
+    # the same reasoning report()'s equivalent line uses. A cached snapshot reused across
+    # requests had been showing the full TTL on every load instead of what was actually left.
+    elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
+    remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
     # The SAME annotation screen the systems report uses. One device is one "system" and its
     # faults are its flags, so the template needs no network special-casing — which is the
     # point: an admin who has written a system report already knows how to write this one.
@@ -748,11 +754,13 @@ def network_report(request):
         "token": token,
         "selected_count": len(snapshot.systems),
         "suggested_author": _profile_author(request.user),
-        "recipient_opts": recipient_options(),
-        "default_recipients": default_recipients(),
+        "suggested_recipients": default_recipients(),
+        "recipient_options": recipient_options(),
         "default_filename": network.network_report_filename(
             getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
-        "remaining_seconds": settings.SNAPSHOT_TTL,
+        "ttl_minutes": settings.SNAPSHOT_TTL // 60,
+        "ttl_seconds": settings.SNAPSHOT_TTL,
+        "remaining_seconds": remaining,
         "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
         # the shared screen's nouns and destinations, so a network admin is not handed the
         # systems screen with a switch on it

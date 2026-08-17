@@ -758,21 +758,27 @@ def _network_overview(data: dict, devices: list) -> dict:
     optics_low = len(data.get("optics_low", []))
     bad = lambda n: "good" if not n else "bad"
     warn = lambda n: "good" if not n else "warn"
+
+    # Same three-band split the systems report uses: AT A GLANCE is bare counts and
+    # readings, no judgement in the colour — a percentage that gets banded amber/red
+    # belongs in the watch row below it, the same way High CPU/High RAM never appear
+    # under Systems/Hosts/Services on the systems dashboard.
+    def _pct_band(pct, amber, red):
+        if pct is None:
+            return "good"
+        return "bad" if pct >= red else ("warn" if pct >= amber else "good")
+
     return {
         "glance": [
             {"label": "Devices", "value": len(devices), "state": "info"},
-            {"label": "CPU", "value": (f"{data['cpu_pct']:.0f}%" if data.get("cpu_pct") is not None else "—"),
-             "state": "info"},
-            {"label": "Memory", "value": (f"{data['mem_pct']:.0f}%" if data.get("mem_pct") is not None else "—"),
-             "state": "info"},
             {"label": "Uptime", "value": (f"{data['uptime_days']:.0f}d" if data.get("uptime_days") is not None else "—"),
              "state": "info"},
             {"label": "Interfaces", "value": data["iface_count"], "state": "info"},
             {"label": "Links up", "value": data["up_count"], "state": "info"},
             {"label": "Carrying traffic", "value": data["carrying_count"], "state": "info"},
             {"label": "Throughput in", "value": data["total_in_text"], "state": "info"},
-            {"label": "OSPF neighbours", "value": f"{data.get('ospf_total', 0) - ospf_down} of {data.get('ospf_total', 0)}",
-             "sub": "Full", "state": "info"},
+            {"label": "MAC / ARP entries", "value": f"{data.get('mac_count', 0)} | {data.get('arp_count', 0)}",
+             "sub": "size only — no vendor max yet", "state": "info"},
         ],
         "immediate": [
             {"label": "Not responding", "value": len(unreachable), "state": bad(len(unreachable))},
@@ -783,6 +789,13 @@ def _network_overview(data: dict, devices: list) -> dict:
              "state": bad(ospf_down)},
         ],
         "watch": [
+            # Usage percentages — judged like the systems report's High CPU/High RAM tiles
+            # (same 80/90 amber/red split _device_flags already uses for these), not shown
+            # as a bare reading the way Uptime or Throughput are above.
+            {"label": "CPU", "value": (f"{data['cpu_pct']:.0f}%" if data.get("cpu_pct") is not None else "—"),
+             "state": _pct_band(data.get("cpu_pct"), 80, 90)},
+            {"label": "Memory", "value": (f"{data['mem_pct']:.0f}%" if data.get("mem_pct") is not None else "—"),
+             "state": _pct_band(data.get("mem_pct"), 80, 90)},
             {"label": "Links not up", "value": down, "sub": "interfaces", "state": warn(down)},
             {"label": "At capacity", "value": len(data.get("saturated", [])), "sub": "≥80% used",
              "state": warn(len(data.get("saturated", [])))},
@@ -790,8 +803,6 @@ def _network_overview(data: dict, devices: list) -> dict:
              "state": warn(len(data.get("erroring", [])))},
             {"label": "Optics near floor", "value": optics_low, "sub": "receive power",
              "state": warn(optics_low)},
-            {"label": "MAC / ARP entries", "value": f"{data.get('mac_count', 0)} | {data.get('arp_count', 0)}",
-             "sub": "size only — no vendor max yet", "state": "info"},
             {"label": "Metrics not collected", "value": missing,
              "sub": f"of {len(CATALOGUE)} requested", "state": warn(missing)},
             {"label": "Counter width", "value": "32-bit" if not data.get("counters_are_64bit") else "64-bit",
