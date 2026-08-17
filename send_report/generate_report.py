@@ -554,6 +554,16 @@ def _shorten(name: str) -> str:
     return name
 
 
+def _stable(expr: str, lookback: str = "6h") -> str:
+    """Wrap a PromQL vector expr so a single missed scrape doesn't drop it from a count.
+       Returns the LAST sample in the window (not max/avg) — a genuine transition to
+       down/gone is still reflected at the very next scrape; this only survives GAPS.
+       Used only for "does this entity exist at all, count it" queries (services, web
+       links, backups, LDAP) — NEVER for point-in-time readings (RAM/CPU/disk/COB/SWIFT/
+       `up`), where a stale value would be actively wrong."""
+    return f"last_over_time(({expr})[{lookback}:1m])"
+
+
 def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     disk: Dict[str, Dict[str, dict]] = {}
     ram: Dict[str, float] = {}
@@ -596,7 +606,7 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     # True up / False down / None when not monitored (no probe target configured or no series).
     ldap_up: Optional[bool] = None
     if cfg.ldap_target:
-        rows = prom.query(f'probe_success{{instance="{cfg.ldap_target}"}}')
+        rows = prom.query(_stable(f'probe_success{{instance="{cfg.ldap_target}"}}'))
         if rows:
             ldap_up = max(r["value"] for r in rows) >= 1
 
@@ -611,7 +621,7 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
         comp_order = {c.label: i for i, c in enumerate(sysm.components)}   # topology order for sub-groups
         for svc in sysm.services:
             try:
-                result = prom.query(svc.expr)
+                result = prom.query(_stable(svc.expr))
             except Exception:
                 result = []
             for r in result:
@@ -679,7 +689,7 @@ def capture_links(prom: Prometheus) -> Dict[str, dict]:
 
     def index(expr: str, field_: str, conv=lambda v: v) -> None:
         try:
-            result = prom.query(expr)
+            result = prom.query(_stable(expr))
         except Exception:
             result = []
         for r in result:
@@ -694,7 +704,7 @@ def capture_links(prom: Prometheus) -> Dict[str, dict]:
     index("probe_duration_seconds", "duration")
     # TLS version travels in the `version` label of probe_tls_version_info
     try:
-        for r in prom.query("probe_tls_version_info"):
+        for r in prom.query(_stable("probe_tls_version_info")):
             inst, ver = r["labels"].get("instance"), r["labels"].get("version")
             if _is_url(inst) and ver:
                 links.setdefault(inst, {})["tls"] = ver
@@ -715,7 +725,7 @@ def capture_backups(prom: Prometheus) -> Dict[str, dict]:
 
     def scan(expr: str, apply: Callable[[dict, dict], None]) -> None:
         try:
-            result = prom.query(expr)
+            result = prom.query(_stable(expr))
         except Exception:
             result = []
         for r in result:
@@ -776,6 +786,13 @@ def disk_high(store: "Store", systems: List["System"], amber: int, red: int
                 disks += len(high)
                 worst = max(worst, max(high))
     return hosts, disks, ("good" if disks == 0 else ("bad" if worst >= red else "warn"))
+
+
+def total_disks(store: "Store", systems: List["System"]) -> int:
+    """Every monitored disk/volume across every component — the denominator for the
+       HIGH DISK USAGE tile's DISKS count (elevated disks out of ALL disks), matching the
+       affected-out-of-TOTAL convention every other number on that tile already follows."""
+    return sum(len(store.disk.get(c.instance, {})) for s in systems for c in s.components)
 
 
 def disk_near_full(store: "Store", systems: List["System"], red: int) -> List[Tuple[str, str, str, float]]:
@@ -881,6 +898,13 @@ def services_down(store: "Store") -> int:
        e-mail KPI, so every renderer agrees with what the per-system cards show as DOWN."""
     svc = sum(1 for v in store.services.values() for row in v if not row[1])
     return svc + links_down(store)
+
+
+def total_services(store: "Store") -> int:
+    """SYSTEM/OFFERED services + web links — the SERVICES tile's total, and the denominator
+       for SERVICES DOWN. Single source of truth shared by the xlsx, the webapp screen and
+       the e-mail, so the three can never disagree on this number."""
+    return sum(len(v) for v in store.services.values()) + len(store.links)
 
 
 def ldap_alert(store: "Store", systems: List["System"]) -> Optional[List[str]]:
@@ -1012,9 +1036,17 @@ def backup_missing_band(count: int) -> str:
 # ============================================================================ #
 class ReportBuilder:
     # column widths (A gutter, then Services | gap | Memory | gap | Disk | gap | Backups | gap | Notes)
-    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 2, "E": 14, "F": 8,
-              "G": 8, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
-              "M": 2, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
+    # D=9, F=9, G=9, M=9 (not the tighter 2/8 you'd expect for what are otherwise mere gap /
+    # numeric columns): the overview tile band reuses these same sheet columns for its KPI
+    # sub-columns (HOSTS/TOTAL/DISKS/...), and at their old widths those labels clipped —
+    # first caught on HIGH RAM USAGE's "HOSTS" landing on D=2, then again on HIGH DISK USAGE
+    # gaining a 4th sub-column (DISKS total) and pushing BACKUP TRACKING's "TOTAL" onto M=2.
+    # 9 matches C, comfortably fits every one of these short bold labels, and each of D/F/G/M
+    # still only ever merges into a wider card/gap in the per-system section below, so
+    # widening them doesn't disturb that layout.
+    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 9,
+              "G": 9, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
+              "M": 9, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
               "Q": 2,                                      # gap before Notes
               "R": 13, "S": 11, "T": 11, "U": 11, "V": 9}  # R-V = notes column
     CARD_GROUPS = [(2, 4), (5, 7), (8, 9), (10, 12)]   # 4 overview cards across the width
@@ -1079,15 +1111,25 @@ class ReportBuilder:
         spans.append((cols[start], cols[-1]))
         return spans
 
-    def _band_spans(self, tiles, ncols=11) -> List[int]:
-        """Column counts for a row of overview tiles across cols 2..12. Every tile gets a
-           readable minimum, then spare columns go first to the panels with the MOST
-           sub-columns (a 2-column panel needs more room than a single value) so the row
-           stays balanced and nothing is crushed."""
+    def _band_spans(self, tiles, ncols=None) -> List[int]:
+        """Column counts for a row of overview tiles, starting at col 2. Every tile gets AT
+           LEAST 2 physical columns — 1 is never enough for a 2-number panel (HOSTS | TOTAL):
+           with only 1 column, the split degenerates to a single sub-column holding BOTH
+           labels merged into one narrow cell and clips (this is what happened to HIGH RAM
+           USAGE's "HOSTS" label before the column was widened). A panel with MORE
+           sub-columns than 2 (e.g. HIGH DISK USAGE's HOSTS/TOTAL/DISKS/TOTAL) gets that many
+           instead, so it never straddles a too-narrow column either. `ncols` lets a caller
+           force several bands to the SAME total width (see _overview: every row of tiles —
+           and the AT A GLANCE cards above them — share one width so their right edges line
+           up, rather than each band growing only as wide as ITS OWN tiles need); left None,
+           the row's width grows to fit whatever these tiles alone need (at least the
+           historical 11 columns). Any spare width beyond each tile's own minimum goes first
+           to the widest-need panel(s)."""
         n = len(tiles)
-        spans = [max(1, ncols // n)] * n
-        spare = ncols - sum(spans)
         subcols = lambda t: len(t[2]) if t[0] == "panel" else 1
+        spans = [max(2, subcols(t)) for t in tiles]
+        ncols = max(ncols or 0, 11, sum(spans))
+        spare = ncols - sum(spans)
         order = sorted(range(n), key=lambda i: (-subcols(tiles[i]), i))   # widest need first
         i = 0
         while spare > 0:
@@ -1183,7 +1225,7 @@ class ReportBuilder:
         hosts = sum(len(s.components) for s in systems)
         # SERVICES inventory counts BOTH classes shown on the cards: PromQL checks + web links,
         # so the 'SERVICES DOWN' count (which now includes down links) can never exceed it.
-        nsvc = sum(len(v) for v in store.services.values()) + len(store.links)
+        nsvc = total_services(store)
         down = services_down(store)   # PromQL service checks + down web-link probes (see services_down)
         thr = self.cfg.overview_threshold
         ram_hosts, ram_state = ram_pressure(store, systems, self.cfg.chip_amber, self.cfg.chip_red)
@@ -1245,23 +1287,12 @@ class ReportBuilder:
                 self.ws.cell(r, c1).border = bar
             self.ws.row_dimensions[rtop + 2].height = 30
 
-        def caption(row, text):
+        def caption(row, text, end_col=12):
             """Thin label above a band of cards, so the two rows read as one group each."""
-            self._merge(row, 2, 12, "  " + text, Theme.font(8, True, Theme.SUB), bg=Theme.BG, al="left")
+            self._merge(row, 2, end_col, "  " + text, Theme.font(8, True, Theme.SUB), bg=Theme.BG, al="left")
             self.ws.row_dimensions[row].height = 14
 
         ur = unreachable(store, systems)           # needed for the Unreachable KPI below
-
-        # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
-        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups
-        caption(8, "AT A GLANCE  ·  inventory & readings")
-        static = [((2, 2),   "SYSTEMS",    str(len(systems))),
-                  ((3, 4),   "HOSTS",      str(hosts)),
-                  ((5, 6),   "SERVICES",   str(nsvc)),
-                  ((7, 9),   "SWIFT TXNS", swift),
-                  ((10, 12), "COB · T24",  cob)]
-        for group, label, value in static:
-            card(9, group, label, value, "info", vrow=10)
 
         # ---- ROW 2 · live health signals, SPLIT BY URGENCY -------------------
         # Two bands, each 3 rows tall (title · sub-labels · value):
@@ -1309,23 +1340,42 @@ class ReportBuilder:
             ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts), ("TOTAL", total_hosts)], cpu_state),
             ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts), ("TOTAL", total_hosts)], ram_state),
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
-             [("HOSTS", disk_high_h), ("TOTAL", total_hosts), ("DISKS", disk_high_d)],
+             [("HOSTS", disk_high_h), ("TOTAL", total_hosts),
+              ("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
              disk_high_state),
             # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
             # encrypted estate read "12 | 0", which looks like half a number, not a pass.
             ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("TOTAL", n_https + n_http)], web_state),
-            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("UNTRACKED", n_untracked)],
+            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("TOTAL", len(systems))],
              "good" if n_untracked == 0 else "warn"),
         ]
 
+        # Both bands (and the AT A GLANCE cards above them) share ONE width, so every row's
+        # right edge lines up — a band is never left to grow only as wide as its OWN tiles
+        # need (that jogged the right edge when HIGH DISK USAGE gained a 4th sub-column).
+        overview_ncols = max(sum(self._band_spans(imm_tiles)), sum(self._band_spans(watch_tiles)))
+
+        # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
+        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups. Rendered
+        # here (not right after "Summary") so its last card can reach overview_ncols too.
+        caption(8, "AT A GLANCE  ·  inventory & readings", end_col=1 + overview_ncols)
+        static = [((2, 2),   "SYSTEMS",    str(len(systems))),
+                  ((3, 4),   "HOSTS",      str(hosts)),
+                  ((5, 6),   "SERVICES",   str(nsvc)),
+                  ((7, 9),   "SWIFT TXNS", swift),
+                  ((10, 1 + overview_ncols), "COB · T24", cob)]
+        for group, label, value in static:
+            card(9, group, label, value, "info", vrow=10)
+
         def band(cap_row, title, tiles):
-            """Lay a row of tiles across columns 2..12 under a caption, so the band reads as
-               one group however many tiles it holds. Width is shared by _band_spans (wider
-               panels get more room). Returns the band's bottom row (value row)."""
-            caption(cap_row, title)
+            """Lay a row of tiles across columns starting at 2 under a caption, so the band
+               reads as one group however many tiles it holds. Every band in the overview
+               shares overview_ncols (see above) so their right edges align."""
+            spans = self._band_spans(tiles, ncols=overview_ncols)
+            caption(cap_row, title, end_col=1 + sum(spans))
             trow = cap_row + 1
             start = 2
-            for t, span in zip(tiles, self._band_spans(tiles)):
+            for t, span in zip(tiles, spans):
                 grp = (start, start + span - 1)
                 start += span
                 if t[0] == "card":

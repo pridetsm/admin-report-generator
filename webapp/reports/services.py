@@ -88,11 +88,12 @@ def build_overview(store, systems, cfg) -> dict:
     numbers match. Returned as plain dicts the template renders natively (theme-aware)."""
     thr = cfg.overview_threshold
     hosts = sum(len(s.components) for s in systems)
-    nsvc = sum(len(v) for v in store.services.values()) + len(store.links)
+    nsvc = gr.total_services(store)
     down = gr.services_down(store)   # PromQL service checks + down web-link probes (see gr.services_down)
     ram_hosts, _ = gr.ram_pressure(store, systems, thr, thr)
     cpu_hosts, _ = gr.cpu_pressure(store, systems, thr, thr)
     dh_hosts, dh_disks, dh_state = gr.disk_high(store, systems, thr, cfg.chip_red)
+    dh_total = gr.total_disks(store, systems)
     nmiss = len(gr.backup_missing(store, systems))
     n_untracked = len(gr.backup_untracked(store, systems))
     n_tracked = len(systems) - n_untracked
@@ -140,13 +141,13 @@ def build_overview(store, systems, cfg) -> dict:
         {"label": "High RAM", "value": f"{ram_hosts} | {hosts}", "sub": "hosts | total",
          "state": warn(ram_hosts)},
         {"label": f"High disk ≥{thr}%", "value": f"{dh_hosts} | {hosts}",
-         "sub": f"hosts | total · {dh_disks} disk{'' if dh_disks == 1 else 's'}", "state": dh_state},
+         "sub": f"hosts | total · {dh_disks} | {dh_total} disks | total", "state": dh_state},
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
         {"label": "Web encryption", "value": f"{n_https} | {n_https + n_http}",
          "sub": "https | total", "state": web_state},
-        {"label": "Backup tracking", "value": f"{n_tracked} | {n_untracked}",
-         "sub": "tracked | untracked", "state": warn(n_untracked)},
+        {"label": "Backup tracking", "value": f"{n_tracked} | {len(systems)}",
+         "sub": "tracked | total", "state": warn(n_untracked)},
     ]
 
     banners = []
