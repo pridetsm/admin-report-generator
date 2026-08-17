@@ -2246,6 +2246,47 @@ class EmptyRoles(TestCase):
 
 
 
+class GenerateBelongsToEveryEstate(TestCase):
+    """Generate is the one download path every estate posts its finished report to.
+
+    It was owned by System Admin in ROLE_PAGES, so RoleScopeMiddleware bounced an
+    Infrastructure Admin to the picker at the exact moment they hit Generate — no download,
+    no error, just the role screen. It only bit someone who ALSO held System Admin, because
+    the middleware stays silent for a role you do not hold, which is why it looked
+    intermittent rather than broken: every superuser holds every role.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("bothroles", password="pw12345!")
+        for role in ("Infrastructure Admin", "System Admin"):
+            self.u.groups.add(Group.objects.get_or_create(name=role)[0])
+        self.client.login(username="bothroles", password="pw12345!")
+
+    def _act_as(self, role):
+        s = self.client.session
+        s["active_role"] = role
+        s.save()
+
+    def test_generate_is_owned_by_no_single_role(self):
+        from .roles import PAGE_OWNER
+        self.assertIsNone(PAGE_OWNER.get("generate"))
+
+    def test_generating_as_infrastructure_admin_is_not_redirected_to_the_picker(self):
+        """The assertion is 'not sent to Role Select'. Reaching the view and being refused an
+        expired token is the correct outcome here — what matters is that the request arrives."""
+        self._act_as("Infrastructure Admin")
+        resp = self.client.post(reverse("generate"), {"token": "expired"})
+        self.assertNotEqual(resp.status_code, 302)
+        self.assertNotIn(reverse("role_select"), resp.get("Location", "") or "")
+        self.assertEqual(resp.status_code, 410)      # reached the view, snapshot had lapsed
+
+    def test_the_same_holds_for_every_role_that_can_open_a_report(self):
+        for role in ("System Admin", "Infrastructure Admin"):
+            self._act_as(role)
+            resp = self.client.post(reverse("generate"), {"token": "expired"})
+            self.assertEqual(resp.status_code, 410, role)
+
+
 class RoleScopedNavigation(TestCase):
     """A bookmark to another role's page explains itself instead of vanishing."""
 

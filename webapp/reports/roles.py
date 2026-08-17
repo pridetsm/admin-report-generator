@@ -26,7 +26,17 @@ INFRA_ADMIN_ROLE = "Infrastructure Admin"
 ROLE_PAGES = {
     # The System Analyses Dashboard is the systems people's landing screen — its picker
     # lists business systems, which is not a network admin's job.
-    SYSTEM_ADMIN_ROLE:   {"report_form", "report", "generate",
+    # `generate` is deliberately NOT here. Every estate posts its finished report to that one
+    # view — infra_report renders form.html with generate_default=reverse("generate") — so
+    # owning it as a System Admin page made RoleScopeMiddleware bounce an Infrastructure Admin
+    # to the picker at the moment they hit Generate, instead of downloading. It only bit
+    # someone who ALSO held System Admin (the middleware stays silent for a role you do not
+    # hold), which is every superuser, so it looked intermittent.
+    #
+    # Common is also the honest description: the view is purely snapshot-driven, and a
+    # snapshot can only exist because a role-gated screen captured it. Nothing is widened by
+    # letting the download itself belong to everyone.
+    SYSTEM_ADMIN_ROLE:   {"report_form", "report",
                           "folder_watch", "folder_watch_temenos", "folder_watch_data"},
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.

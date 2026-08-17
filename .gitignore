@@ -46,6 +46,11 @@ Thumbs.db
 # The header mark is a SHIPPED asset, not a screenshot: without it the deployed app has no
 # manifest entry for it and the header breaks. Same for the design references it came from.
 !webapp/static/img/brand-mark.png
+# The application's own mark (the kingfisher) and the favicon built from it.
+!webapp/static/img/app-mark.png
+!webapp/static/img/favicon.png
+# ...and the source art it was cut from.
+!icons/application/*.jpg
 !webapp/design-assets/*.png
 # Platform glyphs for the system pickers. SHIPPED assets for the same reason as the header
 # mark: app.css masks them by url(), so collectstatic fails outright if they aren't committed.

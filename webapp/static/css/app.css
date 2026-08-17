@@ -97,6 +97,18 @@ a:hover { text-decoration: underline; }
 .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 .brand small { color: var(--muted); font-weight: 500; }
 .login-logo { height: 92px; width: auto; display: block; margin: 0 auto 6px; }
+
+/* ---- the application's own mark: the kingfisher ----
+   Masked rather than dropped in as an <img>, the same technique the OS glyphs use and for
+   the same reason — the source is a flat silhouette, so painting it in currentColor lets it
+   wear the accent in both themes instead of sitting as a black smudge on the dark one. That
+   accent IS the bird's colour, which is where the palette came from in the first place. */
+.app-mark {
+  width: 34px; height: 34px; margin: 0 auto 10px; display: block;
+  background: var(--accent);
+  -webkit-mask: url("../img/app-mark.png") center / contain no-repeat;
+          mask: url("../img/app-mark.png") center / contain no-repeat;
+}
 .topbar .spacer { flex: 1; }
 .topbar .who { color: var(--muted); font-size: 13px; }
 
