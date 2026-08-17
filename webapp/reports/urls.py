@@ -37,6 +37,7 @@ urlpatterns = [
     path("configuration/prometheus/", views.config_prometheus, name="config_prometheus"),
     path("configuration/topology/", views.config_topology, name="config_topology"),
     path("configuration/snmp/", views.config_snmp, name="config_snmp"),
+    path("configuration/backup-policy/", views.config_backup_policy, name="config_backup_policy"),
     path("configuration/yaml/", views.config_yaml, name="config_yaml"),
     path("configuration/role-scopes/", views.config_role_scopes, name="config_role_scopes"),
     path("settings/report-theme/", views.set_report_theme, name="set_report_theme"),

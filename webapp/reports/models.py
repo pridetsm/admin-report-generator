@@ -294,6 +294,41 @@ class SnmpConfigRevision(models.Model):
         return cls.objects.first()
 
 
+class BackupPolicyRevision(models.Model):
+    """A point-in-time snapshot of the per-host backup-frequency overrides
+    generate_report.backup_cutoff() reads (see BACKUP_MAX_AGE_DAYS / reload_backup_policy
+    there) — how many days old a host's newest backup may be and still count as CURRENT.
+    Almost every host backs up daily; a host on a slower cycle (BSA's database, every 3rd
+    day) needs its own entry here, otherwise the gap between its runs reads as a missing
+    backup. "Frequency" is the only component this models today — see
+    reports/backup_policy_admin.py's docstring for room to add more later (e.g. an expected
+    time-of-day) without reshaping this field.
+
+    APPEND-ONLY, same principle as the other config revisions. `policy` is
+    {instance: {"frequency_days": N}, ...} — sparse: a host absent from it just gets the
+    daily default, so filling this in gradually never hides an existing host's status. No
+    secrets here, so unlike Grafana/SNMP there is nothing to mask or encrypt."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    policy = models.JSONField(
+        default=dict, help_text="{instance: {\"frequency_days\": N}, ...} — sparse overrides only.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Backup policy revision"
+
+    def __str__(self):
+        return f"Backup policy @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first()
+
+
 class RoleScope(models.Model):
     """Which systems (from prometheus.yml) a role's workspace covers.
 

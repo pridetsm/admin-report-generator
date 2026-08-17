@@ -2,9 +2,9 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import (EmailRecipient, GrafanaConfigRevision, PrometheusConfigRevision,
-                     PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
-                     SnmpConfigRevision, SystemConfig, UserProfile)
+from .models import (BackupPolicyRevision, EmailRecipient, GrafanaConfigRevision,
+                     PrometheusConfigRevision, PrometheusRuleFileRevision, ReportSubmission,
+                     RoleRequest, RoleScope, SnmpConfigRevision, SystemConfig, UserProfile)
 
 
 @admin.register(SystemConfig)
@@ -67,6 +67,21 @@ class SnmpConfigRevisionAdmin(admin.ModelAdmin):
     readonly_fields = tuple(f.name for f in SnmpConfigRevision._meta.fields
                             if f.name != "secrets_encrypted")
     exclude = ("secrets_encrypted",)
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(BackupPolicyRevision)
+class BackupPolicyRevisionAdmin(admin.ModelAdmin):
+    """Read-only browsing — revisions are only ever created through the config_backup_policy
+    view. No secrets in this one, so nothing is excluded."""
+    list_display = ("__str__", "note", "created_by")
+    readonly_fields = tuple(f.name for f in BackupPolicyRevision._meta.fields)
     date_hierarchy = "created_at"
 
     def has_add_permission(self, request):

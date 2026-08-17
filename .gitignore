@@ -10,6 +10,7 @@ webapp/.env
 /send_report/config.ini
 /prometheus.yml
 /deployments/standalone/systems admin report/config.ini
+/send_report/backup_policy.json
 
 # ── Python ────────────────────────────────────────────────────────────
 __pycache__/

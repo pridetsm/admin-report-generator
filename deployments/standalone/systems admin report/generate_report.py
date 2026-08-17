@@ -428,6 +428,33 @@ BACKUP_MAX_AGE_DAYS = {
 }
 DEFAULT_BACKUP_MAX_AGE_DAYS = 1    # daily backup = today or yesterday
 
+# Overridable at runtime via the webapp's Backup Policy screen (Configuration -> Backup
+# policy) rather than only by editing the dict above and redeploying. BACKUP_POLICY_PATH
+# sits next to config.ini — a per-deployment file, same as config.ini itself, not one this
+# repo tracks — and reload_backup_policy() re-reads it fresh at the top of every capture()
+# (see below), so an admin's edit takes effect on the very next report with no restart.
+# Absent or unparseable: BACKUP_MAX_AGE_DAYS simply stays at the hardcoded defaults above —
+# those are also what the config screen shows on its very first-ever load, before anyone has
+# saved a policy yet (see webapp/reports/backup_policy_admin.py).
+BACKUP_POLICY_PATH = HERE / "backup_policy.json"
+
+
+def reload_backup_policy() -> None:
+    """Repopulate BACKUP_MAX_AGE_DAYS from BACKUP_POLICY_PATH if it exists and parses —
+    called at the top of every capture() so a policy edit takes effect on the very next
+    report. Never raises: a missing or broken file just leaves the current values in place
+    rather than reverting every host to the daily default mid-incident."""
+    global BACKUP_MAX_AGE_DAYS
+    try:
+        raw = json.loads(BACKUP_POLICY_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        return
+    BACKUP_MAX_AGE_DAYS = {inst: int(fields["frequency_days"])
+                           for inst, fields in raw.items()
+                           if isinstance(fields, dict) and "frequency_days" in fields}
+
 
 def backup_cutoff(instance: str, now: datetime.datetime | None = None) -> float:
     """Oldest mtime that still counts as a CURRENT backup for `instance` (unix seconds).
@@ -650,6 +677,7 @@ def _stable(expr: str, lookback: str = "6h") -> str:
 
 
 def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
+    reload_backup_policy()   # fresh on every report — see BACKUP_POLICY_PATH above
     disk: Dict[str, Dict[str, dict]] = {}
     ram: Dict[str, float] = {}
 

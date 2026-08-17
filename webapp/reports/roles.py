@@ -39,7 +39,8 @@ ROLE_PAGES = {
     ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
                           "prometheus_config", "prometheus_rule_file",
                           "configuration", "config_yaml", "config_role_scopes",
-                          "config_prometheus", "config_topology", "config_snmp"},
+                          "config_prometheus", "config_topology", "config_snmp",
+                          "config_backup_policy"},
     # Two roles exist without an estate yet. Deliberately empty rather than borrowing
     # another role's dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),

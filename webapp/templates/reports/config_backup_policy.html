@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Backup policy · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}" style="white-space:pre-wrap">{{ m }}</li>{% endfor %}</ul>{% endif %}
+
+  <div class="section-label">Backup policy</div>
+
+  {% if bootstrapped_from_file %}
+  <div class="card"><div class="body" style="padding:12px 18px">
+    <p style="margin:0;color:var(--muted)">No revisions saved yet — these are the frequencies
+    the report already uses today. Nothing is tracked in history until you Save.</p>
+  </div></div>
+  {% endif %}
+
+  <div class="card"><div class="body" style="padding:18px">
+    <p style="margin:0 0 16px;color:var(--muted)">
+      How many days old a host's newest backup may be and still count as current — the
+      report reads each host's newest backup file against this on every capture. Almost every
+      host backs up daily, so <b>{{ default_days }}</b> (today or yesterday) is the default for
+      any host left blank here; a host on a slower cycle (e.g. a database whose full backup
+      runs every 3rd day) needs its own number, otherwise the gap between its runs reads as a
+      missing backup. <b>Frequency</b> is the only setting this covers today. Every Save
+      creates a new, permanent revision below — nothing is ever edited or deleted. <b>Save</b>
+      only records the revision. <b>Save &amp; Apply</b> also rewrites the live policy file —
+      no service to restart, so it takes effect on the very next report.
+    </p>
+
+    <form method="post" id="backupPolicyForm">
+      {% csrf_token %}
+
+      <div id="backupGroups">
+      {% for g in groups %}
+        <div class="card cfg-job{% if not g.overridden %} collapsed{% endif %}" data-collapsible>
+          <header>
+            <h2>{{ g.name }}</h2>
+            <span class="sub">{{ g.hosts|length }} host{{ g.hosts|length|pluralize }}</span>
+            <span class="spacer"></span>
+            {% if g.overridden %}<span class="chip accent" title="At least one host here differs from the daily default">custom frequency</span>{% endif %}
+            <span class="chev">▾</span>
+          </header>
+          <div class="body">
+            <div class="cfg-group">
+              <div class="cfg-grid3">
+                {% for h in g.hosts %}
+                <label class="field">
+                  <span>{{ h.label }} <b class="cfg-hint" style="display:inline;text-transform:none;letter-spacing:0">— days</b></span>
+                  <input type="number" min="1" step="1"
+                         name="freq__{{ h.instance }}" value="{{ h.days }}"
+                         autocomplete="off">
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+      {% empty %}
+        <div class="card"><div class="body" style="padding:14px 18px">
+          <p style="margin:0;color:var(--muted)">No hosts found in the topology.</p>
+        </div></div>
+      {% endfor %}
+      </div>
+
+      <div class="section-label">This revision</div>
+      <label class="field" style="margin-bottom:16px">
+        <span>Note (optional)</span>
+        <input type="text" name="note" maxlength="200" autocomplete="off">
+      </label>
+
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn ghost" type="submit" name="action" value="save">Save</button>
+        <button class="btn primary" type="submit" name="action" value="apply"
+                onclick="return confirm('This rewrites the live backup policy now. Continue?');">
+          Save &amp; Apply
+        </button>
+        <a class="btn ghost" href="{% url 'report_form' %}">Back</a>
+      </div>
+    </form>
+  </div></div>
+
+  <div class="section-label">History</div>
+  <div class="card"><div class="body" style="padding:6px 18px">
+    {% if history %}
+    <table class="hist">
+      <thead><tr><th>Saved</th><th>By</th><th>Note</th><th>Overrides</th><th></th></tr></thead>
+      <tbody>
+      {% for rev in history %}
+        <tr>
+          <td>{{ rev.created_at|date:"d M Y, H:i" }}</td>
+          <td>{{ rev.created_by.get_username|default:"—" }}</td>
+          <td>{{ rev.note|default:"—" }}</td>
+          <td>{{ rev.policy|length }}</td>
+          <td style="text-align:right">
+            {% if not forloop.first %}
+            <form method="post" style="display:inline">
+              {% csrf_token %}
+              <input type="hidden" name="rev_id" value="{{ rev.pk }}">
+              <button class="btn ghost" type="submit" name="action" value="restore">Restore</button>
+            </form>
+            {% else %}
+            <span style="color:var(--muted)">current</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="color:var(--muted)">No revisions saved yet.</p>
+    {% endif %}
+  </div></div>
+</div>
+{% endblock %}

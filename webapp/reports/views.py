@@ -32,13 +32,13 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
-from . import (connect, crypto, folders, grafana_admin, network, promconfig,
-              prometheus_admin, snmp_admin)
+from . import (backup_policy_admin, connect, crypto, folders, grafana_admin, network,
+              promconfig, prometheus_admin, snmp_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
-from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
+from .models import (BackupPolicyRevision, GrafanaConfigRevision, PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
                      SnmpConfigRevision, SystemConfig, UserProfile)
 from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_LABEL,
@@ -964,6 +964,7 @@ def set_report_theme(request):
 #        ├─ Grafana        custom.ini
 #        ├─ SNMP           (awaiting the server-side update)
 #        ├─ Topology       systems → hosts, pivoted out of the same prometheus.yml
+#        ├─ Backup policy  per-host backup-frequency overrides
 #        ├─ Data sources   which Prometheus/Grafana to read
 #        └─ Role scopes    which systems each role sees
 _CONFIG_CHILDREN = [
@@ -971,6 +972,7 @@ _CONFIG_CHILDREN = [
     ("grafana_config", "Grafana", "custom.ini, versioned and applied"),
     ("config_snmp", "SNMP", "Network device polling"),
     ("config_topology", "Topology", "Which hosts belong to which system"),
+    ("config_backup_policy", "Backup policy", "Per-host backup-frequency overrides"),
     ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
     ("config_role_scopes", "Role scopes", "Which systems each role sees"),
 ]
@@ -1224,6 +1226,94 @@ def config_snmp(request):
         "history": SnmpConfigRevision.objects.all()[:20],
         "bootstrapped_from_file": current is None,
         "service_status": snmp_admin.service_status(),
+    })
+
+
+def _parse_backup_policy_post(post, all_instances) -> dict:
+    """{instance: {"frequency_days": N}, ...} — sparse: only instances whose submitted value
+    differs from the daily default are kept, matching the engine's own sparse-override
+    design (a host absent from the dict just gets DEFAULT_BACKUP_MAX_AGE_DAYS)."""
+    policy: dict = {}
+    for inst in all_instances:
+        raw = (post.get(f"freq__{inst}") or "").strip()
+        if not raw:
+            continue
+        try:
+            days = int(raw)
+        except ValueError:
+            continue
+        if days > 0 and days != backup_policy_admin.DEFAULT_FREQUENCY_DAYS:
+            policy[inst] = {backup_policy_admin.FREQUENCY_FIELD: days}
+    return policy
+
+
+@never_cache
+@login_required
+def config_backup_policy(request):
+    """Per-host backup-frequency overrides — how many days old a host's newest backup may be
+    and still count as current (see reports/backup_policy_admin.py). "Frequency" is the only
+    component this models today.
+
+    Same DB-versioned, append-only shape as the other config screens — but there is no live
+    service to restart here: Save & Apply just rewrites backup_policy.json, which
+    generate_report.capture() re-reads fresh on the very next report (webapp, mail_report.py,
+    or the scheduled CLI run all pick it up the same way).
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    cfg = gr.load_config()
+    # scope="all": a host's backup cadence isn't a System-Admin-only concern — Infrastructure
+    # Admin's hosts belong on this screen too, the same reasoning Connect's inventory uses.
+    systems = gr.load_topology(cfg.prometheus_yml, scope="all")
+    all_instances = [c.instance for s in systems for c in s.components]
+    current = BackupPolicyRevision.current()
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action == "restore":
+            rev_id = request.POST.get("rev_id")
+            restore_rev = get_object_or_404(BackupPolicyRevision, pk=rev_id)
+            view_policy = restore_rev.policy
+            messages.info(request, f"Loaded the {restore_rev.created_at:%d %b %Y %H:%M} "
+                                   "revision — review below, then Save or Save & Apply to "
+                                   "make it current.")
+        else:
+            view_policy = _parse_backup_policy_post(request.POST, all_instances)
+            rev = BackupPolicyRevision(created_by=request.user,
+                                       note=(request.POST.get("note") or "").strip(),
+                                       policy=view_policy)
+            rev.save()
+            if action == "apply":
+                ok, message = backup_policy_admin.write_policy(view_policy)
+                (messages.success if ok else messages.error)(request, message)
+            else:
+                messages.success(request, "Revision saved (not applied — backup_policy.json "
+                                          "is unchanged).")
+            return redirect("config_backup_policy")
+    else:
+        view_policy = (current.policy if current is not None
+                       else backup_policy_admin.parse_live_policy())
+
+    default_days = backup_policy_admin.DEFAULT_FREQUENCY_DAYS
+    groups = []
+    for s in systems:
+        hosts = [{
+            "label": c.label, "instance": c.instance,
+            "days": view_policy.get(c.instance, {}).get(
+                backup_policy_admin.FREQUENCY_FIELD, default_days),
+        } for c in s.components]
+        groups.append({"name": s.name, "hosts": hosts,
+                       "overridden": any(h["days"] != default_days for h in hosts)})
+
+    return render(request, "reports/config_backup_policy.html", {
+        **_config_context("config_backup_policy"),
+        "groups": groups,
+        "default_days": default_days,
+        "current": current,
+        "history": BackupPolicyRevision.objects.all()[:20],
+        "bootstrapped_from_file": current is None,
     })
 
 
