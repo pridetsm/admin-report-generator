@@ -258,6 +258,42 @@ class PrometheusRuleFileRevision(models.Model):
         return cls.objects.filter(filename=filename).first()
 
 
+class SnmpConfigRevision(models.Model):
+    """A point-in-time snapshot of the snmp_exporter's `auths:` credential profiles —
+    NOT the whole snmp.yml. That file's other ~2MB (`modules:`) is generator output ("manual
+    changes will be lost" per its own header); see reports/snmp_admin.py for why this only
+    ever reads/writes that one small section's text, never the whole file.
+
+    APPEND-ONLY, same principle as GrafanaConfigRevision: `profiles` is
+    {profile_name: {field: value, ...}, ...}, ALWAYS with every secret field (community,
+    password, priv_password — see snmp_admin.SECRET_FIELDS) replaced by
+    snmp_admin.PASSWORD_PLACEHOLDER, so browsing history or viewing this in Django admin never
+    exposes a real credential. `secrets_encrypted` holds the real values, separately, at rest
+    as Fernet ciphertext keyed the same way ({profile_name: {field: ciphertext, ...}}); they
+    are spliced back in only at the moment the live file is actually written."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    profiles = models.JSONField(
+        default=dict, help_text="{profile: {field: value, ...}}, secrets MASKED (see class docstring).")
+    secrets_encrypted = models.JSONField(
+        default=dict, help_text="{profile: {field: ciphertext, ...}} — Fernet, never plaintext.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "SNMP config revision"
+
+    def __str__(self):
+        return f"SNMP config @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first()
+
+
 class RoleScope(models.Model):
     """Which systems (from prometheus.yml) a role's workspace covers.
 

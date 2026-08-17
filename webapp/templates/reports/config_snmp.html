@@ -1,28 +1,136 @@
 {% extends "base.html" %}
 {% block title %}SNMP · Configuration{% endblock %}
 
-{% comment %}
-  Deliberately empty. The screen exists so the drawer entry is real and the nesting is in place
-  for the server-side update that fills it; what it must NOT do is show a stubbed form that
-  looks like working configuration. An honest "not here yet" is a better answer than a form
-  whose Save does nothing.
-{% endcomment %}
-
 {% block body %}
 <div class="container" style="max-width:1040px">
   {% include "reports/_config_tabs.html" %}
 
-  <div class="card"><div class="body" style="padding:34px 30px;text-align:center">
-    <div class="chip amber" style="margin-bottom:14px">Not configured yet</div>
-    <h2 style="margin:0 0 8px">SNMP</h2>
-    <p style="margin:0 auto;max-width:520px;color:var(--muted);line-height:1.6">
-      Network device polling will be configured here. Nothing is wired up yet — this screen is
-      waiting on the update being pushed from the server.
+  {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}" style="white-space:pre-wrap">{{ m }}</li>{% endfor %}</ul>{% endif %}
+
+  <div class="section-label">SNMP configuration
+    <span class="chip {% if service_status == 'Running' %}green{% elif service_status == 'Stopped' %}red{% else %}amber{% endif %}"
+          style="margin-left:8px">{{ service_status }}</span>
+  </div>
+
+  {% if bootstrapped_from_file %}
+  <div class="card"><div class="body" style="padding:12px 18px">
+    <p style="margin:0;color:var(--muted)">No revisions saved yet — these are the live
+    <code>snmp.yml</code> credential profiles, read straight from disk. Nothing is tracked in
+    history until you Save.</p>
+  </div></div>
+  {% endif %}
+
+  <div class="card"><div class="body" style="padding:18px">
+    <p style="margin:0 0 16px;color:var(--muted)">
+      The credential profiles under <code>auths:</code> in the snmp_exporter's
+      <code>snmp.yml</code> — what <code>prometheus.yml</code>'s SNMP jobs reference by name
+      (<code>auth: [RBZ_v3]</code>). Not the rest of that file: <code>modules:</code> is ~2MB of
+      generator output ("manual changes will be lost" per its own header) and is never touched
+      here. <code>community</code> / <code>password</code> / <code>priv_password</code> always
+      show a placeholder — leave one untouched to keep the current value, or type a new value
+      over it to change it; the real value never round-trips to this screen. Every Save creates
+      a new, permanent revision below — nothing is ever edited or deleted. <b>Save</b> only
+      records the revision. <b>Save &amp; Apply</b> also rewrites <code>snmp.yml</code> (with
+      the real secrets spliced back in) and restarts the exporter service.
     </p>
-    <p style="margin:18px auto 0;max-width:520px;color:var(--muted);font-size:13px">
-      Until then, the switch and its metrics come through the
-      <a href="{% url 'config_prometheus' %}">Prometheus</a> configuration like everything else.
-    </p>
+
+    <form method="post" id="snmpConfigForm">
+      {% csrf_token %}
+
+      <div id="snmpProfiles">
+      {% for name, fields in view_profiles.items %}
+        <div class="card cfg-job collapsed" data-collapsible>
+          <header>
+            <h2>{{ name }}</h2>
+            <span class="sub">v{{ fields.version|default:"?" }} · {{ fields.security_level|default:"—" }}</span>
+            <span class="spacer"></span>
+            <span class="chev">▾</span>
+          </header>
+          <div class="body">
+            <div class="cfg-group">
+              <div class="cfg-grid3">
+                {% for field, value in fields.items %}
+                <label class="field">
+                  <span>{{ field }}{% if field in secret_fields %} <b class="cfg-req">· secret</b>{% endif %}</span>
+                  <input type="text" name="profile__{{ name }}__{{ field }}" value="{{ value }}"
+                         autocomplete="off" spellcheck="false"
+                         {% if field in secret_fields %}title="Leave as the placeholder to keep the current value"{% endif %}>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+      {% empty %}
+        <div class="card"><div class="body" style="padding:14px 18px">
+          <p style="margin:0;color:var(--muted)">No <code>auths:</code> profiles found.</p>
+        </div></div>
+      {% endfor %}
+      </div>
+
+      <div class="section-label">This revision</div>
+      <label class="field" style="margin-bottom:16px">
+        <span>Note (optional)</span>
+        <input type="text" name="note" maxlength="200" autocomplete="off">
+      </label>
+
+      <label class="field" style="margin-bottom:14px;flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" id="confirmApply">
+        <span>I understand Save &amp; Apply rewrites snmp.yml and restarts the exporter now</span>
+      </label>
+
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn ghost" type="submit" name="action" value="save">Save</button>
+        <button class="btn primary" type="submit" name="action" value="apply"
+                id="applyBtn" disabled
+                onclick="return confirm('This rewrites snmp.yml (auths section only) and restarts the SNMP exporter service now. Continue?');">
+          Save &amp; Apply (restarts exporter)
+        </button>
+        <a class="btn ghost" href="{% url 'report_form' %}">Back</a>
+      </div>
+    </form>
+  </div></div>
+
+  <div class="section-label">History</div>
+  <div class="card"><div class="body" style="padding:6px 18px">
+    {% if history %}
+    <table class="hist">
+      <thead><tr><th>Saved</th><th>By</th><th>Note</th><th>Profiles</th><th></th></tr></thead>
+      <tbody>
+      {% for rev in history %}
+        <tr>
+          <td>{{ rev.created_at|date:"d M Y, H:i" }}</td>
+          <td>{{ rev.created_by.get_username|default:"—" }}</td>
+          <td>{{ rev.note|default:"—" }}</td>
+          <td>{{ rev.profiles|length }}</td>
+          <td style="text-align:right">
+            {% if not forloop.first %}
+            <form method="post" style="display:inline">
+              {% csrf_token %}
+              <input type="hidden" name="rev_id" value="{{ rev.pk }}">
+              <button class="btn ghost" type="submit" name="action" value="restore">Restore</button>
+            </form>
+            {% else %}
+            <span style="color:var(--muted)">current</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="color:var(--muted)">No revisions saved yet.</p>
+    {% endif %}
   </div></div>
 </div>
+
+<script>
+  // Save & Apply stays disabled until the confirmation checkbox is ticked — same gate as
+  // the Grafana/Prometheus config screens.
+  (function () {
+    var box = document.getElementById("confirmApply");
+    var btn = document.getElementById("applyBtn");
+    box.addEventListener("change", function () { btn.disabled = !box.checked; });
+  })();
+</script>
 {% endblock %}

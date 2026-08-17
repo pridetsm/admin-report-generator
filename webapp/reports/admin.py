@@ -4,7 +4,7 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from .models import (EmailRecipient, GrafanaConfigRevision, PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
-                     SystemConfig, UserProfile)
+                     SnmpConfigRevision, SystemConfig, UserProfile)
 
 
 @admin.register(SystemConfig)
@@ -50,6 +50,23 @@ class PrometheusRuleFileRevisionAdmin(admin.ModelAdmin):
     list_display = ("__str__", "filename", "note", "created_by")
     list_filter = ("filename",)
     readonly_fields = tuple(f.name for f in PrometheusRuleFileRevision._meta.fields)
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(SnmpConfigRevision)
+class SnmpConfigRevisionAdmin(admin.ModelAdmin):
+    """Read-only browsing — revisions are only ever created through the config_snmp view
+    (which handles secret encryption); the admin never shows/edits secrets_encrypted."""
+    list_display = ("__str__", "note", "created_by")
+    readonly_fields = tuple(f.name for f in SnmpConfigRevision._meta.fields
+                            if f.name != "secrets_encrypted")
+    exclude = ("secrets_encrypted",)
     date_hierarchy = "created_at"
 
     def has_add_permission(self, request):

@@ -32,14 +32,15 @@ from django.views.decorators.http import require_POST
 
 import generate_report as gr   # to show the config.ini defaults on the settings page
 
-from . import connect, crypto, folders, grafana_admin, network, promconfig, prometheus_admin
+from . import (connect, crypto, folders, grafana_admin, network, promconfig,
+              prometheus_admin, snmp_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
 from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
-                     SystemConfig, UserProfile)
+                     SnmpConfigRevision, SystemConfig, UserProfile)
 from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_LABEL,
                     ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
@@ -1111,19 +1112,119 @@ def config_topology(request):
                               extra=lambda view: {"topo": promconfig.to_topology(view)})
 
 
+def _parse_snmp_post(post) -> dict:
+    """{profile_name: {field: submitted_value, ...}, ...} from `profile__<name>__<field>`
+    POST keys, in submission order (the order the template renders each profile's fields
+    in). `version` is coerced back to int — the only numeric field a profile carries — so
+    Save & Apply writes `version: 3`, not the quoted string `version: '3'`."""
+    profiles: dict = {}
+    for key in post.keys():
+        if not key.startswith("profile__"):
+            continue
+        _, name, field = key.split("__", 2)
+        value = post.get(key, "").strip()
+        if field == "version" and value:
+            try:
+                value = int(value)
+            except ValueError:
+                pass
+        profiles.setdefault(name, {})[field] = value
+    return profiles
+
+
 @never_cache
 @login_required
 def config_snmp(request):
-    """SNMP polling — deliberately empty until the server-side update lands.
+    """SNMP credential profiles — the `auths:` section of the snmp_exporter's snmp.yml that
+    prometheus.yml's snmp/snmp_hardware/snmp_system jobs reference by name (`auth: [RBZ_v3]`).
 
-    A named, reachable placeholder rather than a missing menu entry: the drawer says what is
-    coming, and the screen says it is not here yet, which is a truthful answer. Nothing is
-    stubbed behind it that could be mistaken for working configuration.
+    Same DB-versioned, mask-before-display shape as grafana_config — but per labelled field
+    (profile -> field -> value) rather than one raw-text blob, and scoped to just that ~20-line
+    section: snmp.yml's other ~2MB (`modules:`) is generator output nothing here ever parses
+    or rewrites. See reports/snmp_admin.py.
     """
     denied = _require_admin(request)
     if denied:
         return denied
-    return render(request, "reports/config_snmp.html", _config_context("config_snmp"))
+
+    current = SnmpConfigRevision.current()
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action == "restore":
+            rev_id = request.POST.get("rev_id")
+            restore_rev = get_object_or_404(SnmpConfigRevision, pk=rev_id)
+            view_profiles = restore_rev.profiles
+            messages.info(request, f"Loaded the {restore_rev.created_at:%d %b %Y %H:%M} "
+                                   "revision — review below, then Save or Save & Apply to "
+                                   "make it current.")
+        else:
+            submitted = _parse_snmp_post(request.POST)
+            baseline_secrets = current.secrets_encrypted if current is not None else {}
+            live_profiles = None   # loaded lazily — only the very first-ever save needs it
+            masked_profiles: dict = {}
+            secrets_encrypted: dict = {}
+            for name, fields in submitted.items():
+                masked_fields, enc_fields = {}, {}
+                prev_enc = baseline_secrets.get(name, {})
+                for field, value in fields.items():
+                    if field not in snmp_admin.SECRET_FIELDS:
+                        masked_fields[field] = value
+                        continue
+                    if value and value != snmp_admin.PASSWORD_PLACEHOLDER:
+                        enc = crypto.encrypt(value)
+                    elif name in prev_enc:
+                        enc = prev_enc[field]              # unchanged — carry forward
+                    else:
+                        # very first-ever save: no revision to carry a secret forward from —
+                        # fall back to what's actually in the live file right now.
+                        if live_profiles is None:
+                            try:
+                                live_profiles = snmp_admin.parse_live_auths()
+                            except (OSError, ValueError):
+                                live_profiles = {}
+                        enc = crypto.encrypt(str(live_profiles.get(name, {}).get(field, "")))
+                    enc_fields[field] = enc
+                    masked_fields[field] = snmp_admin.PASSWORD_PLACEHOLDER if enc else ""
+                masked_profiles[name] = masked_fields
+                secrets_encrypted[name] = enc_fields
+
+            rev = SnmpConfigRevision(created_by=request.user,
+                                     note=(request.POST.get("note") or "").strip(),
+                                     profiles=masked_profiles, secrets_encrypted=secrets_encrypted)
+            rev.save()
+            if action == "apply":
+                real_profiles = {
+                    name: {field: (crypto.decrypt(secrets_encrypted[name].get(field, ""))
+                                   if field in snmp_admin.SECRET_FIELDS else value)
+                          for field, value in fields.items()}
+                    for name, fields in masked_profiles.items()
+                }
+                ok, message = snmp_admin.write_auths_and_restart(real_profiles)
+                (messages.success if ok else messages.error)(request, message)
+            else:
+                messages.success(request, "Revision saved (not applied — snmp.yml is unchanged).")
+            return redirect("config_snmp")
+    else:
+        if current is not None:
+            view_profiles = current.profiles
+        else:
+            try:
+                view_profiles = snmp_admin.mask_profiles(snmp_admin.parse_live_auths())
+            except (OSError, ValueError) as exc:
+                view_profiles = {}
+                messages.error(request, f"Could not read the live snmp.yml: {exc}")
+
+    return render(request, "reports/config_snmp.html", {
+        **_config_context("config_snmp"),
+        "view_profiles": view_profiles,
+        "secret_fields": sorted(snmp_admin.SECRET_FIELDS),
+        "placeholder": snmp_admin.PASSWORD_PLACEHOLDER,
+        "current": current,
+        "history": SnmpConfigRevision.objects.all()[:20],
+        "bootstrapped_from_file": current is None,
+        "service_status": snmp_admin.service_status(),
+    })
 
 
 @never_cache
