@@ -460,8 +460,10 @@ table.hist tr:last-child td { border-bottom: 0; }
 .sys-tile:hover { border-color: var(--accent); }
 .sys-tile > .select-check { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .sys-mono {
-  flex: none; width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center;
-  font-weight: 700; font-size: 16px;
+  /* 34px is the old 40px less 15%; the radius and letter come down with it so the badge keeps
+     its proportions rather than looking like a shrunk box with an oversized glyph in it. */
+  flex: none; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center;
+  font-weight: 700; font-size: 14px;
   /* per-letter hue (set inline as --mono-h); saturation/lightness are pinned so all 26 read as
      one cohesive palette. Light-theme values here; dark overrides below. */
   background: hsl(var(--mono-h, 200) 44% 90%);
@@ -738,17 +740,19 @@ table.hist tr:last-child td { border-bottom: 0; }
             mask: var(--os-src) center / contain no-repeat;
   }
   /* sized apart on purpose: the Windows mark is a filled square that carries to the edges of
-     its canvas, so at a matched box it reads noticeably heavier than the penguin. */
-  .os-windows { --os-src: url("../img/os/windows.png"); width: 19px; height: 19px; }
-  .os-linux   { --os-src: url("../img/os/linux.png");   width: 22px; height: 22px; }
+     its canvas, so at a matched box it reads noticeably heavier than the penguin.
+     Both are the previous 19/22 less 15%, tracking the badge they sit in. */
+  .os-windows { --os-src: url("../img/os/windows.png"); width: 16px; height: 16px; }
+  .os-linux   { --os-src: url("../img/os/linux.png");   width: 19px; height: 19px; }
 
-  /* Hybrid shows both stacks side by side rather than picking whichever OS holds the
-     majority — the mixed estate is the very thing worth knowing before you pick the system.
-     .sys-mono centres a single child; two children need an explicit column flow or they
-     stack vertically. Both shrink so the pair still fits the 40px square. */
-  .sys-os--hybrid { grid-auto-flow: column; gap: 3px; }
-  .sys-os--hybrid .os-windows { width: 14px; height: 14px; }
-  .sys-os--hybrid .os-linux   { width: 16px; height: 16px; }
+  /* Hybrid shows both stacks rather than picking whichever OS holds the majority — a mixed
+     estate is the very thing worth knowing before you pick the system.
+
+     TWO badges, not one badge holding two glyphs. Cramming both into a single square meant
+     shrinking each below the size every other badge uses, so the tile that had the most to
+     say was the one whose glyphs were hardest to read. Two full-size badges say "Windows AND
+     Linux" at a glance, and each is the same size as every other badge on the screen. */
+  .sys-os-pair { flex: none; display: flex; gap: 4px; }
   .sys-tick { margin-top: 1px; }
   .sys-body { gap: 1px; }
 

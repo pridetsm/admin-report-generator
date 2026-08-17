@@ -3272,11 +3272,17 @@ class TheSystemPickerShowsThePlatform(TestCase):
         self.assertIn("os-glyph os-windows", html)
         self.assertIn('aria-label="Windows"', html)
 
-    def test_a_hybrid_system_shows_both_glyphs(self):
+    def test_a_hybrid_system_shows_both_glyphs_as_two_badges(self):
+        """Two badges, not one badge holding two glyphs — cramming both into a single square
+        meant shrinking each below the size every other badge uses, so the tile with the most
+        to say had the least legible glyphs. Each badge names its own platform; the pair
+        wrapper is layout only and stays out of the accessibility tree."""
         html = self._picker([{"name": "Alpha", "hosts": 6, "platform": "hybrid"}])
-        self.assertIn("os-windows", html)
-        self.assertIn("os-linux", html)
-        self.assertIn("sys-os--hybrid", html)
+        self.assertIn("sys-os-pair", html)
+        self.assertEqual(html.count("sys-mono"), 2)
+        self.assertIn('aria-label="Windows"', html)
+        self.assertIn('aria-label="Linux"', html)
+        self.assertNotIn("sys-os--hybrid", html)
 
     def test_an_unknown_platform_falls_back_to_the_monogram_letter(self):
         html = self._picker([{"name": "Zeta", "hosts": 1, "platform": ""}])

@@ -63,17 +63,30 @@
         {% comment %}
           The platform glyph stands in for the monogram. A system whose scrape jobs don't
           identify an OS keeps the letter, so the badge is never empty.
+
+          A hybrid system gets TWO badges rather than one badge holding both glyphs — each the
+          same size as every other badge, so the tile with the most to say isn't the one whose
+          glyphs are smallest. Each names its own platform for a screen reader; the pair is
+          just a layout wrapper, so it stays out of the accessibility tree.
         {% endcomment %}
-        <span class="sys-mono{% if s.platform %} sys-os sys-os--{{ s.platform }}{% endif %}"
+        {% if s.platform == 'hybrid' %}
+        <span class="sys-os-pair" style="--mono-h:{{ s.mono_hue }}">
+          <span class="sys-mono" role="img" aria-label="Windows" title="Windows">
+            <i class="os-glyph os-windows"></i>
+          </span>
+          <span class="sys-mono" role="img" aria-label="Linux" title="Linux">
+            <i class="os-glyph os-linux"></i>
+          </span>
+        </span>
+        {% else %}
+        <span class="sys-mono"
               style="--mono-h:{{ s.mono_hue }}"
               {% if s.platform %}role="img" aria-label="{{ s.platform_label }}"
               title="{{ s.platform_label }}"{% endif %}>
-          {% if s.platform == 'hybrid' %}
-            <i class="os-glyph os-windows"></i><i class="os-glyph os-linux"></i>
-          {% elif s.platform %}
-            <i class="os-glyph os-{{ s.platform }}"></i>
+          {% if s.platform %}<i class="os-glyph os-{{ s.platform }}"></i>
           {% else %}{{ s.name.0|upper }}{% endif %}
         </span>
+        {% endif %}
         <span class="sys-body">
           <span class="sys-name">{{ s.name }}</span>
           <span class="sys-sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
