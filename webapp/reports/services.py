@@ -141,7 +141,7 @@ def build_overview(store, systems, cfg) -> dict:
         {"label": "High RAM", "value": f"{ram_hosts} | {hosts}", "sub": "hosts | total",
          "state": warn(ram_hosts)},
         {"label": f"High disk ≥{thr}%", "value": f"{dh_hosts} | {hosts}",
-         "sub": f"hosts | total · {dh_disks}/{dh_total} disks", "state": dh_state},
+         "sub": f"hosts | total · {dh_disks} | {dh_total} disks", "state": dh_state},
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
         {"label": "Web encryption", "value": f"{n_https} | {n_https + n_http}",
