@@ -40,6 +40,9 @@ Thumbs.db
 # Platform glyphs for the system pickers. SHIPPED assets for the same reason as the header
 # mark: app.css masks them by url(), so collectstatic fails outright if they aren't committed.
 !webapp/static/img/os/*.png
+# Role glyphs for the Role Select tiles. SHIPPED assets: the picker renders them by <img>,
+# so without them every tile on the first screen after sign-in is a broken image.
+!webapp/static/img/roles/*.png
 Screenshot*.png
 example.png
 .claude/

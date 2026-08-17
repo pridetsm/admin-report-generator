@@ -25,7 +25,7 @@ from . import folders, network
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
 from .models import ReportSubmission, RoleRequest, SystemConfig
-from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin
+from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin, role_icon
 from .services import FlagVM, Snapshot, SystemVM, build_overview, list_systems
 
 
@@ -3325,3 +3325,62 @@ class TheTopologyPlatformDrivesConnect(TestCase):
         systems = [type("S", (), {"name": "Alpha", "components": [Legacy()]})()]
         hosts = hosts_from_snapshot(systems, type("St", (), {"up": {}})())
         self.assertEqual(hosts["Alpha"][0]["os"], "windows")
+
+
+class RoleGlyphs(TestCase):
+    """Every role tile carries its own glyph, and the files behind them actually ship.
+
+    The failure mode this guards is silent: a role added to the catalogue without an icon
+    still renders (it falls back to its initial), and an icon whose file is missing still
+    renders too — as a broken image on the first screen after sign-in, which is the worst
+    place in the app to look unfinished.
+    """
+
+    def setUp(self):
+        self.multi = get_user_model().objects.create_user("glyphs", password="pw12345!")
+        self.multi.groups.add(Group.objects.get(name="System Admin"))
+        self.multi.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="glyphs", password="pw12345!")
+
+    def test_every_catalogue_role_has_a_glyph(self):
+        for role in ROLE_NAMES:
+            self.assertTrue(role_icon(role), f"{role} has no icon mapped")
+
+    def test_every_glyph_file_exists(self):
+        """A mapping is a promise about a file. Checked against the source tree rather than
+        the manifest so the test fails at authoring time, not only after collectstatic."""
+        import pathlib
+
+        static_dir = pathlib.Path(settings.BASE_DIR) / "static"
+        for role in ROLE_NAMES:
+            self.assertTrue((static_dir / role_icon(role)).is_file(),
+                            f"{role}: {role_icon(role)} is not in static/")
+
+    def test_no_two_roles_share_a_glyph(self):
+        """Five tiles wearing four symbols is a picker that cannot be read at a glance —
+        which is the only reason to have icons rather than the initials they replaced."""
+        used = [role_icon(r) for r in ROLE_NAMES]
+        self.assertEqual(len(set(used)), len(used), "two roles share an icon")
+
+    def test_the_picker_renders_each_glyph(self):
+        body = self.client.get(reverse("role_select")).content.decode()
+        for role in ROLE_NAMES:
+            stem = role_icon(role).rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            self.assertIn(stem, body, f"{role}'s glyph is missing from the picker")
+
+    def test_an_uncatalogued_role_falls_back_to_its_initial(self):
+        """A Keycloak realm role with no entry here must not borrow another role's symbol."""
+        self.assertEqual(role_icon("Some Future Role"), "")
+
+    def test_the_two_deliberate_swaps_stay_swapped(self):
+        """Administrator administers PEOPLE, so it takes the figure-at-a-console; System
+        Admin's estate is the interlinked set of business systems, so it takes the node
+        graph. Both read backwards from their filenames, which is exactly why a later tidy-up
+        would "correct" them — this pins the intent.
+
+        The node graph is kept away from Network Admin on purpose: two link-diagrams side by
+        side read as one domain split in half rather than as two different jobs.
+        """
+        self.assertIn("system-administration", role_icon("Administrator"))
+        self.assertIn("neural-networks", role_icon("System Admin"))
+        self.assertIn("network-infrastructure", role_icon("Network Admin"))

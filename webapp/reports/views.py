@@ -43,7 +43,7 @@ from .models import (GrafanaConfigRevision, PrometheusConfigRevision,
 from .roles import (ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
                     active_role, held_roles, is_network_admin, is_role_admin,
-                    role_screens,
+                    role_icon, role_screens,
                     is_superuser, is_system_admin)
 from .services import (
     EmailNotConfigured,
@@ -241,6 +241,7 @@ def role_select(request):
         # different ideas of how many roles exist.
         "roles": [{"name": r,
                    "description": ROLE_DESCRIPTIONS.get(r, ""),
+                   "icon": role_icon(r),
                    "pages": role_screens(r),
                    "held": r in held,
                    "pending": r in pending} for r in ROLE_NAMES],

@@ -79,6 +79,37 @@ ROLE_DESCRIPTIONS = {
                          "the app's own configuration.",
 }
 
+# The glyph on each picker tile, under static/img/roles/. Paired with the description above:
+# the sentence says whose job it is, the glyph lets someone who has read it once find their
+# own tile again without re-reading all five.
+#
+# The mapping is by JOB, not by filename — two of them read the opposite way round to what
+# their names suggest:
+#   * Administrator gets the person-at-a-laptop-in-a-gear, because that role administers
+#     PEOPLE (who holds which role), and a figure at a console is what that looks like.
+#   * System Admin gets the connected-node graph, because its estate is the interlinked set
+#     of business systems — RTGS, Temenos, CMS and the rest — not a single machine.
+# The node graph deliberately does NOT go to Network Admin, whose cloud-over-racks glyph
+# already says "network"; two link-diagrams side by side would read as one domain split in
+# half rather than as two different jobs.
+ROLE_ICONS = {
+    SYSTEM_ADMIN_ROLE:   "img/roles/neural-networks.png",
+    NETWORK_ADMIN_ROLE:  "img/roles/network-infrastructure.png",
+    "Gov Systems Admin": "img/roles/bank.png",
+    "Security Admin":    "img/roles/cyber-security.png",
+    ADMIN_ROLE:          "img/roles/system-administration.png",
+}
+
+
+def role_icon(role: str) -> str:
+    """The tile glyph for a role, or "" for one added outside this catalogue.
+
+    Empty rather than a stand-in image: the picker falls back to the role's initial, which
+    is always correct, instead of labelling an unknown role with someone else's symbol.
+    """
+    return ROLE_ICONS.get(role, "")
+
+
 SESSION_KEY = "active_role"
 
 

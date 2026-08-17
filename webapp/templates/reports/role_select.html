@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}Role Select · RBZ Monitoring Console{% endblock %}
 
 {% comment %}
@@ -56,6 +57,27 @@
     flex:none; width:40px; height:40px; border-radius:11px; display:grid; place-items:center;
     font-weight:700; font-size:15px; color:var(--accent-ink); background:var(--accent);
   }
+
+  /* The role glyph, in the monogram's exact footprint so tiles line up whether a role has an
+     icon or falls back to its initial.
+
+     NOT masked, unlike the OS glyphs in app.css. Those are flat black silhouettes that have
+     to be painted by the theme; these are multi-colour artwork, and masking would flatten all
+     five to the same accent shape — destroying the at-a-glance difference that is the entire
+     reason for putting icons on a picker.
+
+     Which leaves the plate they sit on. The artwork is blue on transparency, so it needs a
+     surface that is neither the tile's own background (the darker gradients would sink into
+     it on the dark theme) nor the accent (blue on blue). --panel-2 is the app's existing
+     inset surface and reads as a recess in both themes. */
+  .rs-icon {
+    flex:none; width:40px; height:40px; border-radius:11px; display:grid; place-items:center;
+    background:var(--panel-2); border:1px solid var(--line);
+  }
+  .rs-icon img { width:26px; height:26px; object-fit:contain; display:block; }
+  /* A muted tile mutes its glyph too, so a role you do not hold reads as unavailable at the
+     same strength as the text beside it rather than shouting in full colour. */
+  .rs-btn.is-locked .rs-icon img { filter:grayscale(.55); }
   .rs-body { flex:1; min-width:0; }
   .rs-name { font-size:14.5px; font-weight:640; }
   .rs-pages { font-size:12px; color:var(--muted); margin-top:4px; line-height:1.55; }
@@ -112,7 +134,13 @@
       {% if r.held %}
       <input type="hidden" name="role" value="{{ r.name }}">
       <button class="rs-btn" type="submit">
-        <span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>
+        {% comment %}
+          Decorative: the role's name sits right beside it, so the glyph is aria-hidden and
+          its alt is empty rather than repeating what the next line already says.
+          A role with no glyph keeps the initial — always correct, never someone else's symbol.
+        {% endcomment %}
+        {% if r.icon %}<span class="rs-icon" aria-hidden="true"><img src="{% static r.icon %}" alt=""></span>
+        {% else %}<span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>{% endif %}
         <span class="rs-body">
           <span class="rs-name">{{ r.name }}{% if r.name == current %}<span class="rs-current">Current</span>{% endif %}</span>
           {% comment %}
@@ -125,7 +153,13 @@
       {% else %}
       <input type="hidden" name="request_role" value="{{ r.name }}">
       <button class="rs-btn is-locked" type="submit" {% if r.pending %}disabled{% endif %}>
-        <span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>
+        {% comment %}
+          Decorative: the role's name sits right beside it, so the glyph is aria-hidden and
+          its alt is empty rather than repeating what the next line already says.
+          A role with no glyph keeps the initial — always correct, never someone else's symbol.
+        {% endcomment %}
+        {% if r.icon %}<span class="rs-icon" aria-hidden="true"><img src="{% static r.icon %}" alt=""></span>
+        {% else %}<span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>{% endif %}
         <span class="rs-body">
           <span class="rs-name">{{ r.name }}
             {% if r.pending %}<span class="rs-tag pending">Requested</span>
