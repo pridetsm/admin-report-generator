@@ -751,29 +751,37 @@ def _network_overview(data: dict, devices: list) -> dict:
     """
     unreachable = [d for d in devices if d.get("known") and not d.get("reachable")]
     unscraped = [d for d in devices if not d.get("known")]
+    dev_total = len(devices)
+    iface_total = data["iface_count"]
     down = data["down_count"]
     missing = sum(1 for m in CATALOGUE if m["state"] == "missing")
-    psu_failed = len(data.get("psu_failed", []))
-    ospf_down = len(data.get("ospf_down", []))
+    psu_failed, psu_total = len(data.get("psu_failed", [])), data.get("psu_total", 0)
+    ospf_down_n, ospf_total = len(data.get("ospf_down", [])), data.get("ospf_total", 0)
+    optics_total = len(data.get("optics", []))
     optics_low = len(data.get("optics_low", []))
     bad = lambda n: "good" if not n else "bad"
     warn = lambda n: "good" if not n else "warn"
 
-    # Same three-band split the systems report uses: AT A GLANCE is bare counts and
-    # readings, no judgement in the colour — a percentage that gets banded amber/red
-    # belongs in the watch row below it, the same way High CPU/High RAM never appear
-    # under Systems/Hosts/Services on the systems dashboard.
-    def _pct_band(pct, amber, red):
-        if pct is None:
-            return "good"
-        return "bad" if pct >= red else ("warn" if pct >= amber else "good")
+    # Every immediate/watch tile reads "affected | total", the identical shape the systems
+    # report's tiles use (High CPU: "hosts | total", not a bare percentage) — copied here
+    # exactly, not just for the interfaces tile: a count alone can't be judged (12 is
+    # alarming out of 20 interfaces, unremarkable out of 300), and the reader should not
+    # have to hold the denominator in their head or go find it in AT A GLANCE above.
+    #
+    # CPU/Memory become "device(s) over threshold | total devices" for the same reason
+    # High CPU/High RAM never show a raw percentage on the systems dashboard either — the
+    # percentage itself lives on the per-device Health section. With one device monitored
+    # today this reads as "0 | 1" or "1 | 1"; it is written as a device COUNT rather than
+    # hardcoded to one so onboarding a second device grows the denominator for free.
+    cpu_over = 1 if (data.get("cpu_pct") is not None and data["cpu_pct"] >= 80) else 0
+    mem_over = 1 if (data.get("mem_pct") is not None and data["mem_pct"] >= 80) else 0
 
     return {
         "glance": [
             {"label": "Devices", "value": len(devices), "state": "info"},
             {"label": "Uptime", "value": (f"{data['uptime_days']:.0f}d" if data.get("uptime_days") is not None else "—"),
              "state": "info"},
-            {"label": "Interfaces", "value": data["iface_count"], "state": "info"},
+            {"label": "Interfaces", "value": iface_total, "state": "info"},
             {"label": "Links up", "value": data["up_count"], "state": "info"},
             {"label": "Carrying traffic", "value": data["carrying_count"], "state": "info"},
             {"label": "Throughput in", "value": data["total_in_text"], "state": "info"},
@@ -781,30 +789,30 @@ def _network_overview(data: dict, devices: list) -> dict:
              "sub": "size only — no vendor max yet", "state": "info"},
         ],
         "immediate": [
-            {"label": "Not responding", "value": len(unreachable), "state": bad(len(unreachable))},
-            {"label": "Never scraped", "value": len(unscraped), "state": bad(len(unscraped))},
-            {"label": "PSU / fan failed", "value": psu_failed, "sub": f"of {data.get('psu_total', 0)}",
-             "state": bad(psu_failed)},
-            {"label": "OSPF adjacencies lost", "value": ospf_down, "sub": f"of {data.get('ospf_total', 0)}",
-             "state": bad(ospf_down)},
+            {"label": "Not responding", "value": f"{len(unreachable)} | {dev_total}",
+             "sub": "devices | total", "state": bad(len(unreachable))},
+            {"label": "Never scraped", "value": f"{len(unscraped)} | {dev_total}",
+             "sub": "devices | total", "state": bad(len(unscraped))},
+            {"label": "PSU / fan failed", "value": f"{psu_failed} | {psu_total}",
+             "sub": "failed | total", "state": bad(psu_failed)},
+            {"label": "OSPF adjacencies lost", "value": f"{ospf_down_n} | {ospf_total}",
+             "sub": "down | total", "state": bad(ospf_down_n)},
         ],
         "watch": [
-            # Usage percentages — judged like the systems report's High CPU/High RAM tiles
-            # (same 80/90 amber/red split _device_flags already uses for these), not shown
-            # as a bare reading the way Uptime or Throughput are above.
-            {"label": "CPU", "value": (f"{data['cpu_pct']:.0f}%" if data.get("cpu_pct") is not None else "—"),
-             "state": _pct_band(data.get("cpu_pct"), 80, 90)},
-            {"label": "Memory", "value": (f"{data['mem_pct']:.0f}%" if data.get("mem_pct") is not None else "—"),
-             "state": _pct_band(data.get("mem_pct"), 80, 90)},
-            {"label": "Links not up", "value": down, "sub": "interfaces", "state": warn(down)},
-            {"label": "At capacity", "value": len(data.get("saturated", [])), "sub": "≥80% used",
-             "state": warn(len(data.get("saturated", [])))},
-            {"label": "With errors", "value": len(data.get("erroring", [])), "sub": "interfaces",
-             "state": warn(len(data.get("erroring", [])))},
-            {"label": "Optics near floor", "value": optics_low, "sub": "receive power",
-             "state": warn(optics_low)},
-            {"label": "Metrics not collected", "value": missing,
-             "sub": f"of {len(CATALOGUE)} requested", "state": warn(missing)},
+            {"label": "High CPU", "value": f"{cpu_over} | {dev_total}",
+             "sub": "devices | total", "state": warn(cpu_over)},
+            {"label": "High Memory", "value": f"{mem_over} | {dev_total}",
+             "sub": "devices | total", "state": warn(mem_over)},
+            {"label": "Links not up", "value": f"{down} | {iface_total}",
+             "sub": "interfaces | total", "state": warn(down)},
+            {"label": "At capacity", "value": f"{len(data.get('saturated', []))} | {iface_total}",
+             "sub": "interfaces ≥80% | total", "state": warn(len(data.get("saturated", [])))},
+            {"label": "With errors", "value": f"{len(data.get('erroring', []))} | {iface_total}",
+             "sub": "interfaces | total", "state": warn(len(data.get("erroring", [])))},
+            {"label": "Optics near floor", "value": f"{optics_low} | {optics_total}",
+             "sub": "receive optics | total", "state": warn(optics_low)},
+            {"label": "Metrics not collected", "value": f"{missing} | {len(CATALOGUE)}",
+             "sub": "metrics | total requested", "state": warn(missing)},
             {"label": "Counter width", "value": "32-bit" if not data.get("counters_are_64bit") else "64-bit",
              "sub": ("under-reports throughput" if not data.get("counters_are_64bit") else "accurate"),
              "state": "info" if data.get("counters_are_64bit") else "warn"},
