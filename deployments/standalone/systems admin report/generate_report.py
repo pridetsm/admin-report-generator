@@ -266,6 +266,7 @@ class Prometheus:
 class Component:
     label: str
     instance: str
+    os: str = ""                 # "windows" | "linux" | "" when the scrape job doesn't say
 
 
 @dataclass
@@ -399,11 +400,20 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
         Service("Assets Mgt",        systemd("10.100.245.249:9100", "assetsmgt.service", "simple")),
         Service("MySQL",            systemd("10.100.245.249:9100", "mysql.service", "notify")),
     ],
+    # httpd/postgres run INSIDE Docker containers on both hosts, not as systemd units — no
+    # cAdvisor/docker exporter is deployed here, so container internals aren't visible to
+    # Prometheus at all yet. Docker.service itself is the only real, checkable signal for now
+    # (confirmed live, type="notify" on both) — a docker.service that's down definitely means
+    # the containers are down too, but "up" doesn't guarantee httpd/postgres inside are healthy.
+    "attendancesystem": [
+        Service("Docker", systemd("10.0.207.16:9100", "docker.service", "notify"), group="Attendance App"),
+        Service("Docker", systemd("10.0.207.17:9100", "docker.service", "notify"), group="Attendance DB"),
+    ],
 }
 
 # preferred display order (known systems first); anything else is appended A-Z
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
-                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS", "EBIS", "Refinitiv (Reuters)", "Asset Registry"]
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS", "EBIS", "Refinitiv (Reuters)", "Asset Registry", "Attendance System"]
 
 # BACKUP POLICY — how many calendar days old a host's newest backup may be and still count
 # as CURRENT. Almost every system backs up daily, so the default of 1 means "today or
@@ -500,6 +510,55 @@ def _component_label(display: Optional[str], role: Optional[str], system: str, i
     return instance
 
 
+#: default listen ports of the two host exporters, used only as a fallback when the job name
+#: itself is uninformative (a site that named its jobs "hosts-prod" / "hosts-dc2" still gets
+#: classified). Ports are the exporters' documented defaults, so this is a weak-but-safe hint.
+#: Kept in step with connect._PORT_OS, which reads the same convention for the same reason.
+_EXPORTER_PORTS = {"9182": "windows", "9100": "linux", "9101": "linux"}
+
+
+def platform_of_job(job_name: str, target: str = "") -> str:
+    """Which OS a scrape target runs, as "windows" / "linux" / "" (don't know).
+
+    Read off the SCRAPE JOB rather than a metric: the picker renders straight from
+    prometheus.yml with no Prometheus round-trip at all (see list_systems), so anything
+    requiring a live query would defeat the point of that screen being free.
+
+    Only host exporters classify. blackbox_http targets are URLs that happen to carry a
+    `system` label and land in the same grouping — calling those "linux" because they answer
+    on :80 would put a penguin on a web probe, so everything unrecognised stays "".
+    """
+    j = (job_name or "").lower()
+    if "blackbox" in j or "probe" in j:
+        return ""
+    if "windows" in j or "wmi" in j:          # windows_exporter, and its pre-2021 name
+        return "windows"
+    if "node" in j or "linux" in j or "unix" in j:
+        return "linux"
+    port = target.rsplit(":", 1)[-1] if ":" in target else ""
+    return _EXPORTER_PORTS.get(port, "")
+
+
+def platform_of_system(components: List[Component]) -> str:
+    """A system's platform: "windows" / "linux" / "hybrid" / "" when nothing classified.
+
+    Hybrid is real but uncommon here — a system is usually built on one stack — so it is
+    reported honestly rather than collapsed into whichever OS happens to hold the majority:
+    an admin reading the picker should see that the estate spans both before they pick it.
+    Unclassified components (web probes) are ignored, NOT counted as a third platform;
+    otherwise every system carrying a link would read as hybrid.
+
+    Read through getattr because the webapp pickles whole snapshots into its cache: one
+    captured before Component gained `os` unpickles without the attribute, and it must degrade
+    to "platform unknown" rather than 500 the report page for the life of that cache entry.
+    """
+    kinds = {getattr(c, "os", "") for c in components}
+    kinds.discard("")
+    if not kinds:
+        return ""
+    return kinds.pop() if len(kinds) == 1 else "hybrid"
+
+
 def load_topology(prometheus_yml: str) -> List[System]:
     """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label)."""
     import yaml  # PyYAML — see requirements.txt
@@ -507,6 +566,7 @@ def load_topology(prometheus_yml: str) -> List[System]:
         doc = yaml.safe_load(fh) or {}
     grouped: Dict[str, List[Component]] = {}
     for job in doc.get("scrape_configs", []) or []:
+        job_name = job.get("job_name") or ""
         for sc in job.get("static_configs", []) or []:
             labels = sc.get("labels", {}) or {}
             system = (labels.get("system") or "").strip()
@@ -515,7 +575,8 @@ def load_topology(prometheus_yml: str) -> List[System]:
             role, display = labels.get("role"), labels.get("display")
             for target in sc.get("targets", []) or []:
                 grouped.setdefault(system, []).append(
-                    Component(_component_label(display, role, system, target), target))
+                    Component(_component_label(display, role, system, target), target,
+                              platform_of_job(job_name, target)))
     order = {name: i for i, name in enumerate(SYSTEM_ORDER)}
     names = sorted(grouped, key=lambda n: (order.get(n, len(order)), n))
     return [System(name, grouped[name], SERVICE_CHECKS.get(_norm(name), [])) for name in names]

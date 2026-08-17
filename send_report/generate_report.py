@@ -400,11 +400,20 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
         Service("Assets Mgt",        systemd("10.100.245.249:9100", "assetsmgt.service", "simple")),
         Service("MySQL",            systemd("10.100.245.249:9100", "mysql.service", "notify")),
     ],
+    # httpd/postgres run INSIDE Docker containers on both hosts, not as systemd units — no
+    # cAdvisor/docker exporter is deployed here, so container internals aren't visible to
+    # Prometheus at all yet. Docker.service itself is the only real, checkable signal for now
+    # (confirmed live, type="notify" on both) — a docker.service that's down definitely means
+    # the containers are down too, but "up" doesn't guarantee httpd/postgres inside are healthy.
+    "attendancesystem": [
+        Service("Docker", systemd("10.0.207.16:9100", "docker.service", "notify"), group="Attendance App"),
+        Service("Docker", systemd("10.0.207.17:9100", "docker.service", "notify"), group="Attendance DB"),
+    ],
 }
 
 # preferred display order (known systems first); anything else is appended A-Z
 SYSTEM_ORDER = ["RTGS", "RTGSTEST", "Temenos", "Efin", "CMS", "CSD", "ESF",
-                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS", "EBIS", "Refinitiv (Reuters)", "Asset Registry"]
+                "ESFEXEC", "RBZ Website", "Intranet", "FRS", "SmartHR", "Eagle", "CEPECS", "CEBAS", "BDTRS", "LMS", "CRB", "Paytyme", "GCMS", "GMS", "BSA", "Collateral Registry", "EDMS", "EBIS", "Refinitiv (Reuters)", "Asset Registry", "Attendance System"]
 
 # BACKUP POLICY — how many calendar days old a host's newest backup may be and still count
 # as CURRENT. Almost every system backs up daily, so the default of 1 means "today or
