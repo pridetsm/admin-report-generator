@@ -16,10 +16,13 @@ urlpatterns = [
     path("network/", views.network_dashboard, name="network_dashboard"),
     path("network/core-switch/", views.network_report, name="network_report"),
     path("network/generate/", views.network_generate, name="network_generate"),
-    # The start-of-day checklist. Its own pair of URLs rather than a mode of the report
-    # above: that one captures live SNMP for devices you pick, this one is hand-keyed from
-    # four vendor consoles and has no picker at all.
-    path("network/sod/", views.network_sod_form, name="network_sod"),
+    # The start-of-day checklist. Its own trio of URLs rather than a mode of the report
+    # above: that one captures live SNMP for the devices you pick, this one is hand-keyed
+    # from four vendor consoles across a fixed estate — but it gets a picker of its own too,
+    # to thin the entry screen down to what is actually being checked this morning. Nested
+    # the same way network_dashboard/network_report are: the picker owns the parent path.
+    path("network/sod/", views.network_sod_select, name="network_sod_select"),
+    path("network/sod/checklist/", views.network_sod_form, name="network_sod"),
     path("network/sod/generate/", views.network_sod_generate, name="network_sod_generate"),
     path("infra/", views.infra_form, name="infra_form"),
     path("infra/report/", views.infra_report, name="infra_report"),

@@ -46,7 +46,7 @@ ROLE_PAGES = {
     # destination of its own, so it is listed in NON_SCREEN_PAGES below and never counted
     # as a screen the role "adds".
     NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report",
-                          "network_sod", "network_sod_generate"},
+                          "network_sod_select", "network_sod", "network_sod_generate"},
     # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
     # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
     # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
@@ -353,6 +353,9 @@ REPORTS = [
     # is captured from Prometheus, this one is worked through by hand across the SolarWinds,
     # Cisco WLC, Perfstack and Radware consoles. Both belong to Network Admin, which is why
     # the Reports screen earns its keep for this role too rather than going straight through.
+    # Goes to its OWN picker first, same as the Network Report's tile does — the estate is
+    # fixed morning to morning, but the picker is still how an engineer excludes a device
+    # under maintenance rather than staring at a field for it.
     #
     # No icon deliberately. Every glyph in img/reports/ is already spoken for, and the only
     # unused source art is byte-identical to the Network Report's — two identical tiles side
@@ -362,7 +365,7 @@ REPORTS = [
         "network_sod", "Network Infrastructure SOD Report",
         "The start-of-day checklist — core switches, firewalls, internet circuits, WLAN "
         "controllers and the Radware WAF, captured each morning by the on-duty engineer.",
-        "network_sod", {NETWORK_ADMIN_ROLE}),
+        "network_sod_select", {NETWORK_ADMIN_ROLE}),
     ReportOption(
         "infrastructure", "Infrastructure Report",
         "The hardware underneath the systems — hyper-converged clusters and standalone "

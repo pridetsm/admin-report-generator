@@ -1,10 +1,14 @@
 """The Network Infrastructure SOD (Start-of-Day) Report.
 
 A DIFFERENT report from the Network Admin Report next door in network.py, running on the
-same rails. That one is a live SNMP snapshot of the devices Prometheus scrapes; this one is
-the checklist the on-duty engineer works through every morning across four vendor consoles —
-SolarWinds Orion, Cisco Catalyst 9800 WLC, Perfstack and Radware — none of which this app
-integrates with.
+same rails, picker included. That one is a live SNMP snapshot of the devices Prometheus
+scrapes; this one is the checklist the on-duty engineer works through every morning across
+four vendor consoles — SolarWinds Orion, Cisco Catalyst 9800 WLC, Perfstack and Radware —
+none of which this app integrates with. The picker still earns its keep here even though
+the estate is fixed: it thins the ENTRY SCREEN down to what the engineer is actually
+covering this morning (skip a device under maintenance rather than staring at a field for
+it) — the workbook itself keeps every row of the fixed estate regardless, blank where the
+picker left something out, exactly as a blank already means "not captured".
 
 That gap is the whole design constraint. Almost every reading on this sheet comes from a
 console we cannot query, so the module is built to carry BLANKS honestly rather than to
@@ -267,6 +271,29 @@ def prefilled_checklist() -> dict:
             chk.source = hit.get("source", "")
             chk.live = True
     return data
+
+
+def scoped_for_display(data: dict, selected) -> dict:
+    """The subset of `data` the picker chose, for the entry screen only.
+
+    `summarise()` and `build_report()` keep working from the FULL checklist — a blank row
+    there is "not captured", not "does not exist" (see the module docstring), and the
+    reference sheet's shape is fixed regardless of what a given morning's picker covers.
+    This view exists only so the entry screen asks the engineer about what they said they
+    are covering today, the same way the systems report only asks about the systems picked
+    on its own picker.
+    """
+    sel = set(selected or ())
+    return {
+        "core_wan": [c for c in data["core_wan"] if c.key in sel],
+        "firewalls": [Group(g.label, [c for c in g.checks if c.key in sel])
+                      for g in data["firewalls"] if any(c.key in sel for c in g.checks)],
+        "floor": [c for c in data["floor"] if c.key in sel],
+        "circuits": [c for c in data["circuits"] if c.key in sel],
+        "controllers": [c for c in data["controllers"] if c.key in sel],
+        "dr_links": [d for d in data["dr_links"] if d.key in sel],
+        "waf": data["waf"] if "waf" in sel else [],
+    }
 
 
 # =======================================================================================

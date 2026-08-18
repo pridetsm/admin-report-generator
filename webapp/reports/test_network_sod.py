@@ -237,12 +237,35 @@ class SodReportPipeline(TestCase):
         self.user.groups.add(Group.objects.get_or_create(name="Network Admin")[0])
         self.client.force_login(self.user)
 
+    def _all_keys(self):
+        """Every key the device picker offers — the "everything ticked" default it starts
+        each morning with."""
+        data = ns.blank_checklist()
+        return ([c.key for c in data["core_wan"]]
+                + [c.key for g in data["firewalls"] for c in g.checks]
+                + [c.key for c in data["floor"]]
+                + [c.key for c in data["circuits"]]
+                + [c.key for c in data["controllers"]]
+                + [c.key for c in data["dr_links"]]
+                + ["waf"])
+
     def test_the_tile_appears_for_network_admin(self):
         resp = self.client.get(reverse("reports"))
         self.assertContains(resp, "Network Infrastructure SOD Report")
 
+    def test_the_tile_opens_the_device_picker_first(self):
+        resp = self.client.get(reverse("reports"))
+        options = {o["label"]: o["url"] for o in resp.context["options"]}
+        self.assertEqual(options["Network Infrastructure SOD Report"],
+                         reverse("network_sod_select"))
+
+    def test_the_checklist_needs_a_selection_first(self):
+        resp = self.client.get(reverse("network_sod"))
+        self.assertRedirects(resp, reverse("network_sod_select"), fetch_redirect_response=False)
+
     def test_the_screen_renders_every_section(self):
         with mock.patch("reports.network_sod.network.device_inventory", return_value=[]):
+            self.client.post(reverse("network_sod_select"), {"include_device": self._all_keys()})
             resp = self.client.get(reverse("network_sod"))
         self.assertEqual(resp.status_code, 200)
         for probe in ("Head-Office Core Switch", "HQ Sophos Firewall", "Cisco Floor Switches",

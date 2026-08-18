@@ -19,9 +19,6 @@
 
 {% block body %}
 <style>
-  /* Table-shaped entry, so a section on screen has the same column order as the section it
-     becomes in the workbook. Anything else makes checking the sheet against the screen a
-     translation exercise. */
   .sod-table { width: 100%; border-collapse: collapse; }
   .sod-table th {
     text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .04em;
@@ -75,6 +72,8 @@
         <span class="sys-stat">{{ waf_total }} WAF app{{ waf_total|pluralize }}</span>
       </div>
     </div>
+    <div class="spacer" style="flex:1"></div>
+    <a class="btn ghost" href="{{ picker_url }}" title="Go back to device selection">◂ Change devices</a>
   </div>
 
   {% comment %}
@@ -93,6 +92,7 @@
   </div></div>
 
   {% comment %} ---- core switches & WAN links ---- {% endcomment %}
+  {% if data.core_wan %}
   <div class="section-label">Core switches &amp; WAN links</div>
   <div class="card"><div class="body">
     <table class="sod-table">
@@ -115,8 +115,10 @@
       </tbody>
     </table>
   </div></div>
+  {% endif %}
 
   {% comment %} ---- firewalls ---- {% endcomment %}
+  {% if data.firewalls %}
   <div class="section-label">Firewalls</div>
   <div class="card"><div class="body">
     <table class="sod-table">
@@ -142,8 +144,10 @@
       </tbody>
     </table>
   </div></div>
+  {% endif %}
 
   {% comment %} ---- floor switches ---- {% endcomment %}
+  {% if data.floor %}
   <div class="section-label">Floor switches</div>
   <div class="card"><div class="body">
     <table class="sod-table">
@@ -168,8 +172,10 @@
     <p class="sod-note">Reviewed as a set on the Orion dashboard rather than pinged one by
       one, so this section reads REVIEWED rather than OK.</p>
   </div></div>
+  {% endif %}
 
   {% comment %} ---- internet circuits ---- {% endcomment %}
+  {% if data.circuits %}
   <div class="section-label">Internet circuits</div>
   <div class="card"><div class="body" style="overflow-x:auto">
     <table class="sod-table" style="min-width:760px">
@@ -195,8 +201,10 @@
       loss test, or a <b>Poor</b> quality rating raises the degradation warning on the report
       — the count is derived from what you enter here, never typed separately.</p>
   </div></div>
+  {% endif %}
 
   {% comment %} ---- wireless LAN controllers ---- {% endcomment %}
+  {% if data.controllers %}
   <div class="section-label">Wireless LAN controllers</div>
   <div class="card"><div class="body" style="overflow-x:auto">
     <table class="sod-table" style="min-width:680px">
@@ -220,8 +228,10 @@
     <p class="sod-note">Any controller reporting one or more rogue APs raises the rogue-AP
       warning on the report.</p>
   </div></div>
+  {% endif %}
 
   {% comment %} ---- DR Mazowe WAN links ---- {% endcomment %}
+  {% if data.dr_links %}
   <div class="section-label">DR Mazowe WAN links</div>
   <div class="card"><div class="body" style="overflow-x:auto">
     <table class="sod-table" style="min-width:620px">
@@ -248,8 +258,10 @@
     </table>
     <p class="sod-note">Perfstack link-utilization graphs, last 12 hours.</p>
   </div></div>
+  {% endif %}
 
   {% comment %} ---- Radware WAF ---- {% endcomment %}
+  {% if data.waf %}
   <div class="section-label">Radware web application firewall</div>
   <div class="card"><div class="body">
     <div class="sod-waf">
@@ -268,6 +280,7 @@
       {{ data.waf|length }} appear in the captured list. The report states both, rather than
       quietly showing the smaller number.</p>
   </div></div>
+  {% endif %}
 
   {% comment %} ---- sign-off ---- {% endcomment %}
   <div class="section-label">Sign-off</div>
@@ -300,10 +313,6 @@
 <script>
 (function () {
   "use strict";
-  /* A live count of how much of the checklist has actually been keyed in. The engineer works
-     through this over several minutes across four consoles, and the one thing worth showing
-     is how much is still empty — a submitted-but-half-blank sheet is the failure mode this
-     screen exists to make visible. */
   var form = document.getElementById("sodForm");
   if (!form) { return; }
   var fields = Array.prototype.slice.call(

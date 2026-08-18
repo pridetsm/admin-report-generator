@@ -2925,6 +2925,91 @@ class NetworkGenerate(TestCase):
         self.assertIn("ifAdminStatus", text)
 
 
+class NetworkSodPicker(TestCase):
+    """The device picker in front of the SOD checklist — same convention as the live
+    Network Report's picker, in front of a fixed rather than a discovered estate."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("sodpick", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="sodpick", password="pw12345!")
+
+    def test_the_checklist_screen_bounces_to_the_picker_first(self):
+        resp = self.client.get(reverse("network_sod"))
+        self.assertRedirects(resp, reverse("network_sod_select"), fetch_redirect_response=False)
+
+    def test_it_lists_every_item_on_the_checklist(self):
+        from . import network_sod
+        data = network_sod.blank_checklist()
+        expected = (len(data["core_wan"]) + sum(len(g.checks) for g in data["firewalls"])
+                    + len(data["floor"]) + len(data["circuits"]) + len(data["controllers"])
+                    + len(data["dr_links"]) + 1)   # +1: the single Radware WAF tile
+        body = self.client.get(reverse("network_sod_select")).content.decode()
+        self.assertEqual(body.count('name="include_device"'), expected)
+
+    def _is_checked(self, body, key):
+        m = re.search(r'value="%s"[^>]*>' % re.escape(key), body)
+        self.assertIsNotNone(m, "%s tile not found" % key)
+        return "checked" in m.group(0)
+
+    def test_everything_starts_ticked(self):
+        """The estate is the same fixed set every morning, unlike a systems report's — so
+        "all of it" is the normal answer, not an empty grid waiting to be filled in."""
+        body = self.client.get(reverse("network_sod_select")).content.decode()
+        self.assertTrue(self._is_checked(body, "ho_core"))
+        self.assertTrue(self._is_checked(body, "waf"))
+
+    def test_choosing_devices_scopes_the_checklist(self):
+        self.client.post(reverse("network_sod_select"),
+                         {"include_device": ["ho_core", "telecontract"]})
+        body = self.client.get(reverse("network_sod")).content.decode()
+        self.assertIn("Head-Office Core Switch", body)
+        self.assertIn("Telecontract", body)
+        self.assertNotIn("Mazowe DR Core Switch", body)
+        self.assertNotIn("Dandemutande", body)
+        self.assertNotIn("Wireless LAN controllers", body)   # no controller picked -> hidden
+
+    def test_choosing_nothing_is_refused(self):
+        resp = self.client.post(reverse("network_sod_select"), {}, follow=True)
+        self.assertContains(resp, "Select at least one item")
+        self.assertIsNone(self.client.session.get("network_sod_devices"))
+
+    def test_an_unknown_key_is_discarded(self):
+        resp = self.client.post(reverse("network_sod_select"),
+                                {"include_device": "not-a-real-key"}, follow=True)
+        self.assertContains(resp, "Select at least one item")
+        self.assertIsNone(self.client.session.get("network_sod_devices"))
+
+    def test_the_waf_tile_scopes_the_whole_waf_section(self):
+        self.client.post(reverse("network_sod_select"), {"include_device": ["ho_core"]})
+        body = self.client.get(reverse("network_sod")).content.decode()
+        self.assertNotIn("Radware web application firewall", body)
+
+    def test_the_full_workbook_shape_survives_a_partial_pick(self):
+        """Picking fewer devices thins the ENTRY screen, not the exported workbook — a blank
+        row there still means "not captured", the same as it always has."""
+        self.client.post(reverse("network_sod_select"), {"include_device": ["ho_core"]})
+        resp = self.client.post(reverse("network_sod_generate"), {"theme": "dark"})
+        wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+        text = " ".join(str(c.value) for row in wb.active.iter_rows() for c in row if c.value)
+        self.assertIn("Mazowe DR Core Switch", text)     # unpicked rows still shape the sheet
+        self.assertIn("Dandemutande", text)
+
+    def test_revisiting_the_picker_keeps_the_last_choice(self):
+        self.client.post(reverse("network_sod_select"), {"include_device": ["ho_core"]})
+        body = self.client.get(reverse("network_sod_select")).content.decode()
+        self.assertTrue(self._is_checked(body, "ho_core"))
+        self.assertFalse(self._is_checked(body, "mazowe_core"))
+
+    def test_only_network_admin_holds_it(self):
+        other = get_user_model().objects.create_user("sodother", password="pw12345!")
+        other.groups.add(Group.objects.get(name="System Admin"))
+        self.client.logout()
+        self.client.login(username="sodother", password="pw12345!")
+        resp = self.client.get(reverse("network_sod_select"))
+        self.assertRedirects(resp, reverse("report_form"), fetch_redirect_response=False)
+
+
 class NetworkOpenReportParity(TestCase):
     """Continuing an open report behaves the same in both estates.
 

@@ -931,14 +931,59 @@ def network_generate(request):
 
 @never_cache
 @login_required
-def network_sod_form(request):
-    """The Start-of-Day checklist screen.
+def network_sod_select(request):
+    """The device picker in front of the SOD checklist — the same convention as the Network
+    Report's picker and the systems picker next door: choose what this run covers before
+    answering for it.
 
-    No picker in front of it, unlike the Network Report next door. That report asks which
-    devices to capture because capturing is expensive and scoped; this one covers a fixed
-    estate that is the same every morning, so a picker would be a screen that only ever has
-    one answer. os_inventory sets the same precedent: a report whose scope is not a choice
-    goes straight from the Reports tile to the report.
+    The estate is fixed morning to morning, unlike a systems report's, so this defaults to
+    everything ticked rather than nothing: unticking is for the exception (a device under
+    maintenance, a decommissioned circuit), not the daily starting point.
+    """
+    if not is_network_admin(request.user):
+        return redirect("report_form")
+
+    data = network_sod.blank_checklist()
+    live = set(k for k, v in network_sod.collect().items() if v)
+    prior = request.session.get("network_sod_devices")
+    prior = set(prior) if prior else None
+
+    def tile(key, label):
+        return {"key": key, "label": label, "mono_hue": _mono_hue(label),
+                "live": key in live, "checked": prior is None or key in prior}
+
+    sections = [
+        ("Core switches & WAN links", [tile(c.key, c.label) for c in data["core_wan"]]),
+        ("Firewalls", [tile(c.key, c.label)
+                       for g in data["firewalls"] for c in g.checks]),
+        ("Floor switches", [tile(c.key, c.label) for c in data["floor"]]),
+        ("Internet circuits", [tile(c.key, c.provider) for c in data["circuits"]]),
+        ("Wireless LAN controllers", [tile(c.key, c.site) for c in data["controllers"]]),
+        ("DR Mazowe WAN links", [tile(d.key, d.label) for d in data["dr_links"]]),
+        ("Radware WAF", [tile("waf", "All {} protected applications".format(
+            network_sod.WAF_PROTECTED_TOTAL))]),
+    ]
+    total = sum(len(items) for _label, items in sections)
+    known = {t["key"] for _label, items in sections for t in items}
+
+    if request.method == "POST":
+        keys = [k for k in request.POST.getlist("include_device") if k in known]
+        if not keys:
+            messages.error(request, "Select at least one item to include in the checklist.")
+            return redirect("network_sod_select")
+        request.session["network_sod_devices"] = keys
+        return redirect("network_sod")
+
+    return render(request, "reports/network_sod_select.html", {
+        "sections": sections,
+        "total": total,
+    })
+
+
+@never_cache
+@login_required
+def network_sod_form(request):
+    """The Start-of-Day checklist screen, scoped to what the picker chose.
 
     Every field arrives blank except the handful network_sod.collect() can answer from
     Prometheus. That is deliberate and is the point of the sheet — see the module docstring.
@@ -946,11 +991,17 @@ def network_sod_form(request):
     if not is_network_admin(request.user):
         return redirect("report_form")
 
+    selected = request.session.get("network_sod_devices")
+    if not selected:
+        return redirect("network_sod_select")
+    selected = set(selected)
+
     data = network_sod.prefilled_checklist()
+    scoped = network_sod.scoped_for_display(data, selected)
     live_keys = sorted(k for k, v in network_sod.collect().items() if v)
     return render(request, "reports/network_sod.html", {
-        "data": data,
-        "summary": network_sod.summarise(data),
+        "data": scoped,
+        "summary": network_sod.summarise(scoped),
         "status_choices": network_sod.STATUS_CHOICES,
         "live_count": len(live_keys),
         "suggested_author": _profile_author(request.user),
@@ -959,6 +1010,7 @@ def network_sod_form(request):
                                 "default_report_theme", "dark"),
         "generate_url": reverse("network_sod_generate"),
         "waf_total": network_sod.WAF_PROTECTED_TOTAL,
+        "picker_url": reverse("network_sod_select"),
     })
 
 

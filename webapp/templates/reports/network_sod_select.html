@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}SOD Checklist · Device Picker{% endblock %}
+
+{% comment %}
+  The picker in front of the SOD checklist — same tile grid and toolbar as
+  network_select.html and select.html, so an admin who has run either of the other reports
+  already knows how this screen works.
+
+  Everything starts ticked, unlike those two: the estate here is the same fixed set every
+  morning (see network_sod.py's module docstring), so "all of it" is the normal answer and
+  unticking is for the exception — a device under maintenance, a decommissioned circuit —
+  not the daily starting point.
+{% endcomment %}
+
+{% block body %}
+<style>
+  .tile-live {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    background: var(--green-bg); color: var(--green);
+  }
+  .tile-live .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+</style>
+
+<form method="post" action="{% url 'network_sod_select' %}" id="selectForm">
+{% csrf_token %}
+
+<div class="container">
+  <div class="snap" style="align-items:flex-start">
+    <div style="min-width:0">
+      <h1>SOD Checklist · Device Picker</h1>
+      <div class="meta">Choose what this morning's checklist covers — untick anything out of
+        scope today.</div>
+      <div class="sys-stats">
+        <span class="sys-stat">{{ total }} item{{ total|pluralize }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="sys-toolbar" style="margin:0 0 4px">
+    <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All items</span></label>
+    <span class="sys-search">
+      <span class="sys-search-ico" aria-hidden="true">⌕</span>
+      <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter items…"
+             autocomplete="off" aria-label="Filter items">
+      <button type="button" class="sys-clear" id="sysClear" hidden aria-label="Clear filter">×</button>
+    </span>
+    <span class="spacer" style="flex:1"></span>
+    <span class="select-count" id="selectCountTop"></span>
+  </div>
+
+  {% for label, items in sections %}
+  <div class="section-label">{{ label }}</div>
+  <div class="card"><div class="body" style="padding-top:14px">
+    <div class="sys-grid">
+      {% for item in items %}
+      <label class="sys-tile" data-name="{{ item.label|lower }}">
+        <input type="checkbox" class="select-check" name="include_device" value="{{ item.key }}"
+               {% if item.checked %}checked{% endif %}>
+        <span class="sys-mono" style="--mono-h:{{ item.mono_hue }}">{{ item.label.0|upper }}</span>
+        <span class="sys-body">
+          <span class="sys-name">{{ item.label }}</span>
+          {% if item.live %}<span class="tile-live"><span class="dot"></span>live · SNMP</span>{% endif %}
+        </span>
+        <span class="sys-tick" aria-hidden="true">✓</span>
+      </label>
+      {% endfor %}
+    </div>
+  </div></div>
+  {% endfor %}
+</div>
+
+{% comment %} ---- sticky action bar ---- {% endcomment %}
+<div class="actionbar">
+  <div class="container-inner">
+    <span class="sel-pill"><b id="selCountNum">0</b><span id="selectCount"></span></span>
+    <button type="button" class="sel-clear" id="selClear" hidden>Clear</button>
+    <div class="spacer" style="flex:1"></div>
+    <button class="btn primary" type="submit">Capture &amp; continue ▸</button>
+  </div>
+</div>
+</form>
+
+<div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("selectForm");
+  var tiles = Array.prototype.slice.call(document.querySelectorAll(".sys-tile"));
+  var checks = tiles.map(function (t) { return t.querySelector(".select-check"); });
+  var allBox = document.getElementById("selectAll");
+  var counts = [document.getElementById("selectCount"), document.getElementById("selectCountTop")];
+  var filter = document.getElementById("sysFilter");
+  var countNum = document.getElementById("selCountNum");
+  var selClear = document.getElementById("selClear");
+  var sysClear = document.getElementById("sysClear");
+
+  function sync() {
+    var n = 0;
+    tiles.forEach(function (t) {
+      var on = t.querySelector(".select-check").checked;
+      t.classList.toggle("checked", on);
+      if (on) n++;
+    });
+    if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
+    counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
+    if (countNum) countNum.textContent = n;
+    if (selClear) selClear.hidden = n === 0;
+  }
+  checks.forEach(function (c) { c.addEventListener("change", sync); });
+
+  if (allBox) allBox.addEventListener("change", function () {
+    checks.forEach(function (c) { c.checked = allBox.checked; });
+    sync();
+  });
+
+  if (selClear) selClear.addEventListener("click", function () {
+    checks.forEach(function (c) { c.checked = false; });
+    sync();
+  });
+
+  function applyFilter() {
+    var q = filter.value.trim().toLowerCase();
+    tiles.forEach(function (t) {
+      var hit = !q || t.getAttribute("data-name").indexOf(q) > -1;
+      t.classList.toggle("hidden-by-filter", !hit);
+    });
+    if (sysClear) sysClear.hidden = !q;
+  }
+  if (filter) {
+    filter.addEventListener("input", applyFilter);
+    filter.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && filter.value) { e.preventDefault(); filter.value = ""; applyFilter(); }
+    });
+  }
+  if (sysClear) sysClear.addEventListener("click", function () {
+    filter.value = ""; applyFilter(); filter.focus();
+  });
+
+  if (form) form.addEventListener("submit", function (e) {
+    if (!checks.some(function (c) { return c.checked; })) {
+      e.preventDefault();
+      window.alert("Select at least one item to include in the checklist.");
+    }
+  });
+
+  sync();
+})();
+</script>
+{% endblock %}
