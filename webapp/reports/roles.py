@@ -320,12 +320,16 @@ def roles_without_screens() -> list:
 #  ROLE_PAGES would have shown a tile per screen instead, which is how you end up offering
 #  "Report" and "System Picker" as if they were two things to choose between.
 class ReportOption:
-    def __init__(self, key, label, blurb, url_name, roles):
+    def __init__(self, key, label, blurb, url_name, roles, icon=""):
         self.key = key
         self.label = label
         self.blurb = blurb
         self.url_name = url_name       # where the tile goes: usually a picker
         self.roles = set(roles)
+        # Flat line art, so the template masks it and paints the role-icon gradient through
+        # it — otherwise these would read as a different, monochrome set beside the coloured
+        # role tiles they deliberately echo.
+        self.icon = icon
 
 
 REPORTS = [
@@ -333,22 +337,23 @@ REPORTS = [
         "system_health", "System Health Report",
         "Live health of the business systems — disks, memory, services, backups and "
         "certificates, with your comments against each finding.",
-        "report_form", {SYSTEM_ADMIN_ROLE, SECURITY_ADMIN_ROLE}),
+        "report_form", {SYSTEM_ADMIN_ROLE, SECURITY_ADMIN_ROLE},
+        "img/reports/system-health.png"),
     ReportOption(
         "network", "Network Report",
         "Switches and links — port state, optics, PSU and fan health, and the traffic "
         "moving across them.",
-        "network_dashboard", {NETWORK_ADMIN_ROLE}),
+        "network_dashboard", {NETWORK_ADMIN_ROLE}, "img/reports/network.png"),
     ReportOption(
         "infrastructure", "Infrastructure Report",
         "The hardware underneath the systems — hyper-converged clusters and standalone "
         "database hosts.",
-        "infra_form", {INFRA_ADMIN_ROLE}),
+        "infra_form", {INFRA_ADMIN_ROLE}, "img/reports/infrastructure.png"),
     ReportOption(
         "os_inventory", "OS Inventory Report",
         "Every monitored host's operating system, patch level against the newest build in "
         "this estate, and vendor support status.",
-        "os_inventory", {SECURITY_ADMIN_ROLE}),
+        "os_inventory", {SECURITY_ADMIN_ROLE}, "img/reports/os-inventory.png"),
 ]
 
 

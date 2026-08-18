@@ -1,5 +1,16 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}Reports · RBZ Monitoring Console{% endblock %}
+
+{% comment %}
+  Same grid and same tile as Role Select: the two screens ask the same shape of question one
+  after the other, and answering them in different visual languages made the second look like
+  a different kind of decision than it is.
+
+  The report glyphs are flat line art, so they are masked and painted with the role-icon
+  gradient rather than dropped in as <img> — otherwise a monochrome set would sit beside the
+  coloured role tiles it is meant to echo.
+{% endcomment %}
 
 {% block body %}
 <div class="container" style="max-width:760px">
@@ -11,8 +22,14 @@
 
   <div class="rs-list">
     {% for o in options %}
-    <a class="rs-btn rp-tile" href="{{ o.url }}">
+    <a class="rs-btn" href="{{ o.url }}">
+      {% if o.icon %}
+      <span class="rs-icon" aria-hidden="true">
+        <span class="grad-glyph rp-glyph" style="--glyph:url('{% static o.icon %}')"></span>
+      </span>
+      {% else %}
       <span class="rs-mono" aria-hidden="true">{{ o.initial }}</span>
+      {% endif %}
       <span class="rs-body">
         <span class="rs-name">{{ o.label }}</span>
         <span class="rs-pages">{{ o.blurb }}</span>

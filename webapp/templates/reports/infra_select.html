@@ -150,7 +150,7 @@
     });
     if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
     counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
-    // only dim the unselected tiles once something IS selected
+
     if (grid) grid.classList.toggle("has-selection", n > 0);
     if (countNum) countNum.textContent = n;
     if (selClear) selClear.hidden = n === 0;

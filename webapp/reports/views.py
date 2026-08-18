@@ -335,7 +335,7 @@ def reports(request):
         return redirect("roles_console" if is_role_admin(request.user) else "role_empty")
     return render(request, "reports/reports.html", {
         "options": [{"key": r.key, "label": r.label, "blurb": r.blurb,
-                     "url": reverse(r.url_name), "initial": r.label[:1]}
+                     "url": reverse(r.url_name), "icon": r.icon, "initial": r.label[:1]}
                     for r in available],
     })
 

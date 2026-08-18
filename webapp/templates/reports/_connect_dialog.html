@@ -103,7 +103,6 @@
                               : (reach === "down" ? "not reporting" : "status unknown");
     $("cxdDot").className = "cxd-dot" + (reach === "up" ? " up" : (reach === "down" ? " down" : ""));
 
-    // what is actually wrong on this host — the same flags the panel behind the dialog lists
     var sev = d("sev");
     var issues = d("issues") ? d("issues").split("|") : [];
     var box = $("cxdIssues");
@@ -138,7 +137,7 @@
     lastFocus = el;
     dlg.classList.add("show");
     dlg.setAttribute("aria-hidden", "false");
-    // land on the command's Copy button — the reason the dialog was opened
+
     var first = dlg.querySelector('[data-copy-from="cxdCommand"]');
     if (first) { first.focus(); }
   }

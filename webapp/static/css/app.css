@@ -8,7 +8,8 @@
   --bg: #eef1f5;        --panel: #ffffff;      --panel-2: #f2f5f8;
   --ink: #16232e;       --muted: #51707f;
   --line: #e1e6ea;      --line-strong: #ced5dd;
-  --accent: #0e7c93;    --accent-ink: #ffffff;   --accent-bg: #e3f2f6;
+  --accent: #1a6fc4;    --accent-ink: #ffffff;   --accent-bg: #e6f0fb;
+  --grad-from: #2882de; --grad-to: #2dc7e6;
   --red: #d14a3a;       --red-bg: #fdebea;
   --amber: #b8790a;     --amber-bg: #fff6e0;
   --green: #0e9c74;     --green-bg: #e8f6f0;
@@ -20,7 +21,8 @@
     --bg: #0e1620;      --panel: #121e2b;      --panel-2: #1b2836;
     --ink: #e7eef5;     --muted: #7f93a6;
     --line: #26323f;    --line-strong: #33424f;
-    --accent: #5bc0d4;  --accent-ink: #06131a;   --accent-bg: #163540;
+    --accent: #2dc7e6;  --accent-ink: #06131a;   --accent-bg: #123a4f;
+    --grad-from: #2882de; --grad-to: #2dc7e6;
     --red: #ef6a5a;     --red-bg: #3a1a16;
     --amber: #e8b04b;   --amber-bg: #3a2f14;
     --green: #4cc9a4;   --green-bg: #14322b;
@@ -32,7 +34,8 @@
   --bg: #0e1620;      --panel: #121e2b;      --panel-2: #1b2836;
   --ink: #e7eef5;     --muted: #7f93a6;
   --line: #26323f;    --line-strong: #33424f;
-  --accent: #5bc0d4;  --accent-ink: #06131a;   --accent-bg: #163540;
+  --accent: #2dc7e6;  --accent-ink: #06131a;   --accent-bg: #123a4f;
+  --grad-from: #2882de; --grad-to: #2dc7e6;
   --red: #ef6a5a;     --red-bg: #3a1a16;
   --amber: #e8b04b;   --amber-bg: #3a2f14;
   --green: #4cc9a4;   --green-bg: #14322b;
@@ -105,9 +108,18 @@ a:hover { text-decoration: underline; }
    accent IS the bird's colour, which is where the palette came from in the first place. */
 .app-mark {
   width: 34px; height: 34px; margin: 0 auto 10px; display: block;
-  background: var(--accent);
+  background: linear-gradient(135deg, var(--grad-from), var(--grad-to));
   -webkit-mask: url("../img/app-mark.png") center / contain no-repeat;
           mask: url("../img/app-mark.png") center / contain no-repeat;
+}
+
+/* Any flat-silhouette artwork wears the full role-icon gradient: set --glyph to its url and
+   the mask does the rest, so a monochrome icon joins the coloured ones instead of reading as
+   a different set. */
+.grad-glyph {
+  background: linear-gradient(135deg, var(--grad-from), var(--grad-to));
+  -webkit-mask: var(--glyph) center / contain no-repeat;
+          mask: var(--glyph) center / contain no-repeat;
 }
 .topbar .spacer { flex: 1; }
 .topbar .who { color: var(--muted); font-size: 13px; }
@@ -508,8 +520,20 @@ table.hist tr:last-child td { border-bottom: 0; }
    (blended toward the neutral border) since this tile hasn't been ACTED on, only flagged;
    full-strength amber is reserved for the checked state and for genuine alerts elsewhere in
    the report, so a recently-reported tile never reads as urgent. */
-.sys-tile.is-recent { border-color: color-mix(in srgb, var(--amber) 45%, var(--line-strong)); }
+.sys-tile.is-recent { border-color: color-mix(in srgb, var(--amber) 45%, var(--line-strong));
+                      background: var(--amber-bg); }
+/* The name and the platform badge take the amber as well, so the flag survives being scanned
+   quickly: a border alone is easy to miss in a dense grid, and the badge is the first thing
+   the eye lands on in a tile. */
+.sys-tile.is-recent .sys-name,
 .sys-tile.is-recent .sys-sub { color: var(--amber); }
+.sys-tile.is-recent .sys-mono,
+:root[data-theme="light"] .sys-tile.is-recent .sys-mono,
+:root[data-theme="dark"] .sys-tile.is-recent .sys-mono {
+  background: color-mix(in srgb, var(--amber) 14%, var(--panel));
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+}
 /* Selected still wins the border outright — it's the state the user is actively changing. */
 .sys-tile.is-recent.checked { border-color: var(--accent); }
 
@@ -867,3 +891,8 @@ table.hist tr:last-child td { border-bottom: 0; }
   background: var(--panel-2); color: var(--muted);
 }
 .resume-cd.warn { background: var(--amber-bg); color: var(--amber); }
+
+/* Report tiles reuse the Role Select tile wholesale; only the glyph differs, because a
+   report's artwork is line art rather than a filled illustration and needs the gradient
+   painted through it. */
+.rp-glyph { width: 26px; height: 26px; display: block; }

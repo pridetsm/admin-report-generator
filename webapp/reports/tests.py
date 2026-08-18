@@ -2504,7 +2504,9 @@ class CssTokenHygiene(TestCase):
     """
 
     #: tokens supplied by the browser/user agent rather than by app.css
-    _EXTERNAL = {"--mono-h"}
+    #: tokens set per-ELEMENT in a template rather than declared in app.css — the
+    #: monogram hue on each system tile, and the glyph url on each masked report icon
+    _EXTERNAL = {"--mono-h", "--glyph"}
 
     def _defined_in(self, text):
         """Tokens this file supplies: CSS declarations, plus any set from JavaScript.

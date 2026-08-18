@@ -47,6 +47,7 @@ Thumbs.db
 # manifest entry for it and the header breaks. Same for the design references it came from.
 !webapp/static/img/brand-mark.png
 # The application's own mark (the kingfisher) and the favicon built from it.
+!webapp/static/img/reports/*.png
 !webapp/static/img/app-mark.png
 !webapp/static/img/favicon.png
 # ...and the source art it was cut from.

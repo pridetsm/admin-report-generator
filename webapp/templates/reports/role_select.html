@@ -24,24 +24,15 @@
 
 {% block body %}
 <style>
-  /* Every colour here is a theme token: panel, ink, line-strong, accent, accent-ink, muted.
-     An earlier draft named tokens this app does not define and gave each a hex fallback.
-     Because the token did not exist, the fallback won in BOTH themes and these tiles stayed
-     white on a dark page. A fallback on an undefined token is a hardcoded colour wearing a
-     theme's clothes — see the CssTokenHygiene test, which now fails on one. */
+  
   .rs-wrap { max-width:760px; margin:0 auto; padding:8px 0 40px; }
   .rs-head { text-align:center; margin-bottom:26px; }
   .rs-head h1 { font-size:22px; font-weight:650; margin:0 0 6px; letter-spacing:-.2px; }
   .rs-head p { margin:0; color:var(--muted); font-size:13px; line-height:1.6; }
 
-  /* A grid, not a stack: four roles read as four peers of equal standing, and the eye
-     compares them side by side instead of scanning a ranked column. auto-fit collapses it
-     to one column on a narrow window without a second breakpoint. */
   .rs-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(232px,1fr));
              grid-auto-rows:1fr; gap:10px; }
 
-  /* The whole card is the submit control, so the click target is the card and not a small
-     button inside it — a list of one-action rows should not need aiming. */
   .rs-card { margin:0; }
   .rs-btn {
     width:100%; height:100%; text-align:left; cursor:pointer; font:inherit; color:inherit;
@@ -58,36 +49,22 @@
     font-weight:700; font-size:15px; color:var(--accent-ink); background:var(--accent);
   }
 
-  /* The role glyph, in the monogram's exact footprint so tiles line up whether a role has an
-     icon or falls back to its initial.
-
-     NOT masked, unlike the OS glyphs in app.css. Those are flat black silhouettes that have
-     to be painted by the theme; these are multi-colour artwork, and masking would flatten all
-     five to the same accent shape — destroying the at-a-glance difference that is the entire
-     reason for putting icons on a picker.
-
-     Which leaves the plate they sit on. The artwork is blue on transparency, so it needs a
-     surface that is neither the tile's own background (the darker gradients would sink into
-     it on the dark theme) nor the accent (blue on blue). --panel-2 is the app's existing
-     inset surface and reads as a recess in both themes. */
   .rs-icon {
     flex:none; width:40px; height:40px; border-radius:11px; display:grid; place-items:center;
     background:var(--panel-2); border:1px solid var(--line);
   }
   .rs-icon img { width:26px; height:26px; object-fit:contain; display:block; }
-  /* A muted tile mutes its glyph too, so a role you do not hold reads as unavailable at the
-     same strength as the text beside it rather than shouting in full colour. */
+  
   .rs-btn.is-locked .rs-icon img { filter:grayscale(.55); }
   .rs-body { flex:1; min-width:0; }
   .rs-name { font-size:14.5px; font-weight:640; }
   .rs-pages { font-size:12px; color:var(--muted); margin-top:4px; line-height:1.55; }
-  .rs-go { display:none; }   /* the whole tile is the target; an arrow adds nothing */
+  .rs-go { display:none; }   
 
   .rs-current { font-size:10px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
                 background:var(--accent); color:var(--accent-ink); padding:2px 7px;
                 border-radius:5px; margin-left:8px; vertical-align:1px; }
 
-  /* A role you do not hold: same tile, muted, with the ask in place of the switch. */
   .rs-btn.is-locked { opacity:.72; }
   .rs-btn.is-locked:hover { opacity:1; }
   .rs-btn.is-locked[disabled] { cursor:default; opacity:.55; }

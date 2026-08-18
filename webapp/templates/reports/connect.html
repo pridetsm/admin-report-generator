@@ -13,8 +13,7 @@
   .cx-act { display:flex; align-items:center; gap:8px; flex:0 0 auto; margin-left:auto; }
   .cx-os { font-size:11px; letter-spacing:.4px; text-transform:uppercase; font-weight:700;
            padding:3px 8px; border-radius:999px; border:1px solid var(--line-strong); color:var(--muted); }
-  /* .os-glyph itself (app.css) masks the icon in currentColor; only the row-scale size and
-     the muted tone belong here, so both pages keep one definition of how the glyph is drawn. */
+  
   .cx-os-glyph { color:var(--muted); }
   .cx-os-glyph.os-windows { width:13px; height:13px; }
   .cx-os-glyph.os-linux   { width:15px; height:15px; }
@@ -156,7 +155,7 @@
       r.classList.toggle("cx-hidden", !hit);
       if (hit) shown++;
     });
-    // hide a system card entirely once every one of its rows is filtered out
+
     cards.forEach(function (c) {
       var any = Array.prototype.slice.call(c.querySelectorAll(".cx-row"))
         .some(function (r) { return !r.classList.contains("cx-hidden"); });

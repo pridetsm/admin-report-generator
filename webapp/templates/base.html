@@ -7,20 +7,19 @@
   <link rel="icon" type="image/png" href="{% static 'img/favicon.png' %}">
   <link rel="stylesheet" href="{% static 'css/app.css' %}?v={{ asset_v }}">
   <script>
-    // Applied here in <head>, before first paint, so a saved dark theme never flashes light.
+
     (function () {
       var t = localStorage.getItem("pageTheme");
       if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
     })();
   </script>
   <style>
-    /* Settings acts as a parent row; its children are indented under it with a spine so the
-       grouping is visible rather than implied by proximity alone. */
+    
     .nm-children { position: relative; padding-left: 10px; margin: 0 0 4px; }
     .nm-children::before { content: ""; position: absolute; left: 14px; top: 3px; bottom: 3px;
                            width: 1px; background: var(--line-strong); }
     .navmenu-item.nm-child { padding-left: 26px; }
-    /* Same spine treatment in the drawer, so a parent/child pair reads as a group there too. */
+    
     .drawer-children { position: relative; padding-left: 8px; }
     .drawer-children::before { content: ""; position: absolute; left: 20px; top: 2px; bottom: 2px;
                                width: 1px; background: var(--line-strong); }
@@ -234,8 +233,7 @@
 {% block body %}{% endblock %}
 
 <script>
-// Page theme toggle. Inline rather than in app.js so the label can never be stale relative
-// to the page — a cached app.js was leaving this button reading "Theme".
+
 (function () {
   "use strict";
   var root = document.documentElement;
@@ -246,7 +244,7 @@
     return root.getAttribute("data-theme") ||
       (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   }
-  // the label names what you'll GET: on dark it reads "Light Theme"
+
   function relabel() {
     var next = current() === "dark" ? "Light" : "Dark";
     btn.textContent = next + " Theme";
