@@ -357,15 +357,11 @@ REPORTS = [
     # fixed morning to morning, but the picker is still how an engineer excludes a device
     # under maintenance rather than staring at a field for it.
     #
-    # No icon deliberately. Every glyph in img/reports/ is already spoken for, and the only
-    # unused source art is byte-identical to the Network Report's — two identical tiles side
-    # by side would read as one report listed twice. The monogram fallback is honest; a
-    # borrowed twin is not. Drop a distinct glyph in and add its path here.
     ReportOption(
         "network_sod", "Network Infrastructure SOD Report",
         "The start-of-day checklist — core switches, firewalls, internet circuits, WLAN "
         "controllers and the Radware WAF, captured each morning by the on-duty engineer.",
-        "network_sod_select", {NETWORK_ADMIN_ROLE}),
+        "network_sod_select", {NETWORK_ADMIN_ROLE}, "img/reports/network-sod.png"),
     ReportOption(
         "infrastructure", "Infrastructure Report",
         "The hardware underneath the systems — hyper-converged clusters and standalone "
