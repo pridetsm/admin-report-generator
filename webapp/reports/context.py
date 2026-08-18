@@ -59,7 +59,12 @@ _NAV_PARENT = {
     "network_report": "network_dashboard",
     "history": "report_form",
     "submission_detail": "history",
-    "roles_console": "report_form",
+    # Administrator's home page — the same role a picker plays for every other estate
+    # (report_form / network_dashboard / infra_form), just without a Reports screen in
+    # front of it. It has to lead straight to Role Select for the same reason those do:
+    # otherwise the ROLE_HOME fallback below resolves "Administrator's home" to this very
+    # page and Back points at the screen you're already standing on.
+    "roles_console": "role_select",
     "profile": "report_form",
     # Every Configuration screen nests under the hub (see views._CONFIG_TABS) so the drawer's
     # single "Configuration" entry lights up on all of them and Back always steps up to the hub,
