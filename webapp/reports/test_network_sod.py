@@ -60,8 +60,11 @@ class SodDegradationRules(TestCase):
 
         summary = ns.summarise(data)
         self.assertEqual(summary["degraded_circuits"], 2)
-        flagged = {r["name"] for r in summary["banners"][0]["rows"]}
-        self.assertEqual(flagged, {"Telecontract", "Dandemutande"})
+        # The banner names the LINK ("Dandemutande Internet"), matching how the WLAN banner
+        # says "Harare WLAN Controller"; the table below names the provider.
+        flagged = [r["name"] for r in summary["banners"][0]["rows"]]
+        self.assertEqual(flagged, ["Dandemutande Internet", "Telecontract Internet"],
+                         "worst first: a measured 5.70% + Poor outranks a failed test")
 
     def test_a_clean_zero_loss_is_not_degraded(self):
         data = ns.blank_checklist()
@@ -75,6 +78,27 @@ class SodDegradationRules(TestCase):
         row = ns.summarise(data)["banners"][0]["rows"][0]
         self.assertIn("failed to complete", row["detail"])
         self.assertNotIn("Packet loss Failed", row["detail"])
+
+    def test_a_failure_cause_reaches_the_banner_but_not_the_narrow_column(self):
+        """"Failed (connection timed out)" carries its cause into the banner sentence, while
+        the 7-wide Pkt Loss cell keeps just "Failed" — there is no room for more there, and
+        the reference sheet splits it exactly this way."""
+        data = ns.blank_checklist()
+        data["circuits"][0].loss = "Failed (connection timed out)"
+        detail = ns.summarise(data)["banners"][0]["rows"][0]["detail"]
+        self.assertEqual(detail,
+                         "Packet-loss measurement failed to complete (connection timed out)")
+        self.assertEqual(ns.loss_short("Failed (connection timed out)"), "Failed")
+        self.assertEqual(ns.loss_short("5.70%"), "5.70%")
+
+    def test_at_most_two_quality_aspects_reach_the_banner(self):
+        """The banner is a headline; the Quality column below carries the full triple."""
+        data = ns.blank_checklist()
+        data["circuits"][0].loss = "1%"
+        data["circuits"][0].quality = "Average/Poor/Average"
+        detail = ns.summarise(data)["banners"][0]["rows"][0]["detail"]
+        self.assertEqual(detail.count("  ·  "), 2)      # loss + two aspects
+        self.assertNotIn("Chat", detail)
 
     def test_quality_triple_is_decomposed_worst_first(self):
         data = ns.blank_checklist()
@@ -108,6 +132,50 @@ class SodDegradationRules(TestCase):
         data = ns.blank_checklist()
         data["core_wan"][0].status = "DOWN"
         self.assertEqual(ns.summarise(data)["links_down"], 1)
+
+
+class SodWorkbookRendersEverywhere(TestCase):
+    def test_every_colour_is_opaque(self):
+        """Colours must carry an FF alpha, not 00.
+
+        The engine stores its palette as 00RRGGBB. Excel ignores that leading pair, but
+        LibreOffice, Google Sheets and several web previewers read 00 as fully transparent
+        and drop every fill and font colour — rendering this dark report as unstyled
+        black-on-white that looks nothing like the approved sheet. This is the regression
+        that produced exactly that.
+
+        Only colours actually SET are checked. openpyxl reports an unstyled cell's fill as
+        the default "00000000", and the merge tails legitimately carry that — the reference
+        sheet leaves them unfilled too, because Excel paints a merged range from its anchor.
+        """
+        import io
+
+        import openpyxl
+
+        payload = ns.build_report(ns.blank_checklist(), theme="dark", author="A")
+        ws = openpyxl.load_workbook(io.BytesIO(payload)).active
+        bad = []
+        for row in ws.iter_rows(min_row=1, max_row=90, max_col=22):
+            for cell in row:
+                if cell.fill is not None and cell.fill.patternType == "solid":
+                    rgb = getattr(cell.fill.fgColor, "rgb", None)
+                    if isinstance(rgb, str) and not rgb.upper().startswith("FF"):
+                        bad.append("{} fill {}".format(cell.coordinate, rgb))
+                if cell.value is not None and cell.font is not None:
+                    rgb = getattr(cell.font.color, "rgb", None)
+                    if isinstance(rgb, str) and not rgb.upper().startswith("FF"):
+                        bad.append("{} font {}".format(cell.coordinate, rgb))
+        self.assertEqual(bad[:10], [], "{} non-opaque colours".format(len(bad)))
+
+    def test_the_canvas_is_painted_to_the_reference_floor(self):
+        """A quiet morning must not produce a visibly shorter page than a busy one."""
+        import io
+
+        import openpyxl
+
+        payload = ns.build_report(ns.blank_checklist(), theme="dark", author="A")
+        ws = openpyxl.load_workbook(io.BytesIO(payload)).active
+        self.assertGreaterEqual(ws.max_row, 140)
 
 
 class SodCollectIsHonestAboutWhatItKnows(TestCase):

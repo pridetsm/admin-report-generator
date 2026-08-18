@@ -325,6 +325,28 @@ def from_post(post) -> dict:
 #  above, never typed. A summary that can disagree with the table under it is worse than no
 #  summary, and on a sheet that gets signed it is the number people quote in the stand-up.
 # =======================================================================================
+_NUMBER_WORDS = {0: "none", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+
+
+def loss_short(loss: str) -> str:
+    """The Pkt Loss cell's own text: the reading without any explanatory parenthetical.
+
+    "Failed (connection timed out)" is written as "Failed" in the narrow table column and the
+    cause is carried by the banner instead — which is how the reference sheet reads, and the
+    only way the cause fits anywhere at all in a 7-wide column.
+    """
+    text = (loss or "").strip()
+    if "(" in text and text.endswith(")"):
+        return text[:text.index("(")].strip()
+    return text
+
+
+def _plural_circuits(n: int) -> str:
+    """"two circuits are" / "one circuit is" — spelled out, as the reference sheet writes it."""
+    word = _NUMBER_WORDS.get(n, str(n))
+    return "{} circuit{} {}".format(word, "" if n == 1 else "s", "is" if n == 1 else "are")
+
+
 def summarise(data: dict) -> dict:
     """Counts and warning banners derived from the filled-in checklist."""
     firewall_checks = [c for g in data["firewalls"] for c in g.checks]
@@ -354,7 +376,18 @@ def summarise(data: dict) -> dict:
             return True
         return "poor" in c.quality.strip().lower()
 
-    degraded_circuits = [c for c in data["circuits"] if degraded(c)]
+    # Worst first, so the circuit that actually measured badly leads the banner rather than
+    # the one whose test merely errored. The reference sheet lists Dandemutande (5.70% loss,
+    # Poor gaming) above Telecontract (loss test failed) for the same reason.
+    def _circuit_rank(c: Circuit) -> int:
+        if "poor" in c.quality.strip().lower():
+            return 0
+        if not _failed_loss(c.loss) and c.loss.strip().lower() not in _NIL:
+            return 1
+        return 2
+
+    degraded_circuits = sorted((c for c in data["circuits"] if degraded(c)),
+                               key=_circuit_rank)
 
     # The Quality column is a Stream/Game/Chat triple. The banner names the aspects that are
     # not Good rather than echoing the raw "Average/Poor/Average", because "Online Gaming:
@@ -373,13 +406,23 @@ def summarise(data: dict) -> dict:
         # trailing behind a milder aspect that happens to come first in the triple.
         rank = {"poor": 0, "bad": 0, "average": 1, "fair": 1}
         bad.sort(key=lambda nr: rank.get(nr[1].lower(), 2))
-        return ["{}: {}".format(name, rating) for name, rating in bad]
+        # Two at most. The banner is a headline, not the table — the Quality column below
+        # carries the full triple, and the reference sheet names the two worst aspects and
+        # stops there rather than reciting all three.
+        return ["{}: {}".format(name, rating) for name, rating in bad[:2]]
 
     def _circuit_detail(c: Circuit) -> str:
         if _failed_loss(c.loss):
             # The loss test itself errored; the quality ratings from the same run are not
             # trustworthy enough to recite beside it.
-            return "Packet-loss measurement failed to complete"
+            #
+            # A parenthetical in the loss field is carried through, so an engineer who types
+            # "Failed (connection timed out)" gets the cause in the banner instead of a bare
+            # "failed to complete" that leaves the reader asking why.
+            because = ""
+            if "(" in c.loss and c.loss.strip().endswith(")"):
+                because = " " + c.loss[c.loss.index("("):].strip()
+            return "Packet-loss measurement failed to complete" + because
         bits = []
         if c.loss.strip() and c.loss.strip().lower() not in _NIL:
             bits.append("Packet loss {}".format(c.loss.strip()))
@@ -400,10 +443,19 @@ def summarise(data: dict) -> dict:
             "band": "amber",
             "headline": "WARNING  —  INTERNET CIRCUIT DEGRADATION  —  {} of {} circuits affected".format(
                 len(degraded_circuits), len(data["circuits"])),
-            "rows": [{"name": c.provider, "detail": _circuit_detail(c)}
+            # "Dandemutande Internet", matching how the WLAN banner says "Harare WLAN
+            # Controller" — the banner names the LINK, while the table below names the
+            # provider supplying it.
+            "rows": [{"name": "{} Internet".format(c.provider), "detail": _circuit_detail(c)}
                      for c in degraded_circuits],
-            "note": ("Core WAN links and the remaining circuits are within normal range. "
-                     "Monitor any circuit carrying latency-sensitive traffic."),
+            "note": ("Core WAN links ({}) and the remaining {} within normal range. "
+                     "Monitor {} if gaming/latency-sensitive traffic is routed via {}."
+                     # "this circuit" regardless of how many were flagged: the sentence names
+                     # ONE circuit to watch (the worst), so the pronoun refers to that one.
+                     .format(", ".join(lbl for _k, lbl in DR_LINK_DEFS).replace(" Link", ""),
+                             _plural_circuits(len(data["circuits"]) - len(degraded_circuits)),
+                             degraded_circuits[0].provider,
+                             "this circuit")),
         })
     if rogue_controllers:
         banners.append({
@@ -466,7 +518,7 @@ def sod_report_filename(theme: str = "dark", when=None) -> str:
 # =======================================================================================
 
 # Column widths, straight off the reference sheet. A is the crest gutter.
-_WIDTHS = {"A": 6.4, "B": 30, "C": 12, "D": 16, "E": 12, "H": 22, "I": 12, "J": 7,
+_WIDTHS = {"A": 6.43, "B": 30, "C": 12, "D": 16, "E": 12, "H": 22, "I": 12, "J": 7,
            "L": 11, "M": 2, "N": 30, "O": 13, "P": 11, "Q": 2, "R": 13, "S": 11, "V": 9}
 
 # The row heights the reference uses for each kind of row, named so the builder reads as
@@ -504,7 +556,18 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
 
     with gr.palette(theme):
         T = gr.Theme
-        rgb = lambda c: str(c)[-6:]                      # engine stores 00RRGGBB
+
+        def rgb(c):
+            """Engine colours are 00RRGGBB; re-stamp them as FFRRGGBB — OPAQUE.
+
+            The leading pair is the ALPHA channel. Excel ignores it, but LibreOffice, Google
+            Sheets and several web previewers do not: they read 00 as fully transparent and
+            drop every fill and font colour on the sheet, which renders this dark report as
+            unstyled black-on-white and looks nothing like the approved file. The reference
+            workbook stores FF throughout, so match it and the sheet survives whatever it is
+            opened in.
+            """
+            return "FF" + str(c)[-6:]
         BG, CARD, HDR = rgb(T.BG), rgb(T.CARD), rgb(T.HDR)
         BORDER, INK, GREY = rgb(T.BORDER), rgb(T.WHITE), rgb(T.GREY)
         CYAN, SUB = rgb(T.CYAN), rgb(T.SUB)
@@ -521,6 +584,9 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
         left = Alignment(horizontal="left", vertical="center")
         centre = Alignment(horizontal="center", vertical="center")
         wrap = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        # Banner notes wrap onto two lines but sit centred in the taller row, unlike the
+        # sign-off block which is top-aligned because it is a stack of labelled lines.
+        wrapc = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
         wb = Workbook()
         ws = wb.active
@@ -547,13 +613,11 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
             if fill is not None:
                 cell.fill = fill
             if merge:
+                # The tail cells are deliberately left unstyled: Excel paints a merged range
+                # from its anchor, and the reference sheet stores them unfilled too. Writing
+                # a fill onto a MergedCell is a no-op in openpyxl anyway.
                 ws.merge_cells(start_row=row, start_column=col,
                                end_row=row, end_column=merge)
-                # A merged range only takes the anchor's fill; the tail cells stay unpainted
-                # and tear a hole in the background unless they are filled too.
-                if fill is not None:
-                    for c in range(col, merge + 1):
-                        ws.cell(row, c).fill = fill
             return cell
 
         # ---- header ------------------------------------------------------------------
@@ -590,7 +654,9 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
         ws.row_dimensions[7].height = 18
         paint(7)
         put(7, 2, "Summary", font=mono(13, True, CYAN), fill=page)
-        put(7, 14, "Sign-off", font=mono(13, True, CYAN), fill=page, merge=22)
+        # Smaller and on the card fill, unlike "Summary" — it is the panel's caption rather
+        # than a section heading, and the reference sheet sets it that way.
+        put(7, 14, "Sign-off", font=mono(9, True, CYAN), fill=card, merge=22)
 
         ws.row_dimensions[8].height = 13.5
         paint(8)
@@ -657,7 +723,11 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
         r = 16
 
         # ---- warning banners ---------------------------------------------------------
-        for banner in summary["banners"]:
+        # The gaps here are the reference sheet's own: a 15pt breather BETWEEN banners, then
+        # 9.75 + 7.5 after the last one before the first section bar. Getting this wrong
+        # shifts every section below it by a row, which is exactly what makes two mornings'
+        # sheets impossible to compare side by side.
+        for i, banner in enumerate(summary["banners"]):
             fg, bg = CHIP[banner["band"]]
             tint = PatternFill("solid", fgColor=bg)
             ws.row_dimensions[r].height = _H_BANNER
@@ -672,10 +742,15 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
                 r += 1
             ws.row_dimensions[r].height = _H_BANNER_NOTE
             paint(r, tint)
-            put(r, 2, "  " + banner["note"], font=mono(9, False, GREY),
-                align=wrap, fill=tint, merge=12)
+            put(r, 2, "  " + banner["note"], font=mono(8, False, SUB),
+                align=wrapc, fill=tint, merge=12)
             r += 1
-            ws.row_dimensions[r].height = _H_SPACER
+            last = (i == len(summary["banners"]) - 1)
+            ws.row_dimensions[r].height = _H_SPACER if last else 15.0
+            paint(r)
+            r += 1
+        if summary["banners"]:
+            ws.row_dimensions[r].height = 7.5
             paint(r)
             r += 1
 
@@ -740,7 +815,9 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
                 ws.row_dimensions[r].height = _H_ROW
                 paint(r)
                 put(r, 2, "  " + chk.label, font=mono(9, False, GREY), fill=page)
-                put(r, 3, chk.result, font=mono(9, False, GREY), fill=page)
+                # Readings are centred under their header, as in the reference — a column of
+                # "3 ms" / "0 ms" left-aligned against a 12-wide column reads as ragged.
+                put(r, 3, chk.result, font=mono(9, False, GREY), align=centre, fill=page)
                 status_cell(r, 4, chk.status)
                 r += 1
 
@@ -755,8 +832,8 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
         columns([(2, "Check"), (3, "Result"), (4, "Status")])
         for grp in data["firewalls"]:
             ws.row_dimensions[r].height = _H_GROUP
-            paint(r)
-            put(r, 2, "  " + grp.label, font=mono(8, True, SUB), fill=page, merge=4)
+            paint(r, head)
+            put(r, 2, "  " + grp.label, font=mono(8, True, CYAN), fill=head, merge=4)
             r += 1
             check_rows(grp.checks)
         spacer()
@@ -772,13 +849,25 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
         section("INTERNET CIRCUITS")
         columns([(2, "Provider"), (3, "Download"), (4, "Upload"), (5, "Latency"),
                  (6, "Jitter"), (7, "Pkt Loss"), (8, "Quality (Stream / Game / Chat)")])
+        # The Pkt Loss column carries its own verdict in the reference: green for a clean
+        # zero, amber for any loss or a failed test, muted grey for a reading that was never
+        # taken. It is the one number on this table someone scans for, so it is coloured
+        # rather than left to be read.
+        def _reading_colour(text, bad_is_amber=True):
+            t = str(text).strip().lower()
+            if t in ("", "—", "-", "n/a"):
+                return SUB                       # never measured — not a pass, not a fault
+            if t in ("0", "0%", "0.0%"):
+                return CHIP["green"][0]
+            return CHIP["amber"][0] if bad_is_amber else GREY
+
         for c in data["circuits"]:
             data_row([(2, c.provider, mono(9, False, GREY)),
                       (3, c.download, mono(9, False, GREY)),
                       (4, c.upload,   mono(9, False, GREY)),
                       (5, c.latency,  mono(9, False, GREY)),
                       (6, c.jitter,   mono(9, False, GREY)),
-                      (7, c.loss,     mono(9, False, GREY)),
+                      (7, loss_short(c.loss), mono(9, False, _reading_colour(c.loss))),
                       (8, c.quality,  mono(9, False, GREY))])
         note(CIRCUIT_NOTE)
         spacer()
@@ -792,7 +881,9 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
                       (3, w.wlans,       mono(9, False, GREY)),
                       (4, w.aps,         mono(9, False, GREY)),
                       (5, w.clients,     mono(9, False, GREY)),
-                      (6, w.rogue,       mono(9, False, GREY)),
+                      # Coloured on the same rule as packet loss — a rogue-AP count is the
+                      # other number on this sheet that is scanned rather than read.
+                      (6, w.rogue,       mono(9, False, _reading_colour(w.rogue))),
                       (7, w.interferers, mono(9, False, GREY))])
         note(CONTROLLER_NOTE)
         spacer()
@@ -805,9 +896,11 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
             ws.row_dimensions[r].height = _H_ROW
             paint(r)
             put(r, 2, "  " + d.label, font=mono(9, False, GREY), fill=page)
-            put(r, 3, d.utilization, font=mono(9, False, GREY), fill=page)
-            put(r, 4, d.discards, font=mono(9, False, GREY), fill=page)
-            put(r, 5, d.errors, font=mono(9, False, GREY), fill=page)
+            # Centred under their headers, as in the reference: these are short readings
+            # ("Low", "0", "0") in wide columns, and left-aligning them reads as ragged.
+            put(r, 3, d.utilization, font=mono(9, False, GREY), align=centre, fill=page)
+            put(r, 4, d.discards, font=mono(9, False, GREY), align=centre, fill=page)
+            put(r, 5, d.errors, font=mono(9, False, GREY), align=centre, fill=page)
             status_cell(r, 6, d.status)
             r += 1
         note(DR_NOTE)
@@ -832,20 +925,28 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
         ws.row_dimensions[r].height = _H_COLHEAD
         paint(r, head)
         for col, text in ((2, "Application"), (3, "Status"),
-                          (8, "Application"), (9, "Status"), (14, "Application")):
+                          (8, "Application"), (9, "Status"),
+                          (14, "Application"), (15, "Status")):
             put(r, col, text, font=mono(8, True, GREY), fill=head)
         r += 1
         for i in range(max(len(col1), len(col2), len(col3))):
             ws.row_dimensions[r].height = _H_ROW
             paint(r)
-            if i < len(col1):
-                put(r, 2, "  " + col1[i]["name"], font=mono(9, False, GREY), fill=page)
-                put(r, 3, col1[i]["status"], font=mono(9, False, GREY), fill=page)
-            if i < len(col2):
-                put(r, 8, "  " + col2[i]["name"], font=mono(9, False, GREY), fill=page)
-                put(r, 9, col2[i]["status"], font=mono(9, False, GREY), fill=page)
-            if i < len(col3):
-                put(r, 14, "  " + col3[i]["name"], font=mono(9, False, GREY), fill=page)
+            for group, name_col in ((col1, 2), (col2, 8), (col3, 14)):
+                if i < len(group):
+                    put(r, name_col, "  " + group[i]["name"],
+                        font=mono(9, False, GREY), fill=page)
+                    # A chip, matching the OK/DOWN chips above rather than plain text: this
+                    # column reads as a column of verdicts and the reference styles it so.
+                    # An unanswered app stays an uncoloured blank, as everywhere else.
+                    st = (group[i]["status"] or "").strip()
+                    if st:
+                        band = "green" if st.lower() == "protected" else "red"
+                        fg, bg = CHIP[band]
+                        put(r, name_col + 1, st, font=mono(8, True, fg), align=centre,
+                            fill=PatternFill("solid", fgColor=bg))
+                    else:
+                        put(r, name_col + 1, "", fill=page)
             r += 1
         note("{} applications shown as protected in the Radware console; {} domains captured "
              "in this morning's view ({} additional not visible in the captured list)."
@@ -865,12 +966,14 @@ def build_report(data: dict, *, theme: str = "dark", author: str,
         spacer(12)
         ws.row_dimensions[r].height = _H_NOTE
         paint(r)
-        put(r, 2, FOOTER_NOTE, font=mono(8, False, SUB), fill=page, merge=12)
+        put(r, 2, FOOTER_NOTE, font=mono(7, False, SUB), fill=page, merge=12)
         r += 1
 
-        # Paint a tail of blank rows so the dark canvas does not stop mid-screen — the
-        # reference sheet carries its background to row 140 for the same reason.
-        for tail in range(r, r + 40):
+        # Paint a tail of blank rows so the dark canvas does not stop mid-screen. The
+        # reference sheet carries its background to row 140, so match that floor rather than
+        # stopping wherever this morning's content happened to end — otherwise a quiet day
+        # produces a visibly shorter page than a busy one.
+        for tail in range(r, max(141, r + 20)):
             ws.row_dimensions[tail].height = 15
             paint(tail)
 
