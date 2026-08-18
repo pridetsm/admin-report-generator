@@ -40,8 +40,6 @@
   <div class="section-label">Infrastructure to include</div>
   <div class="card"><div class="body" style="padding-top:14px">
     {% if recent_count %}
-    {# Key for the amber tiles. Shown only when some tile is actually amber — a legend for a
-       colour nothing on the page is wearing is just a sentence in the way. #}
     <p class="sys-key">
       <span class="sys-key-swatch" aria-hidden="true"></span>
       Amber = reported in the last {{ recent_hours }} hour{{ recent_hours|pluralize }}.
