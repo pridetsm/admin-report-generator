@@ -1239,7 +1239,7 @@ def _parse_snmp_post(post) -> dict:
 @login_required
 def config_snmp(request):
     """SNMP credential profiles — the `auths:` section of the snmp_exporter's snmp.yml that
-    prometheus.yml's snmp/snmp_hardware/snmp_system jobs reference by name (`auth: [RBZ_v3]`).
+    prometheus.yml's snmp/snmp_hardware/snmp_system jobs reference by name (`auth: [RBZ_v2]`).
 
     Same DB-versioned, mask-before-display shape as grafana_config — but per labelled field
     (profile -> field -> value) rather than one raw-text blob, and scoped to just that ~20-line

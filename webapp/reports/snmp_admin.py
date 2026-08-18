@@ -1,6 +1,6 @@
 """SNMP config management: the `auths:` section of the snmp_exporter's snmp.yml — the
 SNMPv3/v2/v1 credential profiles prometheus.yml's snmp/snmp_hardware/snmp_system jobs
-reference by name (see `auth: [RBZ_v3]` etc.) — read for the first-ever edit-screen load,
+reference by name (see `auth: [RBZ_v2]` etc.) — read for the first-ever edit-screen load,
 mask/unmask each profile's secret fields so they never round-trip to the browser or sit in
 the DB in the clear, and rewrite just that section on Save & Apply.
 
