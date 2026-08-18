@@ -520,11 +520,13 @@ table.hist tr:last-child td { border-bottom: 0; }
    (blended toward the neutral border) since this tile hasn't been ACTED on, only flagged;
    full-strength amber is reserved for the checked state and for genuine alerts elsewhere in
    the report, so a recently-reported tile never reads as urgent. */
-.sys-tile.is-recent { border-color: color-mix(in srgb, var(--amber) 45%, var(--line-strong));
-                      background: var(--amber-bg); }
+.sys-tile.is-recent { border-color: color-mix(in srgb, var(--amber) 45%, var(--line-strong)); }
 /* The name and the platform badge take the amber as well, so the flag survives being scanned
    quickly: a border alone is easy to miss in a dense grid, and the badge is the first thing
-   the eye lands on in a tile. */
+   the eye lands on in a tile. No background fill on the tile itself, deliberately — a solid
+   amber panel behind the whole card reads as "selected" or "alert", not "flagged"; the
+   border, the badge and the text carry the signal without turning the card into a block of
+   colour. */
 .sys-tile.is-recent .sys-name,
 .sys-tile.is-recent .sys-sub { color: var(--amber); }
 .sys-tile.is-recent .sys-mono,
