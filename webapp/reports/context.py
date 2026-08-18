@@ -57,6 +57,10 @@ _NAV_PARENT = {
     "folder_watch": "report_form",
     "folder_watch_temenos": "folder_watch",
     "network_report": "network_dashboard",
+    # The SOD checklist hangs off Reports, not off the device picker: it has no picker of its
+    # own, so Back from it steps up to the tile that opened it rather than to a device list
+    # it never used.
+    "network_sod": "reports",
     "history": "report_form",
     "submission_detail": "history",
     # Administrator's home page — the same role a picker plays for every other estate
@@ -102,6 +106,7 @@ _NAV_LABEL = {
     "folder_watch": "Folder Watch",
     "folder_watch_temenos": "Temenos",
     "network_dashboard": "Network Device Picker",
+    "network_sod": "SOD Checklist",
     "role_empty": "Home",
     "network_report": "Core Switch",
     "infra_form": "Infrastructure Picker",

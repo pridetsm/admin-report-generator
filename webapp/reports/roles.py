@@ -41,7 +41,12 @@ ROLE_PAGES = {
                           "folder_watch", "folder_watch_temenos", "folder_watch_data"},
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.
-    NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report"},
+    # `network_sod_generate` sits alongside its screen for the same reason `generate` is
+    # common to the systems estates: the download is a step INSIDE the SOD screen, not a
+    # destination of its own, so it is listed in NON_SCREEN_PAGES below and never counted
+    # as a screen the role "adds".
+    NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report",
+                          "network_sod", "network_sod_generate"},
     # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
     # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
     # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
@@ -99,7 +104,7 @@ for _role, _pages in ROLE_PAGES.items():
 # but must not be counted when the picker offers "adds N screens", which would otherwise
 # promise a screen that does not exist.
 # "report"/"generate" are steps INSIDE the dashboard, not separate destinations.
-NON_SCREEN_PAGES = {"folder_watch_data", "report", "generate"}
+NON_SCREEN_PAGES = {"folder_watch_data", "report", "generate", "network_sod_generate"}
 
 
 def role_screens(role) -> list:
@@ -344,6 +349,20 @@ REPORTS = [
         "Switches and links — port state, optics, PSU and fan health, and the traffic "
         "moving across them.",
         "network_dashboard", {NETWORK_ADMIN_ROLE}, "img/reports/network.png"),
+    # The morning checklist, a different thing from the live Network Report above: that one
+    # is captured from Prometheus, this one is worked through by hand across the SolarWinds,
+    # Cisco WLC, Perfstack and Radware consoles. Both belong to Network Admin, which is why
+    # the Reports screen earns its keep for this role too rather than going straight through.
+    #
+    # No icon deliberately. Every glyph in img/reports/ is already spoken for, and the only
+    # unused source art is byte-identical to the Network Report's — two identical tiles side
+    # by side would read as one report listed twice. The monogram fallback is honest; a
+    # borrowed twin is not. Drop a distinct glyph in and add its path here.
+    ReportOption(
+        "network_sod", "Network Infrastructure SOD Report",
+        "The start-of-day checklist — core switches, firewalls, internet circuits, WLAN "
+        "controllers and the Radware WAF, captured each morning by the on-duty engineer.",
+        "network_sod", {NETWORK_ADMIN_ROLE}),
     ReportOption(
         "infrastructure", "Infrastructure Report",
         "The hardware underneath the systems — hyper-converged clusters and standalone "

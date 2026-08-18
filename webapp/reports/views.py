@@ -35,7 +35,7 @@ import generate_report as gr   # to show the config.ini defaults on the settings
 from pathlib import Path
 
 from . import (backup_policy_admin, connect, crypto, folders, grafana_admin, network,
-               promconfig, prometheus_admin, scripts, snmp_admin)
+               network_sod, promconfig, prometheus_admin, scripts, snmp_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
@@ -926,6 +926,105 @@ def network_generate(request):
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
+@never_cache
+@login_required
+def network_sod_form(request):
+    """The Start-of-Day checklist screen.
+
+    No picker in front of it, unlike the Network Report next door. That report asks which
+    devices to capture because capturing is expensive and scoped; this one covers a fixed
+    estate that is the same every morning, so a picker would be a screen that only ever has
+    one answer. os_inventory sets the same precedent: a report whose scope is not a choice
+    goes straight from the Reports tile to the report.
+
+    Every field arrives blank except the handful network_sod.collect() can answer from
+    Prometheus. That is deliberate and is the point of the sheet — see the module docstring.
+    """
+    if not is_network_admin(request.user):
+        return redirect("report_form")
+
+    data = network_sod.prefilled_checklist()
+    live_keys = sorted(k for k, v in network_sod.collect().items() if v)
+    return render(request, "reports/network_sod.html", {
+        "data": data,
+        "summary": network_sod.summarise(data),
+        "status_choices": network_sod.STATUS_CHOICES,
+        "live_count": len(live_keys),
+        "suggested_author": _profile_author(request.user),
+        "today": timezone.localdate(),
+        "report_theme": getattr(getattr(request.user, "profile", None),
+                                "default_report_theme", "dark"),
+        "generate_url": reverse("network_sod_generate"),
+        "waf_total": network_sod.WAF_PROTECTED_TOTAL,
+    })
+
+
+@login_required
+@require_POST
+def network_sod_generate(request):
+    """Build the SOD workbook from what the engineer keyed in.
+
+    Nothing is cached between the screen and here — there is no snapshot to expire, because
+    the readings came off vendor consoles by hand rather than out of Prometheus. The POST
+    itself IS the capture, which is why this view has no token and no "that snapshot has
+    expired" path.
+    """
+    if not is_network_admin(request.user):
+        return redirect("report_form")
+
+    data = network_sod.from_post(request.POST)
+    summary = network_sod.summarise(data)
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    when = timezone.localtime()
+    payload = network_sod.build_report(data, theme=theme, author=author, when=when,
+                                       summary_comment=summary_comment)
+
+    # Frozen exactly as presented, so History replays the morning without re-keying it.
+    report_content = {
+        "kind": "network_sod",
+        "summary": {k: v for k, v in summary.items() if k != "banners"},
+        "banners": summary["banners"],
+        "core_wan": [{"label": c.label, "result": c.result, "status": c.status}
+                     for c in data["core_wan"]],
+        "firewalls": [{"group": g.label,
+                       "checks": [{"label": c.label, "result": c.result, "status": c.status}
+                                  for c in g.checks]}
+                      for g in data["firewalls"]],
+        "floor": [{"label": c.label, "result": c.result, "status": c.status}
+                  for c in data["floor"]],
+        "circuits": [vars(c) for c in data["circuits"]],
+        "controllers": [vars(c) for c in data["controllers"]],
+        "dr_links": [vars(d) for d in data["dr_links"]],
+        "waf": data["waf"],
+    }
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        annotations={}, report_content=report_content,
+        # A SOD row that is DOWN is the immediate finding; a degraded circuit or a controller
+        # with rogue APs is a watch item. Mapping them onto the shared counters keeps this
+        # report legible in the same History list as the other two rather than showing 0/0.
+        immediate_count=summary["links_down"],
+        watch_count=summary["degraded_circuits"] + summary["rogue_controllers"],
+        summary_comment=summary_comment,
+    )
+
+    resp = HttpResponse(
+        payload,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = (
+        'attachment; filename="{}"'.format(network_sod.sod_report_filename(theme, when)))
     return resp
 
 

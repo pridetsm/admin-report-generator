@@ -170,6 +170,7 @@
     {% if is_network_admin %}
     <div class="drawer-children">
       <a href="{% url 'network_report' %}" class="drawer-child{% if current_page == 'network_report' %} is-current{% endif %}"{% if current_page == 'network_report' %} aria-current="page"{% endif %}>Core Switch</a>
+      <a href="{% url 'network_sod' %}" class="drawer-child{% if current_page == 'network_sod' %} is-current{% endif %}"{% if current_page == 'network_sod' %} aria-current="page"{% endif %}>SOD Checklist</a>
     </div>
     {% endif %}
     {% endif %}

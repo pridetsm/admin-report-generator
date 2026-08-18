@@ -2386,7 +2386,7 @@ class DashboardsAreSeparate(TestCase):
         resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
         self.assertRedirects(resp, reverse("reports"), fetch_redirect_response=False)
         labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
-        self.assertEqual(labels, ["Network Report"])
+        self.assertEqual(labels, ["Network Report", "Network Infrastructure SOD Report"])
 
 
 class NetworkDevicePicker(TestCase):
@@ -4437,14 +4437,23 @@ class ReportsScreen(TestCase):
         labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
         self.assertEqual(labels, ["System Health Report", "OS Inventory Report"])
 
-    def test_each_other_role_gets_its_one_report(self):
-        for name, role, expected in (("sys", "System Admin", "System Health Report"),
-                                     ("net", "Network Admin", "Network Report"),
-                                     ("inf", "Infrastructure Admin", "Infrastructure Report")):
+    def test_each_role_gets_exactly_its_own_reports(self):
+        """Network Admin has TWO: the live Network Report and the hand-keyed SOD checklist.
+
+        They are genuinely different reports rather than two views of one — the first is
+        captured from Prometheus for devices you pick, the second is worked through each
+        morning across four vendor consoles — which is the same reasoning that gave Security
+        Admin its pair and made this screen necessary in the first place.
+        """
+        for name, role, expected in (
+                ("sys", "System Admin", ["System Health Report"]),
+                ("net", "Network Admin", ["Network Report",
+                                          "Network Infrastructure SOD Report"]),
+                ("inf", "Infrastructure Admin", ["Infrastructure Report"])):
             self._user(name, role)
             self._as(name, role)
             labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
-            self.assertEqual(labels, [expected], role)
+            self.assertEqual(labels, expected, role)
             self.client.logout()
 
     def test_administrator_has_no_reports_screen(self):
