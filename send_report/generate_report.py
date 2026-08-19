@@ -683,15 +683,17 @@ class Store:
     links: Dict[str, dict]                      # URL -> {up, code, ssl, cert_days, tls, duration} (blackbox HTTP probes)
     backups: Dict[str, dict]                    # instance -> {files, count, ok, ts} (textfile backup check)
     ldap_up: Optional[bool] = None              # LDAP/auth probe: True up / False down / None not monitored
-    # lower(system name) -> [(target_label, size_gb), ...]. Keyed by SYSTEM, not host
-    # instance: a watched log folder (folder_exporter, kind="logs") belongs to the estate,
-    # not to one host's windows_exporter identity, and folder_exporter scrapes on its own
-    # port so there's no instance string in common with a Component to join against anyway.
+    # lower(system name) -> [(target_label, size_gb, source_ip), ...]. Keyed by SYSTEM, not
+    # host instance: a watched log folder (folder_exporter, kind="logs") belongs to the
+    # estate, not to one host's windows_exporter identity, and folder_exporter scrapes on
+    # its own port so there's no instance string in common with a Component. source_ip (the
+    # exporter's own IP, port stripped) is carried alongside so _system_card can still
+    # attribute the row to whichever host it actually lives on, by IP rather than a guess.
     # Deliberately separate from `disk`, not another mount: a folder's size has no capacity
     # to be a % OF, so it must never enter total_disks()/disk_high()/disk_near_full(), which
     # all read `disk` directly. Rendered as its own extra row in the per-system Disk table
     # instead (see _system_card), sized but not banded.
-    log_files: Dict[str, List[Tuple[str, float]]] = field(default_factory=dict)
+    log_files: Dict[str, List[Tuple[str, float, str]]] = field(default_factory=dict)
 
 
 # filters reused across every node_filesystem / windows_logical_disk query
@@ -773,12 +775,17 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     # emits folder_size_bytes per watched folder, and kind="logs" is how a log-purpose watch
     # (T24's server log folder) is told apart from those queue-depth ones sharing the same
     # exporter, without needing a name to be hardcoded here.
-    log_files: Dict[str, List[Tuple[str, float]]] = {}
+    log_files: Dict[str, List[Tuple[str, float, str]]] = {}
     for r in prom.query('folder_size_bytes{kind="logs"}/1024/1024/1024'):
         sysname = (r["labels"].get("system") or "").strip().lower()
         target = r["labels"].get("target") or "Log File Size"
+        # folder_exporter scrapes on its OWN port (9847), so its `instance` label never
+        # matches a Component's directly -- just its IP does. Kept alongside the row so
+        # _system_card can attribute it to the right host instead of guessing by label text
+        # (which put T24's log folder on "T24 App" when it actually lives on T24 DB).
+        source_ip = (r["labels"].get("instance") or "").split(":")[0]
         if sysname:
-            log_files.setdefault(sysname, []).append((target, r["value"]))
+            log_files.setdefault(sysname, []).append((target, r["value"], source_ip))
 
     # ---- specials -------------------------------------------------------------
     cob = prom.scalar("cob_time")
@@ -1813,14 +1820,17 @@ class ReportBuilder:
         # log files ride the same Disk table (a size, not a mount -- no "used"/"free", so the
         # row renders a dash instead of a % chip) but never touch `store.disk` itself, so they
         # can't be mistaken for a real volume by total_disks()/disk_high()/disk_near_full().
-        # Keyed by SYSTEM (see Store.log_files), not per-component -- attributed to whichever
-        # component looks like the app host (where a watched folder like this actually lives),
-        # falling back to the first component if none is obviously "App".
-        _log_rows = store.log_files.get(sysm.name.lower(), [])
-        if _log_rows:
-            _log_host = next((c.label for c in sysm.components if "app" in c.label.lower()),
-                             sysm.components[0].label if sysm.components else sysm.name)
-            disks += [(_log_host, name, {"size": gb}) for name, gb in _log_rows]
+        # Keyed by SYSTEM (see Store.log_files), not per-component -- attributed to the
+        # component whose OWN instance shares the folder_exporter's IP (source_ip), i.e. the
+        # host the watched folder actually lives on. T24's log folder turned out to be on
+        # T24 DB, not T24 App -- a name-based guess ("whichever looks like App") would have
+        # gotten that wrong, so this matches by address instead. Falls back to the first
+        # component only if nothing on this system shares that IP.
+        for name, gb, source_ip in store.log_files.get(sysm.name.lower(), []):
+            host = next((c.label for c in sysm.components
+                        if c.instance.split(":")[0] == source_ip),
+                       sysm.components[0].label if sysm.components else sysm.name)
+            disks.append((host, name, {"size": gb}))
         nd = sum(1 for _, st, _ in mems if st == "down")           # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
              sum(1 for _, st, v in mems if st == "ok" and v >= self.cfg.chip_red) + \
