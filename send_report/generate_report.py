@@ -1441,19 +1441,19 @@ class ReportBuilder:
         ur = unreachable(store, systems)           # needed for the Unreachable KPI below
 
         # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
-        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups. Systems,
-        # Hosts and Services are short 1-2 digit numbers, so they share the narrow 1-column
-        # shape SYSTEMS already proved works — freeing the 2 columns PLATFORMS needs without
-        # touching SWIFT/COB's wider text. One combined tile, not two, reads the same shape
-        # every other pair-of-numbers tile in this report uses ("linux% | windows%", not a
-        # bare count each) rather than two separate cards a reader has to add up by eye.
+        # widths chosen so the wide readings sit in the wide groups. Systems, Hosts and
+        # Services are short 1-2 digit numbers, so they share the narrow 1-column shape
+        # SYSTEMS already proved works. LINUX | WINDOWS's "64% | 34%" is 9 characters at the
+        # same large value font every card uses — too wide for 2 columns (it clipped: see
+        # commit fixing this), so it gets 3, the same shape COB's similarly-long "44.6 min"
+        # already uses; SWIFT loses a column to pay for it since "685"/"N/A" never needs 3.
         caption(8, "AT A GLANCE  ·  inventory & readings")
         linux_pct, win_pct = platform_host_pcts(systems)
         static = [((2, 2),  "SYSTEMS",              str(len(systems))),
                   ((3, 3),  "HOSTS",                 str(hosts)),
                   ((4, 4),  "SERVICES",              str(nsvc)),
-                  ((5, 6),  "LINUX | WINDOWS",       f"{linux_pct}% | {win_pct}%"),
-                  ((7, 9),  "SWIFT TXNS",            swift),
+                  ((5, 7),  "LINUX | WINDOWS",       f"{linux_pct}% | {win_pct}%"),
+                  ((8, 9),  "SWIFT TXNS",            swift),
                   ((10, 12), "COB · T24",            cob)]
         for group, label, value in static:
             card(9, group, label, value, "info", vrow=10)
