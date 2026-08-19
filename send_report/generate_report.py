@@ -1214,15 +1214,15 @@ def backup_missing_band(count: int) -> str:
 # ============================================================================ #
 class ReportBuilder:
     # column widths (A gutter, then Services | gap | Memory | gap | Disk | gap | Backups | gap | Notes)
-    # D=9 (not the tighter 2 you'd expect for a mere gap column): the overview tile band
-    # reuses these same sheet columns, and HIGH RAM USAGE's "HOSTS" sub-column lands
-    # entirely on D — at width 2 that clipped the label. 9 matches C so both KPI sub-columns
-    # read fully, and D still just merges into the wider Services card body below. HIGH DISK
-    # USAGE occupies F-I (4 real, divided sub-columns: HOSTS/TOTAL/DISKS/TOTAL) — the extra
-    # physical column it needs comes from BACKUP TRACKING dropping its own TOTAL (see
-    # _band_spans/the watch_tiles list below), not from widening these columns, so the row
-    # still lands on its original 11 columns without pushing anything onto M.
-    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 8,
+    # D=2, matching the Disk-to-Backups gap (M) and the Backups-to-Notes gap (Q) -- every
+    # table separated by the same small gap. D is shared with the overview tile band (HIGH
+    # CPU USAGE's 3rd sub-column, B-D), but _split_by_width there divides by WIDTH not column
+    # count, so a narrow D just merges into the wider "TOTAL" sub-column next to it (C-D)
+    # rather than clipping -- verified against live data, HIGH CPU USAGE still reads "0 | 57"
+    # correctly at this width. H has no equivalent blank gap column at all: Memory · CPU and
+    # Disk are separated by a thin divider border instead (see the per-row rendering below),
+    # which is already at least as tight as a width-2 column, so it needs no change here.
+    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 2, "E": 14, "F": 8,
               "G": 8, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
               "M": 2, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
               "Q": 2,                                      # gap before Notes
