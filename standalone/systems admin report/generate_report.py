@@ -475,8 +475,13 @@ LDAP_DEPENDENTS = {"GCMS", "GMS"}
 # `system` label values that are not real systems. "rbz network" is the core switch / network
 # device estate (see the `snmp` job in prometheus.yml and DEVICES in webapp/reports/network.py)
 # — those get their own Network Admin Report and are deliberately excluded here so a switch
-# never appears among RTGS and Temenos on the System Admin side.
-SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network"}
+# never appears among RTGS and Temenos on the System Admin side. "rtgstest" is RTGS's own
+# test environment, not a business system anyone needs a report on — kept OUT of the System
+# Admin estate the same way, rather than reporting on non-production infrastructure alongside
+# the real one. (DR/staging role components -- Eagle's "dr", LMS's "staging", etc. -- are
+# left alone: those are real infrastructure belonging to a real system, not test systems in
+# their own right, so excluding them here would be wrong.)
+SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest"}
 
 # `system` label values that ARE real systems, but belong to Infrastructure Admin's own
 # estate (hyper-converged clusters, standalone DB hosts — the underlying hardware) rather
