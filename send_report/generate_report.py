@@ -1906,6 +1906,13 @@ class ReportBuilder:
         self._cell(y, 8, bg=Theme.CARD)
         self._merge(y, 9, 13, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
         self.ws.cell(y, 9).value = CellRichText(parts)
+        # the bar itself extends all the way to Notes' own right edge (23, the same in both
+        # branches of nl/nr below) rather than stopping at the summary text's own width, so
+        # the title reads as wide as the tables it sits above instead of looking cut short
+        # over Backups/Notes -- filled plain, not merged, so the summary text keeps its own
+        # tighter right-alignment near Disk rather than drifting off to the far right edge.
+        for c in range(14, 24):
+            self._cell(y, c, bg=Theme.CARD)
         y += 1
         for c in range(2, 14):           # spacer between the name and the tables
             self._cell(y, c, bg=Theme.BG)
