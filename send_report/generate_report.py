@@ -1232,13 +1232,13 @@ class ReportBuilder:
            holding both labels merged into one narrow cell and clip (this is what happened to
            HIGH RAM USAGE's "HOSTS" label before the column was widened). A single-number
            panel (no divider to draw) is exempt from that floor and can sit in just 1 column.
-           A panel needing a 3rd/4th sub-column (HIGH DISK USAGE) gets that many real,
-           divided columns rather than cramming two numbers into one cell — the row's total
-           must still land on the historical 11 columns to stay aligned with the bands
-           above/below it, so BACKUP TRACKING (the least time-sensitive tile here) drops its
-           own TOTAL — already shown as SYSTEMS in the row above — to free the column HIGH
-           DISK USAGE's 4th sub-column needs. Any further spare width beyond each tile's own
-           minimum goes first to the widest-need panel(s)."""
+           Every panel here is a 2-number one (its own affected | TOTAL) and lands at the
+           2-column floor, six panels' worth summing to the row's historical 11 columns — so
+           there is no room for a 3rd/4th sub-column without dropping another panel's own
+           TOTAL to pay for it (HIGH DISK USAGE briefly did this at BACKUP TRACKING's expense;
+           reverted, since a row where one tile's total is missing so another's can have two
+           of them just moves the problem). Any spare width beyond each tile's own minimum
+           goes first to the widest-need panel(s)."""
         n = len(tiles)
         subcols = lambda t: len(t[2]) if t[0] == "panel" else 1
         spans = [max(2, subcols(t)) if subcols(t) > 1 else 1 for t in tiles]
@@ -1450,7 +1450,7 @@ class ReportBuilder:
         # near-full disks ARE high disks and are included here. The banner still carries
         # the named per-host detail. State follows the count: red if any disk is near-full,
         # amber if only elevated, green when zero — so 0 is always green (the colour rule).
-        disk_high_h, disk_high_d, disk_high_state = disk_high(
+        _disk_high_h, disk_high_d, disk_high_state = disk_high(
             store, systems, thr, self.cfg.chip_red)
         # systems with no backup check at all (a monitoring blind spot) -> amber when any
         n_untracked = len(backup_untracked(store, systems))
@@ -1464,23 +1464,18 @@ class ReportBuilder:
         watch_tiles = [
             ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts), ("TOTAL", total_hosts)], cpu_state),
             ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts), ("TOTAL", total_hosts)], ram_state),
-            # 4 real, divided sub-columns — HOSTS/TOTAL alongside DISKS/TOTAL, same bordered
-            # divider every other panel uses (see _band_spans/panel()). The 4th column comes
-            # from BACKUP TRACKING dropping its own TOTAL below, so the row still lands on
-            # the historical 11 columns.
+            # DISKS/TOTAL only — the affected-HOSTS count dropped from here. A disk can be
+            # high without its host being flagged for CPU/RAM, so the host count wasn't
+            # redundant, but every tile in this row must show its own total, and freeing this
+            # panel down to 2 columns is what lets BACKUP TRACKING have one back (see
+            # _band_spans).
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
-             [("HOSTS", disk_high_h), ("TOTAL", total_hosts),
-              ("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
+             [("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
              disk_high_state),
             # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
             # encrypted estate read "12 | 0", which looks like half a number, not a pass.
             ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("TOTAL", n_https + n_http)], web_state),
-            # TRACKED alone, no TOTAL — that denominator is already on screen as SYSTEMS in
-            # the AT A GLANCE row above, so repeating it here would just be the 3rd copy of
-            # the same number in this section. Freeing its own divider column is what lets
-            # HIGH DISK USAGE show a real 4th sub-column instead of cramming two numbers into
-            # one cell — see _band_spans.
-            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked)],
+            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("TOTAL", len(systems))],
              "good" if n_untracked == 0 else "warn"),
         ]
 
