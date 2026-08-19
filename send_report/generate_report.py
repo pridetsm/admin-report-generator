@@ -683,6 +683,11 @@ class Store:
     links: Dict[str, dict]                      # URL -> {up, code, ssl, cert_days, tls, duration} (blackbox HTTP probes)
     backups: Dict[str, dict]                    # instance -> {files, count, ok, ts} (textfile backup check)
     ldap_up: Optional[bool] = None              # LDAP/auth probe: True up / False down / None not monitored
+    # instance -> [(label, size_gb), ...] — deliberately separate from `disk`, not another
+    # mount: a log file has no capacity to be a % OF, so it must never enter total_disks()/
+    # disk_high()/disk_near_full(), which all read `disk` directly. Rendered as its own extra
+    # row in the per-system Disk table instead (see _system_card), sized but not banded.
+    log_files: Dict[str, List[Tuple[str, float]]] = field(default_factory=dict)
 
 
 # filters reused across every node_filesystem / windows_logical_disk query
@@ -758,6 +763,16 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
         if rows:
             ldap_up = max(r["value"] for r in rows) >= 1
 
+    # ---- log files: a size, not a mount -- see Store.log_files for why this is kept
+    # entirely separate from `disk`. Currently just T24's server.log (see the checker
+    # script in send_report/checks/t24_log_size.ps1); metric name is generic
+    # (log_file_size_bytes{file="..."}), so a second host's log check just adds a row.
+    log_files: Dict[str, List[Tuple[str, float]]] = {}
+    for r in prom.query("log_file_size_bytes/1024/1024/1024"):
+        inst = r["labels"].get("instance")
+        if inst:
+            log_files.setdefault(inst, []).append(("Log File Size", r["value"]))
+
     # ---- specials -------------------------------------------------------------
     cob = prom.scalar("cob_time")
     swift = prom.scalar("swift_transactions_total")
@@ -821,7 +836,8 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     # ---- backups (textfile collector: backup_file / _count / _success / _ts) ----
     backups = capture_backups(prom)
 
-    return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up)
+    return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up,
+                log_files=log_files)
 
 
 def _is_url(inst: Optional[str]) -> bool:
@@ -1787,6 +1803,12 @@ class ReportBuilder:
                  for c in sysm.components
                  for mp, dd in sorted(store.disk.get(c.instance, {}).items(),
                                       key=lambda kv: -kv[1].get("used", 0))]
+        # log files ride the same Disk table (a size, not a mount -- no "used"/"free", so the
+        # row renders a dash instead of a % chip) but never touch `store.disk` itself, so they
+        # can't be mistaken for a real volume by total_disks()/disk_high()/disk_near_full().
+        disks += [(c.label, name, {"size": gb})
+                  for c in sysm.components
+                  for name, gb in store.log_files.get(c.instance, [])]
         nd = sum(1 for _, st, _ in mems if st == "down")           # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
              sum(1 for _, st, v in mems if st == "ok" and v >= self.cfg.chip_red) + \
@@ -1946,10 +1968,13 @@ class ReportBuilder:
             # disk
             if k < len(disks):
                 label, mount, dd = disks[k]
-                used, free, size = dd.get("used", 0), dd.get("free"), dd.get("size")
+                used, free, size = dd.get("used"), dd.get("free"), dd.get("size")
                 self._cell(r, 8, label, Theme.font(9, False, Theme.GREY), border=True)
                 self._cell(r, 9, mount, Theme.font(9, False, Theme.GREY), border=True)
-                self._chip(r, 10, f"{used:.0f}%", self._band(used), sz=9)
+                if used is None:            # a log file: sized, not banded -- no % of anything
+                    self._cell(r, 10, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                else:
+                    self._chip(r, 10, f"{used:.0f}%", self._band(used), sz=9)
                 self._cell(r, 11, f"{free:.1f}" if free is not None else "—",
                            Theme.font(9, False, Theme.WHITE), al="center", border=True)
                 self._cell(r, 12, f"{size:.0f}" if size is not None else "—",
