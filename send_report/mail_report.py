@@ -523,7 +523,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
         _kpi_panel("Expired certs", [("Expired", len(cert_expired)), ("Total", engine.cert_monitored(store))],
                    RED if cert_expired else GREEN),
     ]
-    disk_high_h, disk_high_d, disk_high_state = engine.disk_high(store, systems, thr, CRIT)
+    _disk_high_h, disk_high_d, disk_high_state = engine.disk_high(store, systems, thr, CRIT)
     disk_high_color = {"good": GREEN, "warn": AMBER, "bad": RED}[disk_high_state]
     n_untracked = len(engine.backup_untracked(store, systems))
     n_tracked = len(systems) - n_untracked
@@ -534,19 +534,16 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                    AMBER if cpu_hosts else GREEN),
         _kpi_panel("High RAM usage", [("Hosts", ram_hosts), ("Total", hosts)],
                    AMBER if ram_hosts else GREEN),
-        # 4 real, divided cells — matches the xlsx (Hosts/Total alongside Disks/Total, same
-        # bordered-divider convention every tile uses). The Backup tracking tile below drops
-        # its own Total to match.
+        # Disks/Total only — matches the xlsx (see generate_report.py's HIGH DISK USAGE tile),
+        # which dropped the separate Hosts/Total pair so Backup tracking below could keep its
+        # own Total instead of every tile in the row fighting over the same fixed column budget.
         _kpi_panel(f"High disk usage &middot; &#8805;{thr}%",
-                   [("Hosts", disk_high_h), ("Total", hosts),
-                    ("Disks", disk_high_d), ("Total", engine.total_disks(store, systems))],
+                   [("Disks", disk_high_d), ("Total", engine.total_disks(store, systems))],
                    disk_high_color),
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
         _kpi_panel("Web encryption", [("HTTPS", n_https), ("Total", n_https + n_http)], web_color),
-        # Tracked alone, no Total — that denominator is already shown as Systems in the row
-        # above, and matches the xlsx (see generate_report.py's BACKUP TRACKING tile).
-        _kpi_panel("Backup tracking", [("Tracked", n_tracked)],
+        _kpi_panel("Backup tracking", [("Tracked", n_tracked), ("Total", len(systems))],
                    AMBER if n_untracked else GREEN),
     ]
     immediate_kpis = "".join(immediate_kpis)
