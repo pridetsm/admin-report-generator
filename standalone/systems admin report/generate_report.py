@@ -485,6 +485,14 @@ SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network"}
 # (see webapp/reports/roles.py's Infrastructure Admin role and views.infra_form/infra_report).
 INFRA_SYSTEMS = {"hci cluster", "oracle hosts"}
 
+# Scrape jobs whose targets carry a `system` label for a DIFFERENT feature's benefit, not
+# because the target is a host this report should track CPU/RAM/disk on. folder_exporter's
+# target (Temenos/T24 Interface Folders — queue backlog, not a server) is grouped under
+# `system: "Temenos"` purely so Folder Watch can find it; load_topology used to sweep it into
+# Temenos's host list anyway, which gave it permanent "no data" CPU/RAM/disk findings for
+# metrics it was never going to report — a component nobody meant to add, since nobody did.
+SKIP_JOBS = {"folder_exporter"}
+
 # Web links (blackbox HTTP probes) become a "WEB LINKS" service class inside a
 # system's Services table. A link is auto-attributed to the system whose name
 # appears in its URL (e.g. 'cepecs' in 'cepecsrpt.excon.rbz.co.zw' -> CEPECS).
@@ -593,6 +601,31 @@ def platform_of_system(components: List[Component]) -> str:
     return kinds.pop() if len(kinds) == 1 else "hybrid"
 
 
+def platform_host_counts(systems: List[System]) -> Tuple[int, int]:
+    """(windows_hosts, linux_hosts) across every component in every system -- the AT A
+    GLANCE platform tiles' numerator. Counted per HOST, not per system: a hybrid system
+    (see platform_of_system) has hosts of both kinds, and a system-level tally would hide
+    that split. Components with no classified os (web probes; see os_of_job) count toward
+    neither, so the two numbers don't have to sum to the total host count -- same reasoning
+    as platform_of_system not forcing every system into "windows" or "linux"."""
+    windows = sum(1 for s in systems for c in s.components if getattr(c, "os", "") == "windows")
+    linux = sum(1 for s in systems for c in s.components if getattr(c, "os", "") == "linux")
+    return windows, linux
+
+
+def platform_host_pcts(systems: List[System]) -> Tuple[int, int]:
+    """(linux_pct, windows_pct) — the single PLATFORMS tile's "linux% | windows%" pair.
+    Rounded independently, against the FULL host count (not windows+linux), so the two
+    numbers don't have to sum to 100 -- same honesty as platform_host_counts not forcing
+    every host into one of the two camps. Single source of truth so the xlsx/web/e-mail
+    tile can never round differently and disagree by a point."""
+    hosts = sum(len(s.components) for s in systems)
+    if not hosts:
+        return 0, 0
+    windows, linux = platform_host_counts(systems)
+    return round(linux / hosts * 100), round(windows / hosts * 100)
+
+
 def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[System]:
     """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label).
 
@@ -613,6 +646,8 @@ def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[Syste
     grouped: Dict[str, List[Component]] = {}
     for job in doc.get("scrape_configs", []) or []:
         job_name = job.get("job_name") or ""
+        if job_name in SKIP_JOBS:
+            continue
         for sc in job.get("static_configs", []) or []:
             labels = sc.get("labels", {}) or {}
             system = (labels.get("system") or "").strip()
@@ -648,6 +683,17 @@ class Store:
     links: Dict[str, dict]                      # URL -> {up, code, ssl, cert_days, tls, duration} (blackbox HTTP probes)
     backups: Dict[str, dict]                    # instance -> {files, count, ok, ts} (textfile backup check)
     ldap_up: Optional[bool] = None              # LDAP/auth probe: True up / False down / None not monitored
+    # lower(system name) -> [(target_label, size_gb, source_ip), ...]. Keyed by SYSTEM, not
+    # host instance: a watched log folder (folder_exporter, kind="logs") belongs to the
+    # estate, not to one host's windows_exporter identity, and folder_exporter scrapes on
+    # its own port so there's no instance string in common with a Component. source_ip (the
+    # exporter's own IP, port stripped) is carried alongside so _system_card can still
+    # attribute the row to whichever host it actually lives on, by IP rather than a guess.
+    # Deliberately separate from `disk`, not another mount: a folder's size has no capacity
+    # to be a % OF, so it must never enter total_disks()/disk_high()/disk_near_full(), which
+    # all read `disk` directly. Rendered as its own extra row in the per-system Disk table
+    # instead (see _system_card), sized but not banded.
+    log_files: Dict[str, List[Tuple[str, float, str]]] = field(default_factory=dict)
 
 
 # filters reused across every node_filesystem / windows_logical_disk query
@@ -723,6 +769,24 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
         if rows:
             ldap_up = max(r["value"] for r in rows) >= 1
 
+    # ---- log files: a size, not a mount -- see Store.log_files for why this is kept
+    # entirely separate from `disk`. Reuses folder_exporter (already deployed for the
+    # interface/queue folders — see SKIP_JOBS) rather than a new textfile check: it already
+    # emits folder_size_bytes per watched folder, and kind="logs" is how a log-purpose watch
+    # (T24's server log folder) is told apart from those queue-depth ones sharing the same
+    # exporter, without needing a name to be hardcoded here.
+    log_files: Dict[str, List[Tuple[str, float, str]]] = {}
+    for r in prom.query('folder_size_bytes{kind="logs"}/1024/1024/1024'):
+        sysname = (r["labels"].get("system") or "").strip().lower()
+        target = r["labels"].get("target") or "Log File Size"
+        # folder_exporter scrapes on its OWN port (9847), so its `instance` label never
+        # matches a Component's directly -- just its IP does. Kept alongside the row so
+        # _system_card can attribute it to the right host instead of guessing by label text
+        # (which put T24's log folder on "T24 App" when it actually lives on T24 DB).
+        source_ip = (r["labels"].get("instance") or "").split(":")[0]
+        if sysname:
+            log_files.setdefault(sysname, []).append((target, r["value"], source_ip))
+
     # ---- specials -------------------------------------------------------------
     cob = prom.scalar("cob_time")
     swift = prom.scalar("swift_transactions_total")
@@ -786,7 +850,8 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     # ---- backups (textfile collector: backup_file / _count / _success / _ts) ----
     backups = capture_backups(prom)
 
-    return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up)
+    return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up,
+                log_files=log_files)
 
 
 def _is_url(inst: Optional[str]) -> bool:
@@ -1149,19 +1214,23 @@ def backup_missing_band(count: int) -> str:
 # ============================================================================ #
 class ReportBuilder:
     # column widths (A gutter, then Services | gap | Memory | gap | Disk | gap | Backups | gap | Notes)
-    # D=9 (not the tighter 2 you'd expect for a mere gap column): the overview tile band
-    # reuses these same sheet columns, and HIGH RAM USAGE's "HOSTS" sub-column lands
-    # entirely on D — at width 2 that clipped the label. 9 matches C so both KPI sub-columns
-    # read fully, and D still just merges into the wider Services card body below. HIGH DISK
-    # USAGE occupies F-I (4 real, divided sub-columns: HOSTS/TOTAL/DISKS/TOTAL) — the extra
-    # physical column it needs comes from BACKUP TRACKING dropping its own TOTAL (see
-    # _band_spans/the watch_tiles list below), not from widening these columns, so the row
-    # still lands on its original 11 columns without pushing anything onto M.
-    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 8,
-              "G": 8, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
-              "M": 2, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
-              "Q": 2,                                      # gap before Notes
-              "R": 13, "S": 11, "T": 11, "U": 11, "V": 9}  # R-V = notes column
+    # All four gap columns (D, H, N, R) are the SAME small width, 2 -- every table separated
+    # by the same gap, none singled out. Each is shared with real content in the overview
+    # tile band above (D = HIGH CPU USAGE's 3rd sub-column, H = HIGH DISK USAGE's 2nd), but
+    # _split_by_width there divides by WIDTH, not column count, so a narrow gap column just
+    # merges into the wider sub-column beside it (e.g. C-D becomes "TOTAL"'s span) instead of
+    # clipping -- verified against live data for both.
+    # I-M are the Disk table (Host | Mount | Used % | Free GB | Size GB); J=20 (not the ~12
+    # you'd expect) because Mount now also holds folder_exporter log-folder names ("T24 Log
+    # File") that a tight column clipped -- same fix as the AT A GLANCE platforms tile, same
+    # column-sharing reason: J is also WEB ENCRYPTION's 2nd sub-column in the watch row and
+    # SERVICES DOWN's 3rd in the immediate row, both of which only ever hold short values, so
+    # widening it here costs them nothing.
+    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 2, "E": 14, "F": 8,
+              "G": 8, "H": 2, "I": 14, "J": 20, "K": 7, "L": 7,   # G = Memory·CPU's CPU % column
+              "M": 11, "N": 2, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
+              "R": 2,                                        # gap before Notes
+              "S": 13, "T": 11, "U": 11, "V": 11, "W": 9}  # S-W = notes column
     CARD_GROUPS = [(2, 4), (5, 7), (8, 9), (10, 12)]   # 4 overview cards across the width
 
     def __init__(self, cfg: Config, *, author: Optional[str] = None,
@@ -1232,13 +1301,13 @@ class ReportBuilder:
            holding both labels merged into one narrow cell and clip (this is what happened to
            HIGH RAM USAGE's "HOSTS" label before the column was widened). A single-number
            panel (no divider to draw) is exempt from that floor and can sit in just 1 column.
-           A panel needing a 3rd/4th sub-column (HIGH DISK USAGE) gets that many real,
-           divided columns rather than cramming two numbers into one cell — the row's total
-           must still land on the historical 11 columns to stay aligned with the bands
-           above/below it, so BACKUP TRACKING (the least time-sensitive tile here) drops its
-           own TOTAL — already shown as SYSTEMS in the row above — to free the column HIGH
-           DISK USAGE's 4th sub-column needs. Any further spare width beyond each tile's own
-           minimum goes first to the widest-need panel(s)."""
+           Every panel here is a 2-number one (its own affected | TOTAL) and lands at the
+           2-column floor, six panels' worth summing to the row's historical 11 columns — so
+           there is no room for a 3rd/4th sub-column without dropping another panel's own
+           TOTAL to pay for it (HIGH DISK USAGE briefly did this at BACKUP TRACKING's expense;
+           reverted, since a row where one tile's total is missing so another's can have two
+           of them just moves the problem). Any spare width beyond each tile's own minimum
+           goes first to the widest-need panel(s)."""
         n = len(tiles)
         subcols = lambda t: len(t[2]) if t[0] == "panel" else 1
         spans = [max(2, subcols(t)) if subcols(t) > 1 else 1 for t in tiles]
@@ -1362,15 +1431,22 @@ class ReportBuilder:
 
         def card(rtop, group, label, value, state, vrow=None):
             """Standard card: title (rtop) + big value. vrow lets row 2 bottom-align
-               its value so it lines up with the taller disk panel."""
+               its value so it lines up with the taller disk panel.
+
+               Centered, matching panel()'s alignment — the two are the same "tile" component
+               with two shapes (one number vs several), so a reader shouldn't see one row's
+               tiles hug the left edge while every other row's are centered. Left-alignment
+               also pushed a wide value's tail toward the next tile's border with no margin
+               to protect it, which is what made a 2-part value like "64% | 34%" look cramped
+               against the accent bar on one side and squeezed on the other."""
             c1, c2 = group
             accent, tint = palette[state]
             vrow = rtop + 1 if vrow is None else vrow
             bar = Border(left=Side(style="thick", color=accent))   # accent bar on the LEFT
-            self._merge(rtop, c1, c2, "  " + label, Theme.font(8, True, Theme.SUB), bg=tint, al="left")
+            self._merge(rtop, c1, c2, label, Theme.font(8, True, Theme.SUB), bg=tint, al="center")
             for r in range(rtop + 1, vrow):                        # keep the card solid if it spans 3 rows
-                self._merge(r, c1, c2, "", Theme.font(8), bg=tint, al="left")
-            self._merge(vrow, c1, c2, "  " + value, Theme.font(22, True, accent), bg=tint, al="left")
+                self._merge(r, c1, c2, "", Theme.font(8), bg=tint, al="center")
+            self._merge(vrow, c1, c2, value, Theme.font(22, True, accent), bg=tint, al="center")
             for r in range(rtop, vrow + 1):
                 self.ws.cell(r, c1).border = bar
             self.ws.row_dimensions[vrow].height = 30
@@ -1409,13 +1485,20 @@ class ReportBuilder:
         ur = unreachable(store, systems)           # needed for the Unreachable KPI below
 
         # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
-        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups
+        # widths chosen so the wide readings sit in the wide groups. Systems, Hosts and
+        # Services are short 1-2 digit numbers, so they share the narrow 1-column shape
+        # SYSTEMS already proved works. LINUX | WINDOWS's "64% | 34%" is 9 characters at the
+        # same large value font every card uses — too wide for 2 columns (it clipped: see
+        # commit fixing this), so it gets 3, the same shape COB's similarly-long "44.6 min"
+        # already uses; SWIFT loses a column to pay for it since "685"/"N/A" never needs 3.
         caption(8, "AT A GLANCE  ·  inventory & readings")
-        static = [((2, 2),   "SYSTEMS",    str(len(systems))),
-                  ((3, 4),   "HOSTS",      str(hosts)),
-                  ((5, 6),   "SERVICES",   str(nsvc)),
-                  ((7, 9),   "SWIFT TXNS", swift),
-                  ((10, 12), "COB · T24",  cob)]
+        linux_pct, win_pct = platform_host_pcts(systems)
+        static = [((2, 2),  "SYSTEMS",              str(len(systems))),
+                  ((3, 3),  "HOSTS",                 str(hosts)),
+                  ((4, 4),  "SERVICES",              str(nsvc)),
+                  ((5, 7),  "LINUX | WINDOWS",       f"{linux_pct}% | {win_pct}%"),
+                  ((8, 9),  "SWIFT TXNS",            swift),
+                  ((10, 12), "COB · T24",            cob)]
         for group, label, value in static:
             card(9, group, label, value, "info", vrow=10)
 
@@ -1450,7 +1533,7 @@ class ReportBuilder:
         # near-full disks ARE high disks and are included here. The banner still carries
         # the named per-host detail. State follows the count: red if any disk is near-full,
         # amber if only elevated, green when zero — so 0 is always green (the colour rule).
-        disk_high_h, disk_high_d, disk_high_state = disk_high(
+        _disk_high_h, disk_high_d, disk_high_state = disk_high(
             store, systems, thr, self.cfg.chip_red)
         # systems with no backup check at all (a monitoring blind spot) -> amber when any
         n_untracked = len(backup_untracked(store, systems))
@@ -1464,23 +1547,18 @@ class ReportBuilder:
         watch_tiles = [
             ("panel", "HIGH CPU USAGE", [("HOSTS", cpu_hosts), ("TOTAL", total_hosts)], cpu_state),
             ("panel", "HIGH RAM USAGE", [("HOSTS", ram_hosts), ("TOTAL", total_hosts)], ram_state),
-            # 4 real, divided sub-columns — HOSTS/TOTAL alongside DISKS/TOTAL, same bordered
-            # divider every other panel uses (see _band_spans/panel()). The 4th column comes
-            # from BACKUP TRACKING dropping its own TOTAL below, so the row still lands on
-            # the historical 11 columns.
+            # DISKS/TOTAL only — the affected-HOSTS count dropped from here. A disk can be
+            # high without its host being flagged for CPU/RAM, so the host count wasn't
+            # redundant, but every tile in this row must show its own total, and freeing this
+            # panel down to 2 columns is what lets BACKUP TRACKING have one back (see
+            # _band_spans).
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
-             [("HOSTS", disk_high_h), ("TOTAL", total_hosts),
-              ("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
+             [("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
              disk_high_state),
             # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
             # encrypted estate read "12 | 0", which looks like half a number, not a pass.
             ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("TOTAL", n_https + n_http)], web_state),
-            # TRACKED alone, no TOTAL — that denominator is already on screen as SYSTEMS in
-            # the AT A GLANCE row above, so repeating it here would just be the 3rd copy of
-            # the same number in this section. Freeing its own divider column is what lets
-            # HIGH DISK USAGE show a real 4th sub-column instead of cramming two numbers into
-            # one cell — see _band_spans.
-            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked)],
+            ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("TOTAL", len(systems))],
              "good" if n_untracked == 0 else "warn"),
         ]
 
@@ -1573,6 +1651,22 @@ class ReportBuilder:
                 [(h, ", ".join(v)) for h, v in sorted(byhost.items())],
                 "These volumes are almost full — an imminent outage that can take the service down. "
                 "Free space or extend the disk now."))
+
+        # 1b) tracked hosts with no fresh backup — a data-loss risk, not a metric out of
+        #     range: if the host is lost today, there is nothing recent to restore from.
+        #     UNTRACKED hosts never appear here (see backup_missing's own docstring) — this
+        #     is only hosts the backup check actually watches and found nothing fresh for.
+        if miss:
+            bysys: Dict[str, List[str]] = {}
+            for s, lbl, reason in miss:
+                bysys.setdefault(s, []).append(f"{lbl} ({reason})")
+            banners.append((
+                "critical",
+                f"MISSING BACKUPS  —  {len(miss)} host(s) with no fresh backup",
+                [(s, "   ".join(v)) for s, v in sorted(bysys.items())],
+                "These hosts run the backup check but have nothing fresh within policy — if the host "
+                "is lost today, there is no recent backup to restore from. Confirm the backup job and "
+                "re-run it."))
 
         # 2) components Prometheus can no longer reach — the highest-severity finding on
         #    this report: every other red banner is at least still being measured, this one
@@ -1727,6 +1821,20 @@ class ReportBuilder:
                  for c in sysm.components
                  for mp, dd in sorted(store.disk.get(c.instance, {}).items(),
                                       key=lambda kv: -kv[1].get("used", 0))]
+        # log files ride the same Disk table (a size, not a mount -- no "used"/"free", so the
+        # row renders a dash instead of a % chip) but never touch `store.disk` itself, so they
+        # can't be mistaken for a real volume by total_disks()/disk_high()/disk_near_full().
+        # Keyed by SYSTEM (see Store.log_files), not per-component -- attributed to the
+        # component whose OWN instance shares the folder_exporter's IP (source_ip), i.e. the
+        # host the watched folder actually lives on. T24's log folder turned out to be on
+        # T24 DB, not T24 App -- a name-based guess ("whichever looks like App") would have
+        # gotten that wrong, so this matches by address instead. Falls back to the first
+        # component only if nothing on this system shares that IP.
+        for name, gb, source_ip in store.log_files.get(sysm.name.lower(), []):
+            host = next((c.label for c in sysm.components
+                        if c.instance.split(":")[0] == source_ip),
+                       sysm.components[0].label if sysm.components else sysm.name)
+            disks.append((host, name, {"size": gb}))
         nd = sum(1 for _, st, _ in mems if st == "down")           # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
              sum(1 for _, st, v in mems if st == "ok" and v >= self.cfg.chip_red) + \
@@ -1791,20 +1899,33 @@ class ReportBuilder:
             if i:
                 parts.append(_tb("  ·  ", Theme.SUB))        # neutral separator
             parts.append(_tb(text, color))
-        self._merge(y, 8, 12, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
-        self.ws.cell(y, 8).value = CellRichText(parts)
+        # col 8 is the real gap column before Disk (see WIDTHS) -- blanked here TOO, in the
+        # CARD background matching the rest of this bar, not just in the rows below, so the
+        # name/summary bar reads as one solid strip rather than showing a hole the wrong
+        # colour where the gap column crosses it (the bug in the first attempt at this).
+        self._cell(y, 8, bg=Theme.CARD)
+        # Right-aligned at 23 -- Notes' own right edge, always (see nl/nr below), not
+        # Disk's -- so the summary sits flush with where the whole card actually ends,
+        # the same edge the name panel's own bar now reaches.
+        self._merge(y, 9, 23, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
+        self.ws.cell(y, 9).value = CellRichText(parts)
         y += 1
-        for c in range(2, 13):           # spacer between the name and the tables
+        for c in range(2, 14):           # spacer between the name and the tables
             self._cell(y, c, bg=Theme.BG)
         y += 1
         # table-name row
         self._merge(y, 2, 3, "Services", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
         self._cell(y, 4, bg=Theme.BG)
         self._merge(y, 5, 7, "Memory · CPU", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
-        self._merge(y, 8, 12, "Disk", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+        self._cell(y, 8, bg=Theme.BG)                 # real gap column, matching col 4's -- see WIDTHS
+        self._merge(y, 9, 13, "Disk", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
         if bk_rows:                                   # Backups panel title, to the right of Disk
-            self._cell(y, 13, bg=Theme.BG)
-            self._merge(y, 14, 16, "Backups", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+            self._cell(y, 14, bg=Theme.BG)
+            self._merge(y, 15, 17, "Backups", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+            self._cell(y, 18, bg=Theme.BG)
+        else:                                          # nothing tracked here -- a plain gap,
+            for c in range(14, 19):                     # not Notes creeping in to fill it
+                self._cell(y, c, bg=Theme.BG)
         y += 1
         # column headers
         self._cell(y, 2, "Service Name", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
@@ -1813,14 +1934,19 @@ class ReportBuilder:
         self._cell(y, 5, "Host", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
         self._cell(y, 6, "RAM %", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
         self._cell(y, 7, "CPU %", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
-        for c, t in zip((8, 9, 10, 11, 12), ("Host", "Mount", "Used %", "Free GB", "Size GB")):
+        self._cell(y, 8, bg=Theme.BG)
+        for c, t in zip((9, 10, 11, 12, 13), ("Host", "Mount", "Used %", "Free GB", "Size GB")):
             self._cell(y, c, t, Theme.font(8, True, Theme.GREY), bg=Theme.HDR,
-                       al=("left" if c <= 9 else "center"), border=True)
-        if bk_rows:                                   # Backups headers: File (N) + Generated (O) + Status (P)
-            self._cell(y, 13, bg=Theme.BG)
-            self._cell(y, 14, "Backup File", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
-            self._cell(y, 15, "Generated", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
-            self._cell(y, 16, "Status", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+                       al=("left" if c <= 10 else "center"), border=True)
+        if bk_rows:                                   # Backups headers: File (O) + Generated (P) + Status (Q)
+            self._cell(y, 14, bg=Theme.BG)
+            self._cell(y, 15, "Backup File", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
+            self._cell(y, 16, "Generated", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+            self._cell(y, 17, "Status", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+            self._cell(y, 18, bg=Theme.BG)
+        else:                                          # plain gap, not Notes creeping in
+            for c in range(14, 19):
+                self._cell(y, c, bg=Theme.BG)
 
         top = y + 1
         rows = max(len(svc_rows), len(mems), len(disks), len(bk_rows), 1)
@@ -1883,50 +2009,62 @@ class ReportBuilder:
                     self._cell(r, 7, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
             else:
                 self._cell(r, 7, bg=Theme.BG)
+            self._cell(r, 8, bg=Theme.BG)               # real gap column, every row -- see WIDTHS
             # disk
             if k < len(disks):
                 label, mount, dd = disks[k]
-                used, free, size = dd.get("used", 0), dd.get("free"), dd.get("size")
-                self._cell(r, 8, label, Theme.font(9, False, Theme.GREY), border=True)
-                self._cell(r, 9, mount, Theme.font(9, False, Theme.GREY), border=True)
-                self._chip(r, 10, f"{used:.0f}%", self._band(used), sz=9)
-                self._cell(r, 11, f"{free:.1f}" if free is not None else "—",
+                used, free, size = dd.get("used"), dd.get("free"), dd.get("size")
+                self._cell(r, 9, label, Theme.font(9, False, Theme.GREY), border=True)
+                self._cell(r, 10, mount, Theme.font(9, False, Theme.GREY), border=True)
+                if used is None:            # a log file: sized, not banded -- no % of anything
+                    self._cell(r, 11, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                else:
+                    self._chip(r, 11, f"{used:.0f}%", self._band(used), sz=9)
+                self._cell(r, 12, f"{free:.1f}" if free is not None else "—",
                            Theme.font(9, False, Theme.WHITE), al="center", border=True)
-                self._cell(r, 12, f"{size:.0f}" if size is not None else "—",
+                self._cell(r, 13, f"{size:.0f}" if size is not None else "—",
                            Theme.font(9, False, Theme.SUB), al="center", border=True)
             else:
-                for c in range(8, 13):
+                for c in range(9, 14):
                     self._cell(r, c, bg=Theme.BG)
             # backups (4th panel, right of Disk): the Status chip classifies each file by
             # day (TODAY / YESTERDAY, like Services' RUNNING); a red NO BACKUP row per
             # reporting host with none (0 = critical, >0 = acceptable)
             if bk_rows:
-                self._cell(r, 13, bg=Theme.BG)
+                self._cell(r, 14, bg=Theme.BG)
                 if k < len(bk_rows):
                     brow = bk_rows[k]
                     if brow[0] == "file":
                         _, fname, fday, mtime = brow
                         gen = (datetime.datetime.fromtimestamp(mtime).strftime("%d %b %H:%M")
                                if mtime and mtime > 1e8 else "—")   # value = mtime = when generated
-                        self._cell(r, 14, fname, Theme.font(9, False, Theme.WHITE), border=True)
-                        self._cell(r, 15, gen, Theme.font(9, False, Theme.GREY), al="center", border=True)
-                        self._chip(r, 16, {"today": "TODAY", "yesterday": "YESTERDAY"}.get(fday, "PRESENT"),
+                        self._cell(r, 15, fname, Theme.font(9, False, Theme.WHITE), border=True)
+                        self._cell(r, 16, gen, Theme.font(9, False, Theme.GREY), al="center", border=True)
+                        self._chip(r, 17, {"today": "TODAY", "yesterday": "YESTERDAY"}.get(fday, "PRESENT"),
                                    "green", sz=8)
                     else:
                         _, host, reason = brow
-                        self._cell(r, 14, f"{reason}  ·  {host}",
+                        self._cell(r, 15, f"{reason}  ·  {host}",
                                    Theme.font(9, False, Theme.CHIP["red"][0]), border=True)
-                        self._cell(r, 15, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
-                        self._chip(r, 16, "NO BACKUP", "red", sz=8)
+                        self._cell(r, 16, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                        self._chip(r, 17, "NO BACKUP", "red", sz=8)
                 else:
-                    for c in range(14, 17):
+                    for c in range(15, 18):
                         self._cell(r, c, bg=Theme.BG)
+                self._cell(r, 18, bg=Theme.BG)
+            else:                                        # plain gap, not Notes creeping in
+                for c in range(14, 19):
+                    self._cell(r, c, bg=Theme.BG)
 
-        # ---- notes panel to the far right (cols R-V; spans 14-22 when there is no
-        #      Backups panel). Three stacked parts: a table of THIS RUN's flagged
-        #      metrics (critical + warning) for the admin to triage, a free-text
-        #      comment box, then the author line. Regenerated fresh each run. ----
-        nl, nr = (18, 22) if bk_rows else (14, 22)
+        # ---- notes panel to the far right (cols S-W, 19-23) -- ALWAYS this width, backups
+        #      or not, so Notes doesn't stretch wider just because there's nothing tracked to
+        #      show in 14-18. An untracked system leaves that as a plain gap instead (see the
+        #      title/header/data rows above), the same shape as "no backups" reads everywhere
+        #      else in this report -- an absence, not free real estate for the next table.
+        #      Three stacked parts: a table of THIS RUN's flagged metrics (critical +
+        #      warning) for the admin to triage, a free-text comment box, then the author
+        #      line. Regenerated fresh each run. ----
+        nl, nr = 19, 23
         tn_row, last_data = top - 2, top + rows - 1
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         self._merge(tn_row, nl, nr, f"{sysm.name} Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
@@ -2260,7 +2398,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if only:
         scope_links_to_systems(store, systems)   # don't leak other systems' endpoints/certs
     hosts = sum(len(s.components) for s in systems)
-    nsvc = sum(len(v) for v in store.services.values())
+    nsvc = total_services(store)   # matches the SERVICES tile the report itself will show
     nbk = sum(len(d.get("files") or []) for d in store.backups.values())
     print(f"    systems={len(systems)} hosts={hosts} services={nsvc} "
           f"disk_instances={len(store.disk)} ram_instances={len(store.ram)} cpu_instances={len(store.cpu)} "

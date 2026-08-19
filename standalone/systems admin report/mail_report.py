@@ -304,6 +304,34 @@ def _disk_nearfull_block(store, systems) -> str:
     )
 
 
+def _backup_missing_block(store, systems) -> str:
+    """A prominent callout listing tracked hosts with no fresh backup — a data-loss risk,
+    not a metric out of range: if the host is lost today, there is nothing recent to restore
+    from. Untracked hosts never appear here (see engine.backup_missing's own docstring)."""
+    miss = engine.backup_missing(store, systems)
+    if not miss:
+        return ""
+    bysys: dict = {}
+    for s, lbl, reason in miss:
+        bysys.setdefault(s, []).append(f"{lbl} ({reason})")
+    lines = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(s)}</b>'
+        f'<span style="color:#555;"> &mdash; {html.escape(", ".join(v))}</span></div>'
+        for s, v in bysys.items()
+    )
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{RED_T};border-left:4px solid {RED};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{RED};">&#9888;&nbsp; CRITICAL &mdash; '
+        f'{len(miss)} host(s) missing a fresh backup</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These hosts run the backup check '
+        "but have nothing fresh within policy &mdash; if the host is lost today, there is no recent "
+        "backup to restore from. <b>Confirm the backup job and re-run it.</b></div>"
+        f"{lines}</div></td></tr>"
+    )
+
+
 def _cob_block(store, unreach) -> str:
     """A callout when COB looks like it never ran — flagged every day EXCEPT Monday.
 
@@ -502,9 +530,11 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     else:
         banner_bg, banner_fg, headline = GREEN_T, GREEN, "All monitored systems are healthy"
 
+    linux_pct, win_pct = engine.platform_host_pcts(systems)
     static_kpis = "".join([
         _kpi("Systems", str(len(systems)), NAVY),
         _kpi("Hosts", str(hosts), NAVY),
+        _kpi("Linux | Windows", f"{linux_pct}% | {win_pct}%", NAVY),
         _kpi("Services", str(nsvc), NAVY),
         _kpi("SWIFT txns", swift, NAVY),
         _kpi("COB &middot; T24", cob, NAVY),
@@ -523,7 +553,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
         _kpi_panel("Expired certs", [("Expired", len(cert_expired)), ("Total", engine.cert_monitored(store))],
                    RED if cert_expired else GREEN),
     ]
-    disk_high_h, disk_high_d, disk_high_state = engine.disk_high(store, systems, thr, CRIT)
+    _disk_high_h, disk_high_d, disk_high_state = engine.disk_high(store, systems, thr, CRIT)
     disk_high_color = {"good": GREEN, "warn": AMBER, "bad": RED}[disk_high_state]
     n_untracked = len(engine.backup_untracked(store, systems))
     n_tracked = len(systems) - n_untracked
@@ -534,19 +564,16 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                    AMBER if cpu_hosts else GREEN),
         _kpi_panel("High RAM usage", [("Hosts", ram_hosts), ("Total", hosts)],
                    AMBER if ram_hosts else GREEN),
-        # 4 real, divided cells — matches the xlsx (Hosts/Total alongside Disks/Total, same
-        # bordered-divider convention every tile uses). The Backup tracking tile below drops
-        # its own Total to match.
+        # Disks/Total only — matches the xlsx (see generate_report.py's HIGH DISK USAGE tile),
+        # which dropped the separate Hosts/Total pair so Backup tracking below could keep its
+        # own Total instead of every tile in the row fighting over the same fixed column budget.
         _kpi_panel(f"High disk usage &middot; &#8805;{thr}%",
-                   [("Hosts", disk_high_h), ("Total", hosts),
-                    ("Disks", disk_high_d), ("Total", engine.total_disks(store, systems))],
+                   [("Disks", disk_high_d), ("Total", engine.total_disks(store, systems))],
                    disk_high_color),
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
         _kpi_panel("Web encryption", [("HTTPS", n_https), ("Total", n_https + n_http)], web_color),
-        # Tracked alone, no Total — that denominator is already shown as Systems in the row
-        # above, and matches the xlsx (see generate_report.py's BACKUP TRACKING tile).
-        _kpi_panel("Backup tracking", [("Tracked", n_tracked)],
+        _kpi_panel("Backup tracking", [("Tracked", n_tracked), ("Total", len(systems))],
                    AMBER if n_untracked else GREEN),
     ]
     immediate_kpis = "".join(immediate_kpis)
@@ -557,6 +584,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     body = (_ldap_block(store, systems)
             + _unreachable_block(unreach)
             + _disk_nearfull_block(store, systems)
+            + _backup_missing_block(store, systems)
             + _cert_block(store)
             + _cob_block(store, unreach)
             + _swift_block(store, unreach)
