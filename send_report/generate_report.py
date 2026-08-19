@@ -1214,20 +1214,26 @@ def backup_missing_band(count: int) -> str:
 # ============================================================================ #
 class ReportBuilder:
     # column widths (A gutter, then Services | gap | Memory | gap | Disk | gap | Backups | gap | Notes)
-    # D=9 and H=14 (not the tighter 2 you'd expect for mere gap columns): the overview tile
-    # band reuses these same sheet columns for real content -- HIGH RAM USAGE's "HOSTS"
-    # sub-column lands entirely on D, HIGH DISK USAGE's on H -- so a gap column here can never
-    # be narrower than what THAT row needs, only wider than this row strictly requires.
+    # All four gap columns (D, H, N, R) are the SAME width, 14 -- equally spaced tables, not
+    # each gap sized to its own column's bare minimum. 14 is the floor rather than an
+    # arbitrary round number: the overview tile band reuses D and H for real content (HIGH
+    # RAM USAGE's "HOSTS" sub-column lands entirely on D, HIGH DISK USAGE's on H), and H's
+    # own requirement (14) is the largest of the two, so it sets the shared width for all
+    # four gaps rather than each looking merely tight on its own. N and R carry no such
+    # reuse constraint and could be narrower, but matching D/H is the whole point here.
+    # (D is now part of HIGH CPU USAGE's 3-column span, not HIGH RAM USAGE's -- CPU picked
+    # up a spare column once BACKUP TRACKING got its own TOTAL back; RAM's own HOSTS
+    # sub-column moved to E when that happened, and E already had headroom to spare.)
     # I-M are the Disk table (Host | Mount | Used % | Free GB | Size GB); J=20 (not the ~12
     # you'd expect) because Mount now also holds folder_exporter log-folder names ("T24 Log
     # File") that a tight column clipped -- same fix as the AT A GLANCE platforms tile, same
     # column-sharing reason: J is also WEB ENCRYPTION's 2nd sub-column in the watch row and
     # SERVICES DOWN's 3rd in the immediate row, both of which only ever hold short values, so
     # widening it here costs them nothing.
-    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 8,
+    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 14, "E": 14, "F": 8,
               "G": 8, "H": 14, "I": 14, "J": 20, "K": 7, "L": 7,   # G = Memory·CPU's CPU % column
-              "M": 11, "N": 2, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
-              "R": 2,                                        # gap before Notes
+              "M": 11, "N": 14, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
+              "R": 14,                                        # gap before Notes
               "S": 13, "T": 11, "U": 11, "V": 11, "W": 9}  # S-W = notes column
     CARD_GROUPS = [(2, 4), (5, 7), (8, 9), (10, 12)]   # 4 overview cards across the width
 
