@@ -1387,15 +1387,22 @@ class ReportBuilder:
 
         def card(rtop, group, label, value, state, vrow=None):
             """Standard card: title (rtop) + big value. vrow lets row 2 bottom-align
-               its value so it lines up with the taller disk panel."""
+               its value so it lines up with the taller disk panel.
+
+               Centered, matching panel()'s alignment — the two are the same "tile" component
+               with two shapes (one number vs several), so a reader shouldn't see one row's
+               tiles hug the left edge while every other row's are centered. Left-alignment
+               also pushed a wide value's tail toward the next tile's border with no margin
+               to protect it, which is what made a 2-part value like "64% | 34%" look cramped
+               against the accent bar on one side and squeezed on the other."""
             c1, c2 = group
             accent, tint = palette[state]
             vrow = rtop + 1 if vrow is None else vrow
             bar = Border(left=Side(style="thick", color=accent))   # accent bar on the LEFT
-            self._merge(rtop, c1, c2, "  " + label, Theme.font(8, True, Theme.SUB), bg=tint, al="left")
+            self._merge(rtop, c1, c2, label, Theme.font(8, True, Theme.SUB), bg=tint, al="center")
             for r in range(rtop + 1, vrow):                        # keep the card solid if it spans 3 rows
-                self._merge(r, c1, c2, "", Theme.font(8), bg=tint, al="left")
-            self._merge(vrow, c1, c2, "  " + value, Theme.font(22, True, accent), bg=tint, al="left")
+                self._merge(r, c1, c2, "", Theme.font(8), bg=tint, al="center")
+            self._merge(vrow, c1, c2, value, Theme.font(22, True, accent), bg=tint, al="center")
             for r in range(rtop, vrow + 1):
                 self.ws.cell(r, c1).border = bar
             self.ws.row_dimensions[vrow].height = 30
