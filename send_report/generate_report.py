@@ -1904,15 +1904,11 @@ class ReportBuilder:
         # name/summary bar reads as one solid strip rather than showing a hole the wrong
         # colour where the gap column crosses it (the bug in the first attempt at this).
         self._cell(y, 8, bg=Theme.CARD)
-        self._merge(y, 9, 13, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
+        # Right-aligned at 23 -- Notes' own right edge, always (see nl/nr below), not
+        # Disk's -- so the summary sits flush with where the whole card actually ends,
+        # the same edge the name panel's own bar now reaches.
+        self._merge(y, 9, 23, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
         self.ws.cell(y, 9).value = CellRichText(parts)
-        # the bar itself extends all the way to Notes' own right edge (23, the same in both
-        # branches of nl/nr below) rather than stopping at the summary text's own width, so
-        # the title reads as wide as the tables it sits above instead of looking cut short
-        # over Backups/Notes -- filled plain, not merged, so the summary text keeps its own
-        # tighter right-alignment near Disk rather than drifting off to the far right edge.
-        for c in range(14, 24):
-            self._cell(y, c, bg=Theme.CARD)
         y += 1
         for c in range(2, 14):           # spacer between the name and the tables
             self._cell(y, c, bg=Theme.BG)
@@ -1926,6 +1922,10 @@ class ReportBuilder:
         if bk_rows:                                   # Backups panel title, to the right of Disk
             self._cell(y, 14, bg=Theme.BG)
             self._merge(y, 15, 17, "Backups", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+            self._cell(y, 18, bg=Theme.BG)
+        else:                                          # nothing tracked here -- a plain gap,
+            for c in range(14, 19):                     # not Notes creeping in to fill it
+                self._cell(y, c, bg=Theme.BG)
         y += 1
         # column headers
         self._cell(y, 2, "Service Name", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
@@ -1943,6 +1943,10 @@ class ReportBuilder:
             self._cell(y, 15, "Backup File", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
             self._cell(y, 16, "Generated", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
             self._cell(y, 17, "Status", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+            self._cell(y, 18, bg=Theme.BG)
+        else:                                          # plain gap, not Notes creeping in
+            for c in range(14, 19):
+                self._cell(y, c, bg=Theme.BG)
 
         top = y + 1
         rows = max(len(svc_rows), len(mems), len(disks), len(bk_rows), 1)
@@ -2047,12 +2051,20 @@ class ReportBuilder:
                 else:
                     for c in range(15, 18):
                         self._cell(r, c, bg=Theme.BG)
+                self._cell(r, 18, bg=Theme.BG)
+            else:                                        # plain gap, not Notes creeping in
+                for c in range(14, 19):
+                    self._cell(r, c, bg=Theme.BG)
 
-        # ---- notes panel to the far right (cols S-W; spans 15-23 when there is no
-        #      Backups panel). Three stacked parts: a table of THIS RUN's flagged
-        #      metrics (critical + warning) for the admin to triage, a free-text
-        #      comment box, then the author line. Regenerated fresh each run. ----
-        nl, nr = (19, 23) if bk_rows else (15, 23)
+        # ---- notes panel to the far right (cols S-W, 19-23) -- ALWAYS this width, backups
+        #      or not, so Notes doesn't stretch wider just because there's nothing tracked to
+        #      show in 14-18. An untracked system leaves that as a plain gap instead (see the
+        #      title/header/data rows above), the same shape as "no backups" reads everywhere
+        #      else in this report -- an absence, not free real estate for the next table.
+        #      Three stacked parts: a table of THIS RUN's flagged metrics (critical +
+        #      warning) for the admin to triage, a free-text comment box, then the author
+        #      line. Regenerated fresh each run. ----
+        nl, nr = 19, 23
         tn_row, last_data = top - 2, top + rows - 1
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         self._merge(tn_row, nl, nr, f"{sysm.name} Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
