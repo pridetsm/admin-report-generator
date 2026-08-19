@@ -530,12 +530,11 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     else:
         banner_bg, banner_fg, headline = GREEN_T, GREEN, "All monitored systems are healthy"
 
-    win_hosts, linux_hosts = engine.platform_host_counts(systems)
+    linux_pct, win_pct = engine.platform_host_pcts(systems)
     static_kpis = "".join([
         _kpi("Systems", str(len(systems)), NAVY),
         _kpi("Hosts", str(hosts), NAVY),
-        _kpi("Windows", str(win_hosts), NAVY),
-        _kpi("Linux", str(linux_hosts), NAVY),
+        _kpi("Linux | Windows", f"{linux_pct}% | {win_pct}%", NAVY),
         _kpi("Services", str(nsvc), NAVY),
         _kpi("SWIFT txns", swift, NAVY),
         _kpi("COB &middot; T24", cob, NAVY),

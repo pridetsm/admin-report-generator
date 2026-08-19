@@ -605,6 +605,19 @@ def platform_host_counts(systems: List[System]) -> Tuple[int, int]:
     return windows, linux
 
 
+def platform_host_pcts(systems: List[System]) -> Tuple[int, int]:
+    """(linux_pct, windows_pct) — the single PLATFORMS tile's "linux% | windows%" pair.
+    Rounded independently, against the FULL host count (not windows+linux), so the two
+    numbers don't have to sum to 100 -- same honesty as platform_host_counts not forcing
+    every host into one of the two camps. Single source of truth so the xlsx/web/e-mail
+    tile can never round differently and disagree by a point."""
+    hosts = sum(len(s.components) for s in systems)
+    if not hosts:
+        return 0, 0
+    windows, linux = platform_host_counts(systems)
+    return round(linux / hosts * 100), round(windows / hosts * 100)
+
+
 def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[System]:
     """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label).
 
@@ -1422,21 +1435,19 @@ class ReportBuilder:
 
         # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
         # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups. Systems,
-        # Hosts, Services and the two platform counts are all short 1-3 digit numbers, so
-        # they share the narrow 1-column shape SYSTEMS already proved works — freeing the
-        # 2 columns WINDOWS/LINUX need without touching SWIFT/COB's wider text. Labels stay
-        # bare ("WINDOWS" not "WINDOWS HOSTS") both to read as a breakdown of the HOSTS tile
-        # right next to them and because these columns are narrow -- reused from the watch
-        # row below where they only ever hold "HOSTS"/"TOTAL"; a longer label would clip.
+        # Hosts and Services are short 1-2 digit numbers, so they share the narrow 1-column
+        # shape SYSTEMS already proved works — freeing the 2 columns PLATFORMS needs without
+        # touching SWIFT/COB's wider text. One combined tile, not two, reads the same shape
+        # every other pair-of-numbers tile in this report uses ("linux% | windows%", not a
+        # bare count each) rather than two separate cards a reader has to add up by eye.
         caption(8, "AT A GLANCE  ·  inventory & readings")
-        win_hosts, linux_hosts = platform_host_counts(systems)
-        static = [((2, 2),  "SYSTEMS",       str(len(systems))),
-                  ((3, 3),  "HOSTS",         str(hosts)),
-                  ((4, 4),  "SERVICES",      str(nsvc)),
-                  ((5, 5),  "WINDOWS",       str(win_hosts)),
-                  ((6, 6),  "LINUX",         str(linux_hosts)),
-                  ((7, 9),  "SWIFT TXNS",    swift),
-                  ((10, 12), "COB · T24",    cob)]
+        linux_pct, win_pct = platform_host_pcts(systems)
+        static = [((2, 2),  "SYSTEMS",              str(len(systems))),
+                  ((3, 3),  "HOSTS",                 str(hosts)),
+                  ((4, 4),  "SERVICES",              str(nsvc)),
+                  ((5, 6),  "LINUX | WINDOWS",       f"{linux_pct}% | {win_pct}%"),
+                  ((7, 9),  "SWIFT TXNS",            swift),
+                  ((10, 12), "COB · T24",            cob)]
         for group, label, value in static:
             card(9, group, label, value, "info", vrow=10)
 
@@ -2292,7 +2303,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if only:
         scope_links_to_systems(store, systems)   # don't leak other systems' endpoints/certs
     hosts = sum(len(s.components) for s in systems)
-    nsvc = sum(len(v) for v in store.services.values())
+    nsvc = total_services(store)   # matches the SERVICES tile the report itself will show
     nbk = sum(len(d.get("files") or []) for d in store.backups.values())
     print(f"    systems={len(systems)} hosts={hosts} services={nsvc} "
           f"disk_instances={len(store.disk)} ram_instances={len(store.ram)} cpu_instances={len(store.cpu)} "

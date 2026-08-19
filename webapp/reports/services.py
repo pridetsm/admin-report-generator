@@ -112,12 +112,13 @@ def build_overview(store, systems, cfg) -> dict:
     warn = lambda n: "good" if not n else "warn"
     web_state = "good" if n_http == 0 else ("bad" if n_http > n_https else "warn")
 
-    win_hosts, linux_hosts = gr.platform_host_counts(systems)
+    linux_pct, win_pct = gr.platform_host_pcts(systems)
     glance = [
         {"label": "Systems", "value": len(systems), "state": "info"},
         {"label": "Hosts", "value": hosts, "state": "info"},
-        {"label": "Windows", "value": win_hosts, "state": "info"},
-        {"label": "Linux", "value": linux_hosts, "state": "info"},
+        # One combined tile, not two — matches the shape every other pair-of-numbers tile in
+        # this report uses (glance has no "sub" line, so the order lives in the label itself).
+        {"label": "Linux | Windows", "value": f"{linux_pct}% | {win_pct}%", "state": "info"},
         {"label": "Services", "value": nsvc, "state": "info"},
         {"label": "SWIFT txns", "value": swift, "state": "info"},
         {"label": "COB · T24", "value": cob, "state": "info"},
