@@ -1214,21 +1214,19 @@ def backup_missing_band(count: int) -> str:
 # ============================================================================ #
 class ReportBuilder:
     # column widths (A gutter, then Services | gap | Memory | gap | Disk | gap | Backups | gap | Notes)
-    # D=9 and H=14 (not the tighter 2 you'd expect for mere gap columns): the overview tile
-    # band reuses these same sheet columns for real content -- HIGH RAM USAGE's "HOSTS"
-    # sub-column lands entirely on D, HIGH DISK USAGE's on H -- so a gap column here can never
-    # be narrower than what THAT row needs, only wider than this row strictly requires.
-    # I-M are the Disk table (Host | Mount | Used % | Free GB | Size GB); J=20 (not the ~12
-    # you'd expect) because Mount now also holds folder_exporter log-folder names ("T24 Log
-    # File") that a tight column clipped -- same fix as the AT A GLANCE platforms tile, same
-    # column-sharing reason: J is also WEB ENCRYPTION's 2nd sub-column in the watch row and
-    # SERVICES DOWN's 3rd in the immediate row, both of which only ever hold short values, so
-    # widening it here costs them nothing.
+    # D=9 (not the tighter 2 you'd expect for a mere gap column): the overview tile band
+    # reuses these same sheet columns, and HIGH RAM USAGE's "HOSTS" sub-column lands
+    # entirely on D — at width 2 that clipped the label. 9 matches C so both KPI sub-columns
+    # read fully, and D still just merges into the wider Services card body below. HIGH DISK
+    # USAGE occupies F-I (4 real, divided sub-columns: HOSTS/TOTAL/DISKS/TOTAL) — the extra
+    # physical column it needs comes from BACKUP TRACKING dropping its own TOTAL (see
+    # _band_spans/the watch_tiles list below), not from widening these columns, so the row
+    # still lands on its original 11 columns without pushing anything onto M.
     WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 9, "E": 14, "F": 8,
-              "G": 8, "H": 14, "I": 14, "J": 20, "K": 7, "L": 7,   # G = Memory·CPU's CPU % column
-              "M": 11, "N": 2, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
-              "R": 2,                                        # gap before Notes
-              "S": 13, "T": 11, "U": 11, "V": 11, "W": 9}  # S-W = notes column
+              "G": 8, "H": 14, "I": 12, "J": 7, "K": 7, "L": 11,   # G = Memory·CPU's CPU % column
+              "M": 2, "N": 30, "O": 13, "P": 11,          # N-P = Backups (File | Generated | Status)
+              "Q": 2,                                      # gap before Notes
+              "R": 13, "S": 11, "T": 11, "U": 11, "V": 9}  # R-V = notes column
     CARD_GROUPS = [(2, 4), (5, 7), (8, 9), (10, 12)]   # 4 overview cards across the width
 
     def __init__(self, cfg: Config, *, author: Optional[str] = None,
@@ -1897,21 +1895,27 @@ class ReportBuilder:
             if i:
                 parts.append(_tb("  ·  ", Theme.SUB))        # neutral separator
             parts.append(_tb(text, color))
-        self._merge(y, 9, 13, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
-        self.ws.cell(y, 9).value = CellRichText(parts)
+        self._merge(y, 8, 12, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
+        self.ws.cell(y, 8).value = CellRichText(parts)
         y += 1
-        for c in range(2, 14):           # spacer between the name and the tables
+        for c in range(2, 13):           # spacer between the name and the tables
             self._cell(y, c, bg=Theme.BG)
         y += 1
         # table-name row
         self._merge(y, 2, 3, "Services", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
         self._cell(y, 4, bg=Theme.BG)
         self._merge(y, 5, 7, "Memory · CPU", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
-        self._cell(y, 8, bg=Theme.BG)                 # real gap column, matching col 4's -- see WIDTHS
-        self._merge(y, 9, 13, "Disk", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+        self._merge(y, 8, 12, "Disk", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+        # _merge() draws no border of its own (unlike _cell(border=True), which every row
+        # below this one uses) -- Services already gets a real blank spacer column before
+        # Memory · CPU, but there's no room left to spare Disk the same treatment without
+        # reflowing every hardcoded column position after it (Backups, Notes...). A thin
+        # divider — the same style panel() uses between its own sub-columns — reads as a
+        # real seam here too, without the risk of that wider reflow.
+        self.ws.cell(y, 8).border = Border(left=Side(style="thin", color=Theme.SUB))
         if bk_rows:                                   # Backups panel title, to the right of Disk
-            self._cell(y, 14, bg=Theme.BG)
-            self._merge(y, 15, 17, "Backups", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+            self._cell(y, 13, bg=Theme.BG)
+            self._merge(y, 14, 16, "Backups", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
         y += 1
         # column headers
         self._cell(y, 2, "Service Name", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
@@ -1920,15 +1924,14 @@ class ReportBuilder:
         self._cell(y, 5, "Host", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
         self._cell(y, 6, "RAM %", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
         self._cell(y, 7, "CPU %", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
-        self._cell(y, 8, bg=Theme.BG)
-        for c, t in zip((9, 10, 11, 12, 13), ("Host", "Mount", "Used %", "Free GB", "Size GB")):
+        for c, t in zip((8, 9, 10, 11, 12), ("Host", "Mount", "Used %", "Free GB", "Size GB")):
             self._cell(y, c, t, Theme.font(8, True, Theme.GREY), bg=Theme.HDR,
-                       al=("left" if c <= 10 else "center"), border=True)
-        if bk_rows:                                   # Backups headers: File (O) + Generated (P) + Status (Q)
-            self._cell(y, 14, bg=Theme.BG)
-            self._cell(y, 15, "Backup File", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
-            self._cell(y, 16, "Generated", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
-            self._cell(y, 17, "Status", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+                       al=("left" if c <= 9 else "center"), border=True)
+        if bk_rows:                                   # Backups headers: File (N) + Generated (O) + Status (P)
+            self._cell(y, 13, bg=Theme.BG)
+            self._cell(y, 14, "Backup File", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
+            self._cell(y, 15, "Generated", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+            self._cell(y, 16, "Status", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
 
         top = y + 1
         rows = max(len(svc_rows), len(mems), len(disks), len(bk_rows), 1)
@@ -1991,54 +1994,53 @@ class ReportBuilder:
                     self._cell(r, 7, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
             else:
                 self._cell(r, 7, bg=Theme.BG)
-            self._cell(r, 8, bg=Theme.BG)               # real gap column, every row -- see WIDTHS
             # disk
             if k < len(disks):
                 label, mount, dd = disks[k]
                 used, free, size = dd.get("used"), dd.get("free"), dd.get("size")
-                self._cell(r, 9, label, Theme.font(9, False, Theme.GREY), border=True)
-                self._cell(r, 10, mount, Theme.font(9, False, Theme.GREY), border=True)
+                self._cell(r, 8, label, Theme.font(9, False, Theme.GREY), border=True)
+                self._cell(r, 9, mount, Theme.font(9, False, Theme.GREY), border=True)
                 if used is None:            # a log file: sized, not banded -- no % of anything
-                    self._cell(r, 11, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                    self._cell(r, 10, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
                 else:
-                    self._chip(r, 11, f"{used:.0f}%", self._band(used), sz=9)
-                self._cell(r, 12, f"{free:.1f}" if free is not None else "—",
+                    self._chip(r, 10, f"{used:.0f}%", self._band(used), sz=9)
+                self._cell(r, 11, f"{free:.1f}" if free is not None else "—",
                            Theme.font(9, False, Theme.WHITE), al="center", border=True)
-                self._cell(r, 13, f"{size:.0f}" if size is not None else "—",
+                self._cell(r, 12, f"{size:.0f}" if size is not None else "—",
                            Theme.font(9, False, Theme.SUB), al="center", border=True)
             else:
-                for c in range(9, 14):
+                for c in range(8, 13):
                     self._cell(r, c, bg=Theme.BG)
             # backups (4th panel, right of Disk): the Status chip classifies each file by
             # day (TODAY / YESTERDAY, like Services' RUNNING); a red NO BACKUP row per
             # reporting host with none (0 = critical, >0 = acceptable)
             if bk_rows:
-                self._cell(r, 14, bg=Theme.BG)
+                self._cell(r, 13, bg=Theme.BG)
                 if k < len(bk_rows):
                     brow = bk_rows[k]
                     if brow[0] == "file":
                         _, fname, fday, mtime = brow
                         gen = (datetime.datetime.fromtimestamp(mtime).strftime("%d %b %H:%M")
                                if mtime and mtime > 1e8 else "—")   # value = mtime = when generated
-                        self._cell(r, 15, fname, Theme.font(9, False, Theme.WHITE), border=True)
-                        self._cell(r, 16, gen, Theme.font(9, False, Theme.GREY), al="center", border=True)
-                        self._chip(r, 17, {"today": "TODAY", "yesterday": "YESTERDAY"}.get(fday, "PRESENT"),
+                        self._cell(r, 14, fname, Theme.font(9, False, Theme.WHITE), border=True)
+                        self._cell(r, 15, gen, Theme.font(9, False, Theme.GREY), al="center", border=True)
+                        self._chip(r, 16, {"today": "TODAY", "yesterday": "YESTERDAY"}.get(fday, "PRESENT"),
                                    "green", sz=8)
                     else:
                         _, host, reason = brow
-                        self._cell(r, 15, f"{reason}  ·  {host}",
+                        self._cell(r, 14, f"{reason}  ·  {host}",
                                    Theme.font(9, False, Theme.CHIP["red"][0]), border=True)
-                        self._cell(r, 16, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
-                        self._chip(r, 17, "NO BACKUP", "red", sz=8)
+                        self._cell(r, 15, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                        self._chip(r, 16, "NO BACKUP", "red", sz=8)
                 else:
-                    for c in range(15, 18):
+                    for c in range(14, 17):
                         self._cell(r, c, bg=Theme.BG)
 
-        # ---- notes panel to the far right (cols S-W; spans 15-23 when there is no
+        # ---- notes panel to the far right (cols R-V; spans 14-22 when there is no
         #      Backups panel). Three stacked parts: a table of THIS RUN's flagged
         #      metrics (critical + warning) for the admin to triage, a free-text
         #      comment box, then the author line. Regenerated fresh each run. ----
-        nl, nr = (19, 23) if bk_rows else (15, 23)
+        nl, nr = (18, 22) if bk_rows else (14, 22)
         tn_row, last_data = top - 2, top + rows - 1
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         self._merge(tn_row, nl, nr, f"{sysm.name} Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
