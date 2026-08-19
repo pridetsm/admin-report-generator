@@ -1,0 +1,49 @@
+{# One host row on the Topology screen.
+
+   Addressed by (job index, group index) exactly as the Prometheus screen addresses it, so the
+   two screens post identical field names and one parser reads both. The job is shown but not
+   editable: moving a host between jobs changes HOW it is scraped (Windows vs Linux exporter),
+   which is a different decision from which system it belongs to — and getting it wrong would
+   silently stop the host being scraped at all. #}
+<div class="cfg-group" data-group="{{ row.g.i }}">
+  <div class="cfg-group-head">
+    <b>{{ row.g.known.display|default:row.g.targets_text|default:"Host" }}</b>
+    <span class="cfg-hint" style="display:inline;margin:0 0 0 8px">in {{ row.job_name }}</span>
+    <span class="spacer"></span>
+    <button type="button" class="cfg-x" data-remove-host title="Remove this host">✕</button>
+  </div>
+  <label class="field">
+    <span>Address — host:port, one per line</span>
+    <textarea name="sc__{{ row.job_i }}__{{ row.g.i }}__targets" rows="{% if row.g.targets_count > 4 %}6{% else %}{{ row.g.targets_count|default:1 }}{% endif %}" spellcheck="false">{{ row.g.targets_text }}</textarea>
+  </label>
+  <div class="cfg-grid4">
+    <label class="field">
+      <span>System <b class="cfg-req">· groups the report</b></span>
+      <input type="text" name="sc__{{ row.job_i }}__{{ row.g.i }}__l_system" value="{{ row.g.known.system }}" placeholder="e.g. RTGS">
+    </label>
+    <label class="field">
+      <span>Display name</span>
+      <input type="text" name="sc__{{ row.job_i }}__{{ row.g.i }}__l_display" value="{{ row.g.known.display }}" placeholder="e.g. RTGS Database">
+    </label>
+    <label class="field">
+      <span>Role</span>
+      <input type="text" name="sc__{{ row.job_i }}__{{ row.g.i }}__l_role" value="{{ row.g.known.role }}" placeholder="app / db / …">
+    </label>
+    <label class="field">
+      <span>Platform (app)</span>
+      <input type="text" name="sc__{{ row.job_i }}__{{ row.g.i }}__l_app" value="{{ row.g.known.app }}" placeholder="windows / linux">
+    </label>
+  </div>
+  {# labels beyond the four the report reads — kept editable so this screen never drops one #}
+  {% if row.g.extra %}
+  <div class="cfg-kv" data-kv="labels">
+    {% for r in row.g.extra %}
+    <div class="cfg-kv-row">
+      <input type="text" name="sc__{{ row.job_i }}__{{ row.g.i }}__xkey__{{ r.i }}" value="{{ r.key }}" placeholder="label name" aria-label="Label name">
+      <input type="text" name="sc__{{ row.job_i }}__{{ row.g.i }}__xval__{{ r.i }}" value="{{ r.value }}" placeholder="value" aria-label="Label value">
+      <button type="button" class="cfg-x" data-remove title="Remove">✕</button>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>

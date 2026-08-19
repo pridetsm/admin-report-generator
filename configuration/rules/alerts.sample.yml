@@ -1,0 +1,22 @@
+# ============================================================================
+#  alerts.sample.yml — SAMPLE for one of the Prometheus rule-file sub-pages
+#  under the "Prometheus" Configuration screen (Configuration → Prometheus →
+#  alerts.yml tab).
+#
+#  Standard Prometheus alerting-rule syntax — nothing report-specific about
+#  the format itself. Edited as raw text, validated with the real
+#  `promtool check rules` before Save & Apply ever touches the live file
+#  (independent of prometheus.yml — no need to reference the main config to
+#  validate a rule file). See webapp/reports/prometheus_admin.py.
+# ============================================================================
+groups:
+  - name: example-high-memory-alert
+    rules:
+      - alert: ExampleHighMemoryUsage
+        expr: 100 * (1 - node_memory_MemAvailable_bytes{instance="10.0.0.21:9100"} / node_memory_MemTotal_bytes{instance="10.0.0.21:9100"}) > 85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory exceeded 85% usage for 2 minutes"

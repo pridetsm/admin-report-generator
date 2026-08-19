@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ dash_title }} · Admin Report Generator{% endblock %}
+{% block title %}{{ dash_title }} · RBZ Monitoring Console{% endblock %}
 
 {% block body %}
 {% comment %}
@@ -113,12 +113,10 @@
 
 {# ---- connect strip ---- #}
 <style>
-  /* app.css styles captions as `label.field > span`; the theme picker's wrapper is a div
-     (see the note on it), so mirror the caption rule for that case */
+  
   .field > span { display:block; font-size:12px; color:var(--muted); margin:0 0 5px 2px;
                   text-transform:uppercase; letter-spacing:.4px; }
 
-  /* ---- host chips ---- */
   .cxs { display:flex; align-items:center; gap:7px; flex-wrap:wrap;
          padding:2px 0 13px; margin-bottom:6px; border-bottom:1px solid var(--line); }
   .cxs-label { font-size:11px; text-transform:uppercase; letter-spacing:.5px;
@@ -144,7 +142,6 @@
   .cxs-dot.warn { background:var(--amber); box-shadow:0 0 0 3px color-mix(in srgb, var(--amber) 22%, transparent); }
   .cxs-dot.bad  { background:var(--red);   box-shadow:0 0 0 3px color-mix(in srgb, var(--red) 24%, transparent); }
 
-  /* a host carrying flags is tinted so the whole chip reads at a glance, not just the dot */
   .cxs-chip.sev-amber { border-color:color-mix(in srgb, var(--amber) 55%, var(--line-strong));
                         background:color-mix(in srgb, var(--amber-bg) 70%, var(--panel-2)); }
   .cxs-chip.sev-red   { border-color:color-mix(in srgb, var(--red) 55%, var(--line-strong));
@@ -155,6 +152,11 @@
   .cxs-chip.sev-amber .cxs-ct { background:var(--amber); color:#2a1e00; }
   .cxs-chip.sev-red   .cxs-ct { background:var(--red);   color:#fff; }
 
+  .card-os { display:inline-flex; align-items:center; gap:3px; color:var(--muted);
+             flex:0 0 auto; margin-right:-5px; }
+  .card-os .os-windows { width:15px; height:15px; }
+  .card-os .os-linux   { width:17px; height:17px; }
+
 </style>
 
   {# ---- per-system flagged items ---- #}
@@ -163,6 +165,18 @@
   {% for sys in snapshot.systems %}
   <div class="card {% if sys.healthy %}collapsed{% endif %}" data-collapsible data-system="{{ sys.name }}">
     <header>
+      {% comment %}
+        Mirrors the glyph the picker showed on this system's tile. Network reports render
+        through this same template and set no platform, so the card simply goes without.
+      {% endcomment %}
+      {% if sys.platform %}
+        <span class="card-os" role="img" aria-label="{{ sys.platform_label }}"
+              title="{{ sys.platform_label }}">
+          {% if sys.platform == 'hybrid' %}
+            <i class="os-glyph os-windows"></i><i class="os-glyph os-linux"></i>
+          {% else %}<i class="os-glyph os-{{ sys.platform }}"></i>{% endif %}
+        </span>
+      {% endif %}
       <h2>{{ sys.name }}</h2>
       {% if sys.healthy %}
         <span class="sub">{{ sys.hosts }} host{{ sys.hosts|pluralize }}</span>
@@ -318,7 +332,7 @@
 (function () {
   "use strict";
   var form = document.getElementById("reportForm");
-  // "Generate & download" returns a file and keeps this page open — suppress the reload spinner for it.
+
   var dlBtn = form ? form.querySelector('button[value="download"]') : null;
   if (dlBtn) dlBtn.addEventListener("click", function () { if (window.skipSpinnerOnce) window.skipSpinnerOnce(); });
   var recHidden = document.getElementById("recipients");
@@ -328,7 +342,6 @@
   var recLabel = document.getElementById("recipientsLabel");
   var emailBtn = document.getElementById("emailBtn");
 
-  // ---- toasts ----
   var wrap = document.getElementById("toasts");
   function toast(msg, kind) {
     if (!wrap) return;
@@ -341,7 +354,6 @@
   }
   window.toast = toast;
 
-  // ---- report theme (saved to the profile via AJAX, so form entries are not lost) ----
   var themePick = document.getElementById("reportThemePick");
   if (themePick) {
     themePick.addEventListener("click", function (e) {
@@ -370,7 +382,7 @@
         });
         toast("Report theme set to " + theme + ".", "success");
       }).catch(function (err) {
-        // never fail silently — that is what made this look "not working"
+
         toast("Could not save the report theme (" + err.message + ").", "info");
       });
     });
@@ -380,11 +392,10 @@
     return m ? decodeURIComponent(m[2]) : null;
   }
 
-  // ---- recipients dropdown (choose who to e-mail) ----
   function currentRecipients() {
     return recMenu ? Array.prototype.map.call(recMenu.querySelectorAll(".rec-check:checked"), function (c) { return c.value; }) : [];
   }
-  function syncEmail() { /* email button is always enabled — recipients are chosen in the dialog */ }
+  function syncEmail() {  }
   function syncRecipients() {
     var list = currentRecipients();
     if (recHidden) recHidden.value = list.join(", ");
@@ -420,7 +431,6 @@
   if (recAddBtn) recAddBtn.addEventListener("click", function () { addRecipient(recExtra.value, true); recExtra.value = ""; clearResults(); recExtra.focus(); });
   if (recExtra) recExtra.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); addRecipient(recExtra.value, true); recExtra.value = ""; clearResults(); } });
 
-  // ---- live directory (AD/LDAP) type-ahead ----
   var recResults = document.getElementById("recResults");
   var searchUrl = recResults ? recResults.getAttribute("data-url") : null;
   var searchTimer = null;
@@ -449,12 +459,11 @@
 
   syncRecipients();
 
-  // ---- e-mail confirmation dialog (holds the recipient chooser) ----
   var confirmPop = document.getElementById("emailConfirm"),
       confirmSend = document.getElementById("confirmSend"),
       confirmTheme = document.getElementById("confirmTheme");
   if (emailBtn) emailBtn.addEventListener("click", function () {
-    // confirmTheme is kept in sync by the (no-reload) theme toggle; nothing to read here.
+
     syncRecipients();
     if (confirmPop) confirmPop.classList.add("show");
   });
@@ -474,7 +483,6 @@
     b.addEventListener("click", function () { if (confirmPop) confirmPop.classList.remove("show"); });
   });
 
-  // ---- collect current inputs so a refresh doesn't lose them ----
   function collect() {
     var systems = {}, flagText = {};
     document.querySelectorAll("[data-system]").forEach(function (card) {
@@ -495,9 +503,7 @@
              summary: val("textarea[name=summary_comment]"), theme: theme ? theme.value : "dark",
              systems: systems, flagText: flagText };
   }
-  // Scoped to this estate AND this selection. A single shared key meant the systems draft
-  // was restored into a network report, where no card name matches — the answers were saved
-  // faithfully and then dropped on the floor, which looks exactly like not saving at all.
+
   var DRAFT_KEY = (function () {
     var d = document.getElementById("ttlData");
     return (d && d.getAttribute("data-draft-key")) || "draft:report";
@@ -513,27 +519,17 @@
     b.addEventListener("click", function (e) { e.preventDefault(); saveAndReload(); });
   });
 
-  // ---- always persist the current draft before leaving this page ----
-  // Not just the explicit Refresh button above: a plain F5, clicking Home/History/Connect and
-  // coming back via "Continue that report", or closing the tab and reopening later should all
-  // find typed answers intact too — every GET here re-captures fresh metrics (see report()),
-  // so the draft is the ONLY thing that would otherwise be lost.
   window.addEventListener("beforeunload", saveDraft);
-  // beforeunload is not fired reliably on every route out of a page (a discarded tab, a
-  // mobile background, some in-page navigations). visibilitychange is, so the draft is
-  // written whenever this page stops being the one on screen.
+
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") saveDraft();
   });
   form.addEventListener("submit", saveDraft);
 
-  // ---- restore inputs after a refresh + advise on what changed ----
   (function restore() {
     var raw; try { raw = localStorage.getItem(DRAFT_KEY); } catch (e) { return; }
     if (!raw) return;
-    // NOT removed on restore. Every visit to this page re-captures, so a second refresh —
-    // the countdown reload, an F5, coming back a third time — has to find the draft still
-    // there. It is cleared when the report is actually generated, and lapses after an hour.
+
     var d; try { d = JSON.parse(raw); } catch (e) { return; }
     if (!d || Date.now() - (d.ts || 0) > 3600000) return;   // ignore stale drafts (>1h)
 
@@ -563,9 +559,6 @@
     if (gone.length > 4) toast((gone.length - 4) + " more items are no longer flagged.", "info");
   })();
 
-  // ---- countdown + expiry popup ----
-  // The deadline is anchored to the snapshot's capture time (server-provided "remaining"),
-  // so a plain page refresh CONTINUES the countdown instead of restarting it.
   var el = document.getElementById("ttlData");
   var ttl = el ? parseInt(el.getAttribute("data-ttl") || "300", 10) : 300;
   var remaining = el ? parseInt(el.getAttribute("data-remaining") || String(ttl), 10) : ttl;

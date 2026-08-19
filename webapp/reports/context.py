@@ -11,7 +11,8 @@ from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
 from .roles import (ROLE_HOME, ROLE_PAGES, active_role, effective_roles, held_roles,
-                    is_network_admin, is_role_admin, is_system_admin)
+                    is_infra_admin, is_network_admin, is_role_admin, is_system_admin,
+                    reports_for)
 
 
 def _asset_version() -> str:
@@ -40,8 +41,15 @@ def _asset_version() -> str:
 _NAV_PARENT = {
     # The pickers are the top of each estate, and the step above an estate is choosing which
     # one you are working in. Both therefore lead back to Role Select rather than dead-ending.
-    "report_form": "role_select",
-    "network_dashboard": "role_select",
+    "reports": "role_select",
+    # Each picker is a step inside running a report, so Back steps out to the report choice
+    # rather than all the way to the role choice.
+    "report_form": "reports",
+    "network_dashboard": "reports",
+    "network_sod_select": "reports",
+    "infra_form": "reports",
+    "os_inventory": "reports",
+    "infra_report": "infra_form",
     # Each report sits under the picker that opened it, so Back steps out of the report
     # rather than dead-ending on it. The network report already worked this way; the systems
     # one had no Back at all and relied solely on the "Change systems" button in its header.
@@ -50,28 +58,76 @@ _NAV_PARENT = {
     "folder_watch": "report_form",
     "folder_watch_temenos": "folder_watch",
     "network_report": "network_dashboard",
+    # The SOD checklist hangs off its own device picker now, the same shape as the live
+    # network report: Back steps out to what was picked, not straight to the tile that
+    # opened it.
+    "network_sod": "network_sod_select",
     "history": "report_form",
     "submission_detail": "history",
-    "roles_console": "report_form",
-    "system_settings": "report_form",
+    # Administrator's home page — the same role a picker plays for every other estate
+    # (report_form / network_dashboard / infra_form), just without a Reports screen in
+    # front of it. It has to lead straight to Role Select for the same reason those do:
+    # otherwise the ROLE_HOME fallback below resolves "Administrator's home" to this very
+    # page and Back points at the screen you're already standing on.
+    "roles_console": "role_select",
     "profile": "report_form",
+    # Every Configuration screen nests under the hub (see views._CONFIG_TABS) so the drawer's
+    # single "Configuration" entry lights up on all of them and Back always steps up to the hub,
+    # not straight to the dashboard.
+    "configuration": "report_form",
+    "config_prometheus": "configuration",
+    "grafana_config": "configuration",
+    "config_snmp": "configuration",
+    "config_topology": "configuration",
+    "config_backup_policy": "configuration",
+    "config_scripts": "configuration",
+    # a definition and its preview hang off the catalogue, so Back walks
+    # preview -> definition -> catalogue -> hub one step at a time
+    "config_script_edit": "config_scripts",
+    "config_script_preview": "config_script_edit",
+    "system_settings": "configuration",
+    "config_role_scopes": "configuration",
+    # The raw editors are how you edit the SAME file the screen above them presents as fields,
+    # so they hang off that screen rather than off the hub — Back from raw YAML returns to
+    # Prometheus, the way Temenos returns to Folder Watch.
+    "prometheus_config": "config_prometheus",
+    "config_yaml": "config_prometheus",
+    "prometheus_rule_file": "prometheus_config",
 }
 #: the tree's root — a parent of everything, so never marked as "the branch you are in"
 _NAV_ROOT = "report_form"
 
 _NAV_LABEL = {
     "role_select": "Role Select",
+    "reports": "Reports",
+    "os_inventory": "OS Inventory",
     "report_form": "System Picker",
     "report": "Report",
     "connect": "Connect",
     "folder_watch": "Folder Watch",
     "folder_watch_temenos": "Temenos",
     "network_dashboard": "Network Device Picker",
+    "network_sod_select": "SOD Device Picker",
+    "network_sod": "SOD Checklist",
     "role_empty": "Home",
     "network_report": "Core Switch",
+    "infra_form": "Infrastructure Picker",
+    "infra_report": "Infrastructure Report",
     "history": "History",
     "roles_console": "Roles",
-    "system_settings": "Configuration",
+    "configuration": "Configuration",
+    "config_prometheus": "Prometheus",
+    "config_topology": "Topology",
+    "config_scripts": "Scripts",
+    "config_script_edit": "Script",
+    "config_script_preview": "Preview",
+    "config_snmp": "SNMP",
+    "config_backup_policy": "Backup policy",
+    "config_yaml": "Raw YAML",
+    "prometheus_config": "Edit raw YAML",
+    "grafana_config": "Grafana",
+    "system_settings": "Data sources",
+    "config_role_scopes": "Role scopes",
     "profile": "Profile",
 }
 
@@ -127,15 +183,21 @@ def _back_nav(request):
     # retrace the report rather than the screen it was started from.
     # ...but never when you are ALREADY on that report: the override would hand its own URL
     # back as "Back", so the button pointed at the page you were standing on and did nothing.
-    on_the_open_report = name in ("report", "network_report")
-    on_a_picker = name in ("report_form", "network_dashboard")
+    on_the_open_report = name in ("report", "network_report", "infra_report")
+    on_a_picker = name in ("report_form", "network_dashboard", "infra_form")
     # A picker's Back steps OUT of the estate, so the open-report override does not apply
     # there — the picker already offers "Continue that report" in its own widget, and having
     # Back do the same thing would leave no way up at all.
-    if parent in ("report_form", "network_dashboard") and not on_the_open_report and not on_a_picker:
+    if (parent in ("report_form", "network_dashboard", "infra_form")
+            and not on_the_open_report and not on_a_picker):
         if "Network Admin" in scope and request.session.get("network_devices"):
             try:
                 return reverse("network_report"), "Report"
+            except NoReverseMatch:
+                pass
+        if "Infrastructure Admin" in scope and request.session.get("infra_report_systems"):
+            try:
+                return reverse("infra_report"), "Report"
             except NoReverseMatch:
                 pass
         # An empty scope means the user holds no catalogue role at all — the pre-picker
@@ -149,11 +211,10 @@ def _back_nav(request):
     # Never send anyone to a screen their own role does not show. The tree is rooted at the
     # SYSTEMS dashboard, so without this a network admin's Back led to a systems screen that
     # is not in their menu — the tree describing the app, not the role using it.
-    # Role Select auto-applies a single role and would bounce straight back, so a user with
-    # one role gets no Back from the picker rather than a button that returns them to where
-    # they already are.
-    if parent == "role_select" and len(held_roles(user_of(request))) <= 1:
-        return None, None
+    # Role Select no longer auto-applies a single role, so Back to it is a real destination
+    # for everyone — including a one-role holder, for whom it is the only route to seeing the
+    # other roles and requesting one. The old rule suppressed it here because the picker
+    # would have bounced them straight back; it doesn't any more.
 
     if parent == "report_form" and scope and "System Admin" not in scope:
         home = ROLE_HOME.get(active_role(request))
@@ -218,9 +279,14 @@ def role_flags(request):
         # drives the Folder Watch nav group
         "is_system_admin": is_system_admin(user) and in_scope("System Admin"),
         "is_network_admin": is_network_admin(user) and in_scope("Network Admin"),
+        "is_infra_admin": is_infra_admin(user) and in_scope("Infrastructure Admin"),
         "active_role": active_role(request) if user is not None else "",
-        # Only offer "switch role" to someone who actually has somewhere to switch to.
+        # Only offer "switch role" to someone who has somewhere to switch to. The canvas
+        # Back button is the one-role holder's route to the picker (see _back_nav).
         "can_switch_role": len(held_roles(user)) > 1,
+        # drives the single Reports drawer entry — Administrator has none
+        "has_reports": bool(reports_for(effective_roles(request)))
+                       if user is not None else False,
         "home_url": _home_url(request) if user is not None else reverse("report_form"),
         "notif_count": 0,
         "notifications": [],

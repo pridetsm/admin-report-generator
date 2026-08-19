@@ -1,0 +1,21 @@
+# ============================================================================
+#  t24_services.sample.yml — SAMPLE for one of the Prometheus rule-file
+#  sub-pages under the "Prometheus" Configuration screen.
+#
+#  This deployment's real file compares a STATIC list of expected T24 TSA
+#  services against what the exporter actually reports running, producing
+#  t24_service_up{service="..."} = 1 (running) / 0 (expected but not
+#  running) — generate_report.py reads that series directly (see
+#  SERVICE_CHECKS["temenos"]). The pattern below is the general shape: a
+#  recording rule that turns "is X in the expected set AND reporting" into
+#  one queryable series per item, for whatever exporter/system needs it.
+# ============================================================================
+groups:
+  - name: example_service_status
+    rules:
+      - record: example_service_up
+        expr: |
+          label_replace(vector(1), "service", "ExampleService", "", "")
+          and on(service) (example_exporter_running{service="ExampleService"} == 1)
+        labels:
+          service: "ExampleService"

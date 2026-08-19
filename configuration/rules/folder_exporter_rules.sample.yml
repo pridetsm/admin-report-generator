@@ -1,0 +1,30 @@
+# ============================================================================
+#  folder_exporter_rules.sample.yml — SAMPLE for one of the Prometheus
+#  rule-file sub-pages under the "Prometheus" Configuration screen.
+#
+#  This deployment's real file alerts on folder_exporter's health and backlog
+#  depth (interface queue folders on the Temenos/T24 App box — see
+#  SERVICE_CHECKS-adjacent folder_exporter job in prometheus.yml). The shape
+#  below is generic: exporter-health first, then a backlog-depth alert, the
+#  two things any folder-watching exporter is worth alerting on.
+# ============================================================================
+groups:
+  - name: folder_exporter
+    rules:
+      - alert: FolderExporterDown
+        expr: up{job="folder_exporter"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "folder_exporter is down on {{ $labels.instance }}"
+          description: "No scrape from folder_exporter for 5 minutes — folder backlog is no longer visible."
+
+      - alert: FolderBacklogHigh
+        expr: folder_exporter_file_count{folder="example_in"} > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backlog building up in {{ $labels.folder }}"
+          description: "More than 100 files waiting in {{ $labels.folder }} for 10 minutes."

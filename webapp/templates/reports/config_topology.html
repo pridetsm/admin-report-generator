@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Topology · Configuration{% endblock %}
+
+{% comment %}
+  prometheus.yml is organised by EXPORTER — one job for windows_exporter, one for
+  node_exporter — while the estate is organised by SYSTEM: RTGS's hosts sit in the
+  node_exporter job right next to CMS's. This screen does that translation, so maintaining
+  "which hosts are RTGS" doesn't mean holding the job layout in your head.
+
+  The fields are the same ones the Prometheus screen carries hidden
+  (sc__<job>__<group>__*), so one parser serves both and the two can't drift.
+{% endcomment %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  {% if load_error %}
+    <div class="card"><div class="body" style="padding:18px">
+      <div class="errornote" style="margin-top:0">{{ load_error }}</div>
+      <p style="margin:12px 0 0;color:var(--muted)">
+        The estate can only be built from a config that parses. Fix it in
+        <a href="{% url 'prometheus_config' %}">the raw editor</a>, then come back.
+      </p>
+    </div></div>
+  {% else %}
+
+  <form method="post" id="promForm">
+  {% csrf_token %}
+  {# settings live on the Prometheus screen; carry them through untouched #}
+  {% include "reports/_promconfig_carry.html" with carry="globals" %}
+  {% include "reports/_promconfig_carry.html" with carry="jobmeta" %}
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {{ topo.systems|length }} system{{ topo.systems|pluralize }} ·
+      {{ topo.host_count }} host{{ topo.host_count|pluralize }}{% if topo.unassigned %} ·
+      {{ topo.unassigned|length }} unassigned{% endif %}
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_prometheus' %}">Prometheus settings</a>
+    <a class="btn ghost" href="{% url 'prometheus_config' %}">✎ Edit raw YAML</a>
+  </div>
+
+  {% if errors %}
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <div class="errornote" style="margin-top:0">
+      <b>Nothing was saved — {{ errors|length }} problem{{ errors|pluralize }} to fix:</b>
+      <ul style="margin:8px 0 0 18px;padding:0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+    </div>
+  </div></div>
+  {% endif %}
+
+  <div id="topoList">
+  {% for s in topo.systems %}
+    <div class="card cfg-job{% if not errors %} collapsed{% endif %}" data-collapsible>
+      <header>
+        <h2>{{ s.name }}</h2>
+        <span class="sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
+        <span class="spacer"></span>
+        {% if s.skipped %}<span class="chip amber" title="Prometheus scrapes these, but the report skips this system name">not reported</span>{% endif %}
+        {% if s.infra %}<span class="chip accent" title="Reported on the Infrastructure Admin picker, not the System Admin one">Infrastructure Admin</span>{% endif %}
+        <span class="chev">▾</span>
+      </header>
+      <div class="body">
+        {% for row in s.rows %}
+          {% include "reports/_topology_host.html" with row=row %}
+        {% endfor %}
+      </div>
+    </div>
+  {% endfor %}
+
+  {% if topo.unassigned %}
+    <div class="section-label sub">Not assigned to a system</div>
+    <div class="card"><div class="body" style="padding:14px 18px 6px">
+      <p style="margin:0 0 12px;color:var(--muted);font-size:13px">
+        No <b>System</b> label, so the report leaves them out. Give one a system name to include it.
+      </p>
+      {% for row in topo.unassigned %}
+        {% include "reports/_topology_host.html" with row=row %}
+      {% endfor %}
+    </div></div>
+  {% endif %}
+  </div>
+
+  {# ---- add a host: it has to join an existing scrape job, so the job is chosen up front ---- #}
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <div class="cfg-sub-label" style="margin-top:0">Add a host</div>
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <label class="field" style="max-width:280px;margin:0">
+        <span>Scrape job it belongs to</span>
+        <select id="addHostJob">
+          {% for j in topo.jobs %}
+          <option value="{{ j.i }}" data-next-group="{{ j.next_group }}">{{ j.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="button" class="btn ghost" id="addHost">＋ Add host</button>
+    </div>
+    <div id="newHosts" class="cfg-groups" style="margin-top:12px"></div>
+  </div></div>
+
+  {% include "reports/_promconfig_history.html" %}
+
+  <div class="actionbar">
+    <div class="container-inner">
+      <input type="text" name="note" placeholder="What changed and why (optional)"
+             style="max-width:300px" aria-label="Revision note">
+      <button class="btn ghost" type="submit" name="action" value="save">Save revision</button>
+      <button class="btn primary" type="submit" name="action" value="apply">Save &amp; Apply</button>
+      <a class="btn ghost" href="{% url 'config_topology' %}">Discard changes</a>
+    </div>
+  </div>
+  </form>
+
+  <template id="tplHost">
+    <div class="cfg-group" data-group="__G__">
+      <div class="cfg-group-head">
+        <b>New host</b>
+        <span class="cfg-hint" style="display:inline;margin:0 0 0 8px">in __JOBNAME__</span>
+        <span class="spacer"></span>
+        <button type="button" class="cfg-x" data-remove-host title="Remove this host">✕</button>
+      </div>
+      <label class="field">
+        <span>Address — host:port, one per line</span>
+        <textarea name="sc____J______G____targets" rows="2" spellcheck="false" placeholder="10.0.0.11:9182"></textarea>
+      </label>
+      <div class="cfg-grid4">
+        <label class="field"><span>System <b class="cfg-req">· groups the report</b></span>
+          <input type="text" name="sc____J______G____l_system" placeholder="e.g. RTGS"></label>
+        <label class="field"><span>Display name</span>
+          <input type="text" name="sc____J______G____l_display" placeholder="e.g. RTGS Database"></label>
+        <label class="field"><span>Role</span>
+          <input type="text" name="sc____J______G____l_role" placeholder="app / db / …"></label>
+        <label class="field"><span>Platform (app)</span>
+          <input type="text" name="sc____J______G____l_app" placeholder="windows / linux"></label>
+      </div>
+    </div>
+  </template>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Live YAML file · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {{ line_count }} line{{ line_count|pluralize }} ·
+      {% if yaml_source.from_revision %}revision {{ yaml_source.revision.created_at|date:"d M Y, H:i" }}
+      {% else %}live file{% endif %} · service <b>{{ service_status }}</b>
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_prometheus' %}">Edit as fields</a>
+    <a class="btn ghost" href="{% url 'prometheus_config' %}">✎ Edit raw</a>
+    {% if raw %}<a class="btn ghost" href="?download=1" download>⬇ Download</a>{% endif %}
+  </div>
+
+  {% if error %}
+    <div class="card"><div class="body" style="padding:18px">
+      <div class="errornote" style="margin-top:0">{{ error }}</div>
+    </div></div>
+  {% else %}
+    <div class="section-label sub">prometheus.yml</div>
+    <div class="card"><div class="body" style="padding:0">
+      <pre class="cfg-yaml"><code>{{ raw }}</code></pre>
+    </div></div>
+  {% endif %}
+
+  {% if history %}
+  <div class="section-label sub">Recent revisions</div>
+  <div class="card"><div class="body" style="padding:10px 18px 14px">
+    <table class="hist">
+      <thead><tr><th>Saved</th><th>By</th><th>Note</th></tr></thead>
+      <tbody>
+      {% for rev in history %}
+        <tr>
+          <td>{{ rev.created_at|date:"d M Y, H:i" }}{% if forloop.first %} <span class="chip green">current</span>{% endif %}</td>
+          <td>{{ rev.created_by.get_username|default:"—" }}</td>
+          <td style="color:var(--muted)">{{ rev.note|default:"—" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+  {% endif %}
+</div>
+{% endblock %}

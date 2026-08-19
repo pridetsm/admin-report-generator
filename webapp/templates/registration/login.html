@@ -3,17 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in · Report Builder</title>
+  <title>Sign in · RBZ Monitoring Console</title>
   <link rel="stylesheet" href="{% static 'css/app.css' %}?v={{ asset_v }}">
   <style>
-    /* Password reveal. Edge/IE draw their own eye (::-ms-reveal) but only while the field has
-       focus AND content, so it vanishes as you click away — suppress it and use our own button,
-       which is always present and works in every browser. */
+    
     input[type="password"]::-ms-reveal,
     input[type="password"]::-ms-clear { display: none; }
 
     .pw-wrap { position: relative; display: block; }
-    .pw-wrap input { padding-right: 46px !important; }   /* keep text clear of the button */
+    .pw-wrap input { padding-right: 46px !important; }   
     .pw-eye {
       position: absolute; top: 0; right: 0; height: 100%; width: 42px;
       display: grid; place-items: center;
@@ -74,7 +72,7 @@
 
   eye.addEventListener("click", function () {
     var show = input.type === "password";
-    // keep the caret where it was — switching type resets it to the end in some browsers
+
     var start = input.selectionStart, end = input.selectionEnd;
     input.type = show ? "text" : "password";
     eye.setAttribute("aria-pressed", show ? "true" : "false");
@@ -82,10 +80,9 @@
     eye.setAttribute("aria-label", label);
     eye.setAttribute("title", label);
     input.focus();
-    try { input.setSelectionRange(start, end); } catch (err) { /* not supported: ignore */ }
+    try { input.setSelectionRange(start, end); } catch (err) {  }
   });
 
-  // never leave a password on screen after the form is submitted or the page is left
   document.addEventListener("submit", function () { input.type = "password"; });
 })();
 </script>

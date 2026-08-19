@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from django.conf import settings
 
@@ -88,12 +88,14 @@ def build_overview(store, systems, cfg) -> dict:
     numbers match. Returned as plain dicts the template renders natively (theme-aware)."""
     thr = cfg.overview_threshold
     hosts = sum(len(s.components) for s in systems)
-    nsvc = sum(len(v) for v in store.services.values()) + len(store.links)
+    nsvc = gr.total_services(store)
     down = gr.services_down(store)   # PromQL service checks + down web-link probes (see gr.services_down)
     ram_hosts, _ = gr.ram_pressure(store, systems, thr, thr)
     cpu_hosts, _ = gr.cpu_pressure(store, systems, thr, thr)
     dh_hosts, dh_disks, dh_state = gr.disk_high(store, systems, thr, cfg.chip_red)
-    nmiss = len(gr.backup_missing(store, systems))
+    dh_total = gr.total_disks(store, systems)
+    miss = gr.backup_missing(store, systems)
+    nmiss = len(miss)
     n_untracked = len(gr.backup_untracked(store, systems))
     n_tracked = len(systems) - n_untracked
     cert_expired, cert_expiring = gr.cert_rollup(store)
@@ -110,9 +112,13 @@ def build_overview(store, systems, cfg) -> dict:
     warn = lambda n: "good" if not n else "warn"
     web_state = "good" if n_http == 0 else ("bad" if n_http > n_https else "warn")
 
+    linux_pct, win_pct = gr.platform_host_pcts(systems)
     glance = [
         {"label": "Systems", "value": len(systems), "state": "info"},
         {"label": "Hosts", "value": hosts, "state": "info"},
+        # One combined tile, not two — matches the shape every other pair-of-numbers tile in
+        # this report uses (glance has no "sub" line, so the order lives in the label itself).
+        {"label": "Linux | Windows", "value": f"{linux_pct}% | {win_pct}%", "state": "info"},
         {"label": "Services", "value": nsvc, "state": "info"},
         {"label": "SWIFT txns", "value": swift, "state": "info"},
         {"label": "COB · T24", "value": cob, "state": "info"},
@@ -140,13 +146,13 @@ def build_overview(store, systems, cfg) -> dict:
         {"label": "High RAM", "value": f"{ram_hosts} | {hosts}", "sub": "hosts | total",
          "state": warn(ram_hosts)},
         {"label": f"High disk ≥{thr}%", "value": f"{dh_hosts} | {hosts}",
-         "sub": f"hosts | total · {dh_disks} disk{'' if dh_disks == 1 else 's'}", "state": dh_state},
+         "sub": f"hosts | total · {dh_disks} | {dh_total} disks", "state": dh_state},
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
         {"label": "Web encryption", "value": f"{n_https} | {n_https + n_http}",
          "sub": "https | total", "state": web_state},
-        {"label": "Backup tracking", "value": f"{n_tracked} | {n_untracked}",
-         "sub": "tracked | untracked", "state": warn(n_untracked)},
+        {"label": "Backup tracking", "value": f"{n_tracked} | {len(systems)}",
+         "sub": "tracked | total", "state": warn(n_untracked)},
     ]
 
     banners = []
@@ -164,6 +170,14 @@ def build_overview(store, systems, cfg) -> dict:
                         "head": f"Disk near-full — {len(nearfull)} disk(s) on {len(byhost)} host(s)",
                         "rows": [{"label": h, "values": ", ".join(v)}
                                  for h, v in sorted(byhost.items())]})
+    if miss:
+        bysys: dict = {}
+        for s, lbl, reason in miss:
+            bysys.setdefault(s, []).append(f"{lbl} ({reason})")
+        banners.append({"severity": "critical",
+                        "head": f"Missing backups — {len(miss)} host(s) with no fresh backup",
+                        "rows": [{"label": h, "values": ", ".join(v)}
+                                 for h, v in sorted(bysys.items())]})
     if ur:
         bysys: dict = {}
         for s, lbl, _ in ur:
@@ -225,13 +239,21 @@ def build_overview(store, systems, cfg) -> dict:
     return {"glance": glance, "immediate": immediate, "watch": watch, "banners": banners}
 
 
-def list_systems() -> List[dict]:
+def list_systems(*, infra: bool = False) -> List[dict]:
     """The system name + host count from the topology (prometheus.yml) WITHOUT any live capture.
     This is a plain file read, so the selection screen can be rendered on every landing without
-    touching Prometheus — the expensive capture is deferred until the admin actually proceeds."""
+    touching Prometheus — the expensive capture is deferred until the admin actually proceeds.
+
+    `infra=True` returns Infrastructure Admin's own estate (hyper-converged clusters,
+    standalone DB hosts) instead of the business-systems topology — see
+    gr.load_topology's `scope` and webapp/reports/views.infra_form."""
     cfg = gr.load_config()
-    systems = gr.load_topology(cfg.prometheus_yml)
-    return [{"name": s.name, "hosts": len(s.components)} for s in systems]
+    systems = gr.load_topology(cfg.prometheus_yml, scope="infra" if infra else "business")
+    return [{"name": s.name, "hosts": len(s.components),
+             # "windows" / "linux" / "hybrid" / "" — derived from the scrape job, so it costs
+             # the same file read the rest of this function already paid for.
+             "platform": gr.platform_of_system(s.components)}
+            for s in systems]
 
 
 def _scope_links_to_systems(store, systems) -> None:
@@ -244,11 +266,14 @@ def _scope_links_to_systems(store, systems) -> None:
                    if gr.assign_link(u, systems) is not None}
 
 
-def capture_snapshot(token: str, only: Optional[set] = None) -> Snapshot:
+def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = False) -> Snapshot:
     """Load config + topology, capture a FRESH set of live metrics from Prometheus, and compute
     the per-system flagged items. `only` (a set of system names) scopes the capture to just those
     systems — so we only pay for what the admin selected. Raises PrometheusUnavailable if the
-    endpoint is unreachable."""
+    endpoint is unreachable.
+
+    `infra=True` loads Infrastructure Admin's own estate instead of the business-systems
+    topology — see list_systems."""
     cfg = gr.load_config()
     # runtime overrides an Administrator set in the app (which Prometheus/Grafana to use)
     from .models import SystemConfig
@@ -257,7 +282,7 @@ def capture_snapshot(token: str, only: Optional[set] = None) -> Snapshot:
         cfg.prom = sc.prometheus_url
     if sc.grafana_url:
         cfg.grafana = sc.grafana_url
-    systems = gr.load_topology(cfg.prometheus_yml)
+    systems = gr.load_topology(cfg.prometheus_yml, scope="infra" if infra else "business")
     if only is not None:
         want = {n for n in only}
         systems = [s for s in systems if s.name in want]
@@ -399,3 +424,61 @@ def default_recipients() -> str:
         return ", ".join(mr.load_mail_config(str(gr.DEFAULT_CONFIG)).get("recipients", []))
     except Exception:      # noqa: BLE001 — config optional; empty is fine
         return ""
+
+
+class OsInventoryUnavailable(RuntimeError):
+    """Raised when the OS inventory cannot be built — unreachable Prometheus, or the `os`
+    collector not enabled on the exporters so no host reports a version at all."""
+
+
+def build_os_inventory(theme: str = "dark") -> Tuple[bytes, int, int, int]:
+    """The OS Inventory workbook, as bytes, plus (hosts, end-of-life, extended-support).
+
+    Estate-wide by design: an inventory that covered only the systems someone happened to
+    tick would answer "what is the oldest OS we run" with a number that depends on the
+    ticking. generate_os_inventory.fetch() reads every host Prometheus knows about.
+
+    Thin wrapper over send_report/generate_os_inventory.py, the same shape as build_report's
+    wrapper over the daily report — the engine stays the single source of truth for what a
+    report contains, and the webapp only decides when to run it and who may.
+    """
+    import datetime as _dt
+    import io
+
+    import generate_os_inventory as osi
+
+    cfg = gr.load_config()
+    from .models import SystemConfig
+    sc = SystemConfig.get()
+    if sc.prometheus_url:
+        cfg.prom = sc.prometheus_url
+
+    prom = gr.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
+    try:
+        prom.ping()
+    except Exception as exc:                      # noqa: BLE001 — surfaced to the admin
+        raise OsInventoryUnavailable(f"{cfg.prom}: {exc}") from exc
+
+    today = _dt.date.today()
+    hosts = osi.fetch(prom)
+    if not hosts:
+        raise OsInventoryUnavailable(
+            "No windows_os_info or node_os_info series came back — the `os` collector is "
+            "probably not enabled on the exporters.")
+    osi.annotate(hosts, today)
+
+    with gr.palette(theme if theme in gr.PALETTES else "dark"):
+        workbook = osi.Report(hosts, cfg.prom, today).build()
+
+    buf = io.BytesIO()
+    workbook.save(buf)
+    eol = sum(1 for h in hosts if h.band == "red")
+    extended = sum(1 for h in hosts if h.band == "amber")
+    return buf.getvalue(), len(hosts), eol, extended
+
+
+def default_os_inventory_filename(when=None) -> str:
+    import datetime as _dt
+
+    when = when or _dt.datetime.now()
+    return f"OS Inventory - {when:%Y-%m-%d %H%M}.xlsx"

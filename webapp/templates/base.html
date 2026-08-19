@@ -3,24 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Admin Report Generator{% endblock %}</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230e6e82'/><rect x='9' y='8' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='14' width='14' height='2.5' rx='1.2' fill='white'/><rect x='9' y='20' width='9' height='2.5' rx='1.2' fill='white'/></svg>">
+  <title>{% block title %}RBZ Monitoring Console{% endblock %}</title>
+  <link rel="icon" type="image/png" href="{% static 'img/favicon.png' %}">
   <link rel="stylesheet" href="{% static 'css/app.css' %}?v={{ asset_v }}">
   <script>
-    // Applied here in <head>, before first paint, so a saved dark theme never flashes light.
+
     (function () {
       var t = localStorage.getItem("pageTheme");
       if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
     })();
   </script>
   <style>
-    /* Settings acts as a parent row; its children are indented under it with a spine so the
-       grouping is visible rather than implied by proximity alone. */
+    
     .nm-children { position: relative; padding-left: 10px; margin: 0 0 4px; }
     .nm-children::before { content: ""; position: absolute; left: 14px; top: 3px; bottom: 3px;
                            width: 1px; background: var(--line-strong); }
     .navmenu-item.nm-child { padding-left: 26px; }
-    /* Same spine treatment in the drawer, so a parent/child pair reads as a group there too. */
+    
     .drawer-children { position: relative; padding-left: 8px; }
     .drawer-children::before { content: ""; position: absolute; left: 20px; top: 2px; bottom: 2px;
                                width: 1px; background: var(--line-strong); }
@@ -79,7 +78,7 @@
       {% else %}
       <a class="brand-icon" href="{{ home_url }}" title="Home"><img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="brand-logo"></a>
       {% endif %}
-      <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">Grafana Reports</button>
+      <button class="brand-title" type="button" id="drawerToggle" aria-controls="drawer" aria-expanded="false" title="Open navigation">RBZ Monitoring Console</button>
     </div>
     <div class="spacer"></div>
 
@@ -103,7 +102,7 @@
         <div class="nm-head">Settings</div>
         <div class="nm-children">
           {% if is_role_admin %}
-          <a href="{% url 'system_settings' %}" class="navmenu-item nm-child">Configuration</a>
+          <a href="{% url 'configuration' %}" class="navmenu-item nm-child">Configuration</a>
           {% endif %}
           <button type="button" id="themeToggle" class="navmenu-item nm-child">Theme</button>
         </div>
@@ -160,19 +159,20 @@
       <span aria-hidden="true">‹</span> Back to role select
     </a>
     {% endif %}
-    {% if is_system_admin %}
-    <a href="{% url 'report_form' %}"{% if current_page == 'report_form' %} class="is-current" aria-current="page"{% elif 'report_form' in current_ancestors %} class="is-ancestor"{% endif %}>System Picker</a>
-    {% endif %}
     {% comment %}
-      The network dashboard is a parent in the same shape as Folder Watch: the device picker,
-      with one child per monitored device. One today; the firewall and wireless controller
-      join the same list rather than needing a new place to live.
+      One Reports entry in place of a picker per estate. The pickers still exist — they are
+      what a report tile opens — but they are a step inside running a report, not three
+      separate destinations. Administrator has no entry here at all: it configures the app
+      rather than reporting on it.
     {% endcomment %}
+    {% if has_reports %}
+    <a href="{% url 'reports' %}"{% if current_page == 'reports' %} class="is-current" aria-current="page"{% elif 'reports' in current_ancestors %} class="is-ancestor"{% endif %}>Reports</a>
     {% if is_network_admin %}
-    <a href="{% url 'network_dashboard' %}"{% if current_page == 'network_dashboard' %} class="is-current" aria-current="page"{% elif 'network_dashboard' in current_ancestors %} class="is-ancestor"{% endif %}>Network Device Picker</a>
     <div class="drawer-children">
       <a href="{% url 'network_report' %}" class="drawer-child{% if current_page == 'network_report' %} is-current{% endif %}"{% if current_page == 'network_report' %} aria-current="page"{% endif %}>Core Switch</a>
+      <a href="{% url 'network_sod' %}" class="drawer-child{% if current_page == 'network_sod' %} is-current{% endif %}"{% if current_page == 'network_sod' %} aria-current="page"{% endif %}>SOD Checklist</a>
     </div>
+    {% endif %}
     {% endif %}
     <a href="{% url 'connect' %}"{% if current_page == 'connect' %} class="is-current" aria-current="page"{% elif 'connect' in current_ancestors %} class="is-ancestor"{% endif %}>Connect</a>
     {% comment %}
@@ -194,7 +194,23 @@
     {% endcomment %}
     {% if is_role_admin %}
     <a href="{% url 'roles_console' %}"{% if current_page == 'roles_console' %} class="is-current" aria-current="page"{% elif 'roles_console' in current_ancestors %} class="is-ancestor"{% endif %}>Roles</a>
-    <a href="{% url 'system_settings' %}"{% if current_page == 'system_settings' %} class="is-current" aria-current="page"{% elif 'system_settings' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
+    {% comment %}
+      Configuration nests its screens the way Folder Watch nests Temenos: the parent lights as
+      the branch you are inside, each child marks itself when you are on it. Prometheus and
+      Topology are two halves of one file; the raw editors hang off Prometheus rather than
+      appearing here, so the drawer lists what you configure, not every URL that can edit it.
+    {% endcomment %}
+    <a href="{% url 'configuration' %}"{% if current_page == 'configuration' %} class="is-current" aria-current="page"{% elif 'configuration' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
+    <div class="drawer-children">
+      <a href="{% url 'config_prometheus' %}" class="drawer-child{% if current_page == 'config_prometheus' %} is-current{% elif 'config_prometheus' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_prometheus' %} aria-current="page"{% endif %}>Prometheus</a>
+      <a href="{% url 'grafana_config' %}" class="drawer-child{% if current_page == 'grafana_config' %} is-current{% endif %}"{% if current_page == 'grafana_config' %} aria-current="page"{% endif %}>Grafana</a>
+      <a href="{% url 'config_snmp' %}" class="drawer-child{% if current_page == 'config_snmp' %} is-current{% endif %}"{% if current_page == 'config_snmp' %} aria-current="page"{% endif %}>SNMP</a>
+      <a href="{% url 'config_topology' %}" class="drawer-child{% if current_page == 'config_topology' %} is-current{% endif %}"{% if current_page == 'config_topology' %} aria-current="page"{% endif %}>Topology</a>
+      <a href="{% url 'config_backup_policy' %}" class="drawer-child{% if current_page == 'config_backup_policy' %} is-current{% endif %}"{% if current_page == 'config_backup_policy' %} aria-current="page"{% endif %}>Backup policy</a>
+      <a href="{% url 'config_scripts' %}" class="drawer-child{% if current_page == 'config_scripts' %} is-current{% elif 'config_scripts' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_scripts' %} aria-current="page"{% endif %}>Scripts</a>
+      <a href="{% url 'system_settings' %}" class="drawer-child{% if current_page == 'system_settings' %} is-current{% endif %}"{% if current_page == 'system_settings' %} aria-current="page"{% endif %}>Data sources</a>
+      <a href="{% url 'config_role_scopes' %}" class="drawer-child{% if current_page == 'config_role_scopes' %} is-current{% endif %}"{% if current_page == 'config_role_scopes' %} aria-current="page"{% endif %}>Role scopes</a>
+    </div>
     {% endif %}
   </nav>
 
@@ -218,8 +234,7 @@
 {% block body %}{% endblock %}
 
 <script>
-// Page theme toggle. Inline rather than in app.js so the label can never be stale relative
-// to the page — a cached app.js was leaving this button reading "Theme".
+
 (function () {
   "use strict";
   var root = document.documentElement;
@@ -230,7 +245,7 @@
     return root.getAttribute("data-theme") ||
       (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   }
-  // the label names what you'll GET: on dark it reads "Light Theme"
+
   function relabel() {
     var next = current() === "dark" ? "Light" : "Dark";
     btn.textContent = next + " Theme";

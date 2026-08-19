@@ -6,9 +6,18 @@ webapp/.env
 .env
 *.env
 
+# Generated agent-side scripts (Configuration > Scripts). Only the generated/ SUBFOLDER —
+# configuration/ itself holds committed reference samples (see its README). Ignored for the
+# same reason deploy/ is: these are rendered per host with real paths, and any carrying a
+# credential would carry it in plaintext. The DEFINITIONS live in the database; the templates
+# they are rendered from are committed under webapp/reports/script_templates/.
+/configuration/generated/
+
 # Real runtime config that lives at these paths once deployed (samples ARE committed):
 /send_report/config.ini
 /prometheus.yml
+/standalone/systems admin report/config.ini
+/send_report/backup_policy.json
 
 # ── Python ────────────────────────────────────────────────────────────
 __pycache__/
@@ -30,11 +39,26 @@ Thumbs.db
 *.xlsx
 *.png
 !webapp/static/img/logo.png
+# role-selection tile icons — real app assets, not dev artefacts
+!webapp/static/img/roles/*.png
 !send_report/logo.png
+!standalone/systems admin report/logo.png
 # The header mark is a SHIPPED asset, not a screenshot: without it the deployed app has no
 # manifest entry for it and the header breaks. Same for the design references it came from.
 !webapp/static/img/brand-mark.png
+# The application's own mark (the kingfisher) and the favicon built from it.
+!webapp/static/img/reports/*.png
+!webapp/static/img/app-mark.png
+!webapp/static/img/favicon.png
+# ...and the source art it was cut from.
+!icons/application/*.jpg
 !webapp/design-assets/*.png
+# Platform glyphs for the system pickers. SHIPPED assets for the same reason as the header
+# mark: app.css masks them by url(), so collectstatic fails outright if they aren't committed.
+!webapp/static/img/os/*.png
+# Role glyphs for the Role Select tiles. SHIPPED assets: the picker renders them by <img>,
+# so without them every tile on the first screen after sign-in is a broken image.
+!webapp/static/img/roles/*.png
 Screenshot*.png
 example.png
 .claude/

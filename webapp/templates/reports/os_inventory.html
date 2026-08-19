@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}OS Inventory · RBZ Monitoring Console{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:760px">
+
+  <div class="rs-head">
+    <h1>OS Inventory Report</h1>
+    <p>Every monitored host's operating system, its patch level against the newest build of
+       that OS in this estate, and its vendor support status.</p>
+  </div>
+
+  <div class="card"><div class="body" style="padding:18px">
+    <p style="margin:0 0 16px;color:var(--muted);font-size:13.5px">
+      Covers the whole estate — there is nothing to select. A host that is down drops out
+      rather than reporting a stale version, so anything missing here is unreachable, not
+      unknown.
+    </p>
+
+    <form method="post">{% csrf_token %}
+      <label class="field" style="margin-bottom:18px">
+        <span>Theme</span>
+        <div class="segtheme">
+          <input type="radio" id="osThemeDark" name="theme" value="dark"
+                 {% if default_theme != "light" %}checked{% endif %}>
+          <label for="osThemeDark">Dark</label>
+          <input type="radio" id="osThemeLight" name="theme" value="light"
+                 {% if default_theme == "light" %}checked{% endif %}>
+          <label for="osThemeLight">Light</label>
+        </div>
+      </label>
+
+      <button class="btn primary" type="submit" onclick="if(window.skipSpinnerOnce)window.skipSpinnerOnce();">
+        ⬇ Generate &amp; download
+      </button>
+    </form>
+  </div></div>
+</div>
+{% endblock %}

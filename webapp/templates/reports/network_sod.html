@@ -1,0 +1,336 @@
+{% extends "base.html" %}
+{% block title %}Network Infrastructure SOD Report{% endblock %}
+
+{% comment %}
+  The Start-of-Day checklist — the entry screen for the report the on-duty engineer signs
+  each morning.
+
+  Structurally this is the app's normal report screen (header card, stat pills, sections in
+  cards, sticky action bar) so a network admin who has run the other two reports already
+  knows how this one works. What differs is the direction the data flows: the other screens
+  PRESENT what Prometheus captured and ask for comments, while this one ASKS for readings
+  that live in four vendor consoles the app cannot query.
+
+  So every field starts blank on purpose. A blank cell reaches the workbook as a blank, which
+  says "not captured this morning" — a true statement. The only pre-filled rows are the ones
+  network_sod.collect() could answer from the SNMP scrape, and they are marked as such so
+  nobody re-keys them from the console.
+{% endcomment %}
+
+{% block body %}
+<style>
+  .sod-table { width: 100%; border-collapse: collapse; }
+  .sod-table th {
+    text-align: left; font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--muted);
+    padding: 6px 8px; border-bottom: 1px solid var(--line);
+  }
+  .sod-table td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .sod-table tr:last-child td { border-bottom: 0; }
+  .sod-name { font-size: 13px; color: var(--ink); white-space: nowrap; }
+  .sod-group td {
+    font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--muted); padding-top: 12px; border-bottom: 0;
+  }
+  .sod-in {
+    width: 100%; min-width: 0; box-sizing: border-box;
+    background: var(--panel-2); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 8px; font-size: 13px; font-family: inherit;
+  }
+  .sod-in:focus { outline: none; border-color: var(--accent); }
+  .sod-in.live { border-color: var(--green); }
+  select.sod-in { cursor: pointer; }
+  .sod-live {
+    display: inline-flex; align-items: center; gap: 5px; margin-left: 8px;
+    font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+    background: var(--green-bg); color: var(--green); white-space: nowrap;
+  }
+  .sod-note { font-size: 12px; color: var(--muted); margin: 10px 2px 0; line-height: 1.5; }
+  .sod-waf { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 16px; }
+  .sod-waf label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink); }
+  .sod-waf .dom { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .sod-waf select { width: 108px; }
+  @media (max-width: 700px) { .sod-name { white-space: normal; } }
+</style>
+
+<form method="post" action="{{ generate_url }}" id="sodForm">
+{% csrf_token %}
+<input type="hidden" name="theme" value="{{ report_theme }}">
+
+<div class="container">
+
+  <div class="snap" style="align-items:flex-start">
+    <div style="min-width:0">
+      <h1>Network Infrastructure SOD Report</h1>
+      <div class="meta">Start-of-Day checklist for {{ today|date:"d M Y" }} — worked through
+        once each morning by the on-duty engineer.</div>
+      <div class="sys-stats">
+        <span class="sys-stat">{{ summary.ping_total }} device check{{ summary.ping_total|pluralize }}</span>
+        <span class="sys-stat">{{ summary.circuit_count }} circuit{{ summary.circuit_count|pluralize }}</span>
+        <span class="sys-stat">{{ summary.controller_count }} WLAN controller{{ summary.controller_count|pluralize }}</span>
+        <span class="sys-stat">{{ waf_total }} WAF app{{ waf_total|pluralize }}</span>
+      </div>
+    </div>
+    <div class="spacer" style="flex:1"></div>
+    <a class="btn ghost" href="{{ picker_url }}" title="Go back to device selection">◂ Change devices</a>
+  </div>
+
+  {% comment %}
+    Said once, plainly, at the top. The alternative — a hint beside every empty field — would
+    put the same sentence on screen forty times to make one point.
+  {% endcomment %}
+  <div class="card"><div class="body">
+    <p class="meta" style="margin:0;line-height:1.6">These readings live in the SolarWinds,
+      Cisco WLC, Perfstack and Radware consoles, which this app does not connect to — so the
+      fields start empty and you key in what you see.
+      {% if live_count %}<b>{{ live_count }}</b> row{{ live_count|pluralize }} below
+      {{ live_count|pluralize:"is,are" }} already filled in from the SNMP scrape and marked
+      <span class="sod-live">live</span>.{% endif %}
+      <b>Anything you leave blank stays blank in the report</b>, which records it as not
+      captured rather than as passing.</p>
+  </div></div>
+
+  {% comment %} ---- core switches & WAN links ---- {% endcomment %}
+  {% if data.core_wan %}
+  <div class="section-label">Core switches &amp; WAN links</div>
+  <div class="card"><div class="body">
+    <table class="sod-table">
+      <thead><tr><th style="width:36%">Check</th><th style="width:34%">Result</th><th style="width:30%">Status</th></tr></thead>
+      <tbody>
+        {% for c in data.core_wan %}
+        <tr>
+          <td class="sod-name">{{ c.label }}{% if c.live %}<span class="sod-live" title="{{ c.source }}">live</span>{% endif %}</td>
+          <td><input class="sod-in{% if c.live %} live{% endif %}" type="text" name="result__{{ c.key }}"
+                     value="{{ c.result }}" placeholder="e.g. 3 ms" autocomplete="off"></td>
+          <td>
+            <select class="sod-in{% if c.live %} live{% endif %}" name="status__{{ c.key }}">
+              {% for s in status_choices %}
+              <option value="{{ s }}"{% if s == c.status %} selected{% endif %}>{% if s %}{{ s }}{% else %}— not captured —{% endif %}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+  {% endif %}
+
+  {% comment %} ---- firewalls ---- {% endcomment %}
+  {% if data.firewalls %}
+  <div class="section-label">Firewalls</div>
+  <div class="card"><div class="body">
+    <table class="sod-table">
+      <thead><tr><th style="width:36%">Check</th><th style="width:34%">Result</th><th style="width:30%">Status</th></tr></thead>
+      <tbody>
+        {% for g in data.firewalls %}
+        <tr class="sod-group"><td colspan="3">{{ g.label }}</td></tr>
+        {% for c in g.checks %}
+        <tr>
+          <td class="sod-name">{{ c.label }}{% if c.live %}<span class="sod-live" title="{{ c.source }}">live</span>{% endif %}</td>
+          <td><input class="sod-in{% if c.live %} live{% endif %}" type="text" name="result__{{ c.key }}"
+                     value="{{ c.result }}" placeholder="e.g. 2 ms" autocomplete="off"></td>
+          <td>
+            <select class="sod-in{% if c.live %} live{% endif %}" name="status__{{ c.key }}">
+              {% for s in status_choices %}
+              <option value="{{ s }}"{% if s == c.status %} selected{% endif %}>{% if s %}{{ s }}{% else %}— not captured —{% endif %}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+  {% endif %}
+
+  {% comment %} ---- floor switches ---- {% endcomment %}
+  {% if data.floor %}
+  <div class="section-label">Floor switches</div>
+  <div class="card"><div class="body">
+    <table class="sod-table">
+      <thead><tr><th style="width:36%">Check</th><th style="width:34%">Result</th><th style="width:30%">Status</th></tr></thead>
+      <tbody>
+        {% for c in data.floor %}
+        <tr>
+          <td class="sod-name">{{ c.label }}</td>
+          <td><input class="sod-in" type="text" name="result__{{ c.key }}" value="{{ c.result }}"
+                     placeholder="e.g. Reviewed" autocomplete="off"></td>
+          <td>
+            <select class="sod-in" name="status__{{ c.key }}">
+              {% for s in status_choices %}
+              <option value="{{ s }}"{% if s == c.status %} selected{% endif %}>{% if s %}{{ s }}{% else %}— not captured —{% endif %}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="sod-note">Reviewed as a set on the Orion dashboard rather than pinged one by
+      one, so this section reads REVIEWED rather than OK.</p>
+  </div></div>
+  {% endif %}
+
+  {% comment %} ---- internet circuits ---- {% endcomment %}
+  {% if data.circuits %}
+  <div class="section-label">Internet circuits</div>
+  <div class="card"><div class="body" style="overflow-x:auto">
+    <table class="sod-table" style="min-width:760px">
+      <thead><tr>
+        <th>Provider</th><th>Download</th><th>Upload</th><th>Latency</th>
+        <th>Jitter</th><th>Pkt loss</th><th>Quality (Stream / Game / Chat)</th>
+      </tr></thead>
+      <tbody>
+        {% for c in data.circuits %}
+        <tr>
+          <td class="sod-name">{{ c.provider }}</td>
+          <td><input class="sod-in" type="text" name="dl__{{ c.key }}" value="{{ c.download }}" placeholder="149 Mbps" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="ul__{{ c.key }}" value="{{ c.upload }}" placeholder="45.6 Mbps" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="lat__{{ c.key }}" value="{{ c.latency }}" placeholder="26.0 ms" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="jit__{{ c.key }}" value="{{ c.jitter }}" placeholder="45.5 ms" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="loss__{{ c.key }}" value="{{ c.loss }}" placeholder="0%" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="qual__{{ c.key }}" value="{{ c.quality }}" placeholder="Good/Good/Good" autocomplete="off"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="sod-note">Cloudflare speed test, per circuit. Packet loss above zero, a failed
+      loss test, or a <b>Poor</b> quality rating raises the degradation warning on the report
+      — the count is derived from what you enter here, never typed separately.</p>
+  </div></div>
+  {% endif %}
+
+  {% comment %} ---- wireless LAN controllers ---- {% endcomment %}
+  {% if data.controllers %}
+  <div class="section-label">Wireless LAN controllers</div>
+  <div class="card"><div class="body" style="overflow-x:auto">
+    <table class="sod-table" style="min-width:680px">
+      <thead><tr>
+        <th>Site</th><th>WLANs</th><th>APs active</th><th>Clients active</th>
+        <th>Rogue APs</th><th>Interferers (2.4GHz)</th>
+      </tr></thead>
+      <tbody>
+        {% for w in data.controllers %}
+        <tr>
+          <td class="sod-name">{{ w.site }}</td>
+          <td><input class="sod-in" type="text" name="wlans__{{ w.key }}" value="{{ w.wlans }}" placeholder="17 (3 off)" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="aps__{{ w.key }}" value="{{ w.aps }}" placeholder="53" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="clients__{{ w.key }}" value="{{ w.clients }}" placeholder="945" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="rogue__{{ w.key }}" value="{{ w.rogue }}" placeholder="0" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="intf__{{ w.key }}" value="{{ w.interferers }}" placeholder="0" autocomplete="off"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="sod-note">Any controller reporting one or more rogue APs raises the rogue-AP
+      warning on the report.</p>
+  </div></div>
+  {% endif %}
+
+  {% comment %} ---- DR Mazowe WAN links ---- {% endcomment %}
+  {% if data.dr_links %}
+  <div class="section-label">DR Mazowe WAN links</div>
+  <div class="card"><div class="body" style="overflow-x:auto">
+    <table class="sod-table" style="min-width:620px">
+      <thead><tr>
+        <th>Link</th><th>Utilization (12h)</th><th>Discards</th><th>Errors</th><th>Status</th>
+      </tr></thead>
+      <tbody>
+        {% for d in data.dr_links %}
+        <tr>
+          <td class="sod-name">{{ d.label }}</td>
+          <td><input class="sod-in" type="text" name="util__{{ d.key }}" value="{{ d.utilization }}" placeholder="Low" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="disc__{{ d.key }}" value="{{ d.discards }}" placeholder="0" autocomplete="off"></td>
+          <td><input class="sod-in" type="text" name="err__{{ d.key }}" value="{{ d.errors }}" placeholder="0" autocomplete="off"></td>
+          <td>
+            <select class="sod-in" name="drstatus__{{ d.key }}">
+              {% for s in status_choices %}
+              <option value="{{ s }}"{% if s == d.status %} selected{% endif %}>{% if s %}{{ s }}{% else %}— not captured —{% endif %}</option>
+              {% endfor %}
+            </select>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="sod-note">Perfstack link-utilization graphs, last 12 hours.</p>
+  </div></div>
+  {% endif %}
+
+  {% comment %} ---- Radware WAF ---- {% endcomment %}
+  {% if data.waf %}
+  <div class="section-label">Radware web application firewall</div>
+  <div class="card"><div class="body">
+    <div class="sod-waf">
+      {% for a in data.waf %}
+      <label>
+        <span class="dom" title="{{ a.name }}">{{ a.name }}</span>
+        <select class="sod-in" name="waf__{{ forloop.counter0 }}">
+          <option value=""{% if not a.status %} selected{% endif %}>—</option>
+          <option value="Protected"{% if a.status == "Protected" %} selected{% endif %}>Protected</option>
+          <option value="Issue"{% if a.status == "Issue" %} selected{% endif %}>Issue</option>
+        </select>
+      </label>
+      {% endfor %}
+    </div>
+    <p class="sod-note">{{ waf_total }} applications are protected in the Radware console;
+      {{ data.waf|length }} appear in the captured list. The report states both, rather than
+      quietly showing the smaller number.</p>
+  </div></div>
+  {% endif %}
+
+  {% comment %} ---- sign-off ---- {% endcomment %}
+  <div class="section-label">Sign-off</div>
+  <div class="card"><div class="body">
+    <div class="field">
+      <label for="sodAuthor">Engineer / Analyst</label>
+      <input class="sod-in" id="sodAuthor" type="text" name="author" value="{{ suggested_author }}"
+             placeholder="Your name" autocomplete="off" style="max-width:360px">
+    </div>
+    <div class="field" style="margin-top:12px">
+      <label for="sodComment">Notes for this morning <span class="meta">(optional)</span></label>
+      <textarea class="sod-in" id="sodComment" name="summary_comment" rows="3"
+                placeholder="Anything the readings above do not say on their own."></textarea>
+    </div>
+    <p class="sod-note">Your name and the date go into the sign-off block in the top-right of
+      the sheet, above the signature line.</p>
+  </div></div>
+</div>
+
+{% comment %} ---- sticky action bar, as on every other report screen ---- {% endcomment %}
+<div class="actionbar">
+  <div class="container-inner">
+    <span class="sel-pill"><b id="sodFilled">0</b><span id="sodFilledLabel"></span></span>
+    <div class="spacer" style="flex:1"></div>
+    <button class="btn primary" type="submit">Generate report ▸</button>
+  </div>
+</div>
+</form>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("sodForm");
+  if (!form) { return; }
+  var fields = Array.prototype.slice.call(
+    form.querySelectorAll("input[type=text], select")
+  ).filter(function (el) { return el.name !== "author"; });
+  var num = document.getElementById("sodFilled");
+  var label = document.getElementById("sodFilledLabel");
+
+  function sync() {
+    var n = fields.filter(function (el) { return String(el.value || "").trim() !== ""; }).length;
+    if (num) { num.textContent = n; }
+    if (label) { label.textContent = " of " + fields.length + " fields filled in"; }
+  }
+  fields.forEach(function (el) {
+    el.addEventListener("input", sync);
+    el.addEventListener("change", sync);
+  });
+  sync();
+})();
+</script>
+{% endblock %}

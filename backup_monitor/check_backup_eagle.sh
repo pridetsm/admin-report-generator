@@ -3,16 +3,22 @@
 # textfile collector. Dated-folder / single-file case (same shape as check_backup_snapshot.sh),
 # for the Eagle database on hre-eagledb-01.
 #
-# Same dated-folder layout as CEPECS, but a single .sql dump per day, e.g.:
-#     /u01/backupset/EAGLE/2026_07_02/eagle.sql    (+ eagle.log, NOT tracked)
-# We track the single newest eagle.sql under the root and confirm it was generated today or,
-# at the oldest, yesterday. Older/missing/empty => NO BACKUP (critical).
+# Same dated-folder layout as CEPECS, one dump per day, e.g.:
+#     /u01/backupset/EAGLE/2026_07_02/eagle.sql.gz    (+ eagle.log, NOT tracked)
+# We track the single newest matching dump under the root and confirm it was generated today
+# or, at the oldest, yesterday. Older/missing/empty => NO BACKUP (critical).
+#
+# CHECKS BOTH eagle.sql AND eagle.sql.gz -- the job compresses its dump now (confirmed on
+# hre-eagledb-01: the .sql name was never written, only .sql.gz, so a check for .sql alone
+# always found nothing and reported NO BACKUP even on nights the backup ran and succeeded).
+# Both stay checked, not just .gz, so this keeps working if the job is ever run uncompressed
+# again -- add a name to FILENAMES rather than replace one.
 #
 # Age is judged by mtime (%Y) = when the dump was written.
 #
 # Emits the shared schema; renders under the system owning this host's exporter instance
 # (hre-eagledb-01 -> system "Eagle"):
-#     backup_file{file="2026_07_02/eagle.sql",day="today|yesterday"} 1782939900   # value = mtime
+#     backup_file{file="2026_07_02/eagle.sql.gz",day="today|yesterday"} 1782939900   # value = mtime
 #     backup_file_count               1 = a fresh dump exists / 0 = none within yesterday..today
 #     backup_check_success            1 = backup root reachable / 0 = missing
 #     backup_check_timestamp_seconds  when this ran
@@ -21,10 +27,10 @@
 #   45 6 * * *  /opt/backup_monitor/check_backup_eagle.sh
 set -u
 
-BACKUP_ROOT="${BACKUP_ROOT:-/u01/backupset/EAGLE}"   # root holding the dated folders
-FILENAME="${FILENAME:-eagle.sql}"                    # the daily dump (the only file that matters)
+BACKUP_ROOT="${BACKUP_ROOT:-/u01/backupset/EAGLE}"          # root holding the dated folders
+FILENAMES="${FILENAMES:-eagle.sql eagle.sql.gz}"            # space-separated; any one match counts
 OUT="${OUT:-backup_file.prom}"
-MIN_BYTES="${MIN_BYTES:-1}"                           # reject 0-byte / partial dumps
+MIN_BYTES="${MIN_BYTES:-1}"                                  # reject 0-byte / partial dumps
 
 # node_exporter ONLY scrapes the exact --collector.textfile.directory it was started
 # with, and that path differs per install. So: honor an explicit TEXTFILE_DIR, else
@@ -64,18 +70,28 @@ YEST_MID=$(( TODAY_MID - 86400 ))
 # escape \ and " so odd names can't break the label syntax
 esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
+# build the find(1) name-matching expression from FILENAMES, e.g.:
+#   -name eagle.sql -o -name eagle.sql.gz
+find_name_expr=()
+first=1
+for fn in $FILENAMES; do
+    [ "$first" -eq 1 ] || find_name_expr+=( -o )
+    find_name_expr+=( -name "$fn" )
+    first=0
+done
+
 check_ok=1
 file_line=""
 
 if [ -d "$BACKUP_ROOT" ]; then
-    # newest non-empty <FILENAME> anywhere under the backup root (by mtime)
+    # newest non-empty match (any name in FILENAMES) anywhere under the backup root (by mtime)
     newest=""; newest_mtime=0
     while IFS= read -r -d '' f; do
         m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || date -r "$f" +%s 2>/dev/null)"
         sz="$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)"
         [ -n "$m" ] && [ -n "$sz" ] && [ "$sz" -ge "$MIN_BYTES" ] || continue
         if [ "$m" -gt "$newest_mtime" ]; then newest_mtime="$m"; newest="$f"; fi
-    done < <(find "$BACKUP_ROOT" -type f \( -name "$FILENAME" -o -name "$FILENAME.gz" \) -print0 2>/dev/null)
+    done < <(find "$BACKUP_ROOT" -type f \( "${find_name_expr[@]}" \) -print0 2>/dev/null)
 
     if [ -n "$newest" ]; then
         if   [ "$newest_mtime" -ge "$TODAY_MID" ]; then day="today"

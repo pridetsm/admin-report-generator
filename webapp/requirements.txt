@@ -5,3 +5,4 @@ PyYAML>=6           # topology parsing (prometheus.yml)
 Pillow>=10          # lets openpyxl embed the company logo in the report
 psycopg[binary]>=3.1  # PostgreSQL driver (production DB; SQLite used only as a dev fallback)
 whitenoise>=6         # serves /static/ directly when no reverse proxy is in front
+cryptography>=42      # encrypts secrets stored in DB config revisions (see reports/crypto.py)

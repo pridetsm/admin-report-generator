@@ -8,7 +8,8 @@
   --bg: #eef1f5;        --panel: #ffffff;      --panel-2: #f2f5f8;
   --ink: #16232e;       --muted: #51707f;
   --line: #e1e6ea;      --line-strong: #ced5dd;
-  --accent: #0e7c93;    --accent-ink: #ffffff;
+  --accent: #1a6fc4;    --accent-ink: #ffffff;   --accent-bg: #e6f0fb;
+  --grad-from: #2882de; --grad-to: #2dc7e6;
   --red: #d14a3a;       --red-bg: #fdebea;
   --amber: #b8790a;     --amber-bg: #fff6e0;
   --green: #0e9c74;     --green-bg: #e8f6f0;
@@ -20,7 +21,8 @@
     --bg: #0e1620;      --panel: #121e2b;      --panel-2: #1b2836;
     --ink: #e7eef5;     --muted: #7f93a6;
     --line: #26323f;    --line-strong: #33424f;
-    --accent: #5bc0d4;  --accent-ink: #06131a;
+    --accent: #2dc7e6;  --accent-ink: #06131a;   --accent-bg: #123a4f;
+    --grad-from: #2882de; --grad-to: #2dc7e6;
     --red: #ef6a5a;     --red-bg: #3a1a16;
     --amber: #e8b04b;   --amber-bg: #3a2f14;
     --green: #4cc9a4;   --green-bg: #14322b;
@@ -32,7 +34,8 @@
   --bg: #0e1620;      --panel: #121e2b;      --panel-2: #1b2836;
   --ink: #e7eef5;     --muted: #7f93a6;
   --line: #26323f;    --line-strong: #33424f;
-  --accent: #5bc0d4;  --accent-ink: #06131a;
+  --accent: #2dc7e6;  --accent-ink: #06131a;   --accent-bg: #123a4f;
+  --grad-from: #2882de; --grad-to: #2dc7e6;
   --red: #ef6a5a;     --red-bg: #3a1a16;
   --amber: #e8b04b;   --amber-bg: #3a2f14;
   --green: #4cc9a4;   --green-bg: #14322b;
@@ -97,6 +100,15 @@ a:hover { text-decoration: underline; }
 .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 .brand small { color: var(--muted); font-weight: 500; }
 .login-logo { height: 92px; width: auto; display: block; margin: 0 auto 6px; }
+
+/* Any flat-silhouette artwork wears the full role-icon gradient: set --glyph to its url and
+   the mask does the rest, so a monochrome icon joins the coloured ones instead of reading as
+   a different set. */
+.grad-glyph {
+  background: linear-gradient(135deg, var(--grad-from), var(--grad-to));
+  -webkit-mask: var(--glyph) center / contain no-repeat;
+          mask: var(--glyph) center / contain no-repeat;
+}
 .topbar .spacer { flex: 1; }
 .topbar .who { color: var(--muted); font-size: 13px; }
 
@@ -268,9 +280,10 @@ a:hover { text-decoration: underline; }
   display: inline-flex; align-items: center; padding: 2px 8px;
   border-radius: 6px; font-size: 11.5px; font-weight: 600; white-space: nowrap; letter-spacing: .2px;
 }
-.chip.red   { color: var(--red);   background: var(--red-bg); }
-.chip.amber { color: var(--amber); background: var(--amber-bg); }
-.chip.green { color: var(--green); background: var(--green-bg); }
+.chip.red    { color: var(--red);    background: var(--red-bg); }
+.chip.amber  { color: var(--amber);  background: var(--amber-bg); }
+.chip.green  { color: var(--green);  background: var(--green-bg); }
+.chip.accent { color: var(--accent); background: var(--accent-bg); }
 
 /* ---- flagged rows ---- */
 .flag {
@@ -460,8 +473,10 @@ table.hist tr:last-child td { border-bottom: 0; }
 .sys-tile:hover { border-color: var(--accent); }
 .sys-tile > .select-check { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .sys-mono {
-  flex: none; width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center;
-  font-weight: 700; font-size: 16px;
+  /* 34px is the old 40px less 15%; the radius and letter come down with it so the badge keeps
+     its proportions rather than looking like a shrunk box with an oversized glyph in it. */
+  flex: none; width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center;
+  font-weight: 700; font-size: 14px;
   /* per-letter hue (set inline as --mono-h); saturation/lightness are pinned so all 26 read as
      one cohesive palette. Light-theme values here; dark overrides below. */
   background: hsl(var(--mono-h, 200) 44% 90%);
@@ -484,7 +499,44 @@ table.hist tr:last-child td { border-bottom: 0; }
 .sys-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .sys-name { font-weight: 650; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sys-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.sys-tile .badge-reported { margin-top: 6px; align-self: flex-start; }
+
+/* ---- recently reported: accent the tile's own border, don't badge it ----
+   The badge was a third line inside the tile: it pushed the layout around, competed with the
+   name for attention, and only ever appeared on some tiles, so the grid's rows never settled.
+   The border accent carries the same one bit of information the way .checked already accents
+   a border for "selected" — same mechanism, amber instead of the accent colour, toned down
+   (blended toward the neutral border) since this tile hasn't been ACTED on, only flagged;
+   full-strength amber is reserved for the checked state and for genuine alerts elsewhere in
+   the report, so a recently-reported tile never reads as urgent. */
+.sys-tile.is-recent { border-color: color-mix(in srgb, var(--amber) 45%, var(--line-strong)); }
+/* The name and the platform badge take the amber as well, so the flag survives being scanned
+   quickly: a border alone is easy to miss in a dense grid, and the badge is the first thing
+   the eye lands on in a tile. No background fill on the tile itself, deliberately — a solid
+   amber panel behind the whole card reads as "selected" or "alert", not "flagged"; the
+   border, the badge and the text carry the signal without turning the card into a block of
+   colour. */
+.sys-tile.is-recent .sys-name,
+.sys-tile.is-recent .sys-sub { color: var(--amber); }
+.sys-tile.is-recent .sys-mono,
+:root[data-theme="light"] .sys-tile.is-recent .sys-mono,
+:root[data-theme="dark"] .sys-tile.is-recent .sys-mono {
+  background: color-mix(in srgb, var(--amber) 14%, var(--panel));
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
+}
+/* Selected still wins the border outright — it's the state the user is actively changing. */
+.sys-tile.is-recent.checked { border-color: var(--accent); }
+
+/* the key for that accent, sat above the grid — full-strength amber here even though the
+   tiles themselves are toned down, because a legend's whole job is to be unambiguous */
+.sys-key {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 12px;
+  color: var(--muted); font-size: 12.5px; line-height: 1.5;
+}
+.sys-key-swatch {
+  flex: none; width: 26px; height: 16px; border-radius: 5px;
+  background: var(--panel); border: 2px solid var(--amber);
+}
 .sys-tick {
   flex: none; width: 22px; height: 22px; border-radius: 7px; display: grid; place-items: center;
   border: 1.5px solid var(--line-strong); color: transparent; font-size: 13px; font-weight: 800;
@@ -495,11 +547,6 @@ table.hist tr:last-child td { border-bottom: 0; }
 .sys-tile:not(.checked) { opacity: .6; }
 .sys-tile:not(.checked):hover { opacity: 1; }
 .sys-tile.hidden-by-filter { display: none; }
-
-.badge-reported {
-  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
-  background: var(--amber-bg); color: var(--amber); font-size: 11px; font-weight: 600;
-}
 
 /* ---- toasts (bottom-center, above the action bar) ---- */
 .toast-wrap {
@@ -515,6 +562,80 @@ table.hist tr:last-child td { border-bottom: 0; }
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.success { border-left-color: var(--green); }
 .toast.info { border-left-color: var(--accent); }
+
+/* ============================================================================
+   CONFIGURATION — tabs, the prometheus.yml form, role scopes
+   ============================================================================ */
+/* Configuration hub: one card per child screen. Same tokens as the tab strip below, sized up
+   — the hub is a destination, the strip is a way to move sideways once you are in one. */
+.cfg-hub { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+.cfg-hub-card {
+  display: flex; flex-direction: column; gap: 5px; padding: 16px 17px;
+  border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel);
+  color: var(--ink); text-decoration: none; box-shadow: var(--shadow);
+  transition: border-color .12s ease, transform .12s ease;
+}
+.cfg-hub-card:hover { border-color: var(--accent); transform: translateY(-1px); text-decoration: none; }
+.cfg-hub-name { font-weight: 650; font-size: 15px; }
+.cfg-hub-hint { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+
+/* One line at the top of a configuration screen: the state on the left, the ways out on the
+   right. Replaces the paragraphs that used to explain each screen — the drawer says where you
+   are, the field labels say what each field is, and prose repeating both was the third telling. */
+.cfg-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel);
+}
+.cfg-bar .spacer { flex: 1; }
+.cfg-bar-state { color: var(--muted); font-size: 13px; }
+.cfg-note { color: var(--muted); font-size: 12.5px; margin: 0 2px 14px; }
+
+.cfg-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.cfg-grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+.cfg-grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.cfg-hint { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; }
+.cfg-req { color: var(--accent); font-weight: 600; text-transform: none; letter-spacing: 0; }
+.cfg-sub-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin: 18px 0 8px; }
+.cfg-sub-label .cfg-hint { display: inline; text-transform: none; letter-spacing: 0; margin-left: 6px; }
+.cfg-scheme { max-width: 220px; margin-top: 12px; }
+
+/* key/value rows (extra labels, external labels) */
+.cfg-kv { display: flex; flex-direction: column; gap: 8px; }
+.cfg-kv-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
+.cfg-x {
+  width: 30px; height: 30px; flex: none; border-radius: 8px; border: 1px solid var(--line-strong);
+  background: var(--panel-2); color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1;
+}
+.cfg-x:hover { border-color: var(--red); color: var(--red); }
+.cfg-add { padding: 7px 13px; font-size: 13px; margin-top: 10px; }
+
+/* a scrape job card + its target groups */
+.cfg-job > header h2 { font-weight: 650; }
+.cfg-job > header .cfg-x { margin-right: 4px; }
+.cfg-group { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px 14px; margin-bottom: 12px; background: var(--panel-2); }
+.cfg-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 13.5px; }
+.cfg-group-head .spacer { flex: 1; }
+.cfg-group .field { margin-bottom: 10px; }
+.cfg-group textarea { background: var(--panel); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; }
+
+/* read-only blocks: preserved advanced job keys, and the live YAML view */
+.cfg-pre {
+  margin: 0 0 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel-2); color: var(--muted); overflow-x: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.5;
+}
+.cfg-yaml {
+  margin: 0; padding: 16px 18px; max-height: 70vh; overflow: auto;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.55;
+  color: var(--ink); tab-size: 2;
+}
+
+/* role -> systems picker */
+.scope-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.scope-opt { display: flex; align-items: center; gap: 9px; padding: 8px 11px; border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer; font-size: 13.5px; background: var(--panel-2); }
+.scope-opt:hover { border-color: var(--accent); }
+.scope-opt input { width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
 
 /* ---- recipients dropdown ---- */
 .dropdown { position: relative; }
@@ -613,8 +734,16 @@ table.hist tr:last-child td { border-bottom: 0; }
   .sys-grid.has-selection .sys-tile:not(.checked) { opacity: .55; }
   .sys-grid.has-selection .sys-tile:not(.checked):hover { opacity: 1; }
 
-  /* stretch, so a tile fills the equal-height row its grid gives it */
-  .sys-tile { align-items: flex-start; min-height: 66px; height: 100%;
+  /* Stretch, so a tile fills the equal-height row its grid gives it.
+
+     Contents are CENTRED now, and the tile is shorter. Both follow from the "recently
+     reported" badge becoming a tint: the tile is two lines on every row instead of two or
+     three depending on the system, so top-alignment (which existed to stop that third line
+     shoving things around) leaves the badge and the name floating above dead space.
+
+     The badge column sizes itself — one glyph for a single-platform system, two for a hybrid
+     — so the body flexes around it rather than the row being cut to a fixed measure. */
+  .sys-tile { align-items: center; min-height: 58px; height: 100%;
               transition: border-color .13s ease, opacity .13s ease, background .13s ease,
                           transform .13s ease, box-shadow .13s ease; }
   .sys-tile:hover { transform: translateY(-1px); box-shadow: 0 3px 12px rgba(0,0,0,.09); }
@@ -647,6 +776,37 @@ table.hist tr:last-child td { border-bottom: 0; }
     background: color-mix(in srgb, var(--accent) 12%, var(--panel));
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
+
+  /* PLATFORM GLYPHS  (Windows / Linux / hybrid, in place of the monogram letter)
+     ------------------------------------------------------------------------------------
+     .os-glyph is SHARED — the systems picker uses it here, and connect.html / form.html
+     both reuse it, restyling only the size and tone for their context. Moving or deleting
+     this block silently unpaints the glyph on those two screens as well.
+
+     The source icons are flat BLACK silhouettes on transparency. Dropped in as <img> they
+     would sit as a black smudge on the dark theme and ignore the badge's grey -> accent
+     transition entirely. Masking paints them in `currentColor` instead, so they inherit
+     every colour rule the letter already had — the badge keeps ONE definition of its colour
+     across both themes and both states, and the glyph simply follows it. */
+  .os-glyph {
+    display: block; background: currentColor;
+    -webkit-mask: var(--os-src) center / contain no-repeat;
+            mask: var(--os-src) center / contain no-repeat;
+  }
+  /* sized apart on purpose: the Windows mark is a filled square that carries to the edges of
+     its canvas, so at a matched box it reads noticeably heavier than the penguin.
+     Both are the previous 19/22 less 15%, tracking the badge they sit in. */
+  .os-windows { --os-src: url("../img/os/windows.png"); width: 16px; height: 16px; }
+  .os-linux   { --os-src: url("../img/os/linux.png");   width: 19px; height: 19px; }
+
+  /* Hybrid shows both stacks rather than picking whichever OS holds the majority — a mixed
+     estate is the very thing worth knowing before you pick the system.
+
+     TWO badges, not one badge holding two glyphs. Cramming both into a single square meant
+     shrinking each below the size every other badge uses, so the tile that had the most to
+     say was the one whose glyphs were hardest to read. Two full-size badges say "Windows AND
+     Linux" at a glance, and each is the same size as every other badge on the screen. */
+  .sys-os-pair { flex: none; display: flex; gap: 4px; }
   .sys-tick { margin-top: 1px; }
   .sys-body { gap: 1px; }
 
@@ -721,3 +881,66 @@ table.hist tr:last-child td { border-bottom: 0; }
   background: var(--panel-2); color: var(--muted);
 }
 .resume-cd.warn { background: var(--amber-bg); color: var(--amber); }
+
+/* Role Select and Reports both ask "which one" as a grid of tiles, one after the other, so
+   they share one tile component here rather than each keeping its own copy to drift apart.
+   Report tiles reuse it wholesale; only the glyph differs, because a report's artwork is line
+   art rather than a filled illustration and needs the gradient painted through it. */
+.rp-glyph { width: 26px; height: 26px; display: block; }
+
+.rs-wrap { max-width:760px; margin:0 auto; padding:8px 0 40px; }
+.rs-head { text-align:center; margin-bottom:26px; }
+.rs-head h1 { font-size:22px; font-weight:650; margin:0 0 6px; letter-spacing:-.2px; }
+.rs-head p { margin:0; color:var(--muted); font-size:13px; line-height:1.6; }
+
+.rs-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(232px,1fr));
+           grid-auto-rows:1fr; gap:10px; }
+
+.rs-card { margin:0; }
+.rs-btn {
+  width:100%; height:100%; text-align:left; cursor:pointer; font:inherit; color:inherit;
+  background:var(--panel); color:var(--ink); border:1px solid var(--line-strong);
+  border-radius:12px;
+  padding:16px 17px; display:flex; flex-direction:column; align-items:flex-start; gap:11px;
+  transition:border-color .12s ease, transform .12s ease;
+}
+.rs-btn:hover { border-color:var(--accent); transform:translateY(-1px); }
+.rs-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+
+.rs-mono {
+  flex:none; width:40px; height:40px; border-radius:11px; display:grid; place-items:center;
+  font-weight:700; font-size:15px; color:var(--accent-ink); background:var(--accent);
+}
+
+.rs-icon {
+  flex:none; width:40px; height:40px; border-radius:11px; display:grid; place-items:center;
+  background:var(--panel-2); border:1px solid var(--line);
+}
+.rs-icon img { width:26px; height:26px; object-fit:contain; display:block; }
+
+.rs-btn.is-locked .rs-icon img { filter:grayscale(.55); }
+.rs-body { flex:1; min-width:0; }
+.rs-name { font-size:14.5px; font-weight:640; }
+.rs-pages { font-size:12px; color:var(--muted); margin-top:4px; line-height:1.55; }
+.rs-go { display:none; }
+
+.rs-current { font-size:10px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+              background:var(--accent); color:var(--accent-ink); padding:2px 7px;
+              border-radius:5px; margin-left:8px; vertical-align:1px; }
+
+.rs-btn.is-locked { opacity:.72; }
+.rs-btn.is-locked:hover { opacity:1; }
+.rs-btn.is-locked[disabled] { cursor:default; opacity:.55; }
+.rs-btn.is-locked[disabled]:hover { border-color:var(--line-strong); transform:none; }
+.rs-tag { font-size:10px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+          margin-left:8px; padding:2px 7px; border-radius:5px; vertical-align:1px;
+          background:var(--panel-2); color:var(--muted); }
+.rs-tag.pending { background:var(--amber-bg); color:var(--amber); }
+.rs-ask { display:block; margin-top:9px; font-size:12px; font-weight:650; color:var(--accent); }
+.rs-btn.is-locked[disabled] .rs-ask { color:var(--muted); }
+
+.rs-all { margin-top:20px; text-align:center; }
+.rs-all button { background:none; border:0; color:var(--muted); font:inherit; font-size:12.5px;
+                 cursor:pointer; text-decoration:underline; padding:6px; }
+.rs-all button:hover { color:var(--ink); }
+.rs-all p { margin:5px 0 0; font-size:11.5px; color:var(--muted); }

@@ -112,6 +112,9 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'reports.middleware.RoleRequiredMiddleware',
+    # Role gating is RoleScopeMiddleware's job. The branch's ActiveRoleMiddleware was written
+    # against a tree that had no role picker; this one does, and two middlewares racing to
+    # decide the active role would fight over the same session key.
     'reports.middleware.RoleScopeMiddleware',
 ]
 

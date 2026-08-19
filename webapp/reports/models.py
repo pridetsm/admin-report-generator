@@ -157,6 +157,224 @@ class SystemConfig(models.Model):
         return obj
 
 
+class GrafanaConfigRevision(models.Model):
+    """A point-in-time snapshot of Grafana's custom.ini. APPEND-ONLY — a save always creates
+    a new row, never edits or deletes one, so the full history is browsable and the live file
+    can be regenerated from any row. `current()` (the most recent row) is what the edit screen
+    shows and what the live file was last written from; see reports/grafana_admin.py for the
+    mask/unmask/write/restart logic. The DB is the version history — there is no per-version
+    file kept on disk, only the one live custom.ini, fully overwritten on every apply.
+
+    `content` holds the WHOLE file as raw text (not one field per setting — custom.ini can hold
+    any Grafana directive, and a field-per-setting form can only ever cover the ones already
+    modeled). It is ALWAYS the MASKED text — the `password = ...` line under [smtp] is replaced
+    with grafana_admin.PASSWORD_PLACEHOLDER, never the real value — so browsing history, or
+    viewing this in Django admin, never exposes the real secret. `smtp_password_encrypted`
+    holds the real value, separately, at rest as Fernet ciphertext (see reports/crypto.py);
+    it's spliced back into `content` only at the moment the live file is actually written."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    content = models.TextField(
+        default="", help_text="The entire custom.ini text, MASKED (see class docstring).")
+    smtp_password_encrypted = models.TextField(
+        blank=True, help_text="Fernet ciphertext — see reports/crypto.py. Never plaintext.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Grafana config revision"
+
+    def __str__(self):
+        return f"Grafana config @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        """The most recent revision, or None if nothing has ever been saved yet (the edit
+        screen falls back to parsing the live file in that case — see grafana_admin.py)."""
+        return cls.objects.first()
+
+
+class PrometheusConfigRevision(models.Model):
+    """A point-in-time snapshot of the ENTIRE prometheus.yml text. APPEND-ONLY, same shape as
+    GrafanaConfigRevision — but the file (443 lines, 11 scrape jobs, ~60 host targets, and
+    extensive hand-written rationale comments) is edited as raw YAML text rather than
+    decomposed into per-setting fields: a generic re-serialization would either be enormous
+    or would silently drop every comment. See reports/prometheus_admin.py — `validate()` runs
+    the real `promtool check config` (not just a YAML parse) before anything is ever applied."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    content = models.TextField(help_text="The entire prometheus.yml text.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Prometheus config revision"
+
+    def __str__(self):
+        return f"Prometheus config @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first()
+
+
+class PrometheusRuleFileRevision(models.Model):
+    """Same append-only/raw-text shape as PrometheusConfigRevision, for the three files
+    prometheus.yml's `rule_files:` list references (confirmed via `promtool check config`:
+    alerts.yml, t24_services.yml, folder_exporter_rules.yml). One shared model/table for all
+    three rather than three near-identical models — `filename` distinguishes them, `current()`
+    and the view/URL are parametrized by it. See reports/prometheus_admin.py — validated with
+    `promtool check rules` (standalone rule syntax check, independent of prometheus.yml)."""
+
+    RULE_FILE_CHOICES = [
+        ("alerts.yml", "alerts.yml"),
+        ("t24_services.yml", "t24_services.yml"),
+        ("folder_exporter_rules.yml", "folder_exporter_rules.yml"),
+    ]
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    filename = models.CharField(max_length=64, choices=RULE_FILE_CHOICES)
+    content = models.TextField(help_text="The entire rule file's text.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Prometheus rule file revision"
+
+    def __str__(self):
+        return f"{self.filename} @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls, filename):
+        return cls.objects.filter(filename=filename).first()
+
+
+class SnmpConfigRevision(models.Model):
+    """A point-in-time snapshot of the snmp_exporter's `auths:` credential profiles —
+    NOT the whole snmp.yml. That file's other ~2MB (`modules:`) is generator output ("manual
+    changes will be lost" per its own header); see reports/snmp_admin.py for why this only
+    ever reads/writes that one small section's text, never the whole file.
+
+    APPEND-ONLY, same principle as GrafanaConfigRevision: `profiles` is
+    {profile_name: {field: value, ...}, ...}, ALWAYS with every secret field (community,
+    password, priv_password — see snmp_admin.SECRET_FIELDS) replaced by
+    snmp_admin.PASSWORD_PLACEHOLDER, so browsing history or viewing this in Django admin never
+    exposes a real credential. `secrets_encrypted` holds the real values, separately, at rest
+    as Fernet ciphertext keyed the same way ({profile_name: {field: ciphertext, ...}}); they
+    are spliced back in only at the moment the live file is actually written."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    profiles = models.JSONField(
+        default=dict, help_text="{profile: {field: value, ...}}, secrets MASKED (see class docstring).")
+    secrets_encrypted = models.JSONField(
+        default=dict, help_text="{profile: {field: ciphertext, ...}} — Fernet, never plaintext.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "SNMP config revision"
+
+    def __str__(self):
+        return f"SNMP config @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first()
+
+
+class BackupPolicyRevision(models.Model):
+    """A point-in-time snapshot of the per-host backup-frequency overrides
+    generate_report.backup_cutoff() reads (see BACKUP_MAX_AGE_DAYS / reload_backup_policy
+    there) — how many days old a host's newest backup may be and still count as CURRENT.
+    Almost every host backs up daily; a host on a slower cycle (BSA's database, every 3rd
+    day) needs its own entry here, otherwise the gap between its runs reads as a missing
+    backup. "Frequency" is the only component this models today — see
+    reports/backup_policy_admin.py's docstring for room to add more later (e.g. an expected
+    time-of-day) without reshaping this field.
+
+    APPEND-ONLY, same principle as the other config revisions. `policy` is
+    {instance: {"frequency_days": N}, ...} — sparse: a host absent from it just gets the
+    daily default, so filling this in gradually never hides an existing host's status. No
+    secrets here, so unlike Grafana/SNMP there is nothing to mask or encrypt."""
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True,
+                            help_text="What changed and why (optional)")
+    policy = models.JSONField(
+        default=dict, help_text="{instance: {\"frequency_days\": N}, ...} — sparse overrides only.")
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Backup policy revision"
+
+    def __str__(self):
+        return f"Backup policy @ {self.created_at:%d %b %Y %H:%M}"
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first()
+
+
+class RoleScope(models.Model):
+    """Which systems (from prometheus.yml) a role's workspace covers.
+
+    Picking a role on the role-selection screen scopes the dashboard to that role's systems;
+    "Load all my roles" is the union across every role the user holds. An EMPTY `systems`
+    list means "unrestricted" — the role sees the whole estate — so the mapping can be filled
+    in gradually without ever hiding data by accident.
+    """
+
+    role = models.CharField(max_length=64, unique=True,
+                            help_text="Role (Django group) name, e.g. 'Network Admin'")
+    systems = models.JSONField(
+        default=list, blank=True,
+        help_text="System names from prometheus.yml. Empty = this role sees every system.")
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["role"]
+        verbose_name = "role scope"
+
+    def __str__(self):
+        n = len(self.systems or [])
+        return f"{self.role} → {n} system(s)" if n else f"{self.role} → all systems"
+
+    @classmethod
+    def systems_for(cls, roles):
+        """The set of system names the given roles may see, or None for 'unrestricted'.
+
+        None (not an empty set) is returned when ANY of the roles is unmapped, because an
+        unmapped role means "everything" — and a union with everything is everything.
+        """
+        roles = [r for r in roles if r]
+        if not roles:
+            return None
+        rows = {r.role: (r.systems or []) for r in cls.objects.filter(role__in=roles)}
+        allowed: set = set()
+        for role in roles:
+            mapped = rows.get(role)
+            if not mapped:          # unmapped, or mapped to an empty list -> unrestricted
+                return None
+            allowed.update(mapped)
+        return allowed
+
+
 class RoleRequest(models.Model):
     """A user's request for a role (Django group). Administrators approve/reject these."""
 
@@ -198,3 +416,79 @@ class EmailRecipient(models.Model):
     @property
     def label(self) -> str:
         return f"{self.name} · {self.email}" if self.name else self.email
+
+
+class GeneratedScript(models.Model):   # noqa: E303 — appended after EmailRecipient
+    """The definition of one agent-side checker script — the thing the script is generated FROM.
+
+    EDITABLE, unlike the *ConfigRevision models beside it. Those are append-only because they
+    hold a whole file whose previous versions you may need to restore. This holds a handful of
+    parameters for a script that is regenerated from them on demand: the definition IS the
+    current state, and "restore the old one" means changing a path back and regenerating. An
+    append-only history of two-line diffs would be ceremony, not safety.
+
+    Secrets never live in `parameters`. They go in `secrets_encrypted` as a Fernet-encrypted
+    JSON map (reports/crypto.py) and are substituted into the script only as it is written to
+    the configuration folder, which is gitignored. See reports/scripts.py.
+    """
+
+    name = models.CharField(
+        max_length=120,
+        help_text="What this checks, e.g. 'BSA SQL backup'. Becomes the filename stem.")
+    script_type = models.CharField(
+        max_length=32, help_text="Key from reports.scripts.SCRIPT_TYPES")
+    system = models.CharField(
+        max_length=120, blank=True,
+        help_text="The system in prometheus.yml this belongs to — for the generated header, "
+                  "so a file on a host says which estate it serves.")
+    host = models.CharField(
+        max_length=200, blank=True,
+        help_text="Where it runs. Recorded for the operator; the script itself doesn't use it.")
+    parameters = models.JSONField(
+        default=dict, blank=True,
+        help_text="Non-secret field values. NEVER put a credential here — see secrets_encrypted.")
+    secrets_encrypted = models.TextField(
+        blank=True, help_text="Fernet ciphertext — see reports/crypto.py. Never plaintext.")
+    notes = models.TextField(blank=True, help_text="Anything the next person needs to know.")
+
+    last_generated_at = models.DateTimeField(null=True, blank=True)
+    last_generated_files = models.JSONField(
+        default=list, blank=True, help_text="Paths written by the last generate.")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["script_type", "name"]
+        verbose_name = "generated script"
+        constraints = [
+            # one definition per name per type: two would render to the same filename and
+            # silently overwrite each other in the configuration folder
+            models.UniqueConstraint(fields=["script_type", "name"],
+                                    name="unique_script_name_per_type"),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.script_type})"
+
+    def secret_values(self) -> dict:
+        """The decrypted secret map. {} when unset or undecryptable (e.g. SECRET_KEY rotated),
+        which callers treat the same as "none set" rather than failing the render."""
+        import json
+
+        from . import crypto
+
+        raw = crypto.decrypt(self.secrets_encrypted or "")
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+
+    @property
+    def secret_names(self) -> list:
+        """Which secrets are set, for display. Names only — never the values."""
+        return sorted(self.secret_values().keys())

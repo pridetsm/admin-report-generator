@@ -4,6 +4,7 @@ realm roles later). A user may hold several. 'Administrator' is the role that ma
 ROLE_NAMES = [
     "System Admin",
     "Network Admin",
+    "Infrastructure Admin",
     "Gov Systems Admin",
     "Security Admin",
     "Administrator",
@@ -12,6 +13,8 @@ ROLE_NAMES = [
 ADMIN_ROLE = "Administrator"
 SYSTEM_ADMIN_ROLE = "System Admin"
 NETWORK_ADMIN_ROLE = "Network Admin"
+INFRA_ADMIN_ROLE = "Infrastructure Admin"
+SECURITY_ADMIN_ROLE = "Security Admin"
 
 # Which pages each role unlocks. Anything not listed here is COMMON — the report builder,
 # history, connect and the personal pages belong to every role, because they are the job
@@ -24,40 +27,84 @@ NETWORK_ADMIN_ROLE = "Network Admin"
 ROLE_PAGES = {
     # The System Analyses Dashboard is the systems people's landing screen — its picker
     # lists business systems, which is not a network admin's job.
-    SYSTEM_ADMIN_ROLE:   {"report_form", "report", "generate",
+    # `generate` is deliberately NOT here. Every estate posts its finished report to that one
+    # view — infra_report renders form.html with generate_default=reverse("generate") — so
+    # owning it as a System Admin page made RoleScopeMiddleware bounce an Infrastructure Admin
+    # to the picker at the moment they hit Generate, instead of downloading. It only bit
+    # someone who ALSO held System Admin (the middleware stays silent for a role you do not
+    # hold), which is every superuser, so it looked intermittent.
+    #
+    # Common is also the honest description: the view is purely snapshot-driven, and a
+    # snapshot can only exist because a role-gated screen captured it. Nothing is widened by
+    # letting the download itself belong to everyone.
+    SYSTEM_ADMIN_ROLE:   {"reports", "report_form", "report",
                           "folder_watch", "folder_watch_temenos", "folder_watch_data"},
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.
-    NETWORK_ADMIN_ROLE:  {"network_dashboard", "network_report"},
-    ADMIN_ROLE:          {"roles_console", "system_settings"},
-    # Two roles exist without an estate yet. Deliberately empty rather than borrowing
-    # another role's dashboard: a role with nothing in it should look like one.
+    # `network_sod_generate` sits alongside its screen for the same reason `generate` is
+    # common to the systems estates: the download is a step INSIDE the SOD screen, not a
+    # destination of its own, so it is listed in NON_SCREEN_PAGES below and never counted
+    # as a screen the role "adds".
+    NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report",
+                          "network_sod_select", "network_sod", "network_sod_generate"},
+    # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
+    # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
+    # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
+    # so that one page belongs to every estate rather than needing an infra_generate twin.
+    INFRA_ADMIN_ROLE:    {"reports", "infra_form", "infra_report"},
+    ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
+                          "prometheus_config", "prometheus_rule_file",
+                          "configuration", "config_yaml", "config_role_scopes",
+                          "config_prometheus", "config_topology", "config_snmp",
+                          "config_backup_policy",
+                          "config_scripts", "config_script_edit",
+                          "config_script_preview"},
+    # Security Admin runs the SAME System Health report as System Admin — same picker, same
+    # screens — plus its own OS Inventory. Sharing report_form/report between two roles is why
+    # PAGE_OWNER became a set: as a single owner, whichever role lost the tie was bounced off
+    # a screen that is genuinely theirs.
+    SECURITY_ADMIN_ROLE: {"reports", "report_form", "report", "os_inventory"},
+    # One role still has no estate. Deliberately empty rather than borrowing another role's
+    # dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),
-    "Security Admin": set(),
 }
 
 # Where each role lands once chosen. Without this, picking Network Admin would drop the user
 # on a systems screen their own role no longer shows — the picker would be undone by the
 # redirect that follows it.
+# Every role that has reports now lands on the REPORTS screen rather than straight on a
+# picker: which report you are running is the choice that comes before which systems it
+# covers, and Security Admin has two to choose between.
 ROLE_HOME = {
-    SYSTEM_ADMIN_ROLE:   "report_form",
-    NETWORK_ADMIN_ROLE:  "network_dashboard",
+    SYSTEM_ADMIN_ROLE:   "reports",
+    NETWORK_ADMIN_ROLE:  "reports",
+    INFRA_ADMIN_ROLE:    "reports",
+    SECURITY_ADMIN_ROLE: "reports",
+    # Administrator configures the app rather than reporting on it, so it has no Reports
+    # screen at all and still lands on its own console.
     ADMIN_ROLE:          "roles_console",
-    # The roles with no estate yet land on a screen that says so, rather than on History or
+    # The role with no estate yet lands on a screen that says so, rather than on History or
     # on another role's dashboard.
     "Gov Systems Admin": "role_empty",
-    "Security Admin":    "role_empty",
 }
 
-# url_name -> the role that owns it, for the "you are in the wrong role for that page" hint.
-PAGE_OWNER = {page: role for role, pages in ROLE_PAGES.items() for page in pages}
+# url_name -> the roles that own it, for the "you are in the wrong role for that page" hint.
+#
+# A SET per page, not one role. The System Health report belongs to System Admin and Security
+# Admin alike, and a dict comprehension keyed page->role silently kept whichever role came
+# last in ROLE_PAGES — so the other one would have been bounced off a screen that is genuinely
+# theirs, with a message naming a role they may not even hold.
+PAGE_OWNER: dict = {}
+for _role, _pages in ROLE_PAGES.items():
+    for _page in _pages:
+        PAGE_OWNER.setdefault(_page, set()).add(_role)
 
 # Endpoints that are scoped like a page but are not one — polled by JavaScript, never
 # navigated to. They belong in ROLE_PAGES (so a scoped session still reaches its own data)
 # but must not be counted when the picker offers "adds N screens", which would otherwise
 # promise a screen that does not exist.
 # "report"/"generate" are steps INSIDE the dashboard, not separate destinations.
-NON_SCREEN_PAGES = {"folder_watch_data", "report", "generate"}
+NON_SCREEN_PAGES = {"folder_watch_data", "report", "generate", "network_sod_generate"}
 
 
 def role_screens(role) -> list:
@@ -72,11 +119,67 @@ ROLE_DESCRIPTIONS = {
                          "system reports and the Temenos interface folders.",
     NETWORK_ADMIN_ROLE:  "For the team running the network — switches, links and the traffic "
                          "moving across them.",
+    INFRA_ADMIN_ROLE:    "For the team running the underlying hardware — hyper-converged "
+                         "clusters and standalone database hosts, separate from the "
+                         "business systems that run on them.",
     "Gov Systems Admin": "For the administrators of the government systems estate.",
     "Security Admin":    "For the security team.",
     ADMIN_ROLE:          "For whoever manages people's access — who holds which role, and "
                          "the app's own configuration.",
 }
+
+# The glyph on each picker tile, under static/img/roles/. Paired with the description above:
+# the sentence says whose job it is, the glyph lets someone who has read it once find their
+# own tile again without re-reading all five.
+#
+# The mapping is by JOB, not by filename — two of them read the opposite way round to what
+# their names suggest:
+#   * Administrator gets the person-at-a-laptop-in-a-gear, because that role administers
+#     PEOPLE (who holds which role), and a figure at a console is what that looks like.
+#   * System Admin gets the connected-node graph, because its estate is the interlinked set
+#     of business systems — RTGS, Temenos, CMS and the rest — not a single machine.
+# The node graph deliberately does NOT go to Network Admin, whose cloud-over-racks glyph
+# already says "network"; two link-diagrams side by side would read as one domain split in
+# half rather than as two different jobs.
+#
+# Infrastructure Admin has no entry here deliberately, rather than reusing Network Admin's
+# cloud-over-racks glyph for want of a dedicated one — that would read as the same twin
+# problem the node graph was kept off Network Admin to avoid. role_icon() falls back to the
+# role's initial letter, which is honest rather than borrowed.
+ROLE_ICONS = {
+    SYSTEM_ADMIN_ROLE:      "img/roles/neural-networks.png",
+    NETWORK_ADMIN_ROLE:     "img/roles/network-infrastructure.png",
+    # The platform underneath everything else — HCI cluster and Oracle hosts — so the cloud
+    # and gear over a machine, rather than another link diagram: this role owns the tin, not
+    # the wires between it (Network Admin) or the systems running on it (System Admin).
+    "Infrastructure Admin": "img/roles/cloud-computing.png",
+    "Gov Systems Admin":    "img/roles/bank.png",
+    "Security Admin":       "img/roles/cyber-security.png",
+    ADMIN_ROLE:             "img/roles/system-administration.png",
+}
+
+
+# The "work across every role I hold" choice on the picker. Stored as the ABSENCE of a
+# selection rather than as a value: unscoped is a state the app already had (see active_role),
+# so nothing downstream has to learn a sentinel.
+ALL_ROLES = "__all__"
+ALL_ROLES_LABEL = "Load all my roles"
+ALL_ROLES_DESCRIPTION = ("Every role you hold at once — the menu shows all their screens "
+                         "together. Pick a single role instead to narrow it to that estate.")
+# Its own glyph (overlapping circles), so the tile is a peer of the role tiles rather than the
+# odd one out. Deliberately NOT one of the five role glyphs: borrowing one would make this read
+# as that role's twin.
+ALL_ROLES_ICON = "img/roles/all-roles.png"
+
+
+def role_icon(role: str) -> str:
+    """The tile glyph for a role, or "" for one added outside this catalogue.
+
+    Empty rather than a stand-in image: the picker falls back to the role's initial, which
+    is always correct, instead of labelling an unknown role with someone else's symbol.
+    """
+    return ROLE_ICONS.get(role, "")
+
 
 SESSION_KEY = "active_role"
 
@@ -98,6 +201,19 @@ def is_system_admin(user) -> bool:
     """
     return bool(user and user.is_authenticated
                 and (user.is_superuser or user.groups.filter(name=SYSTEM_ADMIN_ROLE).exists()))
+
+
+def is_security_admin(user) -> bool:
+    """Who may run the OS Inventory report.
+
+    Its own gate rather than reusing is_system_admin: the two roles share the System Health
+    report, but the inventory is the security team's, and a shared helper would have silently
+    handed it to System Admin the day it was written. A superuser passes, holding every role
+    by definition.
+    """
+    return bool(user and user.is_authenticated
+                and (user.is_superuser
+                     or user.groups.filter(name=SECURITY_ADMIN_ROLE).exists()))
 
 
 def is_superuser(user) -> bool:
@@ -131,6 +247,20 @@ def is_network_admin(user) -> bool:
     return bool(user and user.is_authenticated
                 and (user.is_superuser
                      or user.groups.filter(name=NETWORK_ADMIN_ROLE).exists()))
+
+
+def is_infra_admin(user) -> bool:
+    """Who may see the Infrastructure Admin picker/report — the hardware estate (HCI
+    clusters, standalone DB hosts) that generate_report.load_topology's scope="infra" reads.
+
+    Same shape as is_network_admin: a dedicated role rather than folded into System Admin,
+    so a system admin's menu stays full of business systems and does not also fill up with
+    the clusters those systems happen to run on. A superuser passes, holding every role by
+    definition.
+    """
+    return bool(user and user.is_authenticated
+                and (user.is_superuser
+                     or user.groups.filter(name=INFRA_ADMIN_ROLE).exists()))
 
 
 def held_roles(user) -> list:
@@ -176,12 +306,85 @@ def effective_roles(request) -> set:
 
 def page_in_scope(request, url_name: str) -> bool:
     """Whether `url_name` belongs to the active role. Common pages always do."""
-    owner = PAGE_OWNER.get(url_name)
-    if owner is None:
+    owners = PAGE_OWNER.get(url_name)
+    if not owners:
         return True
-    return owner in effective_roles(request)
+    return bool(owners & effective_roles(request))
 
 
 def roles_without_screens() -> list:
     """Roles that exist but own nothing yet — the ones whose landing screen says so."""
     return [r for r in ROLE_NAMES if not ROLE_PAGES.get(r)]
+
+
+# ---------------------------------------------------------------------------------------
+#  The reports each role can run — the tiles on the Reports screen.
+# ---------------------------------------------------------------------------------------
+#  A report is a different thing from a role's screen list: System Health is ONE report that
+#  two roles run, and Security Admin runs two reports off one estate. Deriving the tiles from
+#  ROLE_PAGES would have shown a tile per screen instead, which is how you end up offering
+#  "Report" and "System Picker" as if they were two things to choose between.
+class ReportOption:
+    def __init__(self, key, label, blurb, url_name, roles, icon=""):
+        self.key = key
+        self.label = label
+        self.blurb = blurb
+        self.url_name = url_name       # where the tile goes: usually a picker
+        self.roles = set(roles)
+        # Flat line art, so the template masks it and paints the role-icon gradient through
+        # it — otherwise these would read as a different, monochrome set beside the coloured
+        # role tiles they deliberately echo.
+        self.icon = icon
+
+
+REPORTS = [
+    ReportOption(
+        "system_health", "System Health Report",
+        "Live health of the business systems — disks, memory, services, backups and "
+        "certificates, with your comments against each finding.",
+        "report_form", {SYSTEM_ADMIN_ROLE, SECURITY_ADMIN_ROLE},
+        "img/reports/system-health.png"),
+    ReportOption(
+        "network", "Network Report",
+        "Switches and links — port state, optics, PSU and fan health, and the traffic "
+        "moving across them.",
+        "network_dashboard", {NETWORK_ADMIN_ROLE}, "img/reports/network.png"),
+    # The morning checklist, a different thing from the live Network Report above: that one
+    # is captured from Prometheus, this one is worked through by hand across the SolarWinds,
+    # Cisco WLC, Perfstack and Radware consoles. Both belong to Network Admin, which is why
+    # the Reports screen earns its keep for this role too rather than going straight through.
+    # Goes to its OWN picker first, same as the Network Report's tile does — the estate is
+    # fixed morning to morning, but the picker is still how an engineer excludes a device
+    # under maintenance rather than staring at a field for it.
+    #
+    ReportOption(
+        "network_sod", "Network Infrastructure SOD Report",
+        "The start-of-day checklist — core switches, firewalls, internet circuits, WLAN "
+        "controllers and the Radware WAF, captured each morning by the on-duty engineer.",
+        "network_sod_select", {NETWORK_ADMIN_ROLE}, "img/reports/network-sod.png"),
+    ReportOption(
+        "infrastructure", "Infrastructure Report",
+        "The hardware underneath the systems — hyper-converged clusters and standalone "
+        "database hosts.",
+        "infra_form", {INFRA_ADMIN_ROLE}, "img/reports/infrastructure.png"),
+    ReportOption(
+        "os_inventory", "OS Inventory Report",
+        "Every monitored host's operating system, patch level against the newest build in "
+        "this estate, and vendor support status.",
+        "os_inventory", {SECURITY_ADMIN_ROLE}, "img/reports/os-inventory.png"),
+]
+
+
+def reports_for(roles) -> list:
+    """The reports available to a set of roles, in catalogue order.
+
+    Takes the EFFECTIVE roles (see effective_roles), so an unscoped session sees everything
+    it could run rather than nothing.
+    """
+    wanted = set(roles or ())
+    return [r for r in REPORTS if r.roles & wanted]
+
+
+def role_has_reports(role: str) -> bool:
+    """Whether a single role has any — drives whether Reports appears in its drawer."""
+    return any(role in r.roles for r in REPORTS)

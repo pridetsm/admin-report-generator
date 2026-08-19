@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Configuration · RBZ Monitoring Console{% endblock %}
+
+{% comment %}
+  The Configuration hub. A landing page, not a screen that configures anything itself — each
+  card opens a child with its own URL, nested under this one in the drawer and in the Back
+  hierarchy, exactly as Temenos nests under Folder Watch.
+
+  Cards rather than a bare list: each one says what it is FOR, so an admin looking for
+  "where do I change which hosts are RTGS" can tell Topology from Prometheus without opening
+  both.
+{% endcomment %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="section-label">Configuration</div>
+
+  <div class="cfg-hub">
+    {% for c in config_children %}
+    <a class="cfg-hub-card" href="{% url c.url_name %}">
+      <span class="cfg-hub-name">{{ c.label }}</span>
+      <span class="cfg-hub-hint">{{ c.hint }}</span>
+    </a>
+    {% endfor %}
+  </div>
+
+  <p class="cfg-note">Prometheus service: <b>{{ service_status }}</b></p>
+</div>
+{% endblock %}

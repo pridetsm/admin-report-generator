@@ -17,9 +17,7 @@
 
 {% block body %}
 <style>
-  /* Only addition to the shared picker styling: a state badge in the same slot the systems
-     tiles use for "recently reported". It appears ONLY when something is wrong, so a healthy
-     grid looks exactly like the systems one. */
+  
   .badge-state {
     display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
     font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
@@ -147,7 +145,7 @@
     });
     if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
     counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
-    // only dim the unselected tiles once something IS selected
+
     if (grid) grid.classList.toggle("has-selection", n > 0);
     if (countNum) countNum.textContent = n;
     if (selClear) selClear.hidden = n === 0;

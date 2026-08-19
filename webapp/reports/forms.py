@@ -14,6 +14,33 @@ class SystemConfigForm(forms.ModelForm):
         }
 
 
+class RawConfigForm(forms.Form):
+    """Base shape shared by every whole-file raw-text config editor on this app (Grafana's
+    custom.ini, Prometheus's prometheus.yml, and its three rule files): a free-text changelog
+    note plus one big textarea holding the entire file. Subclassed per screen only so each has
+    its own name in forms.py/views.py — the fields are identical."""
+
+    note = forms.CharField(
+        max_length=200, required=False,
+        widget=forms.TextInput(attrs={"placeholder": "What changed and why (optional)"}))
+    content = forms.CharField(
+        widget=forms.Textarea(attrs={
+            "rows": 40, "spellcheck": "false", "class": "mono",
+            "style": "font-family:Consolas,monospace;font-size:12.5px;white-space:pre;"
+                     "tab-size:2;width:100%;box-sizing:border-box"}))
+
+
+class GrafanaConfigForm(RawConfigForm):
+    """The whole custom.ini as text — see GrafanaConfigRevision for why this isn't decomposed
+    into per-setting fields, and for how the SMTP password line is masked in `content`."""
+
+
+class PrometheusConfigForm(RawConfigForm):
+    """The whole prometheus.yml as text — see PrometheusConfigRevision for why this isn't
+    decomposed into per-setting fields. Also reused as-is for the rule-file sub-pages
+    (prometheus_rule_file view) — same note+content shape, no secrets involved either way."""
+
+
 class UserAccountForm(forms.ModelForm):
     """Auth-adjacent fields the user may edit. E-mail is OPTIONAL (nullable) — a profile can
     be created by an admin or completed on first LDAP login without one."""

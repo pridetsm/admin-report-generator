@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Choose systems · Admin Report Generator{% endblock %}
+{% block title %}Choose systems · RBZ Monitoring Console{% endblock %}
 
 {% block body %}
 {# ---- selection screen polish; scoped here so app.css stays untouched ---- #}
@@ -39,10 +39,13 @@
 
   <div class="section-label">Systems to include</div>
   <div class="card"><div class="body" style="padding-top:14px">
-    <p class="meta" style="margin:0 0 4px;line-height:1.5">Systems reported in the last
-      {{ recent_hours }} hour{{ recent_hours|pluralize }} carry a
-      <span class="badge-reported">↻ recently reported</span> flag so you can avoid re-reporting
-      the same one — it's only a heads-up, you can still include them.</p>
+    {% if recent_count %}
+    <p class="sys-key">
+      <span class="sys-key-swatch" aria-hidden="true"></span>
+      Amber = reported in the last {{ recent_hours }} hour{{ recent_hours|pluralize }}.
+      A heads-up so the same one isn't reported twice — you can still include them.
+    </p>
+    {% endif %}
 
     <div class="sys-toolbar">
       <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All systems</span></label>
@@ -58,13 +61,45 @@
 
     <div class="sys-grid" id="selectList">
       {% for s in select_systems %}
-      <label class="sys-tile" data-name="{{ s.name|lower }}">
+      {% comment %}
+        A recently-reported tile is tinted amber rather than carrying a badge: the badge was a
+        third line inside the tile, which pushed the layout around and read as loud as the
+        name. The tint says the same thing at a glance, costs no space, and leaves the tile
+        to be a tile. Who and when stay on the title, for anyone who wants the detail.
+      {% endcomment %}
+      <label class="sys-tile{% if s.reported %} is-recent{% endif %}" data-name="{{ s.name|lower }}"
+             {% if s.reported %}title="Reported {{ s.reported.at|timesince }} ago by {{ s.reported.by|default:'—' }}"{% endif %}>
         <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}">
-        <span class="sys-mono" style="--mono-h:{{ s.mono_hue }}">{{ s.name.0|upper }}</span>
+        {% comment %}
+          The platform glyph stands in for the monogram. A system whose scrape jobs don't
+          identify an OS keeps the letter, so the badge is never empty.
+
+          A hybrid system gets TWO badges rather than one badge holding both glyphs — each the
+          same size as every other badge, so the tile with the most to say isn't the one whose
+          glyphs are smallest. Each names its own platform for a screen reader; the pair is
+          just a layout wrapper, so it stays out of the accessibility tree.
+        {% endcomment %}
+        {% if s.platform == 'hybrid' %}
+        <span class="sys-os-pair" style="--mono-h:{{ s.mono_hue }}">
+          <span class="sys-mono" role="img" aria-label="Windows" title="Windows">
+            <i class="os-glyph os-windows"></i>
+          </span>
+          <span class="sys-mono" role="img" aria-label="Linux" title="Linux">
+            <i class="os-glyph os-linux"></i>
+          </span>
+        </span>
+        {% else %}
+        <span class="sys-mono"
+              style="--mono-h:{{ s.mono_hue }}"
+              {% if s.platform %}role="img" aria-label="{{ s.platform_label }}"
+              title="{{ s.platform_label }}"{% endif %}>
+          {% if s.platform %}<i class="os-glyph os-{{ s.platform }}"></i>
+          {% else %}{{ s.name.0|upper }}{% endif %}
+        </span>
+        {% endif %}
         <span class="sys-body">
           <span class="sys-name">{{ s.name }}</span>
           <span class="sys-sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
-          {% if s.reported %}<span class="badge-reported" title="Reported by {{ s.reported.by|default:'—' }}">↻ reported {{ s.reported.at|timesince }} ago</span>{% endif %}
         </span>
         <span class="sys-tick" aria-hidden="true">✓</span>
       </label>
@@ -113,7 +148,7 @@
     });
     if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
     counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
-    // only dim the unselected tiles once something IS selected
+
     if (grid) grid.classList.toggle("has-selection", n > 0);
     if (countNum) countNum.textContent = n;
     if (selClear) selClear.hidden = n === 0;

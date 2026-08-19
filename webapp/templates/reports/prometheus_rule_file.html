@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}{{ filename }} · RBZ Monitoring Console{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1100px">
+
+  {% if messages %}<ul class="messages">{% for m in messages %}<li class="{{ m.tags }}" style="white-space:pre-wrap">{{ m }}</li>{% endfor %}</ul>{% endif %}
+
+  <div class="section-label">Prometheus configuration
+    <span class="chip {% if service_status == 'Running' %}green{% elif service_status == 'Stopped' %}red{% else %}amber{% endif %}"
+          style="margin-left:8px">{{ service_status }}</span>
+  </div>
+
+  {% include "reports/_prometheus_tabs.html" %}
+
+  {% if bootstrapped_from_file %}
+  <div class="card"><div class="body" style="padding:12px 18px">
+    <p style="margin:0;color:var(--muted)">No revisions saved yet — this is the live
+    <code>{{ filename }}</code> text, read straight from disk. Nothing is tracked in history
+    until you Save.</p>
+  </div></div>
+  {% endif %}
+
+  <div class="card"><div class="body" style="padding:18px">
+    <p style="margin:0 0 16px;color:var(--muted)">
+      One of <code>prometheus.yml</code>'s <code>rule_files:</code> entries, edited as text.
+      Every Save creates a new, permanent revision below — nothing is ever edited or deleted.
+      <b>Save</b> only records the revision. <b>Save &amp; Apply</b> validates it with
+      <code>promtool check rules</code> first — a broken rule is rejected and the live file is
+      left untouched — then rewrites <code>{{ filename }}</code> and restarts Prometheus (rule
+      files aren't hot-reloaded on this install, so this is the same full restart as the main
+      config), a brief scrape gap while it comes back up.
+    </p>
+    <form method="post" id="prometheusRuleFileForm">
+      {% csrf_token %}
+
+      <label class="field" style="margin-bottom:12px">
+        <span>{{ filename }}</span>
+        {{ form.content }}
+        {% if form.content.errors %}<div class="errornote">{{ form.content.errors|striptags }}</div>{% endif %}
+      </label>
+
+      <div class="section-label">This revision</div>
+      <label class="field" style="margin-bottom:16px">
+        <span>Note (optional)</span>
+        {{ form.note }}
+      </label>
+
+      <label class="field" style="margin-bottom:14px;flex-direction:row;align-items:center;gap:8px">
+        <input type="checkbox" id="confirmApply">
+        <span>I understand Save &amp; Apply restarts Prometheus now</span>
+      </label>
+
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn ghost" type="submit" name="action" value="save">Save</button>
+        <button class="btn primary" type="submit" name="action" value="apply"
+                id="applyBtn" disabled
+                onclick="return confirm('This validates {{ filename }} with promtool, then (if it passes) rewrites it and restarts Prometheus now. Continue?');">
+          Save &amp; Apply (validates, then restarts Prometheus)
+        </button>
+        <a class="btn ghost" href="{% url 'report_form' %}">Back</a>
+      </div>
+    </form>
+  </div></div>
+
+  <div class="section-label">History</div>
+  <div class="card"><div class="body" style="padding:6px 18px">
+    {% if history %}
+    <table class="hist">
+      <thead><tr><th>Saved</th><th>By</th><th>Note</th><th>Size</th><th></th></tr></thead>
+      <tbody>
+      {% for rev in history %}
+        <tr>
+          <td>{{ rev.created_at|date:"d M Y, H:i" }}</td>
+          <td>{{ rev.created_by.get_username|default:"—" }}</td>
+          <td>{{ rev.note|default:"—" }}</td>
+          <td>{{ rev.content|length }} chars</td>
+          <td style="text-align:right">
+            {% if not forloop.first %}
+            <form method="post" style="display:inline">
+              {% csrf_token %}
+              <input type="hidden" name="rev_id" value="{{ rev.pk }}">
+              <button class="btn ghost" type="submit" name="action" value="restore">Restore</button>
+            </form>
+            {% else %}
+            <span style="color:var(--muted)">current</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="color:var(--muted)">No revisions saved yet.</p>
+    {% endif %}
+  </div></div>
+</div>
+
+<script>
+  (function () {
+    var box = document.getElementById("confirmApply");
+    var btn = document.getElementById("applyBtn");
+    box.addEventListener("change", function () { btn.disabled = !box.checked; });
+  })();
+</script>
+{% endblock %}

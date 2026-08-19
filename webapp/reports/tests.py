@@ -8,24 +8,31 @@ import contextlib
 import datetime
 import io
 import json
+import pathlib
 import re
+import shutil
+import tempfile
 import time
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils.html import escape
 from unittest import mock
 
 import generate_report as gr
+import openpyxl
+import yaml
 
 from . import folders, network
 from . import keycloak as kc
 from .directory import AuthConfig, HttpAuthBackend, search_directory
-from .models import ReportSubmission, RoleRequest, SystemConfig
-from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin
+from .models import (GeneratedScript, GrafanaConfigRevision, PrometheusConfigRevision,
+                     ReportSubmission, RoleRequest, RoleScope, SystemConfig)
+from . import crypto, scripts
+from .roles import ROLE_NAMES, ROLE_PAGES, is_network_admin, role_icon
 from .services import FlagVM, Snapshot, SystemVM, build_overview, list_systems
 
 
@@ -1641,10 +1648,10 @@ class NetworkReportAccess(TestCase):
         The network screens are reached through their own dashboard now, so the link to
         look for is that dashboard rather than the report directly."""
         self.client.login(username="ga", password="pw12345!")
-        self.assertNotContains(self.client.get(reverse("history")), "Network Device Picker")
+        self.assertNotContains(self.client.get(reverse("history")), reverse("network_report"))
         self.client.logout()
         self.client.login(username="na", password="pw12345!")
-        self.assertContains(self.client.get(reverse("history")), "Network Device Picker")
+        self.assertContains(self.client.get(reverse("history")), reverse("network_report"))
 
     def test_only_network_admin_holds_it(self):
         """Systems and network are separated deliberately: the System Analyses Dashboard is
@@ -1836,13 +1843,41 @@ class RoleSelectScreen(TestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp["Location"], reverse("role_select"))
 
-    def test_a_user_with_one_role_is_never_asked(self):
-        """A question with a single answer is a speed bump. The one role is applied silently
-        and the user goes straight to work."""
+    def test_even_a_single_role_holder_sees_the_picker(self):
+        """Signing in always lands here — nobody is forwarded past it.
+
+        A one-role holder used to be skipped on the grounds that a question with one answer
+        is a speed bump. But the screen answers a second question too — what the other roles
+        are and how to ask for one — so the people who most needed that answer were the only
+        ones who never saw it. It is also the one moment the app states which hat you are
+        wearing, and arriving somewhere already scoped, having chosen nothing, is how you end
+        up unsure which estate you are looking at.
+        """
         self.client.login(username="single", password="pw12345!")
         resp = self.client.get(reverse("role_select"))
-        self.assertRedirects(resp, reverse("report_form"))
-        self.assertEqual(self.client.session.get("active_role"), "System Admin")
+        self.assertEqual(resp.status_code, 200)          # rendered, not redirected
+        self.assertFalse(self.client.session.get("active_role"))   # and nothing auto-applied
+
+    def test_nobody_lands_unscoped_by_default(self):
+        """Landing without a selection shows every screen from every role held at once —
+        precisely what picking a role exists to narrow. So the picker is the landing screen
+        and the scope is only ever set by choosing."""
+        for who in ("multi", "single"):
+            self.client.login(username=who, password="pw12345!")
+            self.assertEqual(self.client.get(reverse("role_select")).status_code, 200)
+            self.assertFalse(self.client.session.get("active_role"), who)
+            self.client.logout()
+
+    def test_the_roles_you_do_not_hold_are_shown_greyed_out(self):
+        """All six are listed whatever you hold: the ones that aren't yours are muted and
+        offer a request instead of a switch, so the catalogue is never a mystery."""
+        self.client.login(username="single", password="pw12345!")
+        body = self.client.get(reverse("role_select")).content.decode()
+        for role in ROLE_NAMES:
+            self.assertIn(role, body)
+        self.assertIn('name="role" value="System Admin"', body)      # held -> switch
+        self.assertIn('name="request_role" value="Network Admin"', body)   # not held -> ask
+        self.assertIn("is-locked", body)                             # and visibly muted
 
     def test_every_role_is_listed_held_or_not(self):
         """Showing only what you hold made the app look like it had two different ideas of
@@ -1887,21 +1922,57 @@ class RoleSelectScreen(TestCase):
         screen your own role no longer shows."""
         self.client.login(username="multi", password="pw12345!")
         resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        self.assertRedirects(resp, reverse("network_dashboard"))
+        self.assertRedirects(resp, reverse("reports"), fetch_redirect_response=False)
         self.assertEqual(self.client.session["active_role"], "Network Admin")
 
-    def test_there_is_no_every_role_at_once_option(self):
-        """A role is the hat being worn. An everything-at-once mode let the menu show screens
-        from estates the admin was not working in — the thing this screen exists to prevent.
-        Removed from the page AND from the view, so it cannot be reached by posting a value
-        the screen no longer renders."""
+    def test_every_role_at_once_is_offered_again(self):
+        """"Load all my roles" is back, by request.
+
+        It was removed once because an everything-at-once mode lets the menu show screens from
+        estates the admin is not working in. That trade-off has not changed — it is now a
+        deliberate choice on the tile rather than something the app decides for you, and the
+        tile says so.
+
+        Unscoped is stored as the ABSENCE of a selection, which is the state a session that
+        never picked is already in, so nothing downstream needs to know a sentinel value.
+        """
         self.client.login(username="multi", password="pw12345!")
-        self.assertNotContains(self.client.get(reverse("role_select")), "Show every role I hold")
+        resp = self.client.get(reverse("role_select"))
+        self.assertContains(resp, "Load all my roles")
+        # a peer of the role tiles: inside the same grid, with the same tile markup
+        grid = resp.content.decode()
+        grid = grid[grid.find('class="rs-list"'):grid.find('class="rs-all"')]
+        self.assertIn("all-roles", grid)
+        self.assertIn('value="__all__"', grid)
 
         self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        resp = self.client.post(reverse("role_select"), {"role": "__all__"}, follow=True)
-        self.assertContains(resp, "not a role you hold")
-        self.assertEqual(self.client.session.get("active_role"), "Network Admin")   # unchanged
+        self.assertEqual(self.client.session.get("active_role"), "Network Admin")
+        self.client.post(reverse("role_select"), {"role": "__all__"})
+        self.assertFalse(self.client.session.get("active_role"))
+
+    def test_all_roles_widens_the_menu_to_every_estate(self):
+        """The point of the tile: one workspace spanning the roles you hold.
+
+        Read off History rather than either dashboard — History is common to every role and
+        renders without a live capture, so this measures the MENU and not whether Prometheus
+        happened to answer.
+        """
+        self.client.login(username="multi", password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        scoped = self.client.get(reverse("history")).content.decode()
+        self.assertNotIn(reverse("network_dashboard"), scoped)   # other estate hidden
+
+        self.client.post(reverse("role_select"), {"role": "__all__"})
+        unscoped = self.client.get(reverse("history")).content.decode()
+        self.assertIn(reverse("network_dashboard"), unscoped)    # both estates now shown
+        self.assertIn(reverse("folder_watch"), unscoped)
+
+    def test_a_single_role_holder_is_not_offered_it(self):
+        """With one role, "all my roles" and "my role" are the same thing — a tile that
+        changes nothing is noise."""
+        self.client.login(username="single", password="pw12345!")
+        resp = self.client.get(reverse("role_select"))
+        self.assertNotContains(resp, "Load all my roles")
 
     def test_the_drawer_head_names_the_role_being_worn(self):
         """The head names the ROLE, not the account — the account is already on the profile
@@ -1989,13 +2060,17 @@ class RoleSelectCannotGrant(TestCase):
         self.client.login(username="netonly", password="pw12345!")
 
     def test_a_role_you_do_not_hold_is_refused(self):
-        """The refusal is the assertion. Following the redirect then lands on the picker,
-        which auto-applies this user's ONE role — correct behaviour, and the reason the
-        check below is 'not Administrator' rather than 'nothing at all'."""
+        """The refusal is the assertion, and it leaves the scope exactly as it found it.
+
+        This used to end by asserting the user's ONE role had been applied, because following
+        the redirect landed on a picker that auto-applied it. The picker no longer forwards
+        anyone, so a refused attempt now leaves no selection at all — which is the stronger
+        statement: a rejected choice changes nothing.
+        """
         resp = self.client.post(reverse("role_select"), {"role": "Administrator"}, follow=True)
         self.assertContains(resp, "not a role you hold")
         self.assertNotEqual(self.client.session.get("active_role"), "Administrator")
-        self.assertEqual(self.client.session.get("active_role"), "Network Admin")
+        self.assertFalse(self.client.session.get("active_role"))
 
     def test_a_forged_session_value_grants_nothing(self):
         """Even if the session key is set to a role the user does not hold, every gate must
@@ -2041,7 +2116,7 @@ class RoleScopedMenu(TestCase):
         """Unscoped is a real state, not an unfinished one — a bookmark or a deep link must
         not dead-end at a chooser."""
         body = self._menu()
-        for link in ("Folder Watch", "Network Device Picker", "Roles"):
+        for link in ("Folder Watch", "Reports", "Roles"):
             self.assertIn(link, body)
 
     def test_choosing_system_admin_hides_the_other_roles_screens(self):
@@ -2075,17 +2150,21 @@ class RoleScopedMenu(TestCase):
             for link in ("Connect", "History"):
                 self.assertIn(link, body, f"{link} vanished under {role}")
 
-    def test_each_role_sees_only_its_own_dashboard(self):
-        """The counterpart to the test above: the dashboards are exactly what is NOT common."""
+    def test_each_role_sees_only_its_own_report(self):
+        """The counterpart to the test above: the estates are exactly what is NOT common.
+
+        The drawer names Reports once for every role, so what differs is the tiles behind
+        it rather than the entry itself."""
         expected = {
-            "System Admin":  ("System Picker", "Network Device Picker"),
-            "Network Admin": ("Network Device Picker", "System Picker"),
+            "System Admin":  ("System Health Report", "Network Report"),
+            "Network Admin": ("Network Report", "System Health Report"),
         }
         for role, (present, absent) in expected.items():
             self.client.post(reverse("role_select"), {"role": role})
-            body = self._menu()
-            self.assertIn(present, body, f"{present} missing under {role}")
-            self.assertNotIn(absent, body, f"{absent} leaked into {role}")
+            self.assertIn(reverse("reports"), self._menu(), role)
+            labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+            self.assertIn(present, labels, f"{present} missing under {role}")
+            self.assertNotIn(absent, labels, f"{absent} leaked into {role}")
 
 
     def test_every_screen_a_role_owns_is_reachable_from_its_drawer(self):
@@ -2117,9 +2196,12 @@ class EmptyRoles(TestCase):
         self.u.groups.add(Group.objects.get(name="Gov Systems Admin"))
         self.client.login(username="gov2", password="pw12345!")
 
-    def test_both_empty_roles_own_no_screens(self):
-        for role in ("Gov Systems Admin", "Security Admin"):
-            self.assertEqual(ROLE_PAGES[role], set(), role)
+    def test_the_remaining_empty_role_owns_no_screens(self):
+        """Security Admin left this group when it gained the System Health and OS Inventory
+        reports. Gov Systems Admin is still deliberately empty — a role with nothing in it
+        should look like one, rather than borrowing another role's dashboard."""
+        self.assertEqual(ROLE_PAGES["Gov Systems Admin"], set())
+        self.assertTrue(ROLE_PAGES["Security Admin"])
 
     def test_security_admin_exists_as_a_group(self):
         """Seeded by migration, so a fresh deployment has it without anyone running a
@@ -2170,6 +2252,47 @@ class EmptyRoles(TestCase):
         self.client.login(username="notgov", password="pw12345!")
         self.assertEqual(self.client.get(reverse("role_empty")).status_code, 302)
 
+
+
+class GenerateBelongsToEveryEstate(TestCase):
+    """Generate is the one download path every estate posts its finished report to.
+
+    It was owned by System Admin in ROLE_PAGES, so RoleScopeMiddleware bounced an
+    Infrastructure Admin to the picker at the exact moment they hit Generate — no download,
+    no error, just the role screen. It only bit someone who ALSO held System Admin, because
+    the middleware stays silent for a role you do not hold, which is why it looked
+    intermittent rather than broken: every superuser holds every role.
+    """
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("bothroles", password="pw12345!")
+        for role in ("Infrastructure Admin", "System Admin"):
+            self.u.groups.add(Group.objects.get_or_create(name=role)[0])
+        self.client.login(username="bothroles", password="pw12345!")
+
+    def _act_as(self, role):
+        s = self.client.session
+        s["active_role"] = role
+        s.save()
+
+    def test_generate_is_owned_by_no_single_role(self):
+        from .roles import PAGE_OWNER
+        self.assertFalse(PAGE_OWNER.get("generate"))
+
+    def test_generating_as_infrastructure_admin_is_not_redirected_to_the_picker(self):
+        """The assertion is 'not sent to Role Select'. Reaching the view and being refused an
+        expired token is the correct outcome here — what matters is that the request arrives."""
+        self._act_as("Infrastructure Admin")
+        resp = self.client.post(reverse("generate"), {"token": "expired"})
+        self.assertNotEqual(resp.status_code, 302)
+        self.assertNotIn(reverse("role_select"), resp.get("Location", "") or "")
+        self.assertEqual(resp.status_code, 410)      # reached the view, snapshot had lapsed
+
+    def test_the_same_holds_for_every_role_that_can_open_a_report(self):
+        for role in ("System Admin", "Infrastructure Admin"):
+            self._act_as(role)
+            resp = self.client.post(reverse("generate"), {"token": "expired"})
+            self.assertEqual(resp.status_code, 410, role)
 
 
 class RoleScopedNavigation(TestCase):
@@ -2229,20 +2352,24 @@ class DashboardsAreSeparate(TestCase):
         body = self.client.get(reverse("history")).content.decode()
         return body[body.find('id="drawer"'):body.find("</nav>")]
 
-    def test_the_systems_dashboard_belongs_to_the_systems_role(self):
-        self.assertIn("System Picker", self._drawer("sysadm"))
+    def test_both_roles_reach_their_estate_through_one_reports_entry(self):
+        """The drawer used to name a picker per estate. It now names Reports once for
+        everyone, and the scoping moved behind it — onto which tiles that screen offers."""
+        for who in ("sysadm", "netadm2"):
+            self.assertIn(reverse("reports"), self._drawer(who), who)
 
-    def test_a_network_admin_is_not_shown_the_systems_dashboard(self):
-        self.assertNotIn("System Picker", self._drawer("netadm2"))
-
-    def test_the_network_dashboard_belongs_to_the_network_role(self):
-        self.assertIn("Network Device Picker", self._drawer("netadm2"))
-
-    def test_a_system_admin_is_not_shown_the_network_dashboard(self):
+    def test_neither_role_is_offered_the_other_s_report(self):
         """An earlier draft let System Admin read the network screens. The roles have since
         been separated deliberately, and a systems menu full of switch screens is exactly
-        what that separation exists to prevent."""
-        self.assertNotIn("Network Device Picker", self._drawer("sysadm"))
+        what that separation exists to prevent — now enforced on the Reports tiles."""
+        for who, role, mine, theirs in (
+                ("sysadm", "System Admin", "System Health Report", "Network Report"),
+                ("netadm2", "Network Admin", "Network Report", "System Health Report")):
+            self.client.login(username=who, password="pw12345!")
+            self.client.post(reverse("role_select"), {"role": role})
+            labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+            self.assertIn(mine, labels, role)
+            self.assertNotIn(theirs, labels, role)
 
     def test_a_system_admin_is_refused_the_network_urls(self):
         """Hiding the link is not access control."""
@@ -2251,12 +2378,15 @@ class DashboardsAreSeparate(TestCase):
             resp = self.client.get(reverse(name))
             self.assertEqual(resp.status_code, 302, name)
 
-    def test_each_role_lands_on_its_own_dashboard(self):
+    def test_each_role_lands_on_the_reports_screen(self):
         """Picking a role and then being dropped on another role's screen would undo the
-        choice with the very redirect that follows it."""
+        choice with the very redirect that follows it. Every reporting role now lands on
+        Reports, and it is that screen — not the redirect — which is role-scoped."""
         self.client.login(username="netadm2", password="pw12345!")
         resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        self.assertRedirects(resp, reverse("network_dashboard"))
+        self.assertRedirects(resp, reverse("reports"), fetch_redirect_response=False)
+        labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+        self.assertEqual(labels, ["Network Report", "Network Infrastructure SOD Report"])
 
 
 class NetworkDevicePicker(TestCase):
@@ -2374,7 +2504,9 @@ class CssTokenHygiene(TestCase):
     """
 
     #: tokens supplied by the browser/user agent rather than by app.css
-    _EXTERNAL = {"--mono-h"}
+    #: tokens set per-ELEMENT in a template rather than declared in app.css — the
+    #: monogram hue on each system tile, and the glyph url on each masked report icon
+    _EXTERNAL = {"--mono-h", "--glyph"}
 
     def _defined_in(self, text):
         """Tokens this file supplies: CSS declarations, plus any set from JavaScript.
@@ -2458,21 +2590,30 @@ class DrawerCurrentIndicator(TestCase):
 
     def test_a_child_screen_also_lights_its_parent(self):
         """On Temenos, Folder Watch shows which branch you are inside rather than going dark
-        while its own child is open."""
-        drawer = self._drawer("folder_watch_temenos", "System Admin")
-        parent = re.search(r'<a href="([^"]+)"[^>]*is-ancestor', drawer)
-        self.assertIsNotNone(parent)
-        self.assertEqual(parent.group(1), reverse("folder_watch"))
+        while its own child is open.
 
-    def test_the_home_screen_is_never_marked_as_a_branch(self):
-        """Every page descends from home, so marking it would accent the dashboard on all of
-        them — and a marker that is nearly always lit stops meaning "you are here"."""
+        Matched on Folder Watch's own anchor rather than the first is-ancestor in the drawer:
+        Reports now sits above it and lights too, which is correct — both are branches the
+        page is inside — but it made "the first one" the wrong thing to assert.
+        """
+        drawer = self._drawer("folder_watch_temenos", "System Admin")
+        own = re.search(r'<a href="' + reverse("folder_watch") + r'"([^>]*)>', drawer)
+        self.assertIsNotNone(own)
+        self.assertIn("is-ancestor", own.group(1))
+
+    def test_the_tree_root_is_not_a_drawer_entry_at_all(self):
+        """The systems picker used to be home AND a drawer entry, so it had to be excluded
+        from branch-marking or it would have been accented on every page. It is now reached
+        through Reports and is not in the drawer, which settles the same problem outright.
+
+        Reports itself is only ever CURRENT on Reports — lighting as a branch elsewhere is
+        the point of it."""
         for url_name in ("folder_watch", "folder_watch_temenos"):
             drawer = self._drawer(url_name, "System Admin")
-            dash = re.search(r'<a href="' + reverse("report_form") + r'"([^>]*)>', drawer)
-            self.assertIsNotNone(dash)
-            self.assertNotIn("is-ancestor", dash.group(1))
-            self.assertNotIn("is-current", dash.group(1))
+            self.assertNotIn('<a href="%s"' % reverse("report_form"), drawer)
+            entry = re.search(r'<a href="' + reverse("reports") + r'"([^>]*)>', drawer)
+            self.assertIsNotNone(entry)
+            self.assertNotIn("is-current", entry.group(1))
 
     def test_the_marker_is_not_colour_alone(self):
         """A screen reader gets the same information from aria-current that a sighted user
@@ -2538,7 +2679,8 @@ class BrandBackCaret(TestCase):
         """Without a caret there is nothing to merge, so the crest keeps its old job."""
         self.client.login(username="caret1", password="pw12345!")
         _, pill = self._caret("history")
-        self.assertIn(('brand-icon', reverse("report_form")),
+        # home is the role's own landing screen, which is Reports for every reporting role
+        self.assertIn(('brand-icon', reverse("reports")),
                       re.findall(r'class="(brand-[a-z-]+)" href="([^"]+)"', pill))
 
     def test_it_is_hidden_when_there_is_only_one_role(self):
@@ -2783,6 +2925,91 @@ class NetworkGenerate(TestCase):
         self.assertIn("ifAdminStatus", text)
 
 
+class NetworkSodPicker(TestCase):
+    """The device picker in front of the SOD checklist — same convention as the live
+    Network Report's picker, in front of a fixed rather than a discovered estate."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("sodpick", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="sodpick", password="pw12345!")
+
+    def test_the_checklist_screen_bounces_to_the_picker_first(self):
+        resp = self.client.get(reverse("network_sod"))
+        self.assertRedirects(resp, reverse("network_sod_select"), fetch_redirect_response=False)
+
+    def test_it_lists_every_item_on_the_checklist(self):
+        from . import network_sod
+        data = network_sod.blank_checklist()
+        expected = (len(data["core_wan"]) + sum(len(g.checks) for g in data["firewalls"])
+                    + len(data["floor"]) + len(data["circuits"]) + len(data["controllers"])
+                    + len(data["dr_links"]) + 1)   # +1: the single Radware WAF tile
+        body = self.client.get(reverse("network_sod_select")).content.decode()
+        self.assertEqual(body.count('name="include_device"'), expected)
+
+    def _is_checked(self, body, key):
+        m = re.search(r'value="%s"[^>]*>' % re.escape(key), body)
+        self.assertIsNotNone(m, "%s tile not found" % key)
+        return "checked" in m.group(0)
+
+    def test_everything_starts_ticked(self):
+        """The estate is the same fixed set every morning, unlike a systems report's — so
+        "all of it" is the normal answer, not an empty grid waiting to be filled in."""
+        body = self.client.get(reverse("network_sod_select")).content.decode()
+        self.assertTrue(self._is_checked(body, "ho_core"))
+        self.assertTrue(self._is_checked(body, "waf"))
+
+    def test_choosing_devices_scopes_the_checklist(self):
+        self.client.post(reverse("network_sod_select"),
+                         {"include_device": ["ho_core", "telecontract"]})
+        body = self.client.get(reverse("network_sod")).content.decode()
+        self.assertIn("Head-Office Core Switch", body)
+        self.assertIn("Telecontract", body)
+        self.assertNotIn("Mazowe DR Core Switch", body)
+        self.assertNotIn("Dandemutande", body)
+        self.assertNotIn("Wireless LAN controllers", body)   # no controller picked -> hidden
+
+    def test_choosing_nothing_is_refused(self):
+        resp = self.client.post(reverse("network_sod_select"), {}, follow=True)
+        self.assertContains(resp, "Select at least one item")
+        self.assertIsNone(self.client.session.get("network_sod_devices"))
+
+    def test_an_unknown_key_is_discarded(self):
+        resp = self.client.post(reverse("network_sod_select"),
+                                {"include_device": "not-a-real-key"}, follow=True)
+        self.assertContains(resp, "Select at least one item")
+        self.assertIsNone(self.client.session.get("network_sod_devices"))
+
+    def test_the_waf_tile_scopes_the_whole_waf_section(self):
+        self.client.post(reverse("network_sod_select"), {"include_device": ["ho_core"]})
+        body = self.client.get(reverse("network_sod")).content.decode()
+        self.assertNotIn("Radware web application firewall", body)
+
+    def test_the_full_workbook_shape_survives_a_partial_pick(self):
+        """Picking fewer devices thins the ENTRY screen, not the exported workbook — a blank
+        row there still means "not captured", the same as it always has."""
+        self.client.post(reverse("network_sod_select"), {"include_device": ["ho_core"]})
+        resp = self.client.post(reverse("network_sod_generate"), {"theme": "dark"})
+        wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+        text = " ".join(str(c.value) for row in wb.active.iter_rows() for c in row if c.value)
+        self.assertIn("Mazowe DR Core Switch", text)     # unpicked rows still shape the sheet
+        self.assertIn("Dandemutande", text)
+
+    def test_revisiting_the_picker_keeps_the_last_choice(self):
+        self.client.post(reverse("network_sod_select"), {"include_device": ["ho_core"]})
+        body = self.client.get(reverse("network_sod_select")).content.decode()
+        self.assertTrue(self._is_checked(body, "ho_core"))
+        self.assertFalse(self._is_checked(body, "mazowe_core"))
+
+    def test_only_network_admin_holds_it(self):
+        other = get_user_model().objects.create_user("sodother", password="pw12345!")
+        other.groups.add(Group.objects.get(name="System Admin"))
+        self.client.logout()
+        self.client.login(username="sodother", password="pw12345!")
+        resp = self.client.get(reverse("network_sod_select"))
+        self.assertRedirects(resp, reverse("report_form"), fetch_redirect_response=False)
+
+
 class NetworkOpenReportParity(TestCase):
     """Continuing an open report behaves the same in both estates.
 
@@ -2846,7 +3073,9 @@ class NetworkOpenReportParity(TestCase):
         """The nav tree is rooted at the SYSTEMS dashboard, so without a role-aware fallback a
         network admin's Back led to a screen that is not in their menu."""
         body = self.client.get(reverse("history")).content.decode()
-        self.assertIn('class="backnav" href="%s"' % reverse("network_dashboard"), body)
+        # Back goes to the role's own landing screen — Reports — never to another estate's
+        # picker, which is the failure this test was written for.
+        self.assertIn('class="backnav" href="%s"' % reverse("reports"), body)
         self.assertNotIn('class="backnav" href="%s"' % reverse("report_form"), body)
 
     def test_the_systems_flow_is_untouched(self):
@@ -3096,7 +3325,9 @@ class BackNavigationChain(TestCase):
         with _snmp_prom(_snmp_series()):
             self.client.post(reverse("network_report"), {"include_device": "core-switch"})
             self.assertEqual(self._back("network_report"), reverse("network_dashboard"))
-            self.assertEqual(self._back("network_dashboard"), reverse("role_select"))
+            # a picker steps out to the report choice, which steps out to the role choice
+            self.assertEqual(self._back("network_dashboard"), reverse("reports"))
+            self.assertEqual(self._back("reports"), reverse("role_select"))
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_back_from_a_report_never_points_at_itself(self, _cap):
@@ -3106,12 +3337,1349 @@ class BackNavigationChain(TestCase):
         self.client.post(reverse("report"), {"include_system": "Efin"})
         self.assertNotEqual(self._back("report"), reverse("report"))
 
-    def test_a_single_role_holder_gets_no_back_from_the_picker(self):
-        """Role Select auto-applies one role and would bounce straight back, so the button
-        would return them to where they already are."""
+    def test_a_single_role_holder_can_still_get_back_to_the_picker(self):
+        """The picker no longer auto-applies one role, so Back to it is a real destination
+        rather than a button that returns them to where they already are — and it is where
+        they request the roles they do not have."""
         one = get_user_model().objects.create_user("justone", password="pw12345!")
         one.groups.add(Group.objects.get(name="System Admin"))
         self.client.logout()
         self.client.login(username="justone", password="pw12345!")
-        self.client.get(reverse("role_select"))
-        self.assertIsNone(self._back("report_form"))
+        self.client.post(reverse("role_select"), {"role": "System Admin"})
+        self.assertEqual(self._back("report_form"), reverse("role_select"))
+
+
+class PlatformDerivedFromTheScrapeJob(TestCase):
+    """The pickers label each system Windows / Linux / hybrid straight from prometheus.yml.
+
+    Deriving it from the SCRAPE JOB (not a `windows_os_info` / `node_os_info` query) is what
+    keeps the picker free — that screen deliberately does no Prometheus round-trip at all —
+    so these tests pin the derivation to the topology file and nothing else.
+    """
+
+    def _topology(self, yml: str):
+        import tempfile, os
+        fd, path = tempfile.mkstemp(suffix=".yml", text=True)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(yml)
+        self.addCleanup(os.unlink, path)
+        return gr.load_topology(path)
+
+    def _platform(self, yml: str) -> str:
+        systems = self._topology(yml)
+        return gr.platform_of_system(systems[0].components)
+
+    def test_a_windows_exporter_job_reads_as_windows(self):
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+"""), "windows")
+
+    def test_a_node_exporter_job_reads_as_linux(self):
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: node_exporter
+    static_configs:
+      - targets: ["10.0.0.21:9100"]
+        labels: {system: Alpha}
+"""), "linux")
+
+    def test_a_system_scraped_by_both_exporters_is_hybrid(self):
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+  - job_name: node_exporter
+    static_configs:
+      - targets: ["10.0.0.21:9100"]
+        labels: {system: Alpha}
+"""), "hybrid")
+
+    def test_a_web_probe_does_not_make_a_system_hybrid(self):
+        """blackbox targets are URLs that carry a `system` label and land in the same grouping.
+        Counting one as a platform would put a hybrid badge on every system with a web link."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+  - job_name: blackbox_http
+    static_configs:
+      - targets: ["https://portal.example.org"]
+        labels: {system: Alpha}
+"""), "windows")
+
+    def test_an_unrecognised_job_leaves_the_platform_unknown(self):
+        """Better a monogram letter than a confidently wrong penguin."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: swift_transactions
+    static_configs:
+      - targets: ["10.0.0.99:8080"]
+        labels: {system: Alpha}
+"""), "")
+
+    def test_the_port_classifies_a_job_whose_name_says_nothing(self):
+        """A site that named its jobs by location still gets a platform: the exporter default
+        ports are a convention firm enough to read when the name offers nothing."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: hosts-datacentre-2
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+"""), "windows")
+
+    def test_a_probe_job_on_a_host_port_is_still_not_a_platform(self):
+        """The port fallback must not fire for blackbox — its targets are URLs, and a probe
+        job pointed at :9100 would otherwise be labelled a Linux host."""
+        self.assertEqual(self._platform("""
+scrape_configs:
+  - job_name: windows_exporter
+    static_configs:
+      - targets: ["10.0.0.11:9182"]
+        labels: {system: Alpha}
+  - job_name: blackbox_probe
+    static_configs:
+      - targets: ["10.0.0.30:9100"]
+        labels: {system: Alpha}
+"""), "windows")
+
+
+class TheSystemPickerShowsThePlatform(TestCase):
+    """The glyph replaces the monogram letter, so the tile must never end up blank."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("platadm", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="platadm", password="pw12345!")
+
+    def _picker(self, systems):
+        with mock.patch("reports.views.list_systems", return_value=systems):
+            return self.client.get(reverse("report_form")).content.decode()
+
+    def test_a_windows_system_gets_the_windows_glyph_and_an_accessible_name(self):
+        html = self._picker([{"name": "Alpha", "hosts": 2, "platform": "windows"}])
+        self.assertIn("os-glyph os-windows", html)
+        self.assertIn('aria-label="Windows"', html)
+
+    def test_a_hybrid_system_shows_both_glyphs_as_two_badges(self):
+        """Two badges, not one badge holding two glyphs — cramming both into a single square
+        meant shrinking each below the size every other badge uses, so the tile with the most
+        to say had the least legible glyphs. Each badge names its own platform; the pair
+        wrapper is layout only and stays out of the accessibility tree."""
+        html = self._picker([{"name": "Alpha", "hosts": 6, "platform": "hybrid"}])
+        self.assertIn("sys-os-pair", html)
+        self.assertEqual(html.count("sys-mono"), 2)
+        self.assertIn('aria-label="Windows"', html)
+        self.assertIn('aria-label="Linux"', html)
+        self.assertNotIn("sys-os--hybrid", html)
+
+    def test_an_unknown_platform_falls_back_to_the_monogram_letter(self):
+        html = self._picker([{"name": "Zeta", "hosts": 1, "platform": ""}])
+        self.assertNotIn("os-glyph", html)
+        # the badge is the ONLY thing in that slot, so an empty one is an empty tile
+        self.assertRegex(html, r'class="sys-mono"[^>]*>\s*Z\s*</span>')
+
+    def test_no_template_comment_text_reaches_the_screen(self):
+        """Django's {# #} is SINGLE-LINE. Spanning it across lines renders it as literal
+        prose — and inside the tile loop that would print a paragraph of developer notes on
+        every system. The same guard the network report already carries, on the picker that
+        now explains its glyph in a comment."""
+        html = self._picker([{"name": "Alpha", "hosts": 2, "platform": "windows"}])
+        visible = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+        visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        for leak in ("{#", "#}", "endcomment", "comment %}"):
+            self.assertNotIn(leak, visible, "template comment syntax leaked: " + leak)
+
+
+class TheTopologyPlatformDrivesConnect(TestCase):
+    """Connect used to read the OS from the exporter PORT alone. The job name is the better
+    signal, so a host scraped on a non-default port now still gets offered its protocol."""
+
+    def test_the_job_derived_os_wins_over_the_port(self):
+        from .connect import build_host
+        h = build_host("Alpha", "app", "10.0.0.11:9999", None, "windows")
+        self.assertEqual(h["os"], "windows")
+        self.assertEqual(h["protocol"], "rdp")
+        self.assertTrue(h["connectable"])
+
+    def test_the_port_still_answers_when_no_hint_is_given(self):
+        from .connect import build_host
+        self.assertEqual(build_host("A", "l", "10.0.0.21:9100", None)["os"], "linux")
+
+    def _connect_page(self, hosts):
+        from .connect import build_host
+        systems = [{"name": "Alpha",
+                    "hosts": [build_host("Alpha", lbl, inst, {}, os_) for lbl, inst, os_ in hosts],
+                    "up_count": 0, "down_count": 0}]
+        with mock.patch("reports.connect.inventory", return_value=systems):
+            return self.client.get(reverse("connect")).content.decode()
+
+    def test_the_connect_row_carries_the_platform_glyph(self):
+        u = get_user_model().objects.create_user("cxadm", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="cxadm", password="pw12345!")
+        html = self._connect_page([("app", "10.0.0.11:9182", "windows"),
+                                   ("db", "10.0.0.21:9100", "linux")])
+        self.assertIn("os-glyph os-windows", html)
+        self.assertIn("os-glyph os-linux", html)
+
+    def test_no_template_comment_text_reaches_the_connect_screen(self):
+        """Django's {# #} is SINGLE-LINE; the glyph on this page is introduced by a comment."""
+        u = get_user_model().objects.create_user("cxadm2", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="cxadm2", password="pw12345!")
+        html = self._connect_page([("app", "10.0.0.11:9182", "windows")])
+        visible = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+        visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        for leak in ("{#", "#}", "endcomment", "comment %}"):
+            self.assertNotIn(leak, visible, "template comment syntax leaked: " + leak)
+
+    def test_a_legacy_component_degrades_to_unknown_rather_than_raising(self):
+        """The report page derives the card's platform from the CACHED snapshot's components.
+        One pickled before the field existed must read as unknown, not raise."""
+        class Legacy:
+            label, instance = "app", "10.0.0.11:9182"
+
+        self.assertEqual(gr.platform_of_system([Legacy()]), "")
+
+    def test_an_old_cached_snapshot_without_the_field_still_renders(self):
+        """Snapshots are pickled into the cache. One captured BEFORE Component gained `os`
+        unpickles without the attribute, and the connect strip must not 500 on it."""
+        from .connect import hosts_from_snapshot
+
+        class Legacy:                      # a Component as it was pickled pre-change
+            label, instance = "app", "10.0.0.11:9182"
+
+        systems = [type("S", (), {"name": "Alpha", "components": [Legacy()]})()]
+        hosts = hosts_from_snapshot(systems, type("St", (), {"up": {}})())
+        self.assertEqual(hosts["Alpha"][0]["os"], "windows")
+
+
+class RoleGlyphs(TestCase):
+    """Every role tile carries its own glyph, and the files behind them actually ship.
+
+    The failure mode this guards is silent: a role added to the catalogue without an icon
+    still renders (it falls back to its initial), and an icon whose file is missing still
+    renders too — as a broken image on the first screen after sign-in, which is the worst
+    place in the app to look unfinished.
+    """
+
+    def setUp(self):
+        self.multi = get_user_model().objects.create_user("glyphs", password="pw12345!")
+        self.multi.groups.add(Group.objects.get(name="System Admin"))
+        self.multi.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="glyphs", password="pw12345!")
+
+    def test_every_mapped_glyph_file_exists(self):
+        """A mapping is a promise about a file. Checked against the source tree rather than
+        the manifest so it fails at authoring time, not only after collectstatic.
+
+        Scoped to roles that HAVE a mapping. Requiring one for every catalogue role would
+        turn adding a role into a build failure over a missing picture, when the picker
+        already has a correct answer for that case — see the fallback test below.
+        """
+        import pathlib
+
+        static_dir = pathlib.Path(settings.BASE_DIR) / "static"
+        for role in ROLE_NAMES:
+            icon = role_icon(role)
+            if not icon:
+                continue
+            self.assertTrue((static_dir / icon).is_file(),
+                            f"{role}: {icon} is not in static/")
+
+    def test_no_two_roles_share_a_glyph(self):
+        """Tiles wearing each other's symbols is a picker that cannot be read at a glance —
+        which is the only reason to have icons rather than the initials they replaced."""
+        used = [role_icon(r) for r in ROLE_NAMES if role_icon(r)]
+        self.assertEqual(len(set(used)), len(used), "two roles share an icon")
+
+    def test_the_picker_renders_every_mapped_glyph(self):
+        body = self.client.get(reverse("role_select")).content.decode()
+        for role in ROLE_NAMES:
+            icon = role_icon(role)
+            if not icon:
+                continue
+            stem = icon.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            self.assertIn(stem, body, f"{role}'s glyph is missing from the picker")
+
+    def test_a_role_without_a_glyph_still_gets_a_tile(self):
+        """The actual contract: a role added to the catalogue before anyone draws it an icon
+        falls back to its initial in the accent square the tiles used before they had glyphs.
+        Never a broken image, and never another role's symbol.
+
+        Infrastructure Admin is in this state today — it arrived with the estate, without a
+        picture. The picker is correct meanwhile; it is a gap in the artwork, not the code.
+        """
+        unglyphed = [r for r in ROLE_NAMES if not role_icon(r)]
+        body = self.client.get(reverse("role_select")).content.decode()
+        for role in unglyphed:
+            tile = body[body.find(f">{role}"):]
+            self.assertTrue(tile, f"{role} has no tile at all")
+        for role in unglyphed:
+            # the monogram span carries the role's initial rather than an <img>
+            self.assertRegex(body,
+                             r'rs-mono"[^>]*>\s*' + role[0] + r'\s*</span>',
+                             f"{role} should fall back to its initial")
+
+    def test_the_all_roles_tile_has_its_own_glyph(self):
+        """It is a tile like the others, so it needs a glyph like the others — and its own,
+        not one borrowed from a role, which would read as that role's twin."""
+        import pathlib
+
+        from .roles import ALL_ROLES_ICON
+        self.assertTrue(ALL_ROLES_ICON)
+        self.assertNotIn(ALL_ROLES_ICON, [role_icon(r) for r in ROLE_NAMES])
+        self.assertTrue((pathlib.Path(settings.BASE_DIR) / "static" / ALL_ROLES_ICON).is_file())
+
+    def test_an_uncatalogued_role_falls_back_to_its_initial(self):
+        """A Keycloak realm role with no entry here must not borrow another role's symbol."""
+        self.assertEqual(role_icon("Some Future Role"), "")
+
+    def test_the_two_deliberate_swaps_stay_swapped(self):
+        """Administrator administers PEOPLE, so it takes the figure-at-a-console; System
+        Admin's estate is the interlinked set of business systems, so it takes the node
+        graph. Both read backwards from their filenames, which is exactly why a later tidy-up
+        would "correct" them — this pins the intent.
+
+        The node graph is kept away from Network Admin on purpose: two link-diagrams side by
+        side read as one domain split in half rather than as two different jobs.
+        """
+        self.assertIn("system-administration", role_icon("Administrator"))
+        self.assertIn("neural-networks", role_icon("System Admin"))
+        self.assertIn("network-infrastructure", role_icon("Network Admin"))
+
+# =========================================================================================
+_FIXTURE_YML = """\
+# Topology for the estate.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+storage:
+  tsdb:
+    out_of_order_time_window: 30d
+
+rule_files:
+  - "alerts.yml"
+
+scrape_configs:
+  - job_name: "windows_exporter"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["10.0.201.3:9182"]
+        labels:
+          app: "windows"
+          system: "Efin"
+          display: "Efin DB"
+      - targets: ["10.0.212.3:9182"]
+        labels:
+          app: "windows"
+          system: "Temenos"
+          display: "Temenos/T24 App"
+          tier: "gold"
+
+  - job_name: "blackbox_http"
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ["https://rtgs.rbz.co.zw/"]
+        labels:
+          system: "RTGS"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+"""
+
+
+def _form_fields(html: str) -> dict:
+    """Every field a browser would submit from a rendered form — visible and hidden alike.
+
+    The two prometheus.yml screens each carry the other's half as hidden fields, and that
+    carrying is exactly what these tests need to exercise: scraping the real markup checks
+    what the browser would actually post, rather than a hand-written dict that could agree
+    with the parser while the template quietly disagrees with both.
+    """
+    import html as _html
+
+    fields = {}
+    for m in re.finditer(r"<input[^>]*>", html):
+        tag = m.group(0)
+        name = re.search(r'name="([^"]+)"', tag)
+        if not name or 'type="checkbox"' in tag or 'type="submit"' in tag:
+            continue
+        value = re.search(r'value="([^"]*)"', tag)
+        fields[name.group(1)] = _html.unescape(value.group(1)) if value else ""
+    for m in re.finditer(r"<textarea[^>]*name=\"([^\"]+)\"[^>]*>(.*?)</textarea>", html, re.S):
+        fields[m.group(1)] = _html.unescape(m.group(2))
+    for m in re.finditer(r"<select[^>]*name=\"([^\"]+)\"[^>]*>(.*?)</select>", html, re.S):
+        chosen = re.search(r'<option value="([^"]*)"[^>]*selected', m.group(2))
+        fields[m.group(1)] = chosen.group(1) if chosen else ""
+    fields.pop("note", None)
+    return fields
+
+
+class PrometheusConfigBase(TestCase):
+    """The labelled form and the raw editor are two views of ONE file with ONE history.
+
+    Nothing here touches disk: the config both screens work from is the newest
+    PrometheusConfigRevision, so seeding one is the whole fixture. The live file is only ever
+    reached through prometheus_admin, which is mocked — these tests must never invoke promtool
+    or restart a Windows service.
+    """
+
+    def setUp(self):
+        PrometheusConfigRevision.objects.create(note="fixture", content=_FIXTURE_YML)
+        self.admin = get_user_model().objects.create_user("cfgadmin", password="pw12345!")
+        self.admin.groups.add(Group.objects.get(name="Administrator"))
+        self.client.login(username="cfgadmin", password="pw12345!")
+
+    def current(self) -> dict:
+        """The newest revision, parsed — what the next form load will show."""
+        return yaml.safe_load(PrometheusConfigRevision.current().content)
+
+    def post_data(self, **overrides) -> dict:
+        """The exact fields the rendered form submits for the fixture, unchanged."""
+        data = {
+            "action": "save",
+            "g_scrape_interval": "15s", "g_evaluation_interval": "15s", "g_scrape_timeout": "10s",
+            "storage_ooo_window": "30d", "rule_files": "alerts.yml",
+            "job__0__name": "windows_exporter", "job__0__scrape_interval": "15s",
+            "job__0__scrape_timeout": "", "job__0__metrics_path": "", "job__0__scheme": "",
+            "sc__0__0__targets": "10.0.201.3:9182",
+            "sc__0__0__l_app": "windows", "sc__0__0__l_system": "Efin",
+            "sc__0__0__l_display": "Efin DB", "sc__0__0__l_role": "",
+            "sc__0__1__targets": "10.0.212.3:9182",
+            "sc__0__1__l_app": "windows", "sc__0__1__l_system": "Temenos",
+            "sc__0__1__l_display": "Temenos/T24 App", "sc__0__1__l_role": "",
+            "sc__0__1__xkey__0": "tier", "sc__0__1__xval__0": "gold",
+            "job__1__name": "blackbox_http", "job__1__scrape_interval": "",
+            "job__1__scrape_timeout": "", "job__1__metrics_path": "/probe", "job__1__scheme": "",
+            "sc__1__0__targets": "https://rtgs.rbz.co.zw/",
+            "sc__1__0__l_app": "", "sc__1__0__l_system": "RTGS",
+            "sc__1__0__l_display": "", "sc__1__0__l_role": "",
+        }
+        data.update(overrides)
+        return data
+
+
+class PrometheusConfigForm(PrometheusConfigBase):
+    def test_requires_administrator(self):
+        u = get_user_model().objects.create_user("cfgnope", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="cfgnope", password="pw12345!")
+        for name in ("configuration", "config_prometheus", "config_topology",
+                     "config_snmp", "config_yaml", "config_role_scopes"):
+            self.assertEqual(self.client.get(reverse(name)).status_code, 302, name)
+
+    def test_the_form_reads_the_same_revision_the_raw_editor_does(self):
+        """The point of the merge: one source, not two."""
+        resp = self.client.get(reverse("config_prometheus"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context["yaml_source"]["from_revision"])
+        self.assertEqual(resp.context["yaml_source"]["revision"],
+                         PrometheusConfigRevision.current())
+
+    def test_form_shows_every_value_in_the_config(self):
+        view = self.client.get(reverse("config_prometheus")).context["view"]
+        self.assertEqual(view["global"]["scrape_interval"], "15s")
+        self.assertEqual(view["storage_out_of_order"], "30d")
+        self.assertEqual(view["rule_files_text"], "alerts.yml")
+        self.assertEqual([j["job_name"] for j in view["jobs"]],
+                         ["windows_exporter", "blackbox_http"])
+        efin = view["jobs"][0]["groups"][0]
+        self.assertEqual(efin["targets_text"], "10.0.201.3:9182")
+        self.assertEqual(efin["known"]["system"], "Efin")
+        self.assertEqual(efin["known"]["display"], "Efin DB")
+        # a label outside the well-known four still appears, as an editable extra row
+        self.assertEqual(view["jobs"][0]["groups"][1]["extra"],
+                         [{"i": 0, "key": "tier", "value": "gold"}])
+        self.assertEqual(view["systems"], ["Efin", "RTGS", "Temenos"])
+        # keys the form doesn't model are surfaced read-only rather than dropped
+        self.assertIn("relabel_configs", view["jobs"][1]["preserved"])
+        self.assertIn("params", view["jobs"][1]["preserved"])
+
+    def test_saving_records_a_revision_and_does_not_touch_the_live_file(self):
+        with mock.patch("reports.prometheus_admin.write_and_restart") as war:
+            resp = self.client.post(reverse("config_prometheus"), self.post_data())
+        self.assertRedirects(resp, reverse("config_prometheus"), fetch_redirect_response=False)
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 2)
+        war.assert_not_called()          # Save is not Apply — nothing live changed
+
+    def test_saving_unchanged_leaves_the_config_equivalent(self):
+        before = self.current()
+        self.client.post(reverse("config_prometheus"), self.post_data())
+        self.assertEqual(self.current(), before)
+
+    def test_apply_goes_through_promtool_and_restarts(self):
+        """Apply must use the same gate as the raw editor — never write the file itself."""
+        with mock.patch("reports.prometheus_admin.write_and_restart",
+                        return_value=(True, "validated, rewritten and restarted")) as war:
+            self.client.post(reverse("config_prometheus"), self.post_data(action="apply"))
+        war.assert_called_once()
+        # what it was handed is the text of the revision it just recorded
+        self.assertEqual(war.call_args.args[0], PrometheusConfigRevision.current().content)
+
+    def test_a_rejected_apply_still_keeps_the_edit_as_a_revision(self):
+        """promtool refusing must not throw the admin's work away."""
+        with mock.patch("reports.prometheus_admin.write_and_restart",
+                        return_value=(False, "Rejected — promtool found a problem")):
+            resp = self.client.post(reverse("config_prometheus"),
+                                    self.post_data(action="apply",
+                                                   **{"sc__0__0__l_display": "Efin Database"}),
+                                    follow=True)
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 2)
+        self.assertContains(resp, "promtool found a problem")
+        labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
+        self.assertEqual(labels["display"], "Efin Database")
+
+    def test_the_revision_note_is_recorded(self):
+        self.client.post(reverse("config_prometheus"), self.post_data(note="widened Efin"))
+        self.assertEqual(PrometheusConfigRevision.current().note, "widened Efin")
+        self.assertEqual(PrometheusConfigRevision.current().created_by, self.admin)
+
+    def test_editing_a_label_is_written_to_the_revision(self):
+        self.client.post(reverse("config_prometheus"),
+                         self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
+        labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
+        self.assertEqual(labels["display"], "Efin Database")
+        self.assertEqual(labels["system"], "Efin")
+
+    def test_adding_a_target_group_lands_in_the_right_job(self):
+        self.client.post(reverse("config_prometheus"), self.post_data(**{
+            "sc__0__2__targets": "10.0.201.9:9182\n10.0.201.10:9182",
+            "sc__0__2__l_app": "windows", "sc__0__2__l_system": "Efin",
+            "sc__0__2__l_display": "Efin App", "sc__0__2__l_role": "app",
+        }))
+        groups = self.current()["scrape_configs"][0]["static_configs"]
+        self.assertEqual(len(groups), 3)
+        self.assertEqual(groups[2]["targets"], ["10.0.201.9:9182", "10.0.201.10:9182"])
+        self.assertEqual(groups[2]["labels"]["role"], "app")
+
+    def test_removing_a_group_removes_only_that_group(self):
+        """Rows are addressed by their original index, so a gap must not shift its neighbours."""
+        data = self.post_data()
+        for k in [k for k in data if k.startswith("sc__0__0__")]:
+            del data[k]
+        self.client.post(reverse("config_prometheus"), data)
+        groups = self.current()["scrape_configs"][0]["static_configs"]
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["labels"]["system"], "Temenos")
+
+    def test_unmodelled_job_keys_survive_a_save(self):
+        self.client.post(reverse("config_prometheus"),
+                         self.post_data(**{"job__1__metrics_path": "/probe2"}))
+        job = self.current()["scrape_configs"][1]
+        self.assertEqual(job["metrics_path"], "/probe2")
+        self.assertEqual(job["params"], {"module": ["http_2xx"]})
+        self.assertEqual(job["relabel_configs"],
+                         [{"source_labels": ["__address__"], "target_label": "__param_target"}])
+
+    def test_a_bad_duration_records_nothing(self):
+        resp = self.client.post(reverse("config_prometheus"),
+                                self.post_data(g_scrape_interval="15 seconds"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(any("15 seconds" in e for e in resp.context["errors"]))
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 1)
+
+    def test_a_bad_label_name_records_nothing(self):
+        resp = self.client.post(reverse("config_prometheus"), self.post_data(**{
+            "sc__0__0__xkey__0": "2bad", "sc__0__0__xval__0": "x"}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context["errors"])
+        self.assertEqual(PrometheusConfigRevision.objects.count(), 1)
+
+    def test_duplicate_job_names_are_rejected(self):
+        resp = self.client.post(reverse("config_prometheus"),
+                                self.post_data(job__1__name="windows_exporter"))
+        self.assertTrue(any("unique" in e for e in resp.context["errors"]))
+
+    def test_a_rejected_save_gives_the_admin_their_own_typing_back(self):
+        resp = self.client.post(reverse("config_prometheus"),
+                                self.post_data(g_scrape_interval="15 seconds"))
+        self.assertEqual(resp.context["view"]["global"]["scrape_interval"], "15 seconds")
+
+    def test_an_unparseable_revision_explains_itself_instead_of_crashing(self):
+        # a tab for indentation — the classic hand-edit that YAML rejects outright, and
+        # exactly the mistake this form exists to stop people making
+        PrometheusConfigRevision.objects.create(note="broken", content="global:\n\ta: 1\n")
+        resp = self.client.get(reverse("config_prometheus"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("not valid YAML", resp.context["load_error"])
+
+    def test_the_saved_config_still_loads_as_topology(self):
+        """The whole point: whatever the form writes, the report engine can still read."""
+        self.client.post(reverse("config_prometheus"), self.post_data(**{
+            "sc__0__2__targets": "10.0.201.9:9182", "sc__0__2__l_system": "Efin",
+            "sc__0__2__l_display": "Efin App",
+        }))
+        out = pathlib.Path(tempfile.mkdtemp(prefix="promtopo_")) / "prometheus.yml"
+        self.addCleanup(shutil.rmtree, str(out.parent), True)
+        out.write_text(PrometheusConfigRevision.current().content, encoding="utf-8")
+        systems = gr.load_topology(str(out))
+        self.assertEqual(sorted(s.name for s in systems), ["Efin", "RTGS", "Temenos"])
+        self.assertEqual(len(next(s for s in systems if s.name == "Efin").components), 2)
+
+
+class PrometheusYamlView(PrometheusConfigBase):
+    def test_it_shows_the_current_revision_verbatim(self):
+        resp = self.client.get(reverse("config_yaml"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["raw"], _FIXTURE_YML)
+
+    def test_download(self):
+        resp = self.client.get(reverse("config_yaml"), {"download": "1"})
+        self.assertIn("attachment", resp["Content-Disposition"])
+        self.assertEqual(resp.content.decode(), _FIXTURE_YML)
+
+    def test_it_follows_the_form_after_a_save(self):
+        """Proves the two screens share a source rather than each holding their own copy."""
+        self.client.post(reverse("config_prometheus"),
+                         self.post_data(**{"sc__0__0__l_display": "Efin Database"}))
+        raw = self.client.get(reverse("config_yaml")).context["raw"]
+        self.assertIn("Efin Database", raw)
+        self.assertEqual(raw, PrometheusConfigRevision.current().content)
+
+    def test_there_is_no_second_write_path(self):
+        """promconfig must not grow its own file-writing/reload back door again."""
+        from . import promconfig
+        for gone in ("save", "reload_prometheus", "backups", "file_info", "yaml_path"):
+            self.assertFalse(hasattr(promconfig, gone),
+                             f"promconfig.{gone} is back — writes belong to prometheus_admin")
+
+
+class RoleScopeConfig(PrometheusConfigBase):
+    def test_systems_come_from_the_same_config(self):
+        resp = self.client.get(reverse("config_role_scopes"))
+        self.assertEqual(resp.context["systems"], ["Efin", "RTGS", "Temenos"])
+
+    def test_saving_a_scope(self):
+        self.client.post(reverse("config_role_scopes"), {
+            "systems__System Admin": ["Efin", "Temenos"],
+            "systems__Network Admin": ["RTGS"],
+        })
+        self.assertEqual(set(RoleScope.objects.get(role="System Admin").systems),
+                         {"Efin", "Temenos"})
+        self.assertEqual(RoleScope.objects.get(role="Gov Systems Admin").systems, [])
+
+    def test_a_system_not_in_the_config_is_ignored(self):
+        self.client.post(reverse("config_role_scopes"),
+                         {"systems__System Admin": ["Efin", "MadeUp"]})
+        self.assertEqual(RoleScope.objects.get(role="System Admin").systems, ["Efin"])
+
+
+class ConfigurationNesting(PrometheusConfigBase):
+    """Configuration's children nest the way Folder Watch nests Temenos.
+
+    The convention is the point: one parent entry in the drawer, children indented under it,
+    the parent lit as the branch you are inside, and Back walking one level up rather than
+    jumping home. A screen that opts out of it is a screen users navigate differently for no
+    reason they could name.
+    """
+
+    CHILDREN = ["config_prometheus", "grafana_config", "config_snmp",
+                "config_topology", "system_settings", "config_role_scopes"]
+
+    def setUp(self):
+        super().setUp()
+        # Grafana's screen falls back to reading the live custom.ini when no revision exists,
+        # which is not on this machine. Seeding one keeps these tests about navigation.
+        GrafanaConfigRevision.objects.create(note="fixture", content="[server]\n")
+
+    def _drawer(self, url_name):
+        body = self.client.get(reverse(url_name)).content.decode()
+        return body[body.find('id="drawer"'):body.find("</nav>")]
+
+    def test_every_child_is_in_the_drawer_under_configuration(self):
+        drawer = self._drawer("configuration")
+        for name in self.CHILDREN:
+            self.assertIn(f'href="{reverse(name)}"', drawer, f"{name} missing from the drawer")
+            self.assertIn("drawer-children", drawer)
+
+    def test_a_child_lights_itself_and_its_parent(self):
+        """Exactly what folder_watch_temenos does: the child marks current, the hub marks
+        ancestor, so the drawer says both where you are and which branch you are in."""
+        for name in self.CHILDREN:
+            drawer = self._drawer(name)
+            child = re.search(r'<a href="([^"]+)"[^>]*drawer-child[^>]*is-current', drawer)
+            self.assertIsNotNone(child, f"{name} does not mark itself current")
+            self.assertEqual(child.group(1), reverse(name))
+            self.assertIn("is-ancestor", drawer, f"{name} does not light Configuration")
+
+    def test_back_walks_one_level_up_to_the_hub(self):
+        for name in self.CHILDREN:
+            resp = self.client.get(reverse(name))
+            self.assertEqual(resp.context["back_url"], reverse("configuration"), name)
+            self.assertEqual(resp.context["back_label"], "Configuration", name)
+
+    def test_the_hub_has_no_back_for_an_administrator(self):
+        """The tree is rooted at the systems dashboard, which an Administrator's menu does not
+        show — so _back_nav offers nothing rather than a button into another role's estate.
+        The children still step up to the hub, which is what the nesting is for."""
+        resp = self.client.get(reverse("configuration"))
+        self.assertIsNone(resp.context["back_url"])
+
+    def test_the_raw_editors_hang_off_prometheus_not_the_hub(self):
+        """Editing the raw YAML is an option ON the Prometheus screen, so Back returns there
+        rather than skipping up to the hub."""
+        for name in ("prometheus_config", "config_yaml"):
+            resp = self.client.get(reverse(name))
+            self.assertEqual(resp.context["back_url"], reverse("config_prometheus"), name)
+
+    def test_the_hub_links_every_child(self):
+        body = self.client.get(reverse("configuration")).content.decode()
+        for name in self.CHILDREN:
+            self.assertIn(f'href="{reverse(name)}"', body, f"{name} missing from the hub")
+
+    def test_snmp_renders_without_the_deleted_tab_strip(self):
+        """SNMP was a placeholder that this class used to assert was empty; c9faf65 wired it
+        up for real, so "is it still blank" is no longer a fact worth pinning.
+
+        What IS worth pinning is that it renders at all. It inherited the tab-strip include
+        from the placeholder, and that partial no longer exists — leaving it would have raised
+        TemplateDoesNotExist on a screen that had only just started working, and no other test
+        loads this page.
+        """
+        resp = self.client.get(reverse("config_snmp"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, "cfg-tabs")
+
+    def test_prometheus_offers_the_raw_yaml(self):
+        resp = self.client.get(reverse("config_prometheus"))
+        self.assertContains(resp, reverse("prometheus_config"))
+        self.assertContains(resp, reverse("config_yaml"))
+
+
+class TopologyScreen(PrometheusConfigBase):
+    """Hosts grouped by SYSTEM rather than by scrape job.
+
+    prometheus.yml is organised by exporter; the report is organised by system. This screen
+    does the translation, and the risk it carries is that a second view of one document
+    quietly drops the half it isn't showing — which is what most of these tests are about.
+    """
+
+    def test_it_groups_hosts_by_system(self):
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        # gr.SYSTEM_ORDER first, then alphabetically — the same order the report presents
+        self.assertEqual([s["name"] for s in topo["systems"]], ["RTGS", "Temenos", "Efin"])
+        efin = next(s for s in topo["systems"] if s["name"] == "Efin")
+        self.assertEqual(efin["hosts"], 1)
+        self.assertEqual(efin["rows"][0]["g"]["known"]["display"], "Efin DB")
+        self.assertEqual(efin["rows"][0]["job_name"], "windows_exporter")
+
+    def test_hosts_from_different_jobs_land_under_their_own_system(self):
+        """The whole point of the pivot: RTGS is in blackbox_http, Efin in windows_exporter,
+        and the admin should not have to know that to maintain either."""
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        rtgs = next(s for s in topo["systems"] if s["name"] == "RTGS")
+        self.assertEqual(rtgs["rows"][0]["job_name"], "blackbox_http")
+
+    def test_saving_from_topology_preserves_the_settings_it_does_not_show(self):
+        """Topology renders global/storage/rules as hidden fields. If it didn't, saving here
+        would silently wipe them — parse_post rebuilds the whole document from the POST."""
+        before = self.current()
+        body = self.client.get(reverse("config_topology")).content.decode()
+        fields = _form_fields(body)
+        fields["action"] = "save"
+        self.client.post(reverse("config_topology"), fields)
+        after = self.current()
+        self.assertEqual(after["global"], before["global"])
+        self.assertEqual(after["storage"], before["storage"])
+        self.assertEqual(after["rule_files"], before["rule_files"])
+        self.assertEqual(after, before)
+
+    def test_saving_from_prometheus_preserves_the_hosts_it_does_not_show(self):
+        """The mirror image: the Prometheus screen carries every target group hidden."""
+        before = self.current()
+        body = self.client.get(reverse("config_prometheus")).content.decode()
+        fields = _form_fields(body)
+        fields["action"] = "save"
+        self.client.post(reverse("config_prometheus"), fields)
+        self.assertEqual(self.current(), before)
+
+    def test_moving_a_host_to_another_system_rewrites_its_label(self):
+        body = self.client.get(reverse("config_topology")).content.decode()
+        fields = _form_fields(body)
+        fields["action"] = "save"
+        fields["sc__0__0__l_system"] = "Efin DR"
+        self.client.post(reverse("config_topology"), fields)
+        labels = self.current()["scrape_configs"][0]["static_configs"][0]["labels"]
+        self.assertEqual(labels["system"], "Efin DR")
+        # and the screen now groups it under the new name
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        self.assertIn("Efin DR", [s["name"] for s in topo["systems"]])
+
+    def test_a_host_with_no_system_is_listed_as_unassigned(self):
+        PrometheusConfigRevision.objects.create(note="orphan", content=_FIXTURE_YML.replace(
+            '          system: "Efin"\n', ""))
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        self.assertEqual(len(topo["unassigned"]), 1)
+        self.assertNotIn("Efin", [s["name"] for s in topo["systems"]])
+
+    def test_it_offers_the_jobs_a_new_host_could_join(self):
+        """A new host has to belong to some scrape job — that is what decides how it is
+        polled — so the job is chosen up front rather than guessed."""
+        topo = self.client.get(reverse("config_topology")).context["topo"]
+        self.assertEqual([j["name"] for j in topo["jobs"]],
+                         ["windows_exporter", "blackbox_http"])
+        # next free group index per job, so added rows never collide with existing ones
+        self.assertEqual(topo["jobs"][0]["next_group"], 2)
+        self.assertEqual(topo["jobs"][1]["next_group"], 1)
+
+
+class JavaScriptParses(TestCase):
+    """app.js must actually parse.
+
+    A syntax error in it is the most damaging failure this app has, and the least visible: the
+    browser abandons the WHOLE file, so every listener in it dies at once — the nav drawer, the
+    top-bar menus, the theme toggle, the page spinner, the pickers — while Django serves 200s,
+    every template renders, and the entire test suite passes. It cost exactly that: a literal
+    newline inside a confirm() string shipped in 214298a and took the drawer down with it.
+
+    Checked by scanning for the failure directly rather than shelling out to node, so it runs
+    the same everywhere. Covers static/js/ — inline <script> blocks in templates are Django
+    templates first and JavaScript second, so they are not parseable in isolation.
+    """
+
+    def _unterminated_strings(self, src: str):
+        """Line numbers where a quoted string is left open at end-of-line.
+
+        A tiny state machine rather than a regex: quotes inside comments, comment markers
+        inside quotes, and escaped quotes all have to be read in context, and a regex that
+        gets those right is harder to trust than this is.
+        """
+        bad, state, escaped = [], None, False
+        line = 1
+        for i, ch in enumerate(src):
+            nxt = src[i + 1] if i + 1 < len(src) else ""
+            if ch == "\n":
+                if state in ('"', "'"):
+                    bad.append(line)
+                    state = None            # resynchronise; report one fault per string
+                elif state == "//":
+                    state = None
+                line += 1
+                escaped = False
+                continue
+            if state in ('"', "'", "`"):
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == state:
+                    state = None
+                continue
+            if state == "//":
+                continue
+            if state == "/*":
+                if ch == "*" and nxt == "/":
+                    state = None
+                continue
+            if ch == "/" and nxt == "/":
+                state = "//"
+            elif ch == "/" and nxt == "*":
+                state = "/*"
+            elif ch in ('"', "'", "`"):
+                state = ch
+        return bad
+
+    def test_no_javascript_file_has_an_unterminated_string(self):
+        import pathlib
+
+        js_dir = pathlib.Path(settings.BASE_DIR) / "static" / "js"
+        checked = 0
+        for path in sorted(js_dir.glob("*.js")):
+            checked += 1
+            bad = self._unterminated_strings(path.read_text(encoding="utf-8"))
+            self.assertEqual(bad, [], f"{path.name}: string left open at line(s) {bad}")
+        self.assertGreater(checked, 0, "no JavaScript found to check — has static/js moved?")
+
+    def test_the_check_catches_the_bug_it_exists_for(self):
+        """The guard is worthless if it cannot see the failure that motivated it."""
+        broken = 'var a = 1;\nif (confirm("Remove this?\n\nNothing is saved.")) { a = 2; }\n'
+        # line 2 is where the string opens; the tail of the split string trips it again on
+        # line 4, which is honest — one broken literal really does corrupt what follows it
+        self.assertIn(2, self._unterminated_strings(broken))
+        # ...and does not cry wolf over the things that legitimately contain quotes.
+        # Raw string: every backslash here belongs to the JavaScript, not to Python.
+        fine = "\n".join([
+            r"""// a comment with "quotes" and an apostrophe's""",
+            r"""/* a block "comment" spanning""",
+            r"""   two lines */""",
+            r'''var s = "a \" escaped quote";''',
+            r"""var t = 'it\'s fine';""",
+            r'''var u = "line one\nline two";''',
+            r"""var v = `a template""",
+            r"""literal spanning lines`;""",
+            "",
+        ])
+        self.assertEqual(self._unterminated_strings(fine), [])
+
+
+class ScriptGeneration(TestCase):
+    """Rendering a checker script from a stored definition.
+
+    These files run unattended on production hosts and publish the metrics the report is built
+    from, so the failure that matters is not a crash — it is a script that runs cleanly and
+    reports the wrong thing. Most of what follows guards that.
+    """
+
+    WIN = {"backup_root": r"E:\BACKUP", "file_glob": "BSAV50_FULL_*.bak",
+           "textfile_dir": r"C:\Program Files\windows_exporter\textfile_inputs",
+           "out_file": "backup_file.prom", "time_field": "LastWriteTime",
+           "min_bytes": "1", "max_age_days": "3"}
+    LNX = {"backup_root": "/var/backups/cms", "file_glob": "*.dmp",
+           "textfile_dir": "/var/lib/node_exporter/textfile_collector",
+           "out_file": "backup_file.prom", "min_bytes": "1",
+           "max_age_days": "1", "cron_schedule": "30 2 * * *"}
+
+    def test_every_token_is_filled(self):
+        """A leftover @@TOKEN@@ would ship as literal text into a path or a number."""
+        for stype, params in (("backup_windows", self.WIN), ("backup_linux", self.LNX)):
+            for name, content in scripts.render(stype, "CMS backup", "CMS", params).items():
+                self.assertNotIn("@@", content, f"{name} still has an unfilled token")
+
+    def test_an_unknown_token_is_an_error_not_a_blank(self):
+        """Silently substituting '' would produce a script that monitors nothing and says
+        nothing — the worst shape of failure for something that runs unattended."""
+        with self.assertRaises(scripts.ScriptError):
+            scripts._substitute("root = @@NOT_A_FIELD@@", {"SLUG": "x"})
+
+    def test_the_parameters_actually_reach_the_script(self):
+        files = scripts.render("backup_windows", "BSA SQL backup", "BSA", self.WIN)
+        ps1 = next(v for k, v in files.items() if k.endswith(".ps1"))
+        self.assertIn(r"$BackupRoot  = 'E:\BACKUP'", ps1)
+        self.assertIn("'BSAV50_FULL_*.bak'", ps1)
+        self.assertIn("$MaxAgeDays     = 3", ps1)
+
+    def test_the_metric_schema_is_fixed_on_both_platforms(self):
+        """generate_report.py scans for exactly these names, and the textfile collector errors
+        if two .prom files in one directory describe the same metric differently. No field may
+        reach them, and Windows and Linux must not drift apart."""
+        wanted = ["backup_file", "backup_file_count",
+                  "backup_check_success", "backup_check_timestamp_seconds"]
+        for stype, params, ext in (("backup_windows", self.WIN, ".ps1"),
+                                   ("backup_linux", self.LNX, ".sh")):
+            files = scripts.render(stype, "CMS backup", "CMS", params)
+            body = next(v for k, v in files.items() if k.endswith(ext))
+            for metric in wanted:
+                self.assertIn(metric, body, f"{stype} does not emit {metric}")
+
+    def test_the_wrapper_launches_the_script_it_was_generated_with(self):
+        """The .bat hard-codes the .ps1's filename, so a rename that missed one would leave a
+        scheduled task pointing at a file that isn't there."""
+        files = scripts.render("backup_windows", "BSA SQL backup", "BSA", self.WIN)
+        ps1_name = next(k for k in files if k.endswith(".ps1"))
+        bat = next(v for k, v in files.items() if k.endswith(".bat"))
+        self.assertIn(ps1_name, bat)
+
+    def test_the_generated_header_says_it_is_generated(self):
+        """A file that can be overwritten has to warn the person editing it."""
+        for stype, params in (("backup_windows", self.WIN), ("backup_linux", self.LNX)):
+            for content in scripts.render(stype, "CMS backup", "CMS", params).values():
+                self.assertIn("GENERATED", content)
+                self.assertIn("regenerate", content.lower())
+
+    def test_a_type_awaiting_its_source_refuses_to_generate(self):
+        """COB and SWIFT are registered so the catalogue is honest about them, but guessing at
+        their data source would produce a script that runs and reports the wrong number."""
+        for key in ("cob", "swift"):
+            self.assertFalse(scripts.get_type(key).available)
+            with self.assertRaises(scripts.ScriptError):
+                scripts.render(key, "x", "y", {})
+
+    def test_names_become_safe_filenames(self):
+        self.assertEqual(scripts.slugify("BSA SQL backup"), "bsa_sql_backup")
+        self.assertEqual(scripts.slugify("RTGS / Oracle (prod)"), "rtgs_oracle_prod")
+        self.assertEqual(scripts.slugify("   "), "script")      # never a bare extension
+
+    def test_generated_shell_parses(self):
+        """The lesson from the app.js outage: generated code nothing ever parses is a silent
+        failure. Skipped rather than faked where the interpreter is absent."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash not available on this host")
+        files = scripts.render("backup_linux", "CMS backup", "CMS", self.LNX)
+        sh = next(v for k, v in files.items() if k.endswith(".sh"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "check.sh"
+            path.write_text(sh, encoding="utf-8", newline="")
+            result = subprocess.run([bash, "-n", str(path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class ScriptSecrets(TestCase):
+    """Secrets belong in the database, encrypted, and never in a file or the browser."""
+
+    def test_a_secret_is_encrypted_at_rest(self):
+        d = GeneratedScript.objects.create(name="s", script_type="backup_windows")
+        d.secrets_encrypted = scripts.merge_secrets("", {"db_password": "hunter2"})
+        d.save()
+        d.refresh_from_db()
+        self.assertNotIn("hunter2", d.secrets_encrypted)       # ciphertext, not plaintext
+        self.assertEqual(d.secret_values(), {"db_password": "hunter2"})
+        self.assertEqual(d.secret_names, ["db_password"])      # names only, never values
+
+    def test_the_placeholder_keeps_the_stored_secret(self):
+        """So editing a definition never requires re-typing a secret, and the real value never
+        travels to the browser and back."""
+        enc = scripts.merge_secrets("", {"db_password": "hunter2"})
+        kept = scripts.merge_secrets(enc, {"db_password": scripts.SECRET_PLACEHOLDER})
+        self.assertEqual(crypto.decrypt(kept), crypto.decrypt(enc))
+
+    def test_a_new_value_replaces_and_an_empty_one_clears(self):
+        enc = scripts.merge_secrets("", {"db_password": "hunter2"})
+        changed = scripts.merge_secrets(enc, {"db_password": "correct-horse"})
+        self.assertEqual(json.loads(crypto.decrypt(changed))["db_password"], "correct-horse")
+        cleared = scripts.merge_secrets(changed, {"db_password": ""})
+        self.assertEqual(crypto.decrypt(cleared) or "{}", "{}")
+
+    def test_parameters_never_hold_a_secret(self):
+        """The definition's plain JSON is what a DB dump or a screenshot exposes."""
+        d = GeneratedScript.objects.create(
+            name="s2", script_type="backup_windows",
+            parameters={"backup_root": r"E:\BACKUP"},
+            secrets_encrypted=scripts.merge_secrets("", {"db_password": "hunter2"}))
+        self.assertNotIn("hunter2", json.dumps(d.parameters))
+
+
+class ScriptScreens(TestCase):
+    """The Administrator screens around all that."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="scriptout_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.override = override_settings(SCRIPT_OUTPUT_DIR=self.dir)
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        self.admin = get_user_model().objects.create_user("scadmin", password="pw12345!")
+        self.admin.groups.add(Group.objects.get(name="Administrator"))
+        self.client.login(username="scadmin", password="pw12345!")
+
+    def _make(self, name="BSA SQL backup"):
+        self.client.post(reverse("config_scripts"),
+                         {"script_type": "backup_windows", "name": name,
+                          "system": "BSA", "host": "10.100.248.20"})
+        return GeneratedScript.objects.get(name=name)
+
+    def test_administrator_only(self):
+        u = get_user_model().objects.create_user("scnope", password="pw12345!")
+        u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="scnope", password="pw12345!")
+        self.assertEqual(self.client.get(reverse("config_scripts")).status_code, 302)
+
+    def test_creating_then_generating_writes_the_files(self):
+        d = self._make()
+        self.assertIsNone(d.last_generated_at)          # creating writes nothing
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict({"action": "generate", "name": d.name, "system": "BSA"},
+                              **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()}))
+        d.refresh_from_db()
+        self.assertIsNotNone(d.last_generated_at)
+        self.assertEqual(len(d.last_generated_files), 2)
+        for path in d.last_generated_files:
+            p = pathlib.Path(path)
+            self.assertTrue(p.is_file(), f"{p} was not written")
+            # per-type sub-folder, so a folder listing says what each script is for
+            self.assertEqual(p.parent.name, "backup_windows")
+            self.assertNotIn("@@", p.read_text(encoding="utf-8"))
+
+    def test_save_does_not_write_anything(self):
+        """Correcting a note should not overwrite a live script on the way past."""
+        d = self._make()
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict({"action": "save", "name": d.name, "notes": "after the 23:30 job"},
+                              **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()}))
+        d.refresh_from_db()
+        self.assertEqual(d.notes, "after the 23:30 job")
+        self.assertIsNone(d.last_generated_at)
+        self.assertEqual(list(pathlib.Path(self.dir).rglob("*.ps1")), [])
+
+    def test_editing_and_regenerating_changes_the_file(self):
+        """The whole point of storing the definition: change a parameter, regenerate."""
+        d = self._make()
+        base = dict({"name": d.name, "system": "BSA"},
+                    **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()})
+        self.client.post(reverse("config_script_edit", args=[d.pk]), dict(base, action="generate"))
+        d.refresh_from_db()
+        ps1 = next(pathlib.Path(p) for p in d.last_generated_files if p.endswith(".ps1"))
+        self.assertIn("$MaxAgeDays     = 3", ps1.read_text(encoding="utf-8"))
+
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict(base, action="generate", p_max_age_days="7"))
+        self.assertIn("$MaxAgeDays     = 7", ps1.read_text(encoding="utf-8"))
+
+    def test_preview_shows_the_files_without_writing_them(self):
+        d = self._make()
+        resp = self.client.get(reverse("config_script_preview", args=[d.pk]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([n for n, _ in resp.context["files"]],
+                         ["check_backup_bsa_sql_backup.ps1", "run_bsa_sql_backup.bat"])
+        self.assertEqual(list(pathlib.Path(self.dir).rglob("*")), [])   # nothing on disk
+
+    def test_preview_can_download_one_file(self):
+        d = self._make()
+        resp = self.client.get(reverse("config_script_preview", args=[d.pk]),
+                               {"file": "run_bsa_sql_backup.bat"})
+        self.assertIn("attachment", resp["Content-Disposition"])
+        self.assertIn(b"@echo off", resp.content)
+
+    def test_a_duplicate_name_is_refused(self):
+        """Two definitions of one type and name render to the same filename and would silently
+        overwrite each other in the configuration folder."""
+        self._make()
+        self.client.post(reverse("config_scripts"),
+                         {"script_type": "backup_windows", "name": "BSA SQL backup"})
+        self.assertEqual(GeneratedScript.objects.filter(name="BSA SQL backup").count(), 1)
+
+    def test_a_type_awaiting_its_source_cannot_be_created(self):
+        self.client.post(reverse("config_scripts"), {"script_type": "cob", "name": "T24 COB"})
+        self.assertFalse(GeneratedScript.objects.filter(name="T24 COB").exists())
+
+    def test_removing_a_definition_leaves_the_files_alone(self):
+        """Removing a definition stops MANAGING a script; it does not stop a host running one
+        — that needs the scheduled task removing too, on the host."""
+        d = self._make()
+        self.client.post(reverse("config_script_edit", args=[d.pk]),
+                         dict({"action": "generate", "name": d.name},
+                              **{f"p_{k}": v for k, v in ScriptGeneration.WIN.items()}))
+        d.refresh_from_db()
+        written = [pathlib.Path(p) for p in d.last_generated_files]
+        self.client.post(reverse("config_script_edit", args=[d.pk]), {"action": "delete"})
+        self.assertFalse(GeneratedScript.objects.filter(pk=d.pk).exists())
+        for p in written:
+            self.assertTrue(p.is_file(), f"{p} should have been left in place")
+
+    def test_the_output_folder_is_gitignored(self):
+        """The requirement is that nothing generated reaches Git. That is enforced by
+        .gitignore, not by the app, so the rule itself is what gets tested."""
+        root = pathlib.Path(settings.BASE_DIR).parent
+        self.assertIn("/configuration/generated/", (root / ".gitignore").read_text(encoding="utf-8"))
+
+
+_OS_SERIES = {
+    "windows_os_info": [{"labels": {"instance": "10.0.212.3:9182", "job": "windows_exporter",
+                                    "system": "Temenos", "display": "Temenos/T24 App",
+                                    "product": "Windows Server 2019 Standard",
+                                    "version": "10.0.17763", "build_number": "17763",
+                                    "revision": "5576"}, "value": 1}],
+    "node_os_info": [{"labels": {"instance": "10.100.249.244:9100", "job": "node_exporter",
+                                 "system": "RTGS", "display": "RTGS Backend", "role": "backend",
+                                 "pretty_name": "Oracle Linux Server 8.10", "id": "ol",
+                                 "version_id": "8.10"}, "value": 1}],
+}
+
+
+class _FakeProm:
+    """Stands in for a live Prometheus for the two constant gauges the inventory reads."""
+
+    def __init__(self, *a, **k):
+        pass
+
+    def ping(self):
+        return True
+
+    def query(self, expr):
+        for name, series in _OS_SERIES.items():
+            if expr.startswith(name):
+                return series
+        return []
+
+
+class ReportsScreen(TestCase):
+    """Which report am I running — the choice that comes before which systems it covers."""
+
+    def _user(self, name, *roles):
+        u = get_user_model().objects.create_user(name, password="pw12345!")
+        for r in roles:
+            u.groups.add(Group.objects.get_or_create(name=r)[0])
+        return u
+
+    def _as(self, name, role):
+        self.client.login(username=name, password="pw12345!")
+        self.client.post(reverse("role_select"), {"role": role})
+
+    def test_security_admin_gets_both_reports(self):
+        """The case that made a screen necessary rather than a menu entry per report."""
+        self._user("sec", "Security Admin")
+        self._as("sec", "Security Admin")
+        labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+        self.assertEqual(labels, ["System Health Report", "OS Inventory Report"])
+
+    def test_each_role_gets_exactly_its_own_reports(self):
+        """Network Admin has TWO: the live Network Report and the hand-keyed SOD checklist.
+
+        They are genuinely different reports rather than two views of one — the first is
+        captured from Prometheus for devices you pick, the second is worked through each
+        morning across four vendor consoles — which is the same reasoning that gave Security
+        Admin its pair and made this screen necessary in the first place.
+        """
+        for name, role, expected in (
+                ("sys", "System Admin", ["System Health Report"]),
+                ("net", "Network Admin", ["Network Report",
+                                          "Network Infrastructure SOD Report"]),
+                ("inf", "Infrastructure Admin", ["Infrastructure Report"])):
+            self._user(name, role)
+            self._as(name, role)
+            labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
+            self.assertEqual(labels, expected, role)
+            self.client.logout()
+
+    def test_administrator_has_no_reports_screen(self):
+        """It configures the app rather than reporting on it, so the entry is absent and the
+        URL sends it somewhere real instead of showing an empty grid."""
+        self._user("adm", "Administrator")
+        self._as("adm", "Administrator")
+        resp = self.client.get(reverse("reports"))
+        self.assertRedirects(resp, reverse("roles_console"), fetch_redirect_response=False)
+        drawer = self.client.get(reverse("history")).content.decode()
+        self.assertNotIn(reverse("reports"), drawer)
+
+    def test_a_role_with_no_estate_is_sent_to_its_own_screen(self):
+        self._user("gov", "Gov Systems Admin")
+        self._as("gov", "Gov Systems Admin")
+        self.assertRedirects(self.client.get(reverse("reports")),
+                             reverse("role_empty"), fetch_redirect_response=False)
+
+    def test_it_is_where_each_role_lands_after_picking(self):
+        from .roles import ROLE_HOME
+        for role in ("System Admin", "Network Admin", "Infrastructure Admin", "Security Admin"):
+            self.assertEqual(ROLE_HOME[role], "reports", role)
+
+    def test_the_drawer_shows_one_reports_entry_not_a_picker_each(self):
+        self._user("sys2", "System Admin")
+        self._as("sys2", "System Admin")
+        body = self.client.get(reverse("history")).content.decode()
+        drawer = body[body.find('id="drawer"'):body.find("</nav>")]
+        self.assertIn(reverse("reports"), drawer)
+        self.assertNotIn("System Picker", drawer)
+
+    def test_back_from_a_picker_steps_out_to_the_report_choice(self):
+        """A picker is a step inside running a report, not a destination beside it."""
+        self._user("sec2", "Security Admin")
+        self._as("sec2", "Security Admin")
+        resp = self.client.get(reverse("os_inventory"))
+        self.assertEqual(resp.context["back_url"], reverse("reports"))
+        self.assertEqual(resp.context["back_label"], "Reports")
+
+
+class OsInventoryReport(TestCase):
+    """Security Admin's second report."""
+
+    def setUp(self):
+        self.sec = get_user_model().objects.create_user("secadm", password="pw12345!")
+        self.sec.groups.add(Group.objects.get_or_create(name="Security Admin")[0])
+        self.client.login(username="secadm", password="pw12345!")
+
+    def test_only_security_admin_can_run_it(self):
+        other = get_user_model().objects.create_user("sysadm", password="pw12345!")
+        other.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="sysadm", password="pw12345!")
+        self.assertRedirects(self.client.get(reverse("os_inventory")),
+                             reverse("reports"), fetch_redirect_response=False)
+
+    def test_the_screen_offers_no_system_picker(self):
+        """An inventory that covered only the systems someone ticked would answer "what is
+        the oldest OS we run" with a number that depends on the ticking."""
+        resp = self.client.get(reverse("os_inventory"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, 'name="include_system"')
+
+    def test_it_downloads_a_real_workbook(self):
+        with mock.patch("reports.services.gr.Prometheus", _FakeProm):
+            resp = self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp["Content-Type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertIn("attachment", resp["Content-Disposition"])
+        wb = openpyxl.load_workbook(io.BytesIO(resp.content))
+        self.assertEqual(wb.sheetnames, ["Summary", "OS Inventory", "Needs attention"])
+
+    def test_it_records_an_audit_row_like_every_other_report(self):
+        """History is common to every role, so a report that skipped it would be a download
+        with no record of who took it."""
+        with mock.patch("reports.services.gr.Prometheus", _FakeProm):
+            self.client.post(reverse("os_inventory"), {"theme": "light"})
+        sub = ReportSubmission.objects.get()
+        self.assertEqual(sub.generated_by, self.sec)
+        self.assertEqual(sub.theme, "light")
+        self.assertEqual(sub.hosts_count, 2)
+        self.assertEqual(sub.report_content["kind"], "os_inventory")
+        self.assertIn("OS Inventory", sub.filename)
+
+    def test_lifecycle_banding_reaches_the_audit_row(self):
+        """immediate/watch carry the report's red and amber bands — end-of-life hosts and
+        extended-support-only ones — so History reads the same as it does for the others."""
+        with mock.patch("reports.services.gr.Prometheus", _FakeProm):
+            self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        sub = ReportSubmission.objects.get()
+        self.assertEqual(sub.immediate_count, 0)      # neither host is end-of-life
+        self.assertEqual(sub.watch_count, 1)          # Windows 2019 is extended-support only
+
+    def test_an_unreachable_prometheus_explains_itself(self):
+        class Dead(_FakeProm):
+            def ping(self):
+                raise OSError("connection refused")
+
+        with mock.patch("reports.services.gr.Prometheus", Dead):
+            resp = self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        self.assertEqual(resp.status_code, 502)
+        self.assertContains(resp, "connection refused", status_code=502)
+
+    def test_no_series_at_all_names_the_likely_cause(self):
+        """Blank output would look like an estate with no operating systems."""
+        class Empty(_FakeProm):
+            def query(self, expr):
+                return []
+
+        with mock.patch("reports.services.gr.Prometheus", Empty):
+            resp = self.client.post(reverse("os_inventory"), {"theme": "dark"})
+        self.assertEqual(resp.status_code, 502)
+        self.assertContains(resp, "os` collector", status_code=502)
+
+
+class SharedReportsBelongToBothRoles(TestCase):
+    """PAGE_OWNER became a set so one screen can belong to two roles."""
+
+    def test_system_health_is_owned_by_both_roles_that_run_it(self):
+        from .roles import PAGE_OWNER
+        self.assertEqual(PAGE_OWNER["report_form"], {"System Admin", "Security Admin"})
+
+    def test_neither_role_is_bounced_off_the_shared_picker(self):
+        """As a single owner, whichever role lost the tie was redirected off a screen that is
+        genuinely theirs — with a message naming a role they might not even hold.
+
+        Asserted on page_in_scope, the decision RoleScopeMiddleware actually makes, rather
+        than by rendering the picker: that would drag a live topology file into a test about
+        role scoping, and fail for a reason that has nothing to do with it.
+        """
+        from django.test import RequestFactory
+
+        from .roles import page_in_scope
+
+        u = get_user_model().objects.create_user("shared", password="pw12345!")
+        for role in ("System Admin", "Security Admin"):
+            u.groups.add(Group.objects.get_or_create(name=role)[0])
+        for role in ("System Admin", "Security Admin"):
+            request = RequestFactory().get("/")
+            request.user = u
+            request.session = {"active_role": role}
+            for page in ("report_form", "report"):
+                self.assertTrue(page_in_scope(request, page), f"{role} / {page}")

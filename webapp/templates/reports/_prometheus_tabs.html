@@ -1,0 +1,14 @@
+{% comment %}
+  Shared tab strip for the Prometheus config area — prometheus.yml plus its rule_files, as
+  sub-pages of one screen rather than separate top-level nav entries. Included by both
+  prometheus_config.html and prometheus_rule_file.html; both pass `active_file` and
+  `rule_files` in their view context.
+{% endcomment %}
+<div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+  <a class="btn {% if active_file == 'prometheus.yml' %}primary{% else %}ghost{% endif %}"
+     href="{% url 'prometheus_config' %}">prometheus.yml</a>
+  {% for rf in rule_files %}
+  <a class="btn {% if active_file == rf %}primary{% else %}ghost{% endif %}"
+     href="{% url 'prometheus_rule_file' filename=rf %}">{{ rf }}</a>
+  {% endfor %}
+</div>

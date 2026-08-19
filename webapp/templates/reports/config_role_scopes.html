@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Role scopes · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <p class="cfg-note">Tick nothing to leave a role unrestricted — it sees every system.</p>
+
+  {% if not systems %}
+    <div class="card"><div class="body" style="padding:18px;color:var(--muted)">
+      No systems found in <code>{{ yaml_source.path }}</code> — nothing to map yet.
+    </div></div>
+  {% else %}
+  <form method="post">{% csrf_token %}
+    {% for row in rows %}
+    <div class="section-label sub" style="display:flex;align-items:center;gap:8px">
+      {# same glyph the Role Select tiles use, so a role looks the same wherever it appears #}
+      {% if row.icon %}<img src="{% static row.icon %}" alt="" style="height:20px;width:20px;object-fit:contain">{% endif %}
+      {{ row.role }}
+      {% if row.unscoped %}<span class="chip amber" style="text-transform:none;letter-spacing:0">Unrestricted — sees all {{ systems|length }}</span>
+      {% else %}<span class="chip green" style="text-transform:none;letter-spacing:0">{{ row.chosen|length }} of {{ systems|length }}</span>{% endif %}
+    </div>
+    <div class="card"><div class="body" style="padding:14px 18px">
+      <div class="scope-grid" data-scope-group>
+        {% for s in systems %}
+        <label class="scope-opt">
+          <input type="checkbox" name="systems__{{ row.role }}" value="{{ s }}" {% if s in row.chosen %}checked{% endif %}>
+          <span>{{ s }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
+        <button type="button" class="btn ghost cfg-add" data-scope-none>Clear (unrestricted)</button>
+      </div>
+    </div></div>
+    {% endfor %}
+
+    <div class="actionbar"><div class="container-inner">
+      <button class="btn primary" type="submit">Save role scopes</button>
+      <a class="btn ghost" href="{% url 'config_role_scopes' %}">Discard changes</a>
+      <span style="color:var(--muted);font-size:12.5px;margin-left:auto">
+        Applies the next time a role is selected — users already signed in keep their current scope
+        until they switch roles.
+      </span>
+    </div></div>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

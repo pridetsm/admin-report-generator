@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Temenos · Folder Watch · Admin Report Generator{% endblock %}
+{% block title %}Temenos · Folder Watch · RBZ Monitoring Console{% endblock %}
 
 {% comment %}
   This page updates itself in place and does not reload on a timer, so the global spinner
@@ -26,10 +26,7 @@
   docstring in reports/folders.py for what that changed and why.
 {% endcomment %}
 <style>
-  /* Folder palettes. `back` is the sheet behind, `front` the flap the name sits on,
-     `ink` the name itself — the complementary reading colour for that flap. Declared
-     per theme the same way the rest of app.css does it (explicit values, no color-mix,
-     so nothing depends on a browser feature this network's Edge build may not have). */
+  
   :root {
     --fw-idle-back:#b7c3ce;  --fw-idle-front:#ccd5de;  --fw-idle-ink:#2f4657;
     --fw-green-back:#7fd4b7; --fw-green-front:#a6e5d0; --fw-green-ink:#07584a;
@@ -65,17 +62,9 @@
     --fw-red-glow:rgba(209,74,58,.55);
   }
 
-  /* This page deliberately uses the app's standard .container width (960px) and does NOT
-     widen it. The canvas Back button is position:fixed at left:calc(50% - 680px), so any
-     column wider than ~1070px runs its own left edge underneath that button — and this
-     page's button reads "Folder Watch", which is wider than most. Widening here reopens
-     that overlap; the tile grid is auto-fill and reflows, so it costs nothing to stay put. */
-
-  /* Two live figures sit together in the header now that the description has moved out of it.
-     A hairline keeps the update clock from reading as one phrase with the next stat. */
+  
   .fw-statsep { width:1px; align-self:stretch; margin:1px 2px; background:var(--line-strong); }
 
-  /* ---- toolbar: state pills double as filters ---- */
   .fw-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:2px 2px 18px; }
   .fw-pill {
     display:inline-flex; align-items:center; gap:7px; padding:6px 13px; border-radius:999px;
@@ -101,7 +90,6 @@
   @keyframes fwBeat { 0%,100%{opacity:1} 50%{opacity:.25} }
   .fw-live .beat { animation: fwBeat 2.4s ease-in-out infinite; }
 
-  /* ---- the grid ---- */
   .fw-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(148px, 1fr)); gap:22px 18px; }
   .fw-tile {
     position:relative; display:flex; flex-direction:column; align-items:center; gap:2px;
@@ -118,8 +106,6 @@
   .fw-ico .back  { fill:var(--fw-idle-back); transition:fill .25s ease; }
   .fw-ico .front { fill:var(--fw-idle-front); transition:fill .25s ease; }
 
-  /* The folder name, ON the flap — not under the icon. The box is pinned to the flap's own
-     geometry (y 40→87 of the 92-unit viewBox) so the text can never ride up over the fold. */
   .fw-name {
     position:absolute; left:8%; right:8%; top:46%; bottom:7%;
     display:flex; align-items:center; justify-content:center; padding:0 2px;
@@ -128,12 +114,10 @@
     transition:color .25s ease;
   }
   .fw-name span { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
-  /* Long dotted names (RBZ.PNET.RESPONSE, F.DE.O.MSG.ALLIANCE) step down rather than clip —
-     a truncated folder name is useless on a screen whose whole job is naming the folder. */
+  
   .fw-tile[data-len="long"] .fw-name { font-size:11px; line-height:1.14; letter-spacing:0; }
   .fw-tile[data-len="xlong"] .fw-name { font-size:10px; line-height:1.12; letter-spacing:-.1px; }
 
-  /* file count, on the tab */
   .fw-count {
     position:absolute; top:3%; left:7%; min-width:19px; height:19px; padding:0 5px;
     display:none; align-items:center; justify-content:center; border-radius:999px;
@@ -142,8 +126,6 @@
   }
   .fw-tile[data-has-files="1"] .fw-count { display:inline-flex; }
 
-  /* Message format, on the tab opposite the file count. IN_MT and IN_MX are the same leg
-     of the same path and differ only by this, so without it two tiles read as duplicates. */
   .fw-fmt {
     position:absolute; top:3%; right:7%; padding:1px 5px; border-radius:4px;
     background:var(--panel); border:1px solid var(--line-strong); color:var(--muted);
@@ -152,24 +134,18 @@
   .fw-fmt:empty { display:none; }
 
   .fw-sub { font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; margin-top:3px; }
-  /* Where the messages in this folder are going. Quiet, and on one line: the grid's value
-     is that every tile is the same shape, so a path that wrapped on some folders and not
-     others would cost more in raggedness than it gained in detail. The dialog has room for
-     the full thing. */
+  
   .fw-path {
     max-width:100%; font-size:9.5px; color:var(--muted); opacity:.7; letter-spacing:.02em;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
   .fw-path:empty { display:none; }
   .fw-path .hop { opacity:.5; padding:0 1px; }
-  /* Throughput, under the waiting figure. Deliberately quieter than .fw-sub: the age of
-     the oldest file is what the screen is FOR, and a number that competes with it for
-     attention would blunt the one reading that matters from across the room. */
+  
   .fw-proc { font-size:10.5px; color:var(--muted); opacity:.8; font-variant-numeric:tabular-nums; }
   .fw-proc:empty { display:none; }
   .fw-host { font-size:10.5px; color:var(--muted); opacity:.75; }
 
-  /* ---- states ---- */
   .fw-tile[data-state="green"]   .back{fill:var(--fw-green-back)}  .fw-tile[data-state="green"]   .front{fill:var(--fw-green-front)}
   .fw-tile[data-state="green"]   .fw-name{color:var(--fw-green-ink)}
   .fw-tile[data-state="amber"]   .back{fill:var(--fw-amber-back)}  .fw-tile[data-state="amber"]   .front{fill:var(--fw-amber-front)}
@@ -180,23 +156,12 @@
   .fw-tile[data-state="amber"]   .fw-sub{color:var(--amber)}
   .fw-tile[data-state="unknown"] .back{fill:var(--fw-unk-back)}    .fw-tile[data-state="unknown"] .front{fill:var(--fw-unk-front)}
   .fw-tile[data-state="unknown"] .fw-name{color:var(--fw-unk-ink)}
-  /* unknown is NOT a quiet grey — a dashed edge says "we are not being told", which must
-     never be mistaken for the solid grey of a folder we know is drained. */
+  
   .fw-tile[data-state="unknown"] .fw-ico { opacity:.62; }
   .fw-tile[data-state="unknown"] .front, .fw-tile[data-state="unknown"] .back {
     stroke:var(--muted); stroke-width:2; stroke-dasharray:5 4;
   }
 
-  /* ---- refresh wave ----
-     A sine travelling left to right across the grid on every refresh: one full cycle of
-     y = -A·sin(2πt) per folder, with each tile's phase delayed by its horizontal position so
-     the crest sweeps rather than the whole grid bouncing at once. The stops below ARE the
-     sine, sampled every 45° (0, .707, 1, .707, 0, -.707, -1, -.707, 0) — which is why the
-     timing function must stay linear: any easing would distort the curve between samples.
-
-     It rides on .fw-ico-wrap, not .fw-tile, for two reasons: the tile's hover rule already
-     owns its transform, and red tiles animate .fw-ico with fwPulse. Three different elements,
-     three animations, none fighting for the same property. */
   .fw-tile .fw-ico-wrap { will-change: auto; }
   .fw-tile.fw-wave .fw-ico-wrap {
     animation: fwWave 780ms linear var(--fw-delay, 0ms) 1 both;
@@ -214,7 +179,6 @@
   }
   .fw-grid { --fw-amp: 9px; }
 
-  /* red illuminates: a glow that breathes, so the eye is caught by motion as well as hue */
   @keyframes fwPulse {
     0%,100% { filter:drop-shadow(0 0 3px var(--fw-red-glow)); }
     50%     { filter:drop-shadow(0 0 15px var(--fw-red-glow)); }
@@ -226,20 +190,19 @@
     .fw-tile.fw-wave .fw-ico-wrap { animation:none; }
   }
 
-  /* ---- detail dialog ---- */
   .fw-dlg { width:min(460px, 94vw); }
   .fw-dlg .fw-kv { display:grid; grid-template-columns:auto 1fr; gap:7px 14px; padding:4px 8px 12px; font-size:13px; }
   .fw-dlg .fw-kv dt { color:var(--muted); }
   .fw-dlg .fw-kv dd { margin:0; word-break:break-word; }
   .fw-dlg .fw-path { font-family:Consolas, ui-monospace, monospace; font-size:12px; }
-  /* ---- collapsible "How to read this" ---- */
+  
   .fw-help { margin-top:30px; }
   .fw-help > summary {
     display:flex; align-items:center; gap:8px; padding:8px 2px; cursor:pointer;
     list-style:none; user-select:none; color:var(--muted);
     font-size:12px; font-weight:700; letter-spacing:.12em; text-transform:uppercase;
   }
-  .fw-help > summary::-webkit-details-marker { display:none; }   /* Safari's default triangle */
+  .fw-help > summary::-webkit-details-marker { display:none; }   
   .fw-help > summary::before {
     content:"›"; font-size:17px; line-height:1; transform:rotate(0deg);
     transition:transform .15s ease;
@@ -248,8 +211,7 @@
   .fw-help > summary:hover { color:var(--ink); }
   .fw-help > summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:6px; }
   @media (prefers-reduced-motion: reduce) { .fw-help > summary::before { transition:none; } }
-  /* What the screen IS, ahead of how to read it — set in the reading colour and ruled off,
-     so the opening sentence is not mistaken for the first item of the detail below it. */
+  
   .fw-lead {
     margin:0 0 14px; padding-bottom:13px; border-bottom:1px solid var(--line-strong);
     color:var(--ink); font-size:14.5px; font-weight:600; line-height:1.6;
@@ -442,31 +404,20 @@
   var grid = document.getElementById("fwGrid");
   if (!grid) { return; }
 
-  // The workstation clock is not the Prometheus clock. Anchor to the server's `now` and
-  // advance from there, or a PC that is five minutes fast would paint healthy folders red.
   var skew = data.now - (Date.now() / 1000);
   function serverNow() { return (Date.now() / 1000) + skew; }
 
-  /* A fixed 10s refresh. Long enough to read as a rhythm rather than a flicker, short
-     enough that the screen is never meaningfully behind. Each poll is a few KB off a
-     snapshot the exporter already holds in memory, so no disk is touched on the T24 box
-     to answer it. */
   var POLL_MS = 10000;
 
-  // When this page last asked for data. Set by the initial render, then by every poll that
-  // lands — this is what the header clock counts from, and nothing else touches it.
   var lastUpdate = data.now;
-  // Red past four missed refreshes: one dropped request is not worth alarming about.
+
   var UPDATE_STALE_S = (POLL_MS / 1000) * 4;
 
   var byKey = {};
   function index(folders) { byKey = {}; folders.forEach(function (f) { byKey[f.key] = f; }); }
   index(data.folders);
 
-  // ---- mirrors reports/folders.py: verdict() and _fmt_age(). Change one, change both. ----
-  /* Judged on the LIVE age, so a folder turns red the moment it truly crosses its limit
-     rather than at the next scrape. Each folder carries its own limits, because one
-     outbound folder may legitimately hold files far longer than an inbound queue. */
+  
   function verdict(age, files, readable, stale, scanOk, amberSeconds, redSeconds) {
     if (stale || !readable || !scanOk) { return "unknown"; }
     if (files <= 0) { return "idle"; }
@@ -491,8 +442,7 @@
     var d = new Date(epoch * 1000);
     return d.toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
   }
-  /* Folders are re-scanned every 30s, so a minute-resolution stamp makes two consecutive
-     scans look like one. Times on this page that name a SCAN carry seconds. */
+  
   function fmtTime(epoch) {
     if (!epoch) { return "—"; }
     return new Date(epoch * 1000).toLocaleTimeString(undefined,
@@ -505,13 +455,6 @@
     return (i === 0 ? Math.round(n) : n.toFixed(1)) + " " + u[i];
   }
 
-  /* Recompute one folder's live figures. `stale` is re-derived here too: if the exporter
-     stops scanning while this page is open, the tiles must drift to unknown on their own
-     rather than sit on the last verdict the server happened to send.
-
-     The age ticks off oldest_mtime, which the exporter publishes directly as the oldest
-     file's modification time. It is a fixed point in the past, so subtracting it from now
-     keeps moving — which is exactly what a jammed folder does. */
   function live(f) {
     var now = serverNow();
     var age = f.oldest_mtime ? (now - f.oldest_mtime) : null;
@@ -522,9 +465,7 @@
     };
   }
 
-  // ---- filtering ----
-  /* Held in sessionStorage so a filter survives the one reload this page still does — the
-     folder set changing on the host. Session-scoped, so it does not outlive the tab. */
+  
   var STORE = "fwFilter";
   var saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(STORE) || "{}"); } catch (e) { saved = {}; }
@@ -535,11 +476,9 @@
       sessionStorage.setItem(STORE, JSON.stringify({
         filter: filter, query: query, help: !!(h && h.open)
       }));
-    } catch (e) { /* private mode — the filter just won't survive the reload */ }
+    } catch (e) {  }
   }
 
-  /* "How to read this" is collapsed on every fresh visit, but if you opened it, a reload
-     must not shut it in your face mid-sentence. */
   var helpEl = document.getElementById("fwHelp");
   if (helpEl) {
     if (saved.help) { helpEl.open = true; }
@@ -567,7 +506,6 @@
     });
   }
 
-  // ---- the once-a-second repaint ----
   var headline = document.getElementById("fwHeadline");
   var banner = document.getElementById("fwBanner");
   var runStat = document.getElementById("fwRunStat");
@@ -600,8 +538,7 @@
       }
       var proc = tile.querySelector("[data-proc-el]");
       if (proc) {
-        // Empty rather than "processed 0" when the figure is unavailable — the CSS hides
-        // an empty node, so a folder we cannot measure simply does not carry the line.
+
         proc.textContent = (f.processed === null || f.processed === undefined)
           ? "" : "processed " + f.processed.toLocaleString();
       }
@@ -617,16 +554,6 @@
       if (n) { n.textContent = counts[p.getAttribute("data-filter")] || 0; }
     });
 
-    /* Time since this page last asked Prometheus for data. Counts 0 -> the poll interval
-       and resets, every time, so the number is a rhythm you can read at a glance rather
-       than something that jumps about.
-
-       It is not a statement about the DATA, and must not be turned into one. It used to
-       show the host's last run — necessary when the metrics came from a .prom file that a
-       scheduled task rewrote, because that file was re-served unchanged in between. The
-       exporter is a live service now and every folder carries its own scan time, so
-       whether the readings are stale is judged per folder: an unscanned folder turns
-       dashed-unknown on its own tile. Leave that job there and this number simple. */
     var sinceUpdate = serverNow() - lastUpdate;
     if (runAgo) {
       runAgo.textContent = fmtAge(sinceUpdate) + " ago";
@@ -662,8 +589,7 @@
         h.textContent = counts.red + " folder" + (counts.red === 1 ? "" : "s") +
           " holding a file past its limit — nothing is draining " + worst.folder.name;
         var d = document.createElement("div"); d.className = "detail";
-        // Total waiting AND how many are over the line: the previous exporter could only
-        // report the second number, which made a deep queue and a single stuck file look alike.
+
         var over = worst.folder.over_red;
         d.textContent = worst.folder.name + ": " + worst.folder.files + " file" +
           (worst.folder.files === 1 ? "" : "s") + " waiting" +
@@ -678,7 +604,6 @@
     }
   }
 
-  // ---- detail dialog ----
   var dlg = document.getElementById("fwDetail");
   var dlgTitle = document.getElementById("fwDlgTitle");
   var dlgSub = document.getElementById("fwDlgSub");
@@ -715,8 +640,7 @@
       : v.state === "green" ? "var(--green)" : "var(--muted)";
 
     dlgBody.innerHTML = "";
-    /* The message path first: when a folder is jammed, "what is stuck and where was it
-       going" is the question, and the answer belongs above the mechanics. */
+    
     if (f.path_text) {
       row("Message path", f.path_text + (f.format ? "   ·   " + f.format + " format" : ""));
     }
@@ -724,8 +648,6 @@
     row("Folder", f.name);
     row("Path found", f.readable ? "yes" : "no — the folder could not be read");
 
-    /* Depth first, then how much of it is over the line. The old exporter published only
-       the second figure, so "3 files too old" could equally have meant 3 waiting or 300. */
     if (f.files > 0) {
       var breakdown = String(f.files) + " waiting";
       if (f.over_red !== null && f.over_red !== undefined) {
@@ -746,9 +668,6 @@
       row("Files", "none waiting — drained");
     }
 
-    /* Arrival is the other half of the story: a folder can be empty because it is being
-       drained promptly, or because nothing has arrived in it for six hours. Only one of
-       those is healthy, and the counters are the only way to tell them apart. */
     if (f.last_added) {
       row("Last arrival", fmtClock(f.last_added) +
           "   (" + fmtAge(serverNow() - f.last_added) + " ago)");
@@ -783,8 +702,7 @@
   function closeDialog() {
     openKey = null;
     dlg.classList.remove("show");
-    // Nothing to resume: the page no longer reloads itself on a timer, and the tiles
-    // behind the dialog have been repainting live the whole time it was open.
+
   }
 
   grid.addEventListener("click", function (e) {
@@ -795,7 +713,6 @@
   dlg.addEventListener("click", function (e) { if (e.target === dlg) { closeDialog(); } });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape" && openKey) { closeDialog(); } });
 
-  // ---- polling: pick up new scrapes without losing the live tick in between ----
   var live_el = document.getElementById("fwLive");
   var live_txt = document.getElementById("fwLiveText");
   var failures = 0;
@@ -803,22 +720,11 @@
   function keysOf(folders) { return folders.map(function (f) { return f.key; }).sort().join("|"); }
   var shape = keysOf(data.folders);
 
-  /* The clock and the wave both mark ONE event: this page asked Prometheus for data and
-     got an answer. Every successful poll, on a fixed cadence — so the clock always counts
-     0 -> POLL_MS and the grid always ripples at the same moment.
-
-     That predictability is the point. Glance at the number and you know a refresh has just
-     happened, or how long until the next one. Tying either to whether the DATA changed
-     makes both stutter — the reading is the same rhythm whether or not a file moved. */
-
   function poll() {
     fetch("{% url 'folder_watch_data' %}", { headers: { "X-Requested-With": "XMLHttpRequest" } })
       .then(function (r) { if (!r.ok) { throw new Error("HTTP " + r.status); } return r.json(); })
       .then(function (fresh) {
-        // folder_exporter.yml changed on the host — the grid's tiles no longer match the
-        // data. Rebuilding the DOM here would duplicate the server's markup in two places,
-        // so we take the one reload this costs instead. This is now the ONLY thing that
-        // reloads the page.
+
         if (keysOf(fresh.folders) !== shape) { window.location.reload(); return; }
         skew = fresh.now - (Date.now() / 1000);
         index(fresh.folders);
@@ -832,18 +738,12 @@
       .catch(function (err) {
         failures++;
         live_el.classList.add("is-down");
-        // The tiles keep ageing on purpose: a file we cannot re-read is still that old,
-        // and the header clock keeps counting up, which is how a stalled page shows itself.
+
         live_txt.textContent = "not refreshing (" + failures + ")";
       });
   }
 
-  // ---- the refresh wave ----
-  /* Phase comes from each tile's real position on screen, measured at play time rather than
-     from its index: the grid is auto-fill, so how many tiles sit in a row depends on the
-     window width, and an index-based delay would ripple diagonally on a wide screen and
-     nearly all at once on a narrow one. Measuring means the crest crosses in TRAVEL_MS at
-     any width, and a filtered grid waves only the tiles you can actually see. */
+  
   var WAVE_TRAVEL_MS = 620;      // time for the crest to cross the whole grid
   var WAVE_CYCLE_MS = 780;       // one folder's full sine cycle — matches the CSS duration
   var reduceMotion = window.matchMedia
@@ -868,19 +768,10 @@
       t.classList.add("fw-wave");
     });
 
-    // strip the class once the last tile has finished, so the next refresh starts clean
     waveClear = setTimeout(function () {
       tiles.forEach(function (t) { t.classList.remove("fw-wave"); });
     }, WAVE_TRAVEL_MS + WAVE_CYCLE_MS + 60);
   }
-
-  /* There is deliberately NO whole-page auto refresh.
-     The poll updates every figure on the screen in place, so a reload was only ever there
-     to pick up template changes on a display nobody touches — and it cost a flash, a lost
-     scroll position and a dialog closing itself mid-read. The page now reloads for exactly
-     one reason: the set of folders changed on the host, so the server-rendered tiles no
-     longer match the data. If a code change needs to reach a wall display, refresh it once
-     by hand. */
 
   paint();
   playWave();          // one wave on load, so the grid announces itself

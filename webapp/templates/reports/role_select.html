@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Role Select · Report Builder{% endblock %}
+{% load static %}
+{% block title %}Role Select · RBZ Monitoring Console{% endblock %}
 
 {% comment %}
   The first screen after signing in, for people who hold more than one role.
@@ -22,68 +23,7 @@
 {% block page_spinner %}{% endblock %}
 
 {% block body %}
-<style>
-  /* Every colour here is a theme token: panel, ink, line-strong, accent, accent-ink, muted.
-     An earlier draft named tokens this app does not define and gave each a hex fallback.
-     Because the token did not exist, the fallback won in BOTH themes and these tiles stayed
-     white on a dark page. A fallback on an undefined token is a hardcoded colour wearing a
-     theme's clothes — see the CssTokenHygiene test, which now fails on one. */
-  .rs-wrap { max-width:760px; margin:0 auto; padding:8px 0 40px; }
-  .rs-head { text-align:center; margin-bottom:26px; }
-  .rs-head h1 { font-size:22px; font-weight:650; margin:0 0 6px; letter-spacing:-.2px; }
-  .rs-head p { margin:0; color:var(--muted); font-size:13px; line-height:1.6; }
-
-  /* A grid, not a stack: four roles read as four peers of equal standing, and the eye
-     compares them side by side instead of scanning a ranked column. auto-fit collapses it
-     to one column on a narrow window without a second breakpoint. */
-  .rs-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(232px,1fr));
-             grid-auto-rows:1fr; gap:10px; }
-
-  /* The whole card is the submit control, so the click target is the card and not a small
-     button inside it — a list of one-action rows should not need aiming. */
-  .rs-card { margin:0; }
-  .rs-btn {
-    width:100%; height:100%; text-align:left; cursor:pointer; font:inherit; color:inherit;
-    background:var(--panel); color:var(--ink); border:1px solid var(--line-strong);
-    border-radius:12px;
-    padding:16px 17px; display:flex; flex-direction:column; align-items:flex-start; gap:11px;
-    transition:border-color .12s ease, transform .12s ease;
-  }
-  .rs-btn:hover { border-color:var(--accent); transform:translateY(-1px); }
-  .rs-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-
-  .rs-mono {
-    flex:none; width:40px; height:40px; border-radius:11px; display:grid; place-items:center;
-    font-weight:700; font-size:15px; color:var(--accent-ink); background:var(--accent);
-  }
-  .rs-body { flex:1; min-width:0; }
-  .rs-name { font-size:14.5px; font-weight:640; }
-  .rs-pages { font-size:12px; color:var(--muted); margin-top:4px; line-height:1.55; }
-  .rs-go { display:none; }   /* the whole tile is the target; an arrow adds nothing */
-
-  .rs-current { font-size:10px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
-                background:var(--accent); color:var(--accent-ink); padding:2px 7px;
-                border-radius:5px; margin-left:8px; vertical-align:1px; }
-
-  /* A role you do not hold: same tile, muted, with the ask in place of the switch. */
-  .rs-btn.is-locked { opacity:.72; }
-  .rs-btn.is-locked:hover { opacity:1; }
-  .rs-btn.is-locked[disabled] { cursor:default; opacity:.55; }
-  .rs-btn.is-locked[disabled]:hover { border-color:var(--line-strong); transform:none; }
-  .rs-tag { font-size:10px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
-            margin-left:8px; padding:2px 7px; border-radius:5px; vertical-align:1px;
-            background:var(--panel-2); color:var(--muted); }
-  .rs-tag.pending { background:var(--amber-bg); color:var(--amber); }
-  .rs-ask { display:block; margin-top:9px; font-size:12px; font-weight:650; color:var(--accent); }
-  .rs-btn.is-locked[disabled] .rs-ask { color:var(--muted); }
-
-  .rs-all { margin-top:20px; text-align:center; }
-  .rs-all button { background:none; border:0; color:var(--muted); font:inherit; font-size:12.5px;
-                   cursor:pointer; text-decoration:underline; padding:6px; }
-  .rs-all button:hover { color:var(--ink); }
-  .rs-all p { margin:5px 0 0; font-size:11.5px; color:var(--muted); }
-</style>
-
+{# ---- .rs-* tile grid lives in app.css now, shared with reports.html ---- #}
 <div class="rs-wrap">
 
   <div class="rs-head">
@@ -112,7 +52,13 @@
       {% if r.held %}
       <input type="hidden" name="role" value="{{ r.name }}">
       <button class="rs-btn" type="submit">
-        <span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>
+        {% comment %}
+          Decorative: the role's name sits right beside it, so the glyph is aria-hidden and
+          its alt is empty rather than repeating what the next line already says.
+          A role with no glyph keeps the initial — always correct, never someone else's symbol.
+        {% endcomment %}
+        {% if r.icon %}<span class="rs-icon" aria-hidden="true"><img src="{% static r.icon %}" alt=""></span>
+        {% else %}<span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>{% endif %}
         <span class="rs-body">
           <span class="rs-name">{{ r.name }}{% if r.name == current %}<span class="rs-current">Current</span>{% endif %}</span>
           {% comment %}
@@ -125,7 +71,13 @@
       {% else %}
       <input type="hidden" name="request_role" value="{{ r.name }}">
       <button class="rs-btn is-locked" type="submit" {% if r.pending %}disabled{% endif %}>
-        <span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>
+        {% comment %}
+          Decorative: the role's name sits right beside it, so the glyph is aria-hidden and
+          its alt is empty rather than repeating what the next line already says.
+          A role with no glyph keeps the initial — always correct, never someone else's symbol.
+        {% endcomment %}
+        {% if r.icon %}<span class="rs-icon" aria-hidden="true"><img src="{% static r.icon %}" alt=""></span>
+        {% else %}<span class="rs-mono" aria-hidden="true">{{ r.name|first }}</span>{% endif %}
         <span class="rs-body">
           <span class="rs-name">{{ r.name }}
             {% if r.pending %}<span class="rs-tag pending">Requested</span>
@@ -138,14 +90,38 @@
       {% endif %}
     </form>
     {% endfor %}
+
+    {% comment %}
+      "Load all my roles" — the UNSCOPED state, which the app has always had internally for a
+      session that never picked, offered as a deliberate choice.
+
+      A tile in the grid like any other: same markup, same glyph treatment, same size. It is a
+      choice you make on this screen, so it belongs among the choices — set apart underneath,
+      it read as a footnote to the question rather than one of its answers. Its glyph is its
+      own (overlapping circles) rather than one borrowed from a role, so it is still visibly
+      not a sixth hat.
+
+      Only offered to someone holding more than one role: for everyone else it is the same
+      thing as their single tile, and a choice that changes nothing is noise.
+
+      The trade-off is real and named on the tile: the menu then shows every screen you are
+      entitled to, including estates you are not currently working in — the thing this screen
+      otherwise exists to narrow.
+    {% endcomment %}
+    {% if offer_all_roles %}
+    <form method="post" class="rs-card">{% csrf_token %}
+      <input type="hidden" name="role" value="{{ all_roles_value }}">
+      <button class="rs-btn" type="submit">
+        <span class="rs-icon" aria-hidden="true"><img src="{% static all_roles_icon %}" alt=""></span>
+        <span class="rs-body">
+          <span class="rs-name">{{ all_roles_label }}{% if unscoped %}<span class="rs-current">Current</span>{% endif %}</span>
+          <span class="rs-pages">{{ all_roles_description }}</span>
+        </span>
+      </button>
+    </form>
+    {% endif %}
   </div>
 
-  {% comment %}
-    No "show every role I hold" any more. A role is the hat you are wearing, and an
-    everything-at-once mode meant the menu could show screens from estates the admin was not
-    working in — which is the thing this screen exists to stop. The unscoped state still
-    exists internally for a session that has never picked; it is simply no longer offered.
-  {% endcomment %}
   <div class="rs-all">
     <form method="post" action="{% url 'logout' %}" style="margin:0">{% csrf_token %}
       <button type="submit">Sign out</button>

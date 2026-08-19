@@ -1,0 +1,33 @@
+# ============================================================================
+#  snmp.auths.sample.yml — SAMPLE for the webapp's SNMP config screen
+#
+#  Not the snmp_exporter's snmp.yml itself — just the `auths:` top-level key,
+#  which is the ONLY part of that file the "SNMP" Configuration screen ever
+#  reads or rewrites. The rest of the real file (`modules:`) is ~2MB of
+#  snmp_exporter-generator output ("manual changes will be lost" per its own
+#  header) and this screen never parses or touches it — see
+#  webapp/reports/snmp_admin.py for how the small auths: block is sliced out
+#  and spliced back in by text, never a full-document YAML load.
+#
+#  prometheus.yml's SNMP jobs reference a profile here by name, e.g.
+#  `params: {auth: [RBZ_v3]}` — the profile name is the key below.
+#
+#  community / password / priv_password are masked with a placeholder in every
+#  browser view and DB revision; the real values live only encrypted at rest
+#  (crypto.py) and in the live file.
+# ============================================================================
+auths:
+  public_v2:
+    community: public
+    security_level: noAuthNoPriv
+    auth_protocol: MD5
+    priv_protocol: DES
+    version: 2
+  RBZ_v3:
+    version: 3
+    security_level: authPriv
+    username: CHANGE_ME
+    password: CHANGE_ME
+    auth_protocol: SHA
+    priv_protocol: AES
+    priv_password: CHANGE_ME
