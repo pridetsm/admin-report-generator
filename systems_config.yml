@@ -1,0 +1,426 @@
+# =============================================================================
+#  systems_config.yml  -  single source of truth for the System Admin Report.
+#
+#  Add a system by adding a block under `systems:`.  Every system has the SAME
+#  four keys (use [] / {} when empty) so the data stays uniform and parseable,
+#  plus an OPTIONAL 5th `backups` key (omit it, or {}, for no backup monitoring):
+#
+#    hosts:     list of { role: str, label: str, instance: "ip:port", os: "linux"|"windows" }
+#               -> each host is a row in the Memory (RAM %), CPU (busy %) and Disk tables;
+#                  values are pulled LIVE from Prometheus by `instance`.
+#                  role names the host's job: database | reverse-proxy | app |
+#                  app-db | web | web-db | frontend1 | backend | dr | bkp | ...
+#    services:  list of { name: str, class: "system"|"offered", check: {..} }
+#               -> each is a row in the Services table with a status chip.
+#                  class:  system  = infrastructure that keeps the platform running
+#                          offered = business endpoints delivered to users
+#                  check.type (uniform fields per type, optional ones = null):
+#                    windows_service { service, instance }
+#                    systemd         { unit, instance, unit_type }    # unit_type may be null
+#                    host_up         { instance }
+#                    http_probe      { target }                       # IP or URL (blackbox)
+#                    metric          { query, name_label, members }   # raw PromQL escape hatch;
+#                                     name_label spreads one row per series; members lists the
+#                                     expected series (or [] to discover them at runtime).
+#    links:     list of URL strings -> each a WEB LINKS row (UP/DOWN + SSL cert days + TLS).
+#    readings:  map of headline numbers for the summary (cob / swift), or {} if none.
+#    backups:   OPTIONAL. { instance: "ip:port", tracks: "glob" } for a system whose
+#               exporter publishes the backup_file metric. When present, a Backups
+#               panel is shown and NO fresh backup (or the metric absent) = CRITICAL.
+#               Omit the key (or use {}) for systems without backup monitoring.
+#               max_age_days: OPTIONAL, default 1 (today or yesterday). Set this for a host
+#               that backs up on a slower cycle (e.g. every 3rd day), otherwise the days
+#               between its runs are misreported as NO BACKUP even though the policy is
+#               being met. Mirrors BACKUP_MAX_AGE_DAYS in send_report/generate_report.py
+#               and -MaxAgeDays in the matching backup_monitor\check_backup_*.ps1 - keep
+#               all three in step for a given host.
+#               e.g. backups: { instance: "10.0.206.5:9182", tracks: "BSAV50_FULL_*.bak", max_age_days: 3 }
+#
+# =============================================================================
+#  REPORT OVERVIEW  --  "NEEDS ATTENTION" IS SPLIT BY URGENCY (two bands)
+# -----------------------------------------------------------------------------
+#  The xlsx report and the e-mail summary group the live health signals into
+#  TWO bands, by how soon a human must act. Same signals, different urgency:
+#
+#    NEEDS IMMEDIATE ATTENTION  --  something is FAILING NOW (act immediately):
+#        * MISSING BACKUPS  -- a host that should have a fresh backup has none
+#        * UNREACHABLE      -- Prometheus `up == 0` (host down / exporter / network)
+#        * SERVICES DOWN    -- a monitored service check reports 0
+#        * DISK NEAR-FULL   -- any disk at/over the RED level (imminent outage)
+#        * EXPIRED CERTS    -- an SSL certificate has already lapsed (site effectively down)
+#
+#    NEEDS ATTENTION  --  DEGRADING, not yet failing (watch / plan):
+#        * HIGH CPU USAGE    -- cpu busy at/over the AMBER level
+#        * HIGH RAM USAGE    -- memory at/over the AMBER level
+#        * HIGH DISK USAGE   -- a disk over AMBER but still under RED
+#        * WEB ENCRYPTION    -- endpoints still on plain HTTP (green only when http == 0,
+#                               red when http endpoints OUTNUMBER https, else amber)
+#        * UNTRACKED BACKUPS -- a system with NO backup monitoring configured at all
+#
+#  DISK is the only signal that MOVES between bands, by severity band, not by
+#  identity: a disk >= RED% is promoted to "immediate" (a full disk takes the
+#  service down); an elevated-but-not-red disk stays in "needs attention". RAM
+#  never promotes (the OS reclaims/swaps; high RAM is pressure, not an outage).
+#  Each host lands in exactly ONE disk band (its worst disk decides), so the two
+#  disk tiles never double-count a server.
+#
+#  Thresholds (percent USED) live in send_report/config.ini, defaults:
+#        chip_amber        = 75   # per-cell AMBER  (>= amber -> warning colour)
+#        chip_red          = 90   # per-cell RED    (>= red   -> critical; disk => "near-full")
+#        overview_threshold = 85  # the "elevated / high disk|ram" counting line
+#  SSL certs (from `links`): < 7 days => immediate, < 24 days => needs attention.
+#
+# =============================================================================
+#  HOW EACH SIGNAL IS FETCHED FROM PROMETHEUS  (instant queries; used verbatim
+#  by send_report/generate_report.py and by the ASP.NET ingestion API)
+# -----------------------------------------------------------------------------
+#  disk (per host `instance`, per mount/volume):
+#    linux   used% : 100*(1 - node_filesystem_avail_bytes{FS}/node_filesystem_size_bytes{FS})
+#            free  : node_filesystem_avail_bytes{FS}/1024/1024/1024        (GB)
+#            size  : node_filesystem_size_bytes{FS}/1024/1024/1024         (GB)
+#            FS    = fstype=~"ext.*|xfs|btrfs", mountpoint excludes pod/container/snap paths
+#    windows used% : 100*(1 - windows_logical_disk_free_bytes{VOL}/windows_logical_disk_size_bytes{VOL})
+#            free/size as above; VOL = volume!~"HarddiskVolume.+";  key = `volume` label
+#  memory (per host, used%):
+#    linux   : 100*(1 - node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes)
+#    windows : 100*(1 - windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)
+#  cpu (per host, busy% = 100 - idle, 5-min avg):
+#    linux   : 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+#    windows : 100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100)
+#  reachability (per host):  max by (instance) (up)          # 1 reachable / 0 unreachable
+#  services (per check spec): run check.query / the type's PromQL; 1 = up, 0 = down.
+#            check.name_label spreads one series per member; `members` lists the
+#            expected series (or [] to discover at runtime).
+#  links (per URL, blackbox exporter):
+#            up        : probe_success                        (>= 1)
+#            http code : probe_http_status_code
+#            ssl?      : probe_http_ssl                       (>= 1)
+#            cert_days : (probe_ssl_earliest_cert_expiry - time())/86400
+#            duration  : probe_duration_seconds
+#            tls       : version label of probe_tls_version_info
+#  readings (headline scalars): cob -> cob_time ; swift -> swift_transactions_total
+#  backups (only for systems with a `backups:` block, textfile collector):
+#            files : backup_file          (value = file mtime unix secs; labels file, day)
+#            count : backup_file_count
+#            ok    : backup_check_success                     (>= 1)
+#            ts    : backup_check_timestamp_seconds
+#            "fresh" = a file whose mtime >= yesterday-midnight (local). A host with
+#            no fresh file, or whose check is absent/failed, counts as MISSING.
+#
+# =============================================================================
+#  DATABASE PERSISTENCE MAP  (custom MSSQL; ASP.NET API ingests on a schedule)
+# -----------------------------------------------------------------------------
+#  This file is the SOURCE OF TRUTH the API syncs into config tables, then it
+#  polls Prometheus and writes one set of *Sample rows per PollRun.
+#
+#    yaml key / signal        MSSQL table(s)                 mandatory?
+#    ----------------------   ----------------------------   ----------------------
+#    system block             Systems                        yes
+#    hosts[]                  Hosts                          yes (>= 1 per system)
+#    services[]               ServiceChecks (+ServiceMembers) optional ([] allowed)
+#    links[]                  LinkChecks                     optional ([] allowed)
+#    readings{}               ReadingConfigs                 optional ({} allowed)
+#    backups{}                BackupConfigs                  OPTIONAL (omit / {})
+#    ----------------------   ----------------------------   ----------------------
+#    disk used%/free/size     DiskSamples                    per host, per poll
+#    memory used%             MemorySamples                  per host, per poll
+#    cpu busy%                CpuSamples                     per host, per poll
+#    up                       HostReachabilitySamples        per host, per poll
+#    service check state      ServiceStatusSamples           per member, per poll
+#    link probe               LinkProbeSamples               only if links present
+#    cob / swift              ReadingSamples                 only if readings present
+#    backup files / check     BackupFileSamples,             ONLY if backups present
+#                             BackupCheckSamples             (systems w/o backups: none)
+#    derived urgency items    AttentionItems (Immediate|Watch) per poll
+#                             Category: MissingBackup|Unreachable|ServiceDown|DiskNearFull|
+#                             HighDisk|HighRam|HighCpu|SslExpiry|LinkDown|UntrackedBackup.
+#                             WEB ENCRYPTION (https vs http) is derived at read time from the
+#                             scheme of LinkChecks.Url — it needs no sample/attention rows.
+#
+#  MANDATORY vs OPTIONAL: a system with no `backups:` writes NOTHING to the
+#  Backup* tables (they stay empty for it, and its Hosts carry no backup rows) --
+#  exactly as the report shows no Backups panel. The same holds for services /
+#  links / readings: an empty list simply yields no config rows and no samples.
+# =============================================================================
+
+systems:
+
+  # ==== RTGS ================================================
+  RTGS:
+    hosts:
+      - { role: "backend",        label: "RTGS Backend",          instance: "10.100.249.244:9100",  os: "linux" }
+      - { role: "frontend1",      label: "RTGS Frontend 1",       instance: "10.100.249.243:9100",  os: "linux" }
+      - { role: "frontend2",      label: "RTGS Frontend 2",       instance: "10.100.249.24:9100",   os: "linux" }
+      - { role: "database",       label: "RTGS Database",         instance: "10.100.249.220:9100",  os: "linux" }
+      - { role: "reverse-proxy",  label: "RTGS Reverse Proxy",    instance: "10.100.246.70:9100",   os: "linux" }
+    services:
+      - name:  "JBoss"
+        class: "system"
+        check: { type: "metric", query: "jboss_status", name_label: "name", members: [] }
+      - name:  "Oracle Listener"
+        class: "system"
+        check: { type: "metric", query: "max by (service) (oracle_listener_instance_status)", name_label: "service", members: [] }
+      - name:  "RTGS apache2 Service"
+        class: "system"
+        check: { type: "systemd", unit: "apache2.service", instance: "10.100.246.70:9100", unit_type: "forking" }
+    links:
+      - "https://rtgs.rbz.co.zw/"
+    readings: {}
+    backups: { instance: "10.100.249.220:9100", tracks: "*.dmp*" }   # monitored; no fresh backup = CRITICAL
+
+  # ==== RTGSTEST ============================================
+  RTGSTEST:
+    hosts:
+      - { role: "app",            label: "RTGSTEST App",          instance: "10.100.249.67:9100",   os: "linux" }
+    services:
+      - name:  "RTGS site"
+        class: "offered"
+        check: { type: "http_probe", target: "https://rtgs.rbz.co.zw/" }
+      - name:  "RTGS reverse Proxy"
+        class: "system"
+        check: { type: "http_probe", target: "10.100.246.70" }
+      - name:  "Apache2"
+        class: "system"
+        check: { type: "systemd", unit: "apache2", instance: "10.100.249.67:9100", unit_type: null }
+    links: []
+    readings: {}
+
+  # ==== Temenos =============================================
+  Temenos:
+    hosts:
+      - { role: "app",            label: "Temenos/T24 App",       instance: "10.0.212.3:9182",      os: "windows" }
+      - { role: "database",       label: "Temenos/T24 DB",        instance: "10.0.212.4:9182",      os: "windows" }
+    services:
+      - name:  "MSSQLSERVER"
+        class: "system"
+        check: { type: "windows_service", service: "MSSQLSERVER", instance: "10.0.212.4:9182" }
+      - name:  "T24 TSA Services"
+        class: "offered"
+        check:
+          type:       "metric"
+          query:      "t24_service_up"
+          name_label: "service"
+          members:
+            - "BNK/AA.SIMULATION.SERVICE"
+            - "BNK/AC.HVT.MERGE.SERVICE"
+            - "BNK/OFS.MESSAGE.SERVICE"
+            - "BNK/PAYNET"
+            - "BNK/RBZ.PNET.RESPONSE"
+            - "BNK/SC.CORPORATE.ACTIONS"
+            - "BNK/SWIFT.IN"
+            - "BNK/SWIFT.OUT"
+            - "BNK/RBZ.EFIN.TXNS.RESPONSE"
+            - "BNK/RBZ.PROCESS.EFIN.TXNS"
+            - "BNK/EB.EXTERNALISE.REPORT"
+            - "RTN.CLR.EXP.TOKENS"
+    links:
+      - "http://10.0.212.3:9089/BrowserWeb/"
+    readings: { cob: "cob_time", swift: "swift_transactions_total" }
+    backups: { instance: "10.0.212.4:9182", tracks: "RBZ_FINAL_FULL_*.BAK" }   # monitored; no fresh backup = CRITICAL
+
+  # ==== Efin ================================================
+  Efin:
+    hosts:
+      - { role: "database",       label: "Efin DB",               instance: "10.0.201.3:9182",      os: "windows" }
+      - { role: "app",            label: "Efin App",              instance: "10.0.201.2:9182",      os: "windows" }
+    services:
+      - name:  "Oracle DB Listener"
+        class: "system"
+        check: { type: "windows_service", service: "OracleOraDB19Home1TNSListener", instance: "10.0.201.3:9182" }
+      - name:  "EFINL service"
+        class: "system"
+        check: { type: "windows_service", service: "OracleServiceEFINL", instance: "10.0.201.3:9182" }
+      - name:  "EFINT service"
+        class: "system"
+        check: { type: "windows_service", service: "OracleServiceEFINT", instance: "10.0.201.3:9182" }
+      - name:  "DBARCL service"
+        class: "system"
+        check: { type: "windows_service", service: "OracleServiceDBARCL", instance: "10.0.201.3:9182" }
+      - name:  "DBARCT service"
+        class: "system"
+        check: { type: "windows_service", service: "OracleServiceDBARCT", instance: "10.0.201.3:9182" }
+      - name:  "RCUL service"
+        class: "system"
+        check: { type: "windows_service", service: "OracleServiceRCUL", instance: "10.0.201.3:9182" }
+    links: []
+    readings: {}
+    backups: { instance: "10.0.201.3:9182", tracks: "EFINL_FULL.DMP" }   # monitored; no fresh backup = CRITICAL
+
+  # ==== CMS =================================================
+  CMS:
+    hosts:
+      - { role: "app",            label: "CMS Application",       instance: "10.100.248.10:9100",   os: "linux" }
+      - { role: "database",       label: "CMS Database",          instance: "10.100.248.11:9100",   os: "linux" }
+    services:
+      - name:  "CMS Service"
+        class: "offered"
+        check: { type: "systemd", unit: "currency.service", instance: "10.100.248.10:9100", unit_type: "simple" }
+    links:
+      - "https://cms.rbz.co.zw/"
+    readings: {}
+    backups: { instance: "10.100.248.11:9100", tracks: "currency.sql" }   # monitored; no fresh backup = CRITICAL
+
+  # ==== CSD =================================================
+  CSD:
+    hosts:
+      - { role: "app",            label: "CSD Application",       instance: "10.100.245.11:9100",   os: "linux" }
+      - { role: "database",       label: "CSD Database",          instance: "10.100.250.82:9100",   os: "linux" }
+    services:
+      - name:  "InternalServiceHost"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+      - name:  "InternalApi"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+    links: []
+    readings: {}
+
+  # ==== ESF =================================================
+  ESF:
+    hosts:
+      - { role: "app-db",         label: "ESF App/DB",            instance: "10.100.245.70:9100",   os: "linux" }
+    services:
+      - name:  "ESF httpd Service"
+        class: "system"
+        check: { type: "systemd", unit: "httpd.service", instance: "10.100.245.70:9100", unit_type: null }
+    links:
+      - "http://10.100.245.133/smartess/"
+      - "https://esf.rbz.co.zw/"
+    readings: {}
+
+  # ==== ESFEXEC =============================================
+  ESFEXEC:
+    hosts:
+      - { role: "app-db",         label: "ESFEXEC App/DB",        instance: "10.100.245.240:9100",  os: "linux" }
+    services:
+      - name:  "ESFEXEC httpd Service"
+        class: "system"
+        check: { type: "systemd", unit: "httpd.service", instance: "10.100.245.240:9100", unit_type: null }
+    links: []
+    readings: {}
+
+  # ==== RBZ Website =========================================
+  RBZ Website:
+    hosts:
+      - { role: "app-db",         label: "RBZ Website App/DB",    instance: "10.100.245.46:9100",   os: "linux" }
+    services:
+      - name:  "apache2 httpd Service"
+        class: "system"
+        check: { type: "systemd", unit: "apache2.service", instance: "10.100.245.46:9100", unit_type: null }
+    links:
+      - "https://www.rbz.co.zw/"
+    readings: {}
+
+  # ==== Eagle ===============================================
+  Eagle:
+    hosts:
+      - { role: "app",            label: "Eagle Application",     instance: "10.100.220.29:9100",   os: "linux" }
+      - { role: "database",       label: "Eagle Database",        instance: "10.100.220.32:9101",   os: "linux" }
+      - { role: "bkp",            label: "Eagle BKP Apps",        instance: "10.100.220.38:9100",   os: "linux" }
+      - { role: "dr",             label: "Eagle DR Servers",      instance: "10.100.220.36:9100",   os: "linux" }
+    services:
+      - name:  "Eagle httpd Service"
+        class: "system"
+        check: { type: "systemd", unit: "httpd.service", instance: "10.100.245.70:9100", unit_type: null }
+    links: []
+    readings: {}
+
+  # ==== CEPECS ==============================================
+  CEPECS:
+    hosts:
+      - { role: "app",            label: "CEPECS Application",    instance: "10.100.248.27:9100",   os: "linux" }
+      - { role: "web-db",         label: "CEPECS Web/DB",         instance: "10.100.248.23:9100",   os: "linux" }
+      - { role: "dr-db",          label: "CEPECS DR Servers DB",  instance: "10.100.200.203:9100",  os: "linux" }
+      - { role: "reverse-proxy",  label: "CEPECS Reverse Proxy",  instance: "192.168.25.159:9100",  os: "linux" }
+    services:
+      - name:  "InternalServiceHost"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+      - name:  "InternalApi"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+    links:
+      - "https://cepecsrpt.excon.rbz.co.zw/"
+    readings: {}
+
+  # ==== CEBAS ===============================================
+  CEBAS:
+    hosts:
+      - { role: "app",            label: "CEBAS Application",     instance: "10.100.248.28:9100",   os: "linux" }
+      - { role: "database",       label: "CEBAS Database",        instance: "10.100.248.22:9100",   os: "linux" }
+      - { role: "dr-db",          label: "CEBAS DR Servers DB",   instance: "10.100.200.207:9100",  os: "linux" }
+      - { role: "reverse-proxy",  label: "CEBAS Reverse Proxy",   instance: "192.168.25.155:9100",  os: "linux" }
+    services:
+      - name:  "InternalServiceHost"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+      - name:  "InternalApi"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+    links:
+      - "https://forex.rbz.co.zw/cebas/"
+    readings: {}
+
+  # ==== CRB =================================================
+  CRB:
+    hosts:
+      - { role: "app",            label: "CRB App",               instance: "10.100.240.116:9182",  os: "windows" }
+      - { role: "web",            label: "CRB Web",               instance: "10.100.245.58:9182",   os: "windows" }
+      - { role: "database",       label: "CRB DB",                instance: "10.100.8.248:9182",    os: "windows" }
+    services:
+      - name:  "InternalServiceHost"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+      - name:  "InternalApi"
+        class: "offered"
+        check: { type: "host_up", instance: "10.100.240.116:9182" }
+    links: []
+    readings: {}
+
+  # ==== Paytyme =============================================
+  Paytyme:
+    hosts:
+      - { role: "app",            label: "Paytyme App",           instance: "10.0.212.16:9182",     os: "windows" }
+    services: []
+    links: []
+    readings: {}
+
+  # ==== BSA =================================================
+  BSA:
+    hosts:
+      - { role: "database",       label: "BSA Database",          instance: "10.0.206.5:9182",      os: "windows" }
+      - { role: "proxy",          label: "BSA Reverse Proxy",     instance: "192.168.25.156:9100",  os: "linux" }
+      - { role: "app",            label: "BSA Docker Host",       instance: "10.0.206.6:9100",      os: "linux" }
+    services:
+      - name:  "MSSQLSERVER"
+        class: "system"
+        check: { type: "windows_service", service: "MSSQLSERVER", instance: "10.0.206.5:9182" }
+      - name:  "BSAv50Monitor"
+        class: "system"
+        check: { type: "windows_service", service: "BSAv50Monitor", instance: "10.0.206.5:9182" }
+      - name:  "BSAv50Parser"
+        class: "system"
+        check: { type: "windows_service", service: "BSAv50Parser", instance: "10.0.206.5:9182" }
+      - name:  "Nginx Reverse Proxy"
+        class: "system"
+        check: { type: "systemd", unit: "nginx.service", instance: "192.168.25.156:9100", unit_type: "forking" }
+      - name:  "Docker"
+        class: "system"
+        check: { type: "systemd", unit: "docker.service", instance: "10.0.206.6:9100", unit_type: "notify" }
+    links: []
+    readings: {}
+    backups: { instance: "10.0.206.5:9182", tracks: "BSAV50_FULL_*.bak", max_age_days: 3 }   # monitored; every-3rd-day cycle, no fresh backup = CRITICAL
+
+
+# ==== other (unassigned - give these a home) ====
+other:
+  hosts:
+    - { role: null,             label: "10.100.220.32:9100",    instance: "10.100.220.32:9100",   os: "linux" }
+    - { role: null,             label: "10.100.249.66:9100",    instance: "10.100.249.66:9100",   os: "linux" }
+    - { role: null,             label: "10.100.249.68:9100",    instance: "10.100.249.68:9100",   os: "linux" }
+  services: []
+  links:
+    - "https://vault.rbz.co.zw:5001/"
+    - "https://lms.rbz.co.zw/"
+    - "https://bdctrs.rbz.co.zw/"
+  readings: {}
