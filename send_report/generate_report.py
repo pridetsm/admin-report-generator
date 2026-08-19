@@ -1884,6 +1884,13 @@ class ReportBuilder:
         self._cell(y, 4, bg=Theme.BG)
         self._merge(y, 5, 7, "Memory · CPU", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
         self._merge(y, 8, 12, "Disk", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+        # _merge() draws no border of its own (unlike _cell(border=True), which every row
+        # below this one uses) -- Services already gets a real blank spacer column before
+        # Memory · CPU, but there's no room left to spare Disk the same treatment without
+        # reflowing every hardcoded column position after it (Backups, Notes...). A thin
+        # divider — the same style panel() uses between its own sub-columns — reads as a
+        # real seam here too, without the risk of that wider reflow.
+        self.ws.cell(y, 8).border = Border(left=Side(style="thin", color=Theme.SUB))
         if bk_rows:                                   # Backups panel title, to the right of Disk
             self._cell(y, 13, bg=Theme.BG)
             self._merge(y, 14, 16, "Backups", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
