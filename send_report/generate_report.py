@@ -683,10 +683,14 @@ class Store:
     links: Dict[str, dict]                      # URL -> {up, code, ssl, cert_days, tls, duration} (blackbox HTTP probes)
     backups: Dict[str, dict]                    # instance -> {files, count, ok, ts} (textfile backup check)
     ldap_up: Optional[bool] = None              # LDAP/auth probe: True up / False down / None not monitored
-    # instance -> [(label, size_gb), ...] — deliberately separate from `disk`, not another
-    # mount: a log file has no capacity to be a % OF, so it must never enter total_disks()/
-    # disk_high()/disk_near_full(), which all read `disk` directly. Rendered as its own extra
-    # row in the per-system Disk table instead (see _system_card), sized but not banded.
+    # lower(system name) -> [(target_label, size_gb), ...]. Keyed by SYSTEM, not host
+    # instance: a watched log folder (folder_exporter, kind="logs") belongs to the estate,
+    # not to one host's windows_exporter identity, and folder_exporter scrapes on its own
+    # port so there's no instance string in common with a Component to join against anyway.
+    # Deliberately separate from `disk`, not another mount: a folder's size has no capacity
+    # to be a % OF, so it must never enter total_disks()/disk_high()/disk_near_full(), which
+    # all read `disk` directly. Rendered as its own extra row in the per-system Disk table
+    # instead (see _system_card), sized but not banded.
     log_files: Dict[str, List[Tuple[str, float]]] = field(default_factory=dict)
 
 
@@ -764,14 +768,17 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
             ldap_up = max(r["value"] for r in rows) >= 1
 
     # ---- log files: a size, not a mount -- see Store.log_files for why this is kept
-    # entirely separate from `disk`. Currently just T24's server.log (see the checker
-    # script in send_report/checks/t24_log_size.ps1); metric name is generic
-    # (log_file_size_bytes{file="..."}), so a second host's log check just adds a row.
+    # entirely separate from `disk`. Reuses folder_exporter (already deployed for the
+    # interface/queue folders — see SKIP_JOBS) rather than a new textfile check: it already
+    # emits folder_size_bytes per watched folder, and kind="logs" is how a log-purpose watch
+    # (T24's server log folder) is told apart from those queue-depth ones sharing the same
+    # exporter, without needing a name to be hardcoded here.
     log_files: Dict[str, List[Tuple[str, float]]] = {}
-    for r in prom.query("log_file_size_bytes/1024/1024/1024"):
-        inst = r["labels"].get("instance")
-        if inst:
-            log_files.setdefault(inst, []).append(("Log File Size", r["value"]))
+    for r in prom.query('folder_size_bytes{kind="logs"}/1024/1024/1024'):
+        sysname = (r["labels"].get("system") or "").strip().lower()
+        target = r["labels"].get("target") or "Log File Size"
+        if sysname:
+            log_files.setdefault(sysname, []).append((target, r["value"]))
 
     # ---- specials -------------------------------------------------------------
     cob = prom.scalar("cob_time")
@@ -1806,9 +1813,14 @@ class ReportBuilder:
         # log files ride the same Disk table (a size, not a mount -- no "used"/"free", so the
         # row renders a dash instead of a % chip) but never touch `store.disk` itself, so they
         # can't be mistaken for a real volume by total_disks()/disk_high()/disk_near_full().
-        disks += [(c.label, name, {"size": gb})
-                  for c in sysm.components
-                  for name, gb in store.log_files.get(c.instance, [])]
+        # Keyed by SYSTEM (see Store.log_files), not per-component -- attributed to whichever
+        # component looks like the app host (where a watched folder like this actually lives),
+        # falling back to the first component if none is obviously "App".
+        _log_rows = store.log_files.get(sysm.name.lower(), [])
+        if _log_rows:
+            _log_host = next((c.label for c in sysm.components if "app" in c.label.lower()),
+                             sysm.components[0].label if sysm.components else sysm.name)
+            disks += [(_log_host, name, {"size": gb}) for name, gb in _log_rows]
         nd = sum(1 for _, st, _ in mems if st == "down")           # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
              sum(1 for _, st, v in mems if st == "ok" and v >= self.cfg.chip_red) + \
