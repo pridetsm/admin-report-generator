@@ -485,6 +485,14 @@ SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network"}
 # (see webapp/reports/roles.py's Infrastructure Admin role and views.infra_form/infra_report).
 INFRA_SYSTEMS = {"hci cluster", "oracle hosts"}
 
+# Scrape jobs whose targets carry a `system` label for a DIFFERENT feature's benefit, not
+# because the target is a host this report should track CPU/RAM/disk on. folder_exporter's
+# target (Temenos/T24 Interface Folders — queue backlog, not a server) is grouped under
+# `system: "Temenos"` purely so Folder Watch can find it; load_topology used to sweep it into
+# Temenos's host list anyway, which gave it permanent "no data" CPU/RAM/disk findings for
+# metrics it was never going to report — a component nobody meant to add, since nobody did.
+SKIP_JOBS = {"folder_exporter"}
+
 # Web links (blackbox HTTP probes) become a "WEB LINKS" service class inside a
 # system's Services table. A link is auto-attributed to the system whose name
 # appears in its URL (e.g. 'cepecs' in 'cepecsrpt.excon.rbz.co.zw' -> CEPECS).
@@ -638,6 +646,8 @@ def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[Syste
     grouped: Dict[str, List[Component]] = {}
     for job in doc.get("scrape_configs", []) or []:
         job_name = job.get("job_name") or ""
+        if job_name in SKIP_JOBS:
+            continue
         for sc in job.get("static_configs", []) or []:
             labels = sc.get("labels", {}) or {}
             system = (labels.get("system") or "").strip()
