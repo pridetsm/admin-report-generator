@@ -593,6 +593,18 @@ def platform_of_system(components: List[Component]) -> str:
     return kinds.pop() if len(kinds) == 1 else "hybrid"
 
 
+def platform_host_counts(systems: List[System]) -> Tuple[int, int]:
+    """(windows_hosts, linux_hosts) across every component in every system -- the AT A
+    GLANCE platform tiles' numerator. Counted per HOST, not per system: a hybrid system
+    (see platform_of_system) has hosts of both kinds, and a system-level tally would hide
+    that split. Components with no classified os (web probes; see os_of_job) count toward
+    neither, so the two numbers don't have to sum to the total host count -- same reasoning
+    as platform_of_system not forcing every system into "windows" or "linux"."""
+    windows = sum(1 for s in systems for c in s.components if getattr(c, "os", "") == "windows")
+    linux = sum(1 for s in systems for c in s.components if getattr(c, "os", "") == "linux")
+    return windows, linux
+
+
 def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[System]:
     """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label).
 
@@ -1409,13 +1421,22 @@ class ReportBuilder:
         ur = unreachable(store, systems)           # needed for the Unreachable KPI below
 
         # ---- ROW 1 · static stats: inventory + point-in-time readings (neutral cyan) ----
-        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups
+        # widths chosen so the wide readings (SWIFT / COB) sit in the wide groups. Systems,
+        # Hosts, Services and the two platform counts are all short 1-3 digit numbers, so
+        # they share the narrow 1-column shape SYSTEMS already proved works — freeing the
+        # 2 columns WINDOWS/LINUX need without touching SWIFT/COB's wider text. Labels stay
+        # bare ("WINDOWS" not "WINDOWS HOSTS") both to read as a breakdown of the HOSTS tile
+        # right next to them and because these columns are narrow -- reused from the watch
+        # row below where they only ever hold "HOSTS"/"TOTAL"; a longer label would clip.
         caption(8, "AT A GLANCE  ·  inventory & readings")
-        static = [((2, 2),   "SYSTEMS",    str(len(systems))),
-                  ((3, 4),   "HOSTS",      str(hosts)),
-                  ((5, 6),   "SERVICES",   str(nsvc)),
-                  ((7, 9),   "SWIFT TXNS", swift),
-                  ((10, 12), "COB · T24",  cob)]
+        win_hosts, linux_hosts = platform_host_counts(systems)
+        static = [((2, 2),  "SYSTEMS",       str(len(systems))),
+                  ((3, 3),  "HOSTS",         str(hosts)),
+                  ((4, 4),  "SERVICES",      str(nsvc)),
+                  ((5, 5),  "WINDOWS",       str(win_hosts)),
+                  ((6, 6),  "LINUX",         str(linux_hosts)),
+                  ((7, 9),  "SWIFT TXNS",    swift),
+                  ((10, 12), "COB · T24",    cob)]
         for group, label, value in static:
             card(9, group, label, value, "info", vrow=10)
 
@@ -1568,6 +1589,22 @@ class ReportBuilder:
                 [(h, ", ".join(v)) for h, v in sorted(byhost.items())],
                 "These volumes are almost full — an imminent outage that can take the service down. "
                 "Free space or extend the disk now."))
+
+        # 1b) tracked hosts with no fresh backup — a data-loss risk, not a metric out of
+        #     range: if the host is lost today, there is nothing recent to restore from.
+        #     UNTRACKED hosts never appear here (see backup_missing's own docstring) — this
+        #     is only hosts the backup check actually watches and found nothing fresh for.
+        if miss:
+            bysys: Dict[str, List[str]] = {}
+            for s, lbl, reason in miss:
+                bysys.setdefault(s, []).append(f"{lbl} ({reason})")
+            banners.append((
+                "critical",
+                f"MISSING BACKUPS  —  {len(miss)} host(s) with no fresh backup",
+                [(s, "   ".join(v)) for s, v in sorted(bysys.items())],
+                "These hosts run the backup check but have nothing fresh within policy — if the host "
+                "is lost today, there is no recent backup to restore from. Confirm the backup job and "
+                "re-run it."))
 
         # 2) components Prometheus can no longer reach — the highest-severity finding on
         #    this report: every other red banner is at least still being measured, this one

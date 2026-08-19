@@ -94,7 +94,8 @@ def build_overview(store, systems, cfg) -> dict:
     cpu_hosts, _ = gr.cpu_pressure(store, systems, thr, thr)
     dh_hosts, dh_disks, dh_state = gr.disk_high(store, systems, thr, cfg.chip_red)
     dh_total = gr.total_disks(store, systems)
-    nmiss = len(gr.backup_missing(store, systems))
+    miss = gr.backup_missing(store, systems)
+    nmiss = len(miss)
     n_untracked = len(gr.backup_untracked(store, systems))
     n_tracked = len(systems) - n_untracked
     cert_expired, cert_expiring = gr.cert_rollup(store)
@@ -111,9 +112,12 @@ def build_overview(store, systems, cfg) -> dict:
     warn = lambda n: "good" if not n else "warn"
     web_state = "good" if n_http == 0 else ("bad" if n_http > n_https else "warn")
 
+    win_hosts, linux_hosts = gr.platform_host_counts(systems)
     glance = [
         {"label": "Systems", "value": len(systems), "state": "info"},
         {"label": "Hosts", "value": hosts, "state": "info"},
+        {"label": "Windows", "value": win_hosts, "state": "info"},
+        {"label": "Linux", "value": linux_hosts, "state": "info"},
         {"label": "Services", "value": nsvc, "state": "info"},
         {"label": "SWIFT txns", "value": swift, "state": "info"},
         {"label": "COB · T24", "value": cob, "state": "info"},
@@ -165,6 +169,14 @@ def build_overview(store, systems, cfg) -> dict:
                         "head": f"Disk near-full — {len(nearfull)} disk(s) on {len(byhost)} host(s)",
                         "rows": [{"label": h, "values": ", ".join(v)}
                                  for h, v in sorted(byhost.items())]})
+    if miss:
+        bysys: dict = {}
+        for s, lbl, reason in miss:
+            bysys.setdefault(s, []).append(f"{lbl} ({reason})")
+        banners.append({"severity": "critical",
+                        "head": f"Missing backups — {len(miss)} host(s) with no fresh backup",
+                        "rows": [{"label": h, "values": ", ".join(v)}
+                                 for h, v in sorted(bysys.items())]})
     if ur:
         bysys: dict = {}
         for s, lbl, _ in ur:

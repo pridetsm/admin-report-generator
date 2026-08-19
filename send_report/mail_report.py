@@ -304,6 +304,34 @@ def _disk_nearfull_block(store, systems) -> str:
     )
 
 
+def _backup_missing_block(store, systems) -> str:
+    """A prominent callout listing tracked hosts with no fresh backup — a data-loss risk,
+    not a metric out of range: if the host is lost today, there is nothing recent to restore
+    from. Untracked hosts never appear here (see engine.backup_missing's own docstring)."""
+    miss = engine.backup_missing(store, systems)
+    if not miss:
+        return ""
+    bysys: dict = {}
+    for s, lbl, reason in miss:
+        bysys.setdefault(s, []).append(f"{lbl} ({reason})")
+    lines = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(s)}</b>'
+        f'<span style="color:#555;"> &mdash; {html.escape(", ".join(v))}</span></div>'
+        for s, v in bysys.items()
+    )
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{RED_T};border-left:4px solid {RED};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{RED};">&#9888;&nbsp; CRITICAL &mdash; '
+        f'{len(miss)} host(s) missing a fresh backup</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These hosts run the backup check '
+        "but have nothing fresh within policy &mdash; if the host is lost today, there is no recent "
+        "backup to restore from. <b>Confirm the backup job and re-run it.</b></div>"
+        f"{lines}</div></td></tr>"
+    )
+
+
 def _cob_block(store, unreach) -> str:
     """A callout when COB looks like it never ran — flagged every day EXCEPT Monday.
 
@@ -502,9 +530,12 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     else:
         banner_bg, banner_fg, headline = GREEN_T, GREEN, "All monitored systems are healthy"
 
+    win_hosts, linux_hosts = engine.platform_host_counts(systems)
     static_kpis = "".join([
         _kpi("Systems", str(len(systems)), NAVY),
         _kpi("Hosts", str(hosts), NAVY),
+        _kpi("Windows", str(win_hosts), NAVY),
+        _kpi("Linux", str(linux_hosts), NAVY),
         _kpi("Services", str(nsvc), NAVY),
         _kpi("SWIFT txns", swift, NAVY),
         _kpi("COB &middot; T24", cob, NAVY),
@@ -554,6 +585,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     body = (_ldap_block(store, systems)
             + _unreachable_block(unreach)
             + _disk_nearfull_block(store, systems)
+            + _backup_missing_block(store, systems)
             + _cert_block(store)
             + _cob_block(store, unreach)
             + _swift_block(store, unreach)
