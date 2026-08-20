@@ -86,7 +86,11 @@
         <span class="sys-mono" style="--mono-h:{{ d.mono_hue }}">{{ d.name.0|upper }}</span>
         <span class="sys-body">
           <span class="sys-name">{{ d.name }}</span>
+          {% if d.kind == "windows" %}
+          <span class="sys-sub">Windows host</span>
+          {% else %}
           <span class="sys-sub">{{ d.iface_count }} interface{{ d.iface_count|pluralize }}</span>
+          {% endif %}
           {% if not d.known %}
           {% comment %}
             No `up` series at all is a different answer from up == 0: one means Prometheus has

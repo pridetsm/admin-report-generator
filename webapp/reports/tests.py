@@ -2401,8 +2401,16 @@ class NetworkDevicePicker(TestCase):
         prom = mock.MagicMock()
 
         def q(expr):
-            if expr.startswith("up{"):
+            # Two jobs now share the "up{...}" shape (the SNMP switch and the windows_exporter
+            # HCI Cluster host) -- matched on the full expression, each answering with its OWN
+            # instance, rather than one loose "up{" prefix answering for both regardless of
+            # which job actually asked (that used to leak the switch's instance into HCI
+            # Cluster's lookup, making it read as never-scraped even when `up` says healthy).
+            if expr == 'up{job="snmp"}':
                 return ([{"labels": {"instance": "10.100.210.253"}, "value": up}]
+                        if up is not None else [])
+            if expr == 'up{job="hci_cluster"}':
+                return ([{"labels": {"instance": "10.100.246.3:9182"}, "value": up}]
                         if up is not None else [])
             if expr == "ifOperStatus":
                 return oper

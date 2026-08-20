@@ -605,7 +605,115 @@ DEVICES = [
         "module": "if_mib_v3",
         "report": "network_report",
     },
+    # HCI Cluster host — belongs to Infrastructure Admin too (see gr.INFRA_SYSTEMS), but is
+    # windows_exporter (CPU/RAM/disk), not SNMP: no interfaces/OSPF/optics/PSU concepts apply
+    # to it, so it is kept OUT of collect()'s SNMP-shaped machinery entirely and gathered by
+    # the small, separate _windows_metrics() path below instead. `kind: "windows"` is what
+    # every branch in this module checks to route it there instead of through the switch's.
+    {
+        "key": "hci-cluster",
+        "name": "HCI Cluster",
+        "kind": "windows",
+        "target": "10.100.246.3:9182",   # windows_exporter instance label (host:port)
+        "system": "HCI Cluster",
+        "job": "hci_cluster",            # the prometheus.yml job this target's `up` lives under
+        "report": "network_report",
+    },
 ]
+
+# volume filter for windows_logical_disk queries -- mirrors generate_report.py's own _VOL
+# (kept as a local literal rather than importing gr._VOL: that name is a generate_report.py
+# implementation detail, not something this module should depend on staying named that).
+_WIN_VOL = 'volume!~"HarddiskVolume.+"'
+
+
+def _windows_metrics(only: Optional[set] = None) -> Dict[str, dict]:
+    """CPU/RAM/disk for windows_exporter-based devices (kind="windows" in DEVICES).
+
+    A Windows host has none of collect()'s SNMP concepts (interfaces, OSPF, optics, PSU), so
+    this is a small, separate query path rather than another branch inside that machinery.
+    Reuses the exact PromQL generate_report.py's capture() uses for windows_exporter CPU/RAM/
+    disk, so a host reads the same way here as it would on the System Admin report.
+
+    Returns {target: {"known":, "reachable":, "cpu_pct":, "mem_pct":, "disks": [...]}}.
+    """
+    wanted = [d for d in DEVICES if d.get("kind") == "windows" and (only is None or d["key"] in only)]
+    if not wanted:
+        return {}
+    prom, _ = _prometheus()
+
+    def q(expr):
+        try:
+            return prom.query(expr)
+        except Exception:                   # noqa: BLE001
+            return []
+
+    up: Dict[str, float] = {}
+    for job in {d["job"] for d in wanted}:
+        for r in q(f'up{{job="{job}"}}'):
+            up[r["labels"].get("instance", "")] = r["value"]
+
+    cpu = {r["labels"]["instance"]: r["value"]
+          for r in q('100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100)')
+          if r["labels"].get("instance")}
+    mem = {r["labels"]["instance"]: r["value"]
+          for r in q("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)")
+          if r["labels"].get("instance")}
+    used, free, size = {}, {}, {}
+    for r in q(f"100*(1-windows_logical_disk_free_bytes{{{_WIN_VOL}}}/windows_logical_disk_size_bytes{{{_WIN_VOL}}})"):
+        if r["labels"].get("instance"):
+            used.setdefault(r["labels"]["instance"], {})[r["labels"].get("volume")] = r["value"]
+    for r in q(f"windows_logical_disk_free_bytes{{{_WIN_VOL}}}/1024/1024/1024"):
+        if r["labels"].get("instance"):
+            free.setdefault(r["labels"]["instance"], {})[r["labels"].get("volume")] = r["value"]
+    for r in q(f"windows_logical_disk_size_bytes{{{_WIN_VOL}}}/1024/1024/1024"):
+        if r["labels"].get("instance"):
+            size.setdefault(r["labels"]["instance"], {})[r["labels"].get("volume")] = r["value"]
+
+    out = {}
+    for d in wanted:
+        t = d["target"]
+        scraped = up.get(t)
+        disks = [{"volume": vol, "used": u,
+                  "free": free.get(t, {}).get(vol), "size": size.get(t, {}).get(vol)}
+                 for vol, u in used.get(t, {}).items()]
+        out[t] = {
+            "known": scraped is not None,
+            "reachable": scraped == 1.0,
+            "cpu_pct": cpu.get(t),
+            "mem_pct": mem.get(t),
+            "disks": disks,
+        }
+    return out
+
+
+def _windows_device_flags(dev: dict, m: dict) -> list:
+    """The flagged items for one windows_exporter device — same red/amber vocabulary and
+    80%/90% thresholds _device_flags() uses for the switch, so the two device kinds read
+    alike on the same report."""
+    from .services import FlagVM
+
+    if not m.get("known"):
+        return [FlagVM("win_unscraped", f"{dev['name']} has never been scraped by Prometheus",
+                       "red", "unreachable")]
+    if not m.get("reachable"):
+        return [FlagVM("win_down", f"{dev['name']} is not answering", "red", "unreachable")]
+    flags = []
+    cpu = m.get("cpu_pct")
+    if cpu is not None and cpu >= 80:
+        flags.append(FlagVM("cpu_high", f"CPU at {cpu:.0f}% (5-minute average)",
+                            "red" if cpu >= 90 else "amber", "cpu"))
+    mem = m.get("mem_pct")
+    if mem is not None and mem >= 80:
+        flags.append(FlagVM("mem_high", f"Memory at {mem:.0f}% in use",
+                            "red" if mem >= 90 else "amber", "ram"))
+    for disk in m.get("disks", []):
+        used = disk.get("used")
+        if used is not None and used >= 80:
+            flags.append(FlagVM(f"disk_high:{disk['volume']}",
+                                f"{disk['volume']} at {used:.0f}% used",
+                                "red" if used >= 90 else "amber", "disk"))
+    return flags
 
 
 def device_inventory() -> list:
@@ -613,7 +721,9 @@ def device_inventory() -> list:
 
     Reachability comes from Prometheus's own `up` for the snmp job rather than from whether
     any metric happens to exist: a device that stopped answering keeps its last series for a
-    while, so "has data" and "is being scraped successfully" are not the same claim.
+    while, so "has data" and "is being scraped successfully" are not the same claim. Windows
+    devices (kind="windows") use their own job's `up` instead -- a different scrape job than
+    the SNMP switch -- via _windows_metrics(), and carry no interface count (0).
     """
     prom, prom_url = _prometheus()
 
@@ -631,17 +741,24 @@ def device_inventory() -> list:
         if int(r["value"]) == 1:
             ups[inst] = ups.get(inst, 0) + 1
 
+    wm = _windows_metrics()   # every windows-kind device, unscoped -- the picker always lists all
+
     out = []
     for d in DEVICES:
         t = d["target"]
-        scraped = up_by_target.get(t)
-        out.append(dict(d,
-                        reachable=(scraped == 1.0),
-                        # None (not 0) when Prometheus has no `up` for it at all — "unknown"
-                        # and "down" are different answers and must not render alike.
-                        known=(scraped is not None),
-                        iface_count=counts.get(t, 0),
-                        iface_up=ups.get(t, 0)))
+        if d.get("kind") == "windows":
+            m = wm.get(t, {"known": False, "reachable": False})
+            out.append(dict(d, reachable=m["reachable"], known=m["known"],
+                            iface_count=0, iface_up=0))
+        else:
+            scraped = up_by_target.get(t)
+            out.append(dict(d,
+                            reachable=(scraped == 1.0),
+                            # None (not 0) when Prometheus has no `up` for it at all — "unknown"
+                            # and "down" are different answers and must not render alike.
+                            known=(scraped is not None),
+                            iface_count=counts.get(t, 0),
+                            iface_up=ups.get(t, 0)))
     return out
 
 
@@ -823,7 +940,7 @@ def _device_flags(dev: dict, data: dict) -> list:
     return flags
 
 
-def _network_overview(data: dict, devices: list) -> dict:
+def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = None) -> dict:
     """The at-a-glance / immediate / watch bands, in the shape reports/form.html renders.
 
     Same three-band layout as the systems overview so the screen is genuinely the same one,
@@ -870,10 +987,23 @@ def _network_overview(data: dict, devices: list) -> dict:
     # hardcoded to one so onboarding a second device grows the denominator for free.
     cpu_pct = data.get("cpu_pct")
     mem_pct = data.get("mem_pct")
-    cpu_state = "bad" if (cpu_pct is not None and cpu_pct >= 90) else warn(cpu_pct is not None and cpu_pct >= 80)
-    mem_state = "bad" if (mem_pct is not None and mem_pct >= 90) else warn(mem_pct is not None and mem_pct >= 80)
-    cpu_over = 1 if (cpu_pct is not None and cpu_pct >= 80) else 0
-    mem_over = 1 if (mem_pct is not None and mem_pct >= 80) else 0
+    # win_metrics folds in windows-kind devices (e.g. HCI Cluster) alongside the switch's own
+    # cpu_pct/mem_pct scalars above, so onboarding one doesn't leave High CPU/Memory blind to
+    # it — those tiles would otherwise only ever describe the switch, the one device collect()
+    # actually measures.
+    win_metrics = win_metrics or []
+    cpu_state = ("bad" if (cpu_pct is not None and cpu_pct >= 90)
+                        or any((m.get("cpu_pct") or 0) >= 90 for m in win_metrics)
+                 else warn((cpu_pct is not None and cpu_pct >= 80)
+                           or any((m.get("cpu_pct") or 0) >= 80 for m in win_metrics)))
+    mem_state = ("bad" if (mem_pct is not None and mem_pct >= 90)
+                        or any((m.get("mem_pct") or 0) >= 90 for m in win_metrics)
+                 else warn((mem_pct is not None and mem_pct >= 80)
+                           or any((m.get("mem_pct") or 0) >= 80 for m in win_metrics)))
+    cpu_over = (1 if (cpu_pct is not None and cpu_pct >= 80) else 0) + \
+               sum(1 for m in win_metrics if (m.get("cpu_pct") or 0) >= 80)
+    mem_over = (1 if (mem_pct is not None and mem_pct >= 80) else 0) + \
+               sum(1 for m in win_metrics if (m.get("mem_pct") or 0) >= 80)
 
     # A device that is fully unreachable has no throughput being measured AT ALL, imprecisely
     # or otherwise — "Not responding" above already says the real thing. Saying "Understated"
@@ -956,6 +1086,12 @@ def _network_overview(data: dict, devices: list) -> dict:
 def capture_snapshot(token: str, only: Optional[set] = None):
     """A Snapshot of the selected network devices, interchangeable with the systems one.
 
+    SNMP devices (the switch) go through collect()'s machinery, which is SNMP-shaped
+    throughout (interfaces, OSPF, optics, PSU) and does not apply to a windows_exporter
+    device — those (kind="windows", e.g. HCI Cluster) are gathered separately by
+    _windows_metrics()/_windows_device_flags() and merged into the same systems list, so the
+    report reads as one estate regardless of which mechanism actually measured each row.
+
     Raises NetworkUnavailable when Prometheus cannot be reached, mirroring
     services.capture_snapshot raising PrometheusUnavailable — the view handles them the same.
     """
@@ -964,7 +1100,12 @@ def capture_snapshot(token: str, only: Optional[set] = None):
     from .services import Snapshot, SystemVM
 
     data = collect(only=only)
-    rows = data["device_rows"] or [d for d in DEVICES if only is None or d["key"] in only]
+    # excludes windows-kind here too: a windows device never produces ifOperStatus rows, so it
+    # would otherwise slip into this SNMP fallback (used when device_rows comes back empty)
+    # and get scored by _device_flags() against the SWITCH's data -- wrongly silent on its own
+    # real CPU/RAM/disk state.
+    rows = data["device_rows"] or [d for d in DEVICES
+                                   if d.get("kind") != "windows" and (only is None or d["key"] in only)]
     inv = {d["target"]: d for d in device_inventory() if only is None or d["key"] in only}
 
     svms = []
@@ -974,17 +1115,23 @@ def capture_snapshot(token: str, only: Optional[set] = None):
                              hosts=len([i for i in data["interfaces"] if i["device"] == dev["target"]]),
                              flags=_device_flags(live, data)))
 
+    win_devices = [d for d in DEVICES if d.get("kind") == "windows" and (only is None or d["key"] in only)]
+    wm = _windows_metrics({d["key"] for d in win_devices}) if win_devices else {}
+    for dev in win_devices:
+        m = wm.get(dev["target"], {"known": False, "reachable": False})
+        svms.append(SystemVM(name=dev["name"], hosts=1, flags=_windows_device_flags(dev, m)))
+
     snap = Snapshot(
         token=token,
         captured_at=datetime.datetime.now(),
         prom_url=data["prom_url"],
         systems=svms,
-        overview=_network_overview(data, list(inv.values())),
+        overview=_network_overview(data, list(inv.values()), win_metrics=list(wm.values())),
     )
     # carried for the report screen and for generation; the systems flow parks its engine
     # objects on the same attributes.
     snap._store = data
-    snap._systems = rows
+    snap._systems = rows + win_devices
     return snap
 
 
@@ -1111,10 +1258,16 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
         band("Immediate attention", ov.get("immediate", []))
         band("Watch list", ov.get("watch", []))
 
+        # "N interfaces" describes the switch; a windows_exporter device (e.g. HCI Cluster)
+        # has no interface count in this report's sense, so it gets the same "host(s)"
+        # wording reports/form.html already uses for it on the live screen.
+        win_names = {d["name"] for d in DEVICES if d.get("kind") == "windows"}
         for sysvm in snapshot.systems:
             paint(r)
             ws.cell(r, FIRST, sysvm.name.upper()).font = Font(bold=True, size=12, color=CYAN)
-            ws.cell(r, FIRST + 1, f"{sysvm.hosts} interfaces").font = Font(color=SUB, size=10)
+            sub = (f"{sysvm.hosts} host{'s' if sysvm.hosts != 1 else ''}" if sysvm.name in win_names
+                   else f"{sysvm.hosts} interfaces")
+            ws.cell(r, FIRST + 1, sub).font = Font(color=SUB, size=10)
             r += 1
 
             paint(r)
