@@ -366,7 +366,14 @@ def _backups_untracked_block(store, systems) -> str:
     untracked = engine.backup_untracked(store, systems)
     if not untracked:
         return ""
-    names = html.escape(", ".join(sorted(untracked)))
+    # one row per system, matching every other banner -- not all names crammed into a
+    # single "Systems" row.
+    lines = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(s)}</b>'
+        f'<span style="color:#555;"> &mdash; no backup check on any host</span></div>'
+        for s in sorted(untracked)
+    )
     return (
         '<tr><td style="padding:18px 24px 2px;">'
         f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
@@ -375,9 +382,7 @@ def _backups_untracked_block(store, systems) -> str:
         f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">No host on these systems reports '
         "the backup check, so nothing here can be judged missing or fresh &mdash; it simply isn't being "
         "watched. <b>Add the check before this becomes a real gap nobody caught.</b></div>"
-        f'<div style="margin:3px 0;font-size:13px;"><b style="color:{NAVY};">Systems</b>'
-        f'<span style="color:#555;"> &mdash; {names}</span></div>'
-        "</div></td></tr>"
+        f"{lines}</div></td></tr>"
     )
 
 

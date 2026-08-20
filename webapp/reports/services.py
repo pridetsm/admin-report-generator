@@ -184,7 +184,9 @@ def build_overview(store, systems, cfg) -> dict:
         # ("it's broken") — nothing here is judged missing, since nothing is being watched.
         banners.append({"severity": "warning",
                         "head": f"Backups untracked — {len(untracked)} system(s) with no backup check at all",
-                        "rows": [{"label": "Systems", "values": ", ".join(sorted(untracked))}]})
+                        # one row per system, matching every other banner
+                        "rows": [{"label": s, "values": "no backup check on any host"}
+                                 for s in sorted(untracked)]})
     if ur:
         bysys: dict = {}
         for s, lbl, _ in ur:

@@ -1701,7 +1701,10 @@ class ReportBuilder:
             banners.append((
                 "warning",
                 f"BACKUPS UNTRACKED  —  {len(untracked)} system(s) with no backup check at all",
-                [("Systems", "   ".join(sorted(untracked)))],
+                # one row per system, matching every other banner -- not all names crammed
+                # into a single "Systems" row. Same wording flagged_for_system() already
+                # uses for this exact condition on a system's own Notes card.
+                [(s, "no backup check on any host") for s in sorted(untracked)],
                 "No host on these systems reports the backup check, so nothing here can be judged "
                 "missing or fresh — it simply isn't being watched. Add the check before this becomes "
                 "a real gap nobody caught."))
