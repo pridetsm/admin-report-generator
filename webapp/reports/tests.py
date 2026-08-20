@@ -3098,7 +3098,7 @@ def _build_overview(unreachable=False, nearfull=False, certs=None, ldap=False):
     """
     from reports import services
 
-    store = mock.MagicMock(services={}, links={}, cob=1.0, swift=1.0)
+    store = mock.MagicMock(services={}, links={}, log_files={}, cob=1.0, swift=1.0)
     systems = [mock.MagicMock(components=[1])]
     cfg = mock.MagicMock(overview_threshold=80, chip_red=90)
 

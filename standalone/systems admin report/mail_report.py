@@ -519,6 +519,35 @@ def _http_links_block(store, systems) -> str:
     )
 
 
+def _folder_over_expected_block(store, systems) -> str:
+    """A callout listing watched folders (e.g. T24 Log File) over their expected size --
+    see the Folders table on the owning system's card. Always warning, never critical, no
+    matter how far over expected the folder grows (see FOLDER_EXPECTED_GB's docstring):
+    this is "keep an eye on it", not an outage."""
+    over_folders = engine.folder_over_expected_detail(store, systems)
+    if not over_folders:
+        return ""
+    bysys: dict = {}
+    for s, name, expected, actual in over_folders:
+        bysys.setdefault(s, []).append(f"{name} ({actual:.1f} GB, expected {expected:.1f} GB)")
+    lines = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(s)}</b>'
+        f'<span style="color:#555;"> &mdash; {html.escape(", ".join(names))}</span></div>'
+        for s, names in sorted(bysys.items())
+    )
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{AMBER};">&#9888;&nbsp; WARNING &mdash; '
+        f'{len(over_folders)} folder(s) on {len(bysys)} system(s) over expected size</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These watched folders have grown '
+        "past their expected size &mdash; worth a look (e.g. confirm rotation/archival is running), "
+        "but not itself an outage.</div>"
+        f"{lines}</div></td></tr>"
+    )
+
+
 def _attachment_block(mail) -> str:
     """Callout naming the XLSX report attached to this e-mail. Only rendered when one is
        actually attached — it sits ABOVE the Report Generator call-to-action, which stays
@@ -671,6 +700,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
             + _backups_untracked_block(store, systems)
             + _cert_block(store)
             + _http_links_block(store, systems)
+            + _folder_over_expected_block(store, systems)
             + _cob_block(store, unreach)
             + _swift_block(store, unreach)
             + _section("Critical", crit, RED, RED_T)

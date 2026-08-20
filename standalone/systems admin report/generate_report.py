@@ -470,6 +470,11 @@ def backup_cutoff(instance: str, now: datetime.datetime | None = None) -> float:
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
 LDAP_DEPENDENTS = {"GCMS", "GMS"}
+# folder_exporter target name -> expected size in GB, for the Folders table (see
+# _system_card / FOLDER OVER EXPECTED SIZE banner). A folder over its expectation is ALWAYS
+# a warning here, never critical, however far over it grows -- this is "keep an eye on it",
+# not an outage, unlike a near-full disk. Extend as more logging-role folders are watched.
+FOLDER_EXPECTED_GB = {"T24 Log File": 5}
 # `system` label values that are not real systems. "rbz network" is the core switch / network
 # device estate (see the `snmp` job in prometheus.yml and DEVICES in webapp/reports/network.py)
 # — those get their own Network Admin Report and are deliberately excluded here so a switch
@@ -687,15 +692,15 @@ class Store:
     backups: Dict[str, dict]                    # instance -> {files, count, ok, ts} (textfile backup check)
     ldap_up: Optional[bool] = None              # LDAP/auth probe: True up / False down / None not monitored
     # lower(system name) -> [(target_label, size_gb, source_ip), ...]. Keyed by SYSTEM, not
-    # host instance: a watched log folder (folder_exporter, kind="logs") belongs to the
-    # estate, not to one host's windows_exporter identity, and folder_exporter scrapes on
-    # its own port so there's no instance string in common with a Component. source_ip (the
-    # exporter's own IP, port stripped) is carried alongside so _system_card can still
-    # attribute the row to whichever host it actually lives on, by IP rather than a guess.
-    # Deliberately separate from `disk`, not another mount: a folder's size has no capacity
-    # to be a % OF, so it must never enter total_disks()/disk_high()/disk_near_full(), which
-    # all read `disk` directly. Rendered as its own extra row in the per-system Disk table
-    # instead (see _system_card), sized but not banded.
+    # host instance: a watched log folder (folder_exporter, kind="logs", role="logging")
+    # belongs to the estate, not to one host's windows_exporter identity, and folder_exporter
+    # scrapes on its own port so there's no instance string in common with a Component.
+    # source_ip (the exporter's own IP, port stripped) is carried alongside so _system_card
+    # can still attribute the row to whichever host it actually lives on, by IP rather than a
+    # guess. Deliberately separate from `disk`: a folder's size has no capacity to be a % OF,
+    # so it must never enter total_disks()/disk_high()/disk_near_full(), which all read
+    # `disk` directly. Rendered in its own Folders table instead (see _system_card), each
+    # entry judged against FOLDER_EXPECTED_GB rather than banded like a real volume.
     log_files: Dict[str, List[Tuple[str, float, str]]] = field(default_factory=dict)
 
 
@@ -772,14 +777,14 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
         if rows:
             ldap_up = max(r["value"] for r in rows) >= 1
 
-    # ---- log files: a size, not a mount -- see Store.log_files for why this is kept
-    # entirely separate from `disk`. Reuses folder_exporter (already deployed for the
-    # interface/queue folders — see SKIP_JOBS) rather than a new textfile check: it already
-    # emits folder_size_bytes per watched folder, and kind="logs" is how a log-purpose watch
-    # (T24's server log folder) is told apart from those queue-depth ones sharing the same
-    # exporter, without needing a name to be hardcoded here.
+    # ---- log files: rendered in their own Folders table, not the Disk one -- see
+    # Store.log_files. Reuses folder_exporter (already deployed for the interface/queue
+    # folders — see SKIP_JOBS) rather than a new textfile check. role="logging" (not just
+    # kind="logs") is deliberate: BACKUP.LOGS on the same exporter is ALSO kind="logs" but
+    # role="backup" — that one belongs to the backup posture, not this table, and matching
+    # only kind="logs" pulled it in by mistake.
     log_files: Dict[str, List[Tuple[str, float, str]]] = {}
-    for r in prom.query('folder_size_bytes{kind="logs"}/1024/1024/1024'):
+    for r in prom.query('folder_size_bytes{kind="logs",role="logging"}/1024/1024/1024'):
         sysname = (r["labels"].get("system") or "").strip().lower()
         target = r["labels"].get("target") or "Log File Size"
         # folder_exporter scrapes on its OWN port (9847), so its `instance` label never
@@ -1126,6 +1131,22 @@ def http_links_detail(store: "Store", systems: List["System"]) -> List[Tuple[str
     since the risk is the missing encryption, not whether the link currently answers."""
     return [(_link_owner_name(url, systems), _link_display(url))
             for url in store.links if url.lower().startswith("http://")]
+
+
+def folder_over_expected_detail(store: "Store", systems: List["System"]) -> List[Tuple[str, str, float, float]]:
+    """Every watched folder (see Store.log_files / FOLDER_EXPECTED_GB) currently over its
+    expected size -> [(system, name, expected_gb, actual_gb), ...]. Always a WARNING, never
+    escalated to critical no matter how far over expected the folder grows -- this is "keep
+    an eye on it" (e.g. a log file not being rotated), not an outage like a near-full disk."""
+    rows: List[Tuple[str, str, float, float]] = []
+    by_name = {_norm(s.name): s.name for s in systems}
+    for sysname_lower, entries in store.log_files.items():
+        real_name = by_name.get(_norm(sysname_lower), sysname_lower)
+        for name, gb, _source_ip in entries:
+            expected = FOLDER_EXPECTED_GB.get(name)
+            if expected is not None and gb > expected:
+                rows.append((real_name, name, expected, gb))
+    return rows
 
 
 def ldap_alert(store: "Store", systems: List["System"]) -> Optional[List[str]]:
@@ -1793,6 +1814,23 @@ class ReportBuilder:
                 "These web links are reachable over plain HTTP — anything sent to them (including "
                 "credentials) travels unencrypted. Move them to HTTPS."))
 
+        # 3c) watched folders (e.g. T24 Log File) over their expected size — see the Folders
+        #     table on the owning system's card. Always warning, never critical, however far
+        #     over expected the folder grows (see FOLDER_EXPECTED_GB's docstring) — this is
+        #     "keep an eye on it", not an outage.
+        over_folders = folder_over_expected_detail(store, systems)
+        if over_folders:
+            bysys: Dict[str, List[str]] = {}
+            for s, name, expected, actual in over_folders:
+                bysys.setdefault(s, []).append(f"{name} ({actual:.1f} GB, expected {expected:.1f} GB)")
+            banners.append((
+                "warning",
+                f"FOLDER OVER EXPECTED SIZE  —  {len(over_folders)} folder(s) on "
+                f"{len(bysys)} system(s)",
+                [(s, "   ".join(v)) for s, v in sorted(bysys.items())],
+                "These watched folders have grown past their expected size — worth a look (e.g. "
+                "confirm rotation/archival is running), but not itself an outage."))
+
         # 4) COB looks like it never ran — flagged EVERY day EXCEPT Monday. A Monday
         #    reading covers Sunday (a non-work day with no COB), so an absent/abnormally
         #    high value then is expected, not a fault, and is left unflagged.
@@ -1929,20 +1967,21 @@ class ReportBuilder:
                  for c in sysm.components
                  for mp, dd in sorted(store.disk.get(c.instance, {}).items(),
                                       key=lambda kv: -kv[1].get("used", 0))]
-        # log files ride the same Disk table (a size, not a mount -- no "used"/"free", so the
-        # row renders a dash instead of a % chip) but never touch `store.disk` itself, so they
-        # can't be mistaken for a real volume by total_disks()/disk_high()/disk_near_full().
-        # Keyed by SYSTEM (see Store.log_files), not per-component -- attributed to the
-        # component whose OWN instance shares the folder_exporter's IP (source_ip), i.e. the
-        # host the watched folder actually lives on. T24's log folder turned out to be on
-        # T24 DB, not T24 App -- a name-based guess ("whichever looks like App") would have
-        # gotten that wrong, so this matches by address instead. Falls back to the first
-        # component only if nothing on this system shares that IP.
+        # watched folders (see Store.log_files / FOLDER_EXPECTED_GB) get their own Folders
+        # table, directly under Disk -- never store.disk itself, so they can't be mistaken
+        # for a real volume by total_disks()/disk_high()/disk_near_full(). Keyed by SYSTEM
+        # (see Store.log_files), not per-component -- attributed to the component whose OWN
+        # instance shares the folder_exporter's IP (source_ip), i.e. the host the watched
+        # folder actually lives on. T24's log folder turned out to be on T24 DB, not T24 App
+        # -- a name-based guess ("whichever looks like App") would have gotten that wrong,
+        # so this matches by address instead. Falls back to the first component only if
+        # nothing on this system shares that IP.
+        folders = []
         for name, gb, source_ip in store.log_files.get(sysm.name.lower(), []):
             host = next((c.label for c in sysm.components
                         if c.instance.split(":")[0] == source_ip),
                        sysm.components[0].label if sysm.components else sysm.name)
-            disks.append((host, name, {"size": gb}))
+            folders.append((host, name, gb))
         nd = sum(1 for _, st, _ in mems if st == "down")           # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
              sum(1 for _, st, v in mems if st == "ok" and v >= self.cfg.chip_red) + \
@@ -2164,6 +2203,52 @@ class ReportBuilder:
                 for c in range(14, 19):
                     self._cell(r, c, bg=Theme.BG)
 
+        # ---- Folders table: watched folders (e.g. T24 Log File), directly under Disk,
+        #      same columns (9-13) so it reads as part of the same block. Only rendered when
+        #      this system actually has an entry -- most systems have none. A gap row first
+        #      (same "small gap" spacing used between every other pair of tables on this
+        #      card), then title + header rows matching Disk's own styling exactly, then one
+        #      data row per folder. Actual GB is always chipped amber (never red) when over
+        #      Expected -- see FOLDER_EXPECTED_GB's docstring: this is "keep an eye on it",
+        #      not an outage, however large the folder grows. ----
+        folders_bottom = top + rows - 1
+        if folders:
+            fy = top + rows
+            for c in range(2, 19):                     # gap row, full card width
+                self._cell(fy, c, bg=Theme.BG)
+            fy += 1
+            for c in range(2, 9):
+                self._cell(fy, c, bg=Theme.BG)
+            self._merge(fy, 9, 13, "Folders", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+            for c in range(14, 19):
+                self._cell(fy, c, bg=Theme.BG)
+            fy += 1
+            for c in range(2, 9):
+                self._cell(fy, c, bg=Theme.BG)
+            for c, t in zip((9, 10, 11, 12, 13), ("Host", "Name", "Expected GB", "Actual GB", "")):
+                self._cell(fy, c, t, Theme.font(8, True, Theme.GREY), bg=Theme.HDR,
+                           al=("left" if c <= 10 else "center"), border=True)
+            for c in range(14, 19):
+                self._cell(fy, c, bg=Theme.BG)
+            ftop = fy + 1
+            for i, (host, name, gb) in enumerate(folders):
+                r = ftop + i
+                for c in range(2, 9):
+                    self._cell(r, c, bg=Theme.BG)
+                expected = FOLDER_EXPECTED_GB.get(name)
+                self._cell(r, 9, host, Theme.font(9, False, Theme.GREY), border=True)
+                self._cell(r, 10, name, Theme.font(9, False, Theme.GREY), border=True)
+                self._cell(r, 11, f"{expected:.1f}" if expected is not None else "—",
+                           Theme.font(9, False, Theme.WHITE), al="center", border=True)
+                if expected is not None and gb > expected:
+                    self._chip(r, 12, f"{gb:.1f}", "amber", sz=9)
+                else:
+                    self._cell(r, 12, f"{gb:.1f}", Theme.font(9, False, Theme.WHITE), al="center", border=True)
+                self._cell(r, 13, "", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                for c in range(14, 19):
+                    self._cell(r, c, bg=Theme.BG)
+            folders_bottom = ftop + len(folders) - 1
+
         # ---- notes panel to the far right (cols S-W, 19-23) -- ALWAYS this width, backups
         #      or not, so Notes doesn't stretch wider just because there's nothing tracked to
         #      show in 14-18. An untracked system leaves that as a plain gap instead (see the
@@ -2173,7 +2258,7 @@ class ReportBuilder:
         #      warning) for the admin to triage, a free-text comment box, then the author
         #      line. Regenerated fresh each run. ----
         nl, nr = 19, 23
-        tn_row, last_data = top - 2, top + rows - 1
+        tn_row, last_data = top - 2, max(top + rows - 1, folders_bottom)
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         self._merge(tn_row, nl, nr, f"{sysm.name} Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
 

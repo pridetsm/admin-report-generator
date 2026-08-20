@@ -227,6 +227,18 @@ def build_overview(store, systems, cfg) -> dict:
                         "head": f"Plain HTTP — {len(http_links)} link(s) not using HTTPS",
                         "rows": [{"label": s, "values": ", ".join(sorted(names))}
                                  for s, names in sorted(bysys.items())]})
+    over_folders = gr.folder_over_expected_detail(store, systems)
+    if over_folders:
+        # Always warning, never critical, however far over expected the folder grows — see
+        # FOLDER_EXPECTED_GB's docstring: this is "keep an eye on it", not an outage.
+        bysys: dict = {}
+        for s, name, expected, actual in over_folders:
+            bysys.setdefault(s, []).append(f"{name} ({actual:.1f} GB, expected {expected:.1f} GB)")
+        banners.append({"severity": "warning",
+                        "head": f"Folder over expected size — {len(over_folders)} folder(s) on "
+                                f"{len(bysys)} system(s)",
+                        "rows": [{"label": s, "values": ", ".join(v)}
+                                 for s, v in sorted(bysys.items())]})
     if cob_missing and datetime.date.today().weekday() != 0:   # 0 = Monday (Sunday: no COB)
         # If the T24 database component is itself unreachable, an abnormal COB reading isn't
         # evidence COB failed to run — it means we can't tell, because the exporter that would
