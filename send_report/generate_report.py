@@ -1219,21 +1219,24 @@ def backup_missing_band(count: int) -> str:
 # ============================================================================ #
 class ReportBuilder:
     # column widths (A gutter, then Services | gap | Memory | gap | Disk | gap | Backups | gap | Notes)
-    # All four gap columns (D, H, N, R) are the SAME small width, 2 -- every table separated
-    # by the same gap, none singled out. Each is shared with real content in the overview
-    # tile band above (D = HIGH CPU USAGE's 3rd sub-column, H = HIGH DISK USAGE's 2nd), but
-    # _split_by_width there divides by WIDTH, not column count, so a narrow gap column just
-    # merges into the wider sub-column beside it (e.g. C-D becomes "TOTAL"'s span) instead of
-    # clipping -- verified against live data for both.
+    # D, H and N (the gaps before Memory·CPU, Disk and Backups) are the exact values from the
+    # approved reference workbook (standalone/systems admin report/System Admin Report -
+    # 2026-08-19 2051 (dark).xlsx) -- Excel AutoFit widths, not round numbers, kept precise
+    # rather than rounded so this matches that file exactly. R (gap before Notes) stays 2,
+    # tighter than the other three, matching that same reference. Each of D/H/N is shared
+    # with real content in the overview tile band above (D = HIGH CPU USAGE's 3rd sub-column,
+    # H = HIGH DISK USAGE's 2nd), but _split_by_width there divides by WIDTH, not column
+    # count, so a narrow gap column just merges into the wider sub-column beside it (e.g.
+    # C-D becomes "TOTAL"'s span) instead of clipping -- verified against live data for both.
     # I-M are the Disk table (Host | Mount | Used % | Free GB | Size GB); J=20 (not the ~12
     # you'd expect) because Mount now also holds folder_exporter log-folder names ("T24 Log
     # File") that a tight column clipped -- same fix as the AT A GLANCE platforms tile, same
     # column-sharing reason: J is also WEB ENCRYPTION's 2nd sub-column in the watch row and
     # SERVICES DOWN's 3rd in the immediate row, both of which only ever hold short values, so
     # widening it here costs them nothing.
-    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 2, "E": 14, "F": 8,
-              "G": 8, "H": 2, "I": 14, "J": 20, "K": 7, "L": 7,   # G = Memory·CPU's CPU % column
-              "M": 11, "N": 2, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
+    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 8.140625, "E": 14, "F": 8,
+              "G": 8, "H": 7.5703125, "I": 14, "J": 20, "K": 7, "L": 7,   # G = Memory·CPU's CPU % column
+              "M": 11, "N": 7.85546875, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
               "R": 2,                                        # gap before Notes
               "S": 13, "T": 11, "U": 11, "V": 11, "W": 9}  # S-W = notes column
     CARD_GROUPS = [(2, 4), (5, 7), (8, 9), (10, 12)]   # 4 overview cards across the width
