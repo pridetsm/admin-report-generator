@@ -1842,7 +1842,9 @@ class ReportBuilder:
             content_bottom = r
 
         # ---- Summary Notes: RHS panel spanning the whole summary (explain anything, incl. the alert) ----
-        nl, nr = 14, 22       # no Backups panel here -> notes span the full right-hand width
+        # nr=23, not 22 -- matches the report's own established full-width right edge (every
+        # per-system Notes panel ends at 23), which this box fell one column short of.
+        nl, nr = 14, 23
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         # title sits LOW — level with the cards (row 9), mirroring the per-system notes titles
         tt = 9
