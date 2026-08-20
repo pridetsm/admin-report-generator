@@ -217,6 +217,16 @@ def build_overview(store, systems, cfg) -> dict:
                                 ([{"label": "Expiring ≤30d",
                                    "values": ", ".join(f"{h} ({cd:.0f}d)" for h, cd in cert_expiring)}]
                                  if cert_expiring else [])})
+    http_links = gr.http_links_detail(store, systems)
+    if http_links:
+        # Warning, not critical: an unencrypted link isn't down, it's a standing exposure.
+        bysys: dict = {}
+        for s, name in http_links:
+            bysys.setdefault(s, []).append(name)
+        banners.append({"severity": "warning",
+                        "head": f"Plain HTTP — {len(http_links)} link(s) not using HTTPS",
+                        "rows": [{"label": s, "values": ", ".join(sorted(names))}
+                                 for s, names in sorted(bysys.items())]})
     if cob_missing and datetime.date.today().weekday() != 0:   # 0 = Monday (Sunday: no COB)
         # If the T24 database component is itself unreachable, an abnormal COB reading isn't
         # evidence COB failed to run — it means we can't tell, because the exporter that would

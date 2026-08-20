@@ -1088,6 +1088,20 @@ def total_services(store: "Store") -> int:
     return sum(len(v) for v in store.services.values()) + len(store.links)
 
 
+def _link_owner_name(url: str, systems: List["System"]) -> str:
+    """assign_link's result, mapped back to the real System.name -- assign_link itself
+    returns a NORMALISED name (lowercased, punctuation/spaces stripped, e.g. "SmartHR" ->
+    "smarthr", "Collateral Registry" -> "collateralregistry") meant for matching against a
+    URL, not for display. Every banner that names a link's owning system goes through this,
+    not assign_link directly, so it never shows the normalised form by mistake."""
+    nrm = assign_link(url, systems)
+    if nrm:
+        for s in systems:
+            if _norm(s.name) == nrm:
+                return s.name
+    return "Unassigned"
+
+
 def services_down_detail(store: "Store", systems: List["System"]) -> List[Tuple[str, str]]:
     """Every DOWN service/link as (system, label) pairs -- the named list behind the
     SERVICES DOWN tile/count. Combines both classes services_down() counts (PromQL checks
@@ -1101,8 +1115,17 @@ def services_down_detail(store: "Store", systems: List["System"]) -> List[Tuple[
                 rows.append((sysname, name))
     for url, d in store.links.items():
         if not d.get("up", False):
-            rows.append((assign_link(url, systems) or "Unassigned", _link_display(url)))
+            rows.append((_link_owner_name(url, systems), _link_display(url)))
     return rows
+
+
+def http_links_detail(store: "Store", systems: List["System"]) -> List[Tuple[str, str]]:
+    """Every monitored web link still on plain HTTP (not HTTPS), as (system, label) pairs --
+    the named list behind the WEB ENCRYPTION tile's http count. Reachability is separate
+    (see services_down_detail/links_down) -- a plain-HTTP link that's UP still belongs here,
+    since the risk is the missing encryption, not whether the link currently answers."""
+    return [(_link_owner_name(url, systems), _link_display(url))
+            for url in store.links if url.lower().startswith("http://")]
 
 
 def ldap_alert(store: "Store", systems: List["System"]) -> Optional[List[str]]:
@@ -1754,6 +1777,21 @@ class ReportBuilder:
                 rows,
                 "Renew these certificates before they lapse — an expired certificate makes browsers "
                 "reject the site, a silent outage until the certificate is replaced."))
+
+        # 3b) monitored web links still on plain HTTP — the named list behind the WEB
+        #     ENCRYPTION tile's http count. Warning, not critical: an unencrypted link isn't
+        #     down, it's a standing exposure (credentials/session data readable in transit).
+        http_links = http_links_detail(store, systems)
+        if http_links:
+            bysys: Dict[str, List[str]] = {}
+            for s, name in http_links:
+                bysys.setdefault(s, []).append(name)
+            banners.append((
+                "warning",
+                f"PLAIN HTTP  —  {len(http_links)} link(s) not using HTTPS",
+                [(s, ", ".join(sorted(names))) for s, names in sorted(bysys.items())],
+                "These web links are reachable over plain HTTP — anything sent to them (including "
+                "credentials) travels unencrypted. Move them to HTTPS."))
 
         # 4) COB looks like it never ran — flagged EVERY day EXCEPT Monday. A Monday
         #    reading covers Sunday (a non-work day with no COB), so an absent/abnormally

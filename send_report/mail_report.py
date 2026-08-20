@@ -491,6 +491,34 @@ def _cert_block(store) -> str:
     )
 
 
+def _http_links_block(store, systems) -> str:
+    """A callout listing monitored web links still on plain HTTP -- the named list behind
+    the WEB ENCRYPTION tile's http count. Warning, not critical: an unencrypted link isn't
+    down, it's a standing exposure (credentials/session data readable in transit)."""
+    http_links = engine.http_links_detail(store, systems)
+    if not http_links:
+        return ""
+    bysys: dict = {}
+    for s, name in http_links:
+        bysys.setdefault(s, []).append(name)
+    lines = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(s)}</b>'
+        f'<span style="color:#555;"> &mdash; {html.escape(", ".join(sorted(names)))}</span></div>'
+        for s, names in sorted(bysys.items())
+    )
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{AMBER};">&#9888;&nbsp; WARNING &mdash; '
+        f'{len(http_links)} link(s) not using HTTPS</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These web links are reachable '
+        "over plain HTTP &mdash; anything sent to them (including credentials) travels unencrypted. "
+        "<b>Move them to HTTPS.</b></div>"
+        f"{lines}</div></td></tr>"
+    )
+
+
 def _attachment_block(mail) -> str:
     """Callout naming the XLSX report attached to this e-mail. Only rendered when one is
        actually attached — it sits ABOVE the Report Generator call-to-action, which stays
@@ -642,6 +670,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
             + _backup_missing_block(store, systems)
             + _backups_untracked_block(store, systems)
             + _cert_block(store)
+            + _http_links_block(store, systems)
             + _cob_block(store, unreach)
             + _swift_block(store, unreach)
             + _section("Critical", crit, RED, RED_T)
