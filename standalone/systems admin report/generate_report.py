@@ -1841,23 +1841,29 @@ class ReportBuilder:
                 r = render_banner(r, severity, title, rows, expl)
             content_bottom = r
 
-        # ---- Summary Notes: RHS panel spanning the whole summary (explain anything, incl. the alert) ----
-        # nr=23, not 22 -- matches the report's own established full-width right edge (every
-        # per-system Notes panel ends at 23), which this box fell one column short of.
-        nl, nr = 14, 23
+        # ---- Summary Notes: RHS panel beside the AT A GLANCE / tile bands (explain anything,
+        #      incl. the alert) ----
+        # O:W (15-23), rows 9-18 -- a fixed box beside the tile bands specifically, not a tall
+        # one running the full height of however many banners render below. notes_bottom is
+        # the box's own visual bottom; content_bottom (the banners' true bottom, already
+        # updated above) still governs where the author line and the NEXT section start, so a
+        # tall banner stack is never overlapped just because this box is now short.
+        nl, nr = 15, 23
+        notes_bottom = 18
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         # title sits LOW — level with the cards (row 9), mirroring the per-system notes titles
         tt = 9
         self._merge(tt, nl, nr, "Summary Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
-        for r in range(tt + 1, content_bottom + 1):    # writable box directly beneath the title
+        for r in range(tt + 1, notes_bottom + 1):      # writable box directly beneath the title
             for c in range(nl, nr + 1):
                 self._cell(r, c, bg=Theme.CARD).border = field
         self.ws.cell(tt + 1, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        self.ws.merge_cells(start_row=tt + 1, start_column=nl, end_row=content_bottom, end_column=nr)
+        self.ws.merge_cells(start_row=tt + 1, start_column=nl, end_row=notes_bottom, end_column=nr)
         if self.summary_comment:                       # pre-fill the summary box from the web form
             self.ws.cell(tt + 1, nl).value = self.summary_comment
-        # author line — this is the MASTER name cell (drawn first), every system's "By" mirrors it
-        by = content_bottom + 1
+        # author line — this is the MASTER name cell (drawn first), every system's "By" mirrors it.
+        # Below whichever is taller: the banners or this now-short box.
+        by = max(content_bottom, notes_bottom) + 1
         self._cell(by, nl, "By  ", Theme.font(8, False, Theme.SUB), bg=Theme.CARD, al="right")
         for c in range(nl + 1, nr + 1):
             self._cell(by, c, bg=Theme.CARD).border = field
@@ -1867,6 +1873,13 @@ class ReportBuilder:
             anchor.value = self.author
         self._first_by = f"${get_column_letter(nl + 1)}${by}"
         self.ws.merge_cells(start_row=by, start_column=nl + 1, end_row=by, end_column=nr)
+        # Everything the purple box no longer reaches (rows below it, alongside a tall banner
+        # stack) still needs the page background explicitly -- nothing else touches these
+        # cells, and an untouched cell renders WHITE, a stark hole in an otherwise all-dark
+        # sheet (the same class of bug the title-bar gap column had earlier).
+        for r in range(notes_bottom + 1, content_bottom + 1):
+            for c in range(13, nr + 1):
+                self._cell(r, c, bg=Theme.BG)
         return by + 1   # next free row (one gap line)
 
     def _system_card(self, y: int, sysm: System, store: Store) -> int:
