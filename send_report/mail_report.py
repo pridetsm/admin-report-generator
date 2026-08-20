@@ -278,6 +278,33 @@ def _unreachable_block(unreach: List[Finding]) -> str:
     )
 
 
+def _services_down_block(store, systems) -> str:
+    """A prominent callout listing every DOWN service/link -- the named list behind the
+    overview SERVICES DOWN tile, which until now only ever showed a bare count."""
+    down = engine.services_down_detail(store, systems)
+    if not down:
+        return ""
+    bysys: dict = {}
+    for s, name in down:
+        bysys.setdefault(s, []).append(name)
+    lines = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(s)}</b>'
+        f'<span style="color:#555;"> &mdash; {html.escape(", ".join(sorted(names)))}</span></div>'
+        for s, names in sorted(bysys.items())
+    )
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{RED_T};border-left:4px solid {RED};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{RED};">&#9888;&nbsp; CRITICAL &mdash; '
+        f'{len(down)} service(s)/link(s) down across {len(bysys)} system(s)</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These checks or web links are '
+        "currently reporting down. <b>Confirm whether the outage is real or the check itself needs "
+        "attention, then restore service.</b></div>"
+        f"{lines}</div></td></tr>"
+    )
+
+
 def _disk_nearfull_block(store, systems) -> str:
     """A prominent callout listing the volumes that are almost full (>= CRIT%)."""
     nearfull = engine.disk_near_full(store, systems, CRIT)
@@ -329,6 +356,28 @@ def _backup_missing_block(store, systems) -> str:
         "but have nothing fresh within policy &mdash; if the host is lost today, there is no recent "
         "backup to restore from. <b>Confirm the backup job and re-run it.</b></div>"
         f"{lines}</div></td></tr>"
+    )
+
+
+def _backups_untracked_block(store, systems) -> str:
+    """A callout listing systems where NOT ONE host runs the backup check at all -- a
+    monitoring blind spot, not an active failure: nothing here is judged missing, since
+    nothing is being watched to judge."""
+    untracked = engine.backup_untracked(store, systems)
+    if not untracked:
+        return ""
+    names = html.escape(", ".join(sorted(untracked)))
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{AMBER};">&#9888;&nbsp; WARNING &mdash; '
+        f'{len(untracked)} system(s) with no backup check at all</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">No host on these systems reports '
+        "the backup check, so nothing here can be judged missing or fresh &mdash; it simply isn't being "
+        "watched. <b>Add the check before this becomes a real gap nobody caught.</b></div>"
+        f'<div style="margin:3px 0;font-size:13px;"><b style="color:{NAVY};">Systems</b>'
+        f'<span style="color:#555;"> &mdash; {names}</span></div>'
+        "</div></td></tr>"
     )
 
 
@@ -583,8 +632,10 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     # COB, SWIFT) -- highest-consequence first.
     body = (_ldap_block(store, systems)
             + _unreachable_block(unreach)
+            + _services_down_block(store, systems)
             + _disk_nearfull_block(store, systems)
             + _backup_missing_block(store, systems)
+            + _backups_untracked_block(store, systems)
             + _cert_block(store)
             + _cob_block(store, unreach)
             + _swift_block(store, unreach)

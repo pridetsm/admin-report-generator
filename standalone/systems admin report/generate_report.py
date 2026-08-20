@@ -1088,6 +1088,23 @@ def total_services(store: "Store") -> int:
     return sum(len(v) for v in store.services.values()) + len(store.links)
 
 
+def services_down_detail(store: "Store", systems: List["System"]) -> List[Tuple[str, str]]:
+    """Every DOWN service/link as (system, label) pairs -- the named list behind the
+    SERVICES DOWN tile/count. Combines both classes services_down() counts (PromQL checks
+    AND web links) so the banner this feeds can never name fewer things than the count
+    says are down. A down link falls back to "Unassigned" only if assign_link can't place
+    it in this report's systems at all -- in practice everything real has an owner."""
+    rows: List[Tuple[str, str]] = []
+    for sysname, svcs in store.services.items():
+        for name, up, _kind, _group in svcs:
+            if not up:
+                rows.append((sysname, name))
+    for url, d in store.links.items():
+        if not d.get("up", False):
+            rows.append((assign_link(url, systems) or "Unassigned", _link_display(url)))
+    return rows
+
+
 def ldap_alert(store: "Store", systems: List["System"]) -> Optional[List[str]]:
     """If the LDAP / auth service is DOWN, the list of dependent systems to warn about; else None.
 
@@ -1674,6 +1691,21 @@ class ReportBuilder:
                 "is lost today, there is no recent backup to restore from. Confirm the backup job and "
                 "re-run it."))
 
+        # 1c) systems where NOT ONE host runs the backup check at all — a monitoring blind
+        #     spot, not an active failure (nothing here is judged as missing, because
+        #     nothing is being watched to judge). Warning, not critical: this is "we can't
+        #     tell" rather than "it's broken" — but it still needs an answer, since a blind
+        #     spot is exactly the condition under which a real gap goes unnoticed.
+        untracked = backup_untracked(store, systems)
+        if untracked:
+            banners.append((
+                "warning",
+                f"BACKUPS UNTRACKED  —  {len(untracked)} system(s) with no backup check at all",
+                [("Systems", "   ".join(sorted(untracked)))],
+                "No host on these systems reports the backup check, so nothing here can be judged "
+                "missing or fresh — it simply isn't being watched. Add the check before this becomes "
+                "a real gap nobody caught."))
+
         # 2) components Prometheus can no longer reach — the highest-severity finding on
         #    this report: every other red banner is at least still being measured, this one
         #    means we've lost visibility entirely. "critical" band + an explicit label (not
@@ -1688,6 +1720,20 @@ class ReportBuilder:
                 [(s, ", ".join(lbls)) for s, lbls in sorted(bysys.items())],
                 "Prometheus can no longer scrape these targets — the host is down, the exporter has "
                 "stopped, or there are network / connectivity issues. Treat as urgent."))
+
+        # 2b) services / links currently reporting DOWN — the named list behind the
+        #     overview SERVICES DOWN tile, which until now only ever showed a bare count.
+        down_detail = services_down_detail(store, systems)
+        if down_detail:
+            bysys: Dict[str, List[str]] = {}
+            for s, name in down_detail:
+                bysys.setdefault(s, []).append(name)
+            banners.append((
+                "critical",
+                f"SERVICES DOWN  —  {len(down_detail)} service(s)/link(s) across {len(bysys)} system(s)",
+                [(s, ", ".join(sorted(names))) for s, names in sorted(bysys.items())],
+                "These checks or web links are currently reporting down. Confirm whether the outage "
+                "is real or the check itself needs attention, then restore service."))
 
         # 3) SSL certificates expired or expiring within 30 days — a classic silent-failure
         #    risk. Red if any cert has already lapsed (the site is effectively down), else

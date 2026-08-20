@@ -178,6 +178,13 @@ def build_overview(store, systems, cfg) -> dict:
                         "head": f"Missing backups — {len(miss)} host(s) with no fresh backup",
                         "rows": [{"label": h, "values": ", ".join(v)}
                                  for h, v in sorted(bysys.items())]})
+    untracked = gr.backup_untracked(store, systems)
+    if untracked:
+        # Warning, not critical: a blind spot ("we can't tell"), not an active failure
+        # ("it's broken") — nothing here is judged missing, since nothing is being watched.
+        banners.append({"severity": "warning",
+                        "head": f"Backups untracked — {len(untracked)} system(s) with no backup check at all",
+                        "rows": [{"label": "Systems", "values": ", ".join(sorted(untracked))}]})
     if ur:
         bysys: dict = {}
         for s, lbl, _ in ur:
@@ -188,6 +195,16 @@ def build_overview(store, systems, cfg) -> dict:
                         "head": f"Unreachable — {len(ur)} component(s) across {len(bysys)} system(s)",
                         "rows": [{"label": s, "values": ", ".join(l)}
                                  for s, l in sorted(bysys.items())]})
+    down_detail = gr.services_down_detail(store, systems)
+    if down_detail:
+        bysys: dict = {}
+        for s, name in down_detail:
+            bysys.setdefault(s, []).append(name)
+        banners.append({"severity": "critical",
+                        "head": f"Services down — {len(down_detail)} service(s)/link(s) across "
+                                f"{len(bysys)} system(s)",
+                        "rows": [{"label": s, "values": ", ".join(sorted(names))}
+                                 for s, names in sorted(bysys.items())]})
     if cert_expired or cert_expiring:
         bits = ([f"{len(cert_expired)} expired"] if cert_expired else []) + \
                ([f"{len(cert_expiring)} expiring ≤30d"] if cert_expiring else [])
