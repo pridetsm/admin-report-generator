@@ -57,8 +57,6 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
-from openpyxl.cell.rich_text import CellRichText, TextBlock
-from openpyxl.cell.text import InlineFont
 from openpyxl.worksheet.datavalidation import DataValidation
 
 
@@ -1890,23 +1888,23 @@ class ReportBuilder:
         y += 1
         # band: system name (left) + one-line health summary (right)
         self._merge(y, 2, 7, f"▌  {sysm.name}", Theme.font(13, True, Theme.CYAN), bg=Theme.CARD)
-        # health summary: colour each segment by its OWN meaning (rich text), not the whole line.
-        # counts that are a state go green when 0 / red|amber when >0; plain counts (services)
-        # are constants -> the same blue as the system name (neither good nor bad).
+        # health summary, one colour for the whole line rather than per segment (rich text):
+        # openpyxl/Excel's horizontal alignment is NOT reliably honoured on a merged cell
+        # holding rich text (multiple runs) -- confirmed by screenshot, the line rendered
+        # flush LEFT despite al="right" and the correct 9-23 merge, leaving a visible gap
+        # before Notes' own right edge. Plain text's alignment is ordinary, well-supported
+        # behaviour, so this line now takes the WORST band present (red > amber > green),
+        # same rank order the per-system chips already use, rather than colouring segments
+        # individually.
         red, amber, green = Theme.CHIP["red"][0], Theme.CHIP["amber"][0], Theme.CHIP["green"][0]
-        segs = []                                            # (text, colour)
-        if nd:          segs.append((f"{nd} unreachable", red))
-        if nbk_missing: segs.append((f"{nbk_missing} no-backup", red))
-        if bk_untracked: segs.append(("backups untracked", amber))
-        segs.append((f"{nc} critical", green if nc == 0 else red))
-        segs.append((f"{nw} warning",  green if nw == 0 else amber))
-        segs.append((f"{len(svcs)} services", Theme.CYAN))   # a constant count, not a health state
-        _tb = lambda text, color: TextBlock(InlineFont(rFont="Consolas", sz=9, color=color), text)
-        parts = []
-        for i, (text, color) in enumerate(segs):
-            if i:
-                parts.append(_tb("  ·  ", Theme.SUB))        # neutral separator
-            parts.append(_tb(text, color))
+        segs = []                                            # plain text pieces, worst-first order
+        if nd:          segs.append(f"{nd} unreachable")
+        if nbk_missing: segs.append(f"{nbk_missing} no-backup")
+        if bk_untracked: segs.append("backups untracked")
+        segs.append(f"{nc} critical")
+        segs.append(f"{nw} warning")
+        segs.append(f"{len(svcs)} services")
+        summary_color = red if (nd or nbk_missing or nc) else (amber if (bk_untracked or nw) else green)
         # col 8 is the real gap column before Disk (see WIDTHS) -- blanked here TOO, in the
         # CARD background matching the rest of this bar, not just in the rows below, so the
         # name/summary bar reads as one solid strip rather than showing a hole the wrong
@@ -1915,8 +1913,8 @@ class ReportBuilder:
         # Right-aligned at 23 -- Notes' own right edge, always (see nl/nr below), not
         # Disk's -- so the summary sits flush with where the whole card actually ends,
         # the same edge the name panel's own bar now reaches.
-        self._merge(y, 9, 23, "", Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="right")
-        self.ws.cell(y, 9).value = CellRichText(parts)
+        self._merge(y, 9, 23, "  ·  ".join(segs), Theme.font(9, False, summary_color),
+                    bg=Theme.CARD, al="right")
         y += 1
         for c in range(2, 14):           # spacer between the name and the tables
             self._cell(y, c, bg=Theme.BG)
