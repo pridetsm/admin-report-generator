@@ -687,10 +687,107 @@ def _windows_metrics(only: Optional[set] = None) -> Dict[str, dict]:
     return out
 
 
-def _windows_device_flags(dev: dict, m: dict) -> list:
+# windows_exporter's mscluster_node collector State -- confirmed against this cluster's own
+# live data (all 4 nodes read 0 while the cluster is healthy and every device is reachable).
+_CLUSTER_NODE_STATE = {-1: "unknown", 0: "up", 1: "down", 2: "paused", 3: "joining"}
+
+# mscluster_resource collector State. 2 (Online) and 3 (Offline) are the two states actually
+# seen on this cluster: Offline is NOT necessarily a fault -- most of this estate's Offline
+# resources are deliberately-powered-off test/UAT/DR VMs (confirmed against the live name
+# list), so it is treated as informational (see the "offline" banner in _network_overview),
+# never a red/amber flag. Only a genuine Failed state is flagged.
+_CLUSTER_RESOURCE_STATE = {-1: "unknown", 0: "inherited", 1: "initializing", 2: "online",
+                          3: "offline", 4: "failed", 128: "pending", 129: "online pending",
+                          130: "offline pending"}
+
+
+def _windows_cluster_metrics(only: Optional[set] = None) -> Dict[str, dict]:
+    """Windows Server Failover Cluster health, for windows-kind devices that expose it (the
+    exporter's mscluster_* collectors) -- e.g. HCI Cluster. A separate question from
+    _windows_metrics()'s CPU/RAM/disk: that answers "is the HOST healthy", this answers "is
+    the CLUSTER healthy" -- node up/down state, and resource (mostly VM) state, plus which
+    node currently owns each resource group. A future windows-kind device that does NOT run
+    this collector simply never appears in the result (see the `if t not in ...: continue`
+    below) rather than reading as an empty/broken cluster.
+
+    Returns {target: {"nodes": [(name, state_text, up_bool), ...],
+                       "resources": {"online": n, "offline": n, "failed": n, "other": n,
+                                     "offline_names": [...], "failed_names": [...]},
+                       "owners": {node_name: group_count}}}.
+    """
+    wanted = [d for d in DEVICES if d.get("kind") == "windows" and (only is None or d["key"] in only)]
+    if not wanted:
+        return {}
+    prom, _ = _prometheus()
+
+    def q(expr):
+        try:
+            return prom.query(expr)
+        except Exception:                   # noqa: BLE001
+            return []
+
+    nodes_by_target: Dict[str, list] = {}
+    for r in q("windows_mscluster_node_state"):
+        inst = r["labels"].get("instance")
+        if not inst:
+            continue
+        state = int(r["value"])
+        nodes_by_target.setdefault(inst, []).append(
+            (r["labels"].get("node", "?"), _CLUSTER_NODE_STATE.get(state, f"state {state}"), state == 0))
+
+    res_by_target: Dict[str, dict] = {}
+    for r in q("windows_mscluster_resource_state"):
+        inst = r["labels"].get("instance")
+        if not inst:
+            continue
+        state = int(r["value"])
+        c = res_by_target.setdefault(inst, {"online": 0, "offline": 0, "failed": 0, "other": 0,
+                                            "offline_names": [], "failed_names": []})
+        name = r["labels"].get("name", "?")
+        if state == 2:
+            c["online"] += 1
+        elif state == 3:
+            c["offline"] += 1
+            c["offline_names"].append(name)
+        elif state == 4:
+            c["failed"] += 1
+            c["failed_names"].append(name)
+        else:
+            c["other"] += 1
+
+    owners_by_target: Dict[str, dict] = {}
+    for r in q("windows_mscluster_resourcegroup_owner_node"):
+        inst = r["labels"].get("instance")
+        if not inst or r["value"] != 1.0:      # one-hot: only the row naming the ACTUAL owner is 1
+            continue
+        node = r["labels"].get("node", "?")
+        owners_by_target.setdefault(inst, {})
+        owners_by_target[inst][node] = owners_by_target[inst].get(node, 0) + 1
+
+    out = {}
+    for d in wanted:
+        t = d["target"]
+        if t not in nodes_by_target and t not in res_by_target:
+            continue                          # this windows device has no mscluster collector
+        out[t] = {
+            "nodes": nodes_by_target.get(t, []),
+            "resources": res_by_target.get(t, {"online": 0, "offline": 0, "failed": 0, "other": 0,
+                                               "offline_names": [], "failed_names": []}),
+            "owners": owners_by_target.get(t, {}),
+        }
+    return out
+
+
+def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None) -> list:
     """The flagged items for one windows_exporter device — same red/amber vocabulary and
     80%/90% thresholds _device_flags() uses for the switch, so the two device kinds read
-    alike on the same report."""
+    alike on the same report.
+
+    `cluster` (see _windows_cluster_metrics) adds two REAL faults on top of CPU/RAM/disk: a
+    cluster node that is down, and a resource in a genuine Failed state. An Offline resource
+    is deliberately NOT flagged here — see _CLUSTER_RESOURCE_STATE's docstring; it only
+    appears in the informational banner _network_overview() builds.
+    """
     from .services import FlagVM
 
     if not m.get("known"):
@@ -713,6 +810,14 @@ def _windows_device_flags(dev: dict, m: dict) -> list:
             flags.append(FlagVM(f"disk_high:{disk['volume']}",
                                 f"{disk['volume']} at {used:.0f}% used",
                                 "red" if used >= 90 else "amber", "disk"))
+    if cluster:
+        for name, state_text, up in cluster.get("nodes", []):
+            if not up:
+                flags.append(FlagVM(f"cluster_node_down:{name}",
+                                    f"Cluster node {name} is {state_text}", "red", "unreachable"))
+        for name in cluster.get("resources", {}).get("failed_names", []):
+            flags.append(FlagVM(f"cluster_resource_failed:{name}",
+                                f"Cluster resource '{name}' is in a Failed state", "red", "service"))
     return flags
 
 
@@ -940,7 +1045,8 @@ def _device_flags(dev: dict, data: dict) -> list:
     return flags
 
 
-def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = None) -> dict:
+def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = None,
+                      win_cluster: Optional[list] = None) -> dict:
     """The at-a-glance / immediate / watch bands, in the shape reports/form.html renders.
 
     Same three-band layout as the systems overview so the screen is genuinely the same one,
@@ -1021,6 +1127,61 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             "state": "info" if data.get("counters_are_64bit") else "warn",
         }
 
+    # ---- Windows Server Failover Cluster health (e.g. HCI Cluster) -- see
+    # _windows_cluster_metrics(). Node-down and resource-Failed are real faults (also flagged
+    # per-device, see _windows_device_flags); a resource merely Offline is NOT one -- most of
+    # this estate's Offline resources are deliberately-powered-off test/UAT/DR VMs, so it is
+    # informational only (a NOTE banner naming what's offline, never a coloured tile) and
+    # never counted toward "immediate"/"watch". Nothing here renders at all when no windows
+    # device in scope exposes cluster metrics (win_cluster empty) -- an empty "0 | 0" tile
+    # would read as a broken cluster rather than as "not applicable".
+    cluster_glance, cluster_immediate, cluster_banners = [], [], []
+    win_cluster = win_cluster or []
+    if win_cluster:
+        cnodes = [n for wc in win_cluster for n in wc.get("nodes", [])]
+        cnodes_up = sum(1 for _, _, up in cnodes if up)
+        cres = {"online": 0, "offline": 0, "failed": 0, "other": 0, "offline_names": [], "failed_names": []}
+        owners: Dict[str, int] = {}
+        for wc in win_cluster:
+            r = wc.get("resources") or {}
+            for k in ("online", "offline", "failed", "other"):
+                cres[k] += r.get(k, 0)
+            cres["offline_names"] += r.get("offline_names", [])
+            cres["failed_names"] += r.get("failed_names", [])
+            for node, count in (wc.get("owners") or {}).items():
+                owners[node] = owners.get(node, 0) + count
+        cres_total = cres["online"] + cres["offline"] + cres["failed"] + cres["other"]
+
+        cluster_glance = [
+            {"label": "Cluster nodes", "value": f"{cnodes_up} | {len(cnodes)}",
+             "sub": "up | total", "state": "info"},
+            {"label": "Cluster resources", "value": f"{cres['online']} | {cres_total}",
+             "sub": f"online | total ({cres['offline']} offline — not flagged, see below)",
+             "state": "info"},
+        ]
+        cluster_immediate = [
+            {"label": "Cluster nodes down", "value": f"{len(cnodes) - cnodes_up} | {len(cnodes)}",
+             "sub": "nodes | total", "state": bad(len(cnodes) - cnodes_up)},
+            {"label": "Cluster resources failed", "value": f"{cres['failed']} | {cres_total}",
+             "sub": "failed | total", "state": bad(cres["failed"])},
+        ]
+        if cres["offline_names"]:
+            cluster_banners.append({
+                "band": "info", "sev_label": "NOTE",
+                "head": f"{cres['offline']} cluster resource(s) offline — informational, not flagged",
+                "rows": [{"label": "Offline", "values": "   ".join(sorted(cres["offline_names"]))}],
+                "detail": "These clustered resources (mostly VMs) are currently Offline. Many are "
+                          "deliberately powered off (test/UAT/DR/lab boxes), so this is not treated as "
+                          "a fault — only a genuinely Failed resource state is flagged above.",
+            })
+        if owners:
+            cluster_banners.append({
+                "band": "info", "sev_label": "NOTE",
+                "head": "VM / resource group placement across the cluster's nodes",
+                "rows": [{"label": node, "values": f"{count} group(s)"}
+                        for node, count in sorted(owners.items())],
+            })
+
     return {
         "glance": [
             {"label": "Devices", "value": len(devices), "state": "info"},
@@ -1032,7 +1193,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             {"label": "Throughput in", "value": data["total_in_text"], "state": "info"},
             {"label": "MAC / ARP entries", "value": f"{data.get('mac_count', 0)} | {data.get('arp_count', 0)}",
              "sub": "entry count, not % of capacity", "state": "info"},
-        ],
+        ] + cluster_glance,
         "immediate": [
             {"label": "Not responding", "value": f"{len(unreachable)} | {dev_total}",
              "sub": "devices | total", "state": bad(len(unreachable))},
@@ -1051,7 +1212,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             # reasoning _device_flags()'s iface_errors flag uses to go straight to red.
             {"label": "Interfaces with errors", "value": f"{err_only_n} | {iface_total}",
              "sub": "true errors | total", "state": bad(err_only_n)},
-        ],
+        ] + cluster_immediate,
         "watch": [
             {"label": "High CPU", "value": f"{cpu_over} | {dev_total}",
              "sub": "devices | total", "state": cpu_state},
@@ -1079,7 +1240,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
              "sub": "metrics | total requested", "state": warn(missing)},
             accuracy,
         ],
-        "banners": [],
+        "banners": cluster_banners,
     }
 
 
@@ -1116,17 +1277,21 @@ def capture_snapshot(token: str, only: Optional[set] = None):
                              flags=_device_flags(live, data)))
 
     win_devices = [d for d in DEVICES if d.get("kind") == "windows" and (only is None or d["key"] in only)]
-    wm = _windows_metrics({d["key"] for d in win_devices}) if win_devices else {}
+    win_keys = {d["key"] for d in win_devices}
+    wm = _windows_metrics(win_keys) if win_devices else {}
+    wc = _windows_cluster_metrics(win_keys) if win_devices else {}
     for dev in win_devices:
         m = wm.get(dev["target"], {"known": False, "reachable": False})
-        svms.append(SystemVM(name=dev["name"], hosts=1, flags=_windows_device_flags(dev, m)))
+        svms.append(SystemVM(name=dev["name"], hosts=1,
+                             flags=_windows_device_flags(dev, m, wc.get(dev["target"]))))
 
     snap = Snapshot(
         token=token,
         captured_at=datetime.datetime.now(),
         prom_url=data["prom_url"],
         systems=svms,
-        overview=_network_overview(data, list(inv.values()), win_metrics=list(wm.values())),
+        overview=_network_overview(data, list(inv.values()), win_metrics=list(wm.values()),
+                                   win_cluster=list(wc.values())),
     )
     # carried for the report screen and for generation; the systems flow parks its engine
     # objects on the same attributes.
@@ -1253,10 +1418,48 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             paint(r)
             r += 1
 
+        def banner(b):
+            """An informational callout (see _network_overview's cluster banners) — same
+            head/rows/detail shape the web screen renders, coloured by `band`. Only "info"
+            exists today (CYAN, the app's own existing informational accent — not a new
+            colour), but red/amber are supported too so a future non-informational network
+            banner does not need a second renderer."""
+            nonlocal r
+            accent = {"red": CHIP["red"][0], "amber": CHIP["amber"][0]}.get(b.get("band"), CYAN)
+            paint(r)
+            ws.cell(r, FIRST, f"{b.get('sev_label', 'NOTE')}  —  {b['head']}").font = Font(
+                bold=True, size=11, color=accent)
+            for c in range(FIRST, LAST):
+                ws.cell(r, c).fill = card
+            r += 1
+            for row in b.get("rows", []):
+                paint(r)
+                ws.cell(r, FIRST, row["label"]).font = Font(bold=True, size=9, color=GREY)
+                v = ws.cell(r, FIRST + 1, row["values"])
+                v.font = Font(size=9, color=INK)
+                v.alignment = Alignment(wrap_text=True, vertical="top")
+                ws.merge_cells(start_row=r, start_column=FIRST + 1, end_row=r, end_column=LAST - 1)
+                for c in range(FIRST, LAST):
+                    ws.cell(r, c).fill = card
+                r += 1
+            if b.get("detail"):
+                paint(r)
+                d = ws.cell(r, FIRST, b["detail"])
+                d.font = Font(size=8, color=SUB)
+                d.alignment = Alignment(wrap_text=True, vertical="top")
+                ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=LAST - 1)
+                for c in range(FIRST, LAST):
+                    ws.cell(r, c).fill = card
+                r += 1
+            paint(r)
+            r += 1
+
         ov = snapshot.overview or {}
         band("At a glance", ov.get("glance", []))
         band("Immediate attention", ov.get("immediate", []))
         band("Watch list", ov.get("watch", []))
+        for b in ov.get("banners", []):
+            banner(b)
 
         # "N interfaces" describes the switch; a windows_exporter device (e.g. HCI Cluster)
         # has no interface count in this report's sense, so it gets the same "host(s)"
