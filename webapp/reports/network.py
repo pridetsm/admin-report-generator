@@ -701,6 +701,109 @@ _CLUSTER_RESOURCE_STATE = {-1: "unknown", 0: "inherited", 1: "initializing", 2: 
                           130: "offline pending"}
 
 
+def _hci_node_metrics() -> Dict[str, dict]:
+    """Per-node CPU/RAM/disk/network/latency for every HCI Cluster node -- queried by JOB
+    ("hci_cluster" has 4 targets, see prometheus.yml), not by a single DEVICES target, so it
+    naturally covers whichever nodes are actually reporting. up{job="hci_cluster"} names all
+    4 configured instances regardless of reachability, so a node with windows_exporter not
+    yet installed still gets a row here (known=True, reachable=False, everything else None/
+    empty) rather than silently vanishing -- an admin needs to see it is expected but absent.
+
+    Network is summed across a node's NICs (total throughput/errors/discards, not a per-
+    adapter breakdown -- the question here is "is this node's networking healthy", the same
+    level the switch's own per-device totals answer at). Latency is the average seconds/op
+    over RATE_WINDOW, summed across a node's disks -- a per-disk breakdown would be noise at
+    this level; "is this node's storage struggling" is the question.
+
+    Returns {target: {"display":, "known":, "reachable":, "cpu_pct":, "mem_pct":,
+                       "disks": [...], "net": {in_bps, out_bps, err_in, err_out, disc_in,
+                       disc_out}, "latency": {read_ms, write_ms}}}.
+    """
+    prom, _ = _prometheus()
+
+    def q(expr):
+        try:
+            return prom.query(expr)
+        except Exception:                   # noqa: BLE001
+            return []
+
+    up: Dict[str, float] = {}
+    display: Dict[str, str] = {}
+    for r in q('up{job="hci_cluster"}'):
+        inst = r["labels"].get("instance")
+        if not inst:
+            continue
+        up[inst] = r["value"]
+        display[inst] = r["labels"].get("display", inst)
+
+    cpu = {r["labels"]["instance"]: r["value"]
+          for r in q('100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100)')
+          if r["labels"].get("instance")}
+    mem = {r["labels"]["instance"]: r["value"]
+          for r in q("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)")
+          if r["labels"].get("instance")}
+
+    used, free, size = {}, {}, {}
+    for r in q(f"100*(1-windows_logical_disk_free_bytes{{{_WIN_VOL}}}/windows_logical_disk_size_bytes{{{_WIN_VOL}}})"):
+        if r["labels"].get("instance"):
+            used.setdefault(r["labels"]["instance"], {})[r["labels"].get("volume")] = r["value"]
+    for r in q(f"windows_logical_disk_free_bytes{{{_WIN_VOL}}}/1024/1024/1024"):
+        if r["labels"].get("instance"):
+            free.setdefault(r["labels"]["instance"], {})[r["labels"].get("volume")] = r["value"]
+    for r in q(f"windows_logical_disk_size_bytes{{{_WIN_VOL}}}/1024/1024/1024"):
+        if r["labels"].get("instance"):
+            size.setdefault(r["labels"]["instance"], {})[r["labels"].get("volume")] = r["value"]
+
+    def _sum_by_instance(expr):
+        out: Dict[str, float] = {}
+        for r in q(expr):
+            inst = r["labels"].get("instance")
+            if inst:
+                out[inst] = out.get(inst, 0.0) + r["value"]
+        return out
+
+    net_in = _sum_by_instance(f"rate(windows_net_bytes_received_total[{RATE_WINDOW}])")
+    net_out = _sum_by_instance(f"rate(windows_net_bytes_sent_total[{RATE_WINDOW}])")
+    err_in = _sum_by_instance(f"increase(windows_net_packets_received_errors_total[{RATE_WINDOW}])")
+    err_out = _sum_by_instance(f"increase(windows_net_packets_outbound_errors_total[{RATE_WINDOW}])")
+    disc_in = _sum_by_instance(f"increase(windows_net_packets_received_discarded_total[{RATE_WINDOW}])")
+    disc_out = _sum_by_instance(f"increase(windows_net_packets_outbound_discarded_total[{RATE_WINDOW}])")
+
+    read_lat_sum = _sum_by_instance(f"increase(windows_physical_disk_read_latency_seconds_total[{RATE_WINDOW}])")
+    read_ops_sum = _sum_by_instance(f"increase(windows_physical_disk_reads_total[{RATE_WINDOW}])")
+    write_lat_sum = _sum_by_instance(f"increase(windows_physical_disk_write_latency_seconds_total[{RATE_WINDOW}])")
+    write_ops_sum = _sum_by_instance(f"increase(windows_physical_disk_writes_total[{RATE_WINDOW}])")
+
+    out: Dict[str, dict] = {}
+    for inst in up:
+        reachable = up[inst] == 1.0
+        disks = [{"volume": vol, "used": u,
+                  "free": free.get(inst, {}).get(vol), "size": size.get(inst, {}).get(vol)}
+                 for vol, u in used.get(inst, {}).items()]
+        r_ops, w_ops = read_ops_sum.get(inst, 0.0), write_ops_sum.get(inst, 0.0)
+        out[inst] = {
+            "display": display.get(inst, inst),
+            "known": True,
+            "reachable": reachable,
+            "cpu_pct": cpu.get(inst),
+            "mem_pct": mem.get(inst),
+            "disks": disks,
+            # None (not 0) when unreachable -- "no traffic measured" is not the same claim as
+            # "measured zero traffic", the same distinction CPU/RAM already make via .get()
+            # returning None rather than a fabricated 0.
+            "net": {
+                "in_bps": net_in.get(inst, 0.0) * 8, "out_bps": net_out.get(inst, 0.0) * 8,
+                "err_in": err_in.get(inst, 0.0), "err_out": err_out.get(inst, 0.0),
+                "disc_in": disc_in.get(inst, 0.0), "disc_out": disc_out.get(inst, 0.0),
+            } if reachable else None,
+            "latency": {
+                "read_ms": (read_lat_sum.get(inst, 0.0) / r_ops * 1000) if r_ops else None,
+                "write_ms": (write_lat_sum.get(inst, 0.0) / w_ops * 1000) if w_ops else None,
+            },
+        }
+    return out
+
+
 def _windows_cluster_metrics(only: Optional[set] = None) -> Dict[str, dict]:
     """Windows Server Failover Cluster health, for windows-kind devices that expose it (the
     exporter's mscluster_* collectors) -- e.g. HCI Cluster. A separate question from
@@ -778,7 +881,17 @@ def _windows_cluster_metrics(only: Optional[set] = None) -> Dict[str, dict]:
     return out
 
 
-def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None) -> list:
+# Errors/discards over RATE_WINDOW that are worth a watch-band flag -- same reasoning
+# collect()'s DISCARD_RED uses for the switch: a handful is normal background noise, this
+# floor is well above that and well below genuine sustained congestion.
+_NODE_ERR_RED = 100
+_NODE_DISC_RED = 1000
+_NODE_LATENCY_AMBER_MS = 15    # disk I/O latency worth watching
+_NODE_LATENCY_RED_MS = 40      # disk I/O latency indicating real storage trouble
+
+
+def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None,
+                          nodes: Optional[Dict[str, dict]] = None) -> list:
     """The flagged items for one windows_exporter device — same red/amber vocabulary and
     80%/90% thresholds _device_flags() uses for the switch, so the two device kinds read
     alike on the same report.
@@ -787,6 +900,11 @@ def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None) ->
     cluster node that is down, and a resource in a genuine Failed state. An Offline resource
     is deliberately NOT flagged here — see _CLUSTER_RESOURCE_STATE's docstring; it only
     appears in the informational banner _network_overview() builds.
+
+    `nodes` (see _hci_node_metrics), when given, replaces the single-target CPU/RAM/disk
+    checks below with the SAME checks run per NODE across the whole cluster (plus network
+    errors/discards and disk latency, which a single-target device has no equivalent of) --
+    so a hot node 3 shows up even while node 1 (the device's own primary target) is fine.
     """
     from .services import FlagVM
 
@@ -796,20 +914,59 @@ def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None) ->
     if not m.get("reachable"):
         return [FlagVM("win_down", f"{dev['name']} is not answering", "red", "unreachable")]
     flags = []
-    cpu = m.get("cpu_pct")
-    if cpu is not None and cpu >= 80:
-        flags.append(FlagVM("cpu_high", f"CPU at {cpu:.0f}% (5-minute average)",
-                            "red" if cpu >= 90 else "amber", "cpu"))
-    mem = m.get("mem_pct")
-    if mem is not None and mem >= 80:
-        flags.append(FlagVM("mem_high", f"Memory at {mem:.0f}% in use",
-                            "red" if mem >= 90 else "amber", "ram"))
-    for disk in m.get("disks", []):
-        used = disk.get("used")
-        if used is not None and used >= 80:
-            flags.append(FlagVM(f"disk_high:{disk['volume']}",
-                                f"{disk['volume']} at {used:.0f}% used",
-                                "red" if used >= 90 else "amber", "disk"))
+    if nodes:
+        for target, n in sorted(nodes.items(), key=lambda kv: kv[1].get("display", kv[0])):
+            label = n.get("display", target)
+            if not n.get("reachable"):
+                flags.append(FlagVM(f"node_down:{target}", f"{label} is not answering",
+                                    "red", "unreachable"))
+                continue
+            cpu = n.get("cpu_pct")
+            if cpu is not None and cpu >= 80:
+                flags.append(FlagVM(f"node_cpu:{target}", f"{label} · CPU at {cpu:.0f}%",
+                                    "red" if cpu >= 90 else "amber", "cpu"))
+            mem = n.get("mem_pct")
+            if mem is not None and mem >= 80:
+                flags.append(FlagVM(f"node_mem:{target}", f"{label} · Memory at {mem:.0f}% in use",
+                                    "red" if mem >= 90 else "amber", "ram"))
+            for disk in n.get("disks", []):
+                used = disk.get("used")
+                if used is not None and used >= 80:
+                    flags.append(FlagVM(f"node_disk:{target}:{disk['volume']}",
+                                        f"{label} · {disk['volume']} at {used:.0f}% used",
+                                        "red" if used >= 90 else "amber", "disk"))
+            net = n.get("net") or {}
+            err = net.get("err_in", 0) + net.get("err_out", 0)
+            if err >= _NODE_ERR_RED:
+                flags.append(FlagVM(f"node_net_err:{target}",
+                                    f"{label} · {err:.0f} network error(s) in the last {RATE_WINDOW}",
+                                    "red", "unreachable"))
+            disc = net.get("disc_in", 0) + net.get("disc_out", 0)
+            if disc >= _NODE_DISC_RED:
+                flags.append(FlagVM(f"node_net_disc:{target}",
+                                    f"{label} · {disc:.0f} discard(s) in the last {RATE_WINDOW}",
+                                    "amber", "unreachable"))
+            lat = n.get("latency") or {}
+            worst_ms = max((v for v in (lat.get("read_ms"), lat.get("write_ms")) if v is not None), default=None)
+            if worst_ms is not None and worst_ms >= _NODE_LATENCY_AMBER_MS:
+                flags.append(FlagVM(f"node_latency:{target}",
+                                    f"{label} · disk latency {worst_ms:.1f}ms",
+                                    "red" if worst_ms >= _NODE_LATENCY_RED_MS else "amber", "disk"))
+    else:
+        cpu = m.get("cpu_pct")
+        if cpu is not None and cpu >= 80:
+            flags.append(FlagVM("cpu_high", f"CPU at {cpu:.0f}% (5-minute average)",
+                                "red" if cpu >= 90 else "amber", "cpu"))
+        mem = m.get("mem_pct")
+        if mem is not None and mem >= 80:
+            flags.append(FlagVM("mem_high", f"Memory at {mem:.0f}% in use",
+                                "red" if mem >= 90 else "amber", "ram"))
+        for disk in m.get("disks", []):
+            used = disk.get("used")
+            if used is not None and used >= 80:
+                flags.append(FlagVM(f"disk_high:{disk['volume']}",
+                                    f"{disk['volume']} at {used:.0f}% used",
+                                    "red" if used >= 90 else "amber", "disk"))
     if cluster:
         for name, state_text, up in cluster.get("nodes", []):
             if not up:
@@ -1046,7 +1203,8 @@ def _device_flags(dev: dict, data: dict) -> list:
 
 
 def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = None,
-                      win_cluster: Optional[list] = None) -> dict:
+                      win_cluster: Optional[list] = None,
+                      hci_nodes: Optional[Dict[str, dict]] = None) -> dict:
     """The at-a-glance / immediate / watch bands, in the shape reports/form.html renders.
 
     Same three-band layout as the systems overview so the screen is genuinely the same one,
@@ -1218,6 +1376,84 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
                         for node, count in sorted(owners.items())],
             })
 
+    # ---- per-node CPU/Storage/Network/Latency, and the whole cluster's own rollup of the
+    # same (see _hci_node_metrics) -- a DIFFERENT question from win_cluster/cres above, which
+    # is cluster STATE (is each node Up, is each VM Online); this is node/cluster RESOURCE
+    # USAGE. Nodes not yet running windows_exporter (see the 2026-08-21 rollout) still get a
+    # row -- "not answering" -- rather than silently vanishing from the table. ----
+    hci_nodes = hci_nodes or {}
+    if hci_nodes:
+        reporting = [n for n in hci_nodes.values() if n.get("reachable")]
+
+        def _avg(key):
+            vals = [n[key] for n in reporting if n.get(key) is not None]
+            return sum(vals) / len(vals) if vals else None
+
+        cluster_glance += [
+            {"label": "Cluster CPU (avg)",
+             "value": (f"{_avg('cpu_pct'):.0f}%" if _avg("cpu_pct") is not None else "—"),
+             "sub": f"across {len(reporting)} reporting node(s)", "state": "info"},
+            {"label": "Cluster Memory (avg)",
+             "value": (f"{_avg('mem_pct'):.0f}%" if _avg("mem_pct") is not None else "—"),
+             "sub": f"across {len(reporting)} reporting node(s)", "state": "info"},
+        ]
+        used_gb = sum(d.get("size", 0) * (d.get("used") or 0) / 100 for n in reporting for d in n.get("disks", [])
+                      if d.get("size") is not None)
+        total_gb = sum(d.get("size", 0) for n in reporting for d in n.get("disks", []) if d.get("size") is not None)
+        if total_gb:
+            cluster_glance.append({"label": "Cluster storage", "value": f"{used_gb:.0f} / {total_gb:.0f} GB",
+                                   "sub": "used | total, summed across nodes", "state": "info"})
+        total_in = sum((n.get("net") or {}).get("in_bps", 0) for n in reporting)
+        total_out = sum((n.get("net") or {}).get("out_bps", 0) for n in reporting)
+        cluster_glance.append({"label": "Cluster throughput",
+                               "value": f"{_fmt_bps(total_in)} in  ·  {_fmt_bps(total_out)} out",
+                               "sub": "summed across nodes", "state": "info"})
+        total_err = sum((n.get("net") or {}).get("err_in", 0) + (n.get("net") or {}).get("err_out", 0)
+                        for n in reporting)
+        total_disc = sum((n.get("net") or {}).get("disc_in", 0) + (n.get("net") or {}).get("disc_out", 0)
+                         for n in reporting)
+        cluster_immediate.append({"label": "Cluster network errors",
+                                  "value": f"{total_err:.0f} | {RATE_WINDOW}",
+                                  "sub": "summed across nodes", "state": bad(total_err)})
+        cluster_immediate.append({"label": "Cluster network discards",
+                                  "value": f"{total_disc:.0f} | {RATE_WINDOW}",
+                                  "sub": "summed across nodes", "state": warn(total_disc)})
+        worst_latency = max((v for n in reporting for v in
+                            ((n.get("latency") or {}).get("read_ms"), (n.get("latency") or {}).get("write_ms"))
+                            if v is not None), default=None)
+        cluster_glance.append({"label": "Cluster disk latency (worst)",
+                               "value": (f"{worst_latency:.1f}ms" if worst_latency is not None else "—"),
+                               "sub": "slowest node/op, read or write", "state": "info"})
+
+        rows = []
+        for target, n in sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0])):
+            label = n.get("display", target)
+            if not n.get("reachable"):
+                rows.append({"label": label, "values": "not answering"})
+                continue
+            cpu = n.get("cpu_pct")
+            mem = n.get("mem_pct")
+            disks = n.get("disks", [])
+            store = "  ·  ".join(f"{d['volume']} {d.get('used', 0):.0f}%" for d in disks) or "—"
+            net = n.get("net") or {}
+            lat = n.get("latency") or {}
+            lat_bits = [f"{v:.1f}ms {k}" for k, v in (("read", lat.get("read_ms")), ("write", lat.get("write_ms")))
+                       if v is not None]
+            rows.append({"label": label,
+                        "values": f"CPU {cpu:.0f}%  ·  RAM {mem:.0f}%  ·  {store}  ·  "
+                                  f"{_fmt_bps(net.get('in_bps', 0))} in / {_fmt_bps(net.get('out_bps', 0))} out  ·  "
+                                  f"{net.get('err_in', 0) + net.get('err_out', 0):.0f} err / "
+                                  f"{net.get('disc_in', 0) + net.get('disc_out', 0):.0f} disc  ·  "
+                                  + (", ".join(lat_bits) if lat_bits else "latency n/a")})
+        cluster_banners.append({
+            "band": "info", "sev_label": "NOTE",
+            "head": "Per-node CPU / storage / network — HCI Cluster",
+            "rows": rows,
+            "detail": f"Errors/discards and latency are over the last {RATE_WINDOW}. Genuinely high "
+                      "values are already flagged separately above (per node, on this system's card) "
+                      "— this table is the full picture, not just what crossed a threshold.",
+        })
+
     # Same post-processing services.py's build_overview() uses: `band`/`sev_label` are DERIVED
     # from `severity` rather than set by hand, so a banner can't read amber on screen and red
     # in the file, and the two reports use one shared vocabulary. The informational NOTE
@@ -1329,10 +1565,14 @@ def capture_snapshot(token: str, only: Optional[set] = None):
     win_keys = {d["key"] for d in win_devices}
     wm = _windows_metrics(win_keys) if win_devices else {}
     wc = _windows_cluster_metrics(win_keys) if win_devices else {}
+    # job-scoped (not per-DEVICES-target), so it naturally covers all 4 HCI Cluster nodes --
+    # only queried when the hci-cluster device is actually in scope for this report.
+    hci_nodes = _hci_node_metrics() if any(d["key"] == "hci-cluster" for d in win_devices) else {}
     for dev in win_devices:
         m = wm.get(dev["target"], {"known": False, "reachable": False})
-        svms.append(SystemVM(name=dev["name"], hosts=1,
-                             flags=_windows_device_flags(dev, m, wc.get(dev["target"]))))
+        nodes = hci_nodes if dev["key"] == "hci-cluster" else None
+        svms.append(SystemVM(name=dev["name"], hosts=(len(nodes) if nodes else 1),
+                             flags=_windows_device_flags(dev, m, wc.get(dev["target"]), nodes)))
 
     snap = Snapshot(
         token=token,
@@ -1340,7 +1580,7 @@ def capture_snapshot(token: str, only: Optional[set] = None):
         prom_url=data["prom_url"],
         systems=svms,
         overview=_network_overview(data, list(inv.values()), win_metrics=list(wm.values()),
-                                   win_cluster=list(wc.values())),
+                                   win_cluster=list(wc.values()), hci_nodes=hci_nodes),
     )
     # carried for the report screen and for generation; the systems flow parks its engine
     # objects on the same attributes.
