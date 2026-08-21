@@ -1422,8 +1422,9 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
                                    "sub": "used | total, summed across nodes", "state": "info"})
         total_in = sum((n.get("net") or {}).get("in_bps", 0) for n in reporting)
         total_out = sum((n.get("net") or {}).get("out_bps", 0) for n in reporting)
-        cluster_glance.append({"label": "Cluster throughput",
-                               "value": f"{_fmt_bps(total_in)} in  ·  {_fmt_bps(total_out)} out",
+        cluster_glance.append({"label": "Cluster throughput in", "value": _fmt_bps(total_in),
+                               "sub": "summed across nodes", "state": "info"})
+        cluster_glance.append({"label": "Cluster throughput out", "value": _fmt_bps(total_out),
                                "sub": "summed across nodes", "state": "info"})
         total_err = sum((n.get("net") or {}).get("err_in", 0) + (n.get("net") or {}).get("err_out", 0)
                         for n in reporting)
