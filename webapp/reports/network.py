@@ -1312,7 +1312,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
                       "exporter has stopped, or there are network/connectivity issues. Treat as urgent.",
         })
 
-    cluster_glance, cluster_immediate, cluster_banners = [], [], []
+    cluster_glance, cluster_immediate, cluster_watch, cluster_banners = [], [], [], []
     win_cluster = win_cluster or []
     if win_cluster:
         cnodes = [n for wc in win_cluster for n in wc.get("nodes", [])]
@@ -1393,10 +1393,27 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             {"label": "Cluster CPU (avg)",
              "value": (f"{_avg('cpu_pct'):.0f}%" if _avg("cpu_pct") is not None else "—"),
              "sub": f"across {len(reporting)} reporting node(s)", "state": "info"},
-            {"label": "Cluster Memory (avg)",
-             "value": (f"{_avg('mem_pct'):.0f}%" if _avg("mem_pct") is not None else "—"),
-             "sub": f"across {len(reporting)} reporting node(s)", "state": "info"},
         ]
+        # Cluster Memory is graded, never a plain glance readout: 70-80% is a watch-band
+        # finding, above 80% escalates to immediate, and 95%+ ALSO gets its own IMMINENT
+        # banner on top of the immediate tile -- below 70% it doesn't appear at all (nothing
+        # to say). Same "affected | total" tile shape everywhere else on this report uses.
+        avg_mem = _avg("mem_pct")
+        if avg_mem is not None and avg_mem >= 70:
+            tile = {"label": "Cluster Memory (avg)", "value": f"{avg_mem:.0f}%",
+                   "sub": f"across {len(reporting)} reporting node(s)",
+                   "state": "bad" if avg_mem > 80 else "warn"}
+            (cluster_immediate if avg_mem > 80 else cluster_watch).append(tile)
+            if avg_mem >= 95:
+                fault_banners.append({
+                    "severity": "imminent",
+                    "head": f"CLUSTER MEMORY CRITICAL  —  HCI Cluster averaging {avg_mem:.0f}% memory",
+                    "rows": [{"label": "HCI Cluster",
+                              "values": f"{avg_mem:.0f}% average across {len(reporting)} reporting node(s)"}],
+                    "detail": "Cluster-wide memory pressure is critical. If this holds, expect VM "
+                              "performance degradation or the cluster starting to page/swap. "
+                              "Investigate immediately.",
+                })
         used_gb = sum(d.get("size", 0) * (d.get("used") or 0) / 100 for n in reporting for d in n.get("disks", [])
                       if d.get("size") is not None)
         total_gb = sum(d.get("size", 0) for n in reporting for d in n.get("disks", []) if d.get("size") is not None)
@@ -1519,7 +1536,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             {"label": "Metrics not collected", "value": f"{missing} | {len(CATALOGUE)}",
              "sub": "metrics | total requested", "state": warn(missing)},
             accuracy,
-        ],
+        ] + cluster_watch,
         "banners": all_banners,
     }
 
