@@ -1293,68 +1293,31 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
         }
 
     # ---- Windows Server Failover Cluster health (e.g. HCI Cluster) -- see
-    # _windows_cluster_metrics(). Node-down and resource-Failed are real faults (also flagged
-    # per-device, see _windows_device_flags); a resource merely Offline is NOT one -- most of
-    # this estate's Offline resources are deliberately-powered-off test/UAT/DR VMs, so it is
-    # informational only (a NOTE banner naming what's offline, never a coloured tile) and
-    # never counted toward "immediate"/"watch". Nothing here renders at all when no windows
-    # device in scope exposes cluster metrics (win_cluster empty) -- an empty "0 | 0" tile
-    # would read as a broken cluster rather than as "not applicable".
-    # ---- real-fault banners, in the SAME vocabulary/structure the systems report uses --
-    # gr.SEVERITY (imminent/critical/warning), not a separate scheme, so the two reports read
-    # as one language. Built here (device unreachable) and just below (cluster node/resource
-    # faults); the informational NOTE banners (offline resources, placement) stay outside this
-    # -- gr.SEVERITY has no neutral tier, and turning "many of these are deliberately off" into
-    # an amber finding would be exactly the false alarm that banner was written to avoid.
-    fault_banners: list = []
-    if unreachable or unscraped:
-        rows = ([{"label": d["name"], "values": "not responding"} for d in sorted(unreachable, key=lambda d: d["name"])]
-                + [{"label": d["name"], "values": "never scraped by Prometheus"}
-                   for d in sorted(unscraped, key=lambda d: d["name"])])
-        fault_banners.append({
-            "severity": "imminent",
-            "head": f"UNREACHABLE  —  {len(unreachable) + len(unscraped)} device(s)",
-            "rows": rows,
-            "detail": "Prometheus can no longer scrape these targets — the device is down, the "
-                      "exporter has stopped, or there are network/connectivity issues. Treat as urgent.",
-        })
-
-    cluster_glance, cluster_immediate, cluster_watch, cluster_banners = [], [], [], []
+    # _windows_cluster_metrics(). This screen shows TILES ONLY -- the detail that used to
+    # render as banners here (which devices, which nodes, which resources, by name) now lives
+    # in build_report()'s xlsx as real tables, sourced from the same snapshot._wc/_hci_nodes
+    # (see capture_snapshot). This dashboard exists to capture admin sign-off on flagged
+    # anomalies (each device's own Findings table, still below, is untouched by this); it is
+    # not itself a report. Nothing here renders at all when no windows device in scope
+    # exposes cluster metrics (win_cluster empty) -- an empty "0 | 0" tile would read as a
+    # broken cluster rather than as "not applicable".
+    cluster_glance, cluster_immediate, cluster_watch = [], [], []
     win_cluster = win_cluster or []
     if win_cluster:
         cnodes = [n for wc in win_cluster for n in wc.get("nodes", [])]
         cnodes_up = sum(1 for _, _, up in cnodes if up)
-        cres = {"online": 0, "offline": 0, "failed": 0, "other": 0, "offline_names": [], "failed_names": []}
-        owners: Dict[str, int] = {}
-        group_owner: Dict[str, str] = {}
+        cres = {"online": 0, "offline": 0, "failed": 0, "other": 0}
         for wc in win_cluster:
             r = wc.get("resources") or {}
             for k in ("online", "offline", "failed", "other"):
                 cres[k] += r.get(k, 0)
-            cres["offline_names"] += r.get("offline_names", [])
-            cres["failed_names"] += r.get("failed_names", [])
-            for node, count in (wc.get("owners") or {}).items():
-                owners[node] = owners.get(node, 0) + count
-            group_owner.update(wc.get("group_owner") or {})
         cres_total = cres["online"] + cres["offline"] + cres["failed"] + cres["other"]
-
-        # Group a list of (resource_name, group) pairs by owning NODE -- one row per node,
-        # comma-joined names within it -- the same shape every grouped banner on this report
-        # (and the systems report's own PLAIN HTTP/BACKUPS UNTRACKED) already uses: one row
-        # per owner, not every affected item crammed into a single cell. A resource whose
-        # group has no known owner (shouldn't normally happen) falls under "Unknown".
-        def _by_node(pairs):
-            by_node: Dict[str, list] = {}
-            for name, group in pairs:
-                by_node.setdefault(group_owner.get(group, "Unknown"), []).append(name)
-            return [{"label": node, "values": ", ".join(sorted(names))}
-                    for node, names in sorted(by_node.items())]
 
         cluster_glance = [
             {"label": "Cluster nodes", "value": f"{cnodes_up} | {len(cnodes)}",
              "sub": "up | total", "state": "info"},
             {"label": "Cluster resources", "value": f"{cres['online']} | {cres_total}",
-             "sub": f"online | total ({cres['offline']} offline — not flagged, see below)",
+             "sub": f"online | total ({cres['offline']} offline — see the xlsx report)",
              "state": "info"},
         ]
         cluster_immediate = [
@@ -1363,45 +1326,10 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             {"label": "Cluster resources failed", "value": f"{cres['failed']} | {cres_total}",
              "sub": "failed | total", "state": bad(cres["failed"])},
         ]
-        down_nodes = [(name, state_text) for name, state_text, up in cnodes if not up]
-        if down_nodes:
-            fault_banners.append({
-                "severity": "critical",
-                "head": f"CLUSTER NODE DOWN  —  {len(down_nodes)} of {len(cnodes)} HCI Cluster node(s)",
-                "rows": [{"label": name, "values": f"state: {state_text}"} for name, state_text in sorted(down_nodes)],
-                "detail": "A cluster node is not Up. Depending how many nodes remain, the cluster may be "
-                          "running degraded or without quorum. Investigate immediately.",
-            })
-        if cres["failed_names"]:
-            fault_banners.append({
-                "severity": "critical",
-                "head": f"CLUSTER RESOURCE FAILED  —  {cres['failed']} resource(s)",
-                "rows": _by_node(cres["failed_names"]),
-                "detail": "These clustered resources are in a genuine Failed state (not simply Offline) "
-                          "— the cluster could not bring them online. Investigate and repair/restart as needed.",
-            })
-        if cres["offline_names"]:
-            cluster_banners.append({
-                "band": "info", "sev_label": "NOTE",
-                "head": f"{cres['offline']} cluster resource(s) offline — informational, not flagged",
-                "rows": _by_node(cres["offline_names"]),
-                "detail": "These clustered resources (mostly VMs) are currently Offline. Many are "
-                          "deliberately powered off (test/UAT/DR/lab boxes), so this is not treated as "
-                          "a fault — only a genuinely Failed resource state is flagged above.",
-            })
-        if owners:
-            cluster_banners.append({
-                "band": "info", "sev_label": "NOTE",
-                "head": "VM / resource group placement across the cluster's nodes",
-                "rows": [{"label": node, "values": f"{count} group(s)"}
-                        for node, count in sorted(owners.items())],
-            })
 
-    # ---- per-node CPU/Storage/Network/Latency, and the whole cluster's own rollup of the
-    # same (see _hci_node_metrics) -- a DIFFERENT question from win_cluster/cres above, which
-    # is cluster STATE (is each node Up, is each VM Online); this is node/cluster RESOURCE
-    # USAGE. Nodes not yet running windows_exporter (see the 2026-08-21 rollout) still get a
-    # row -- "not answering" -- rather than silently vanishing from the table. ----
+    # Per-node CPU/Storage/Network/Latency rollup tiles -- see _hci_node_metrics. Per-node
+    # DETAIL (which node, what value) is an xlsx table now, not a banner; only the aggregate
+    # tiles stay here.
     hci_nodes = hci_nodes or {}
     if hci_nodes:
         reporting = [n for n in hci_nodes.values() if n.get("reachable")]
@@ -1416,25 +1344,14 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
              "sub": f"across {len(reporting)} reporting node(s)", "state": "info"},
         ]
         # Cluster Memory is graded, never a plain glance readout: 70-80% is a watch-band
-        # finding, above 80% escalates to immediate, and 95%+ ALSO gets its own IMMINENT
-        # banner on top of the immediate tile -- below 70% it doesn't appear at all (nothing
-        # to say). Same "affected | total" tile shape everywhere else on this report uses.
+        # finding, above 80% escalates to immediate -- below 70% it doesn't appear at all
+        # (nothing to say). Same "affected | total" tile shape everywhere else here uses.
         avg_mem = _avg("mem_pct")
         if avg_mem is not None and avg_mem >= 70:
             tile = {"label": "Cluster Memory (avg)", "value": f"{avg_mem:.0f}%",
                    "sub": f"across {len(reporting)} reporting node(s)",
                    "state": "bad" if avg_mem > 80 else "warn"}
             (cluster_immediate if avg_mem > 80 else cluster_watch).append(tile)
-            if avg_mem >= 95:
-                fault_banners.append({
-                    "severity": "imminent",
-                    "head": f"CLUSTER MEMORY CRITICAL  —  HCI Cluster averaging {avg_mem:.0f}% memory",
-                    "rows": [{"label": "HCI Cluster",
-                              "values": f"{avg_mem:.0f}% average across {len(reporting)} reporting node(s)"}],
-                    "detail": "Cluster-wide memory pressure is critical. If this holds, expect VM "
-                              "performance degradation or the cluster starting to page/swap. "
-                              "Investigate immediately.",
-                })
         used_gb = sum(d.get("size", 0) * (d.get("used") or 0) / 100 for n in reporting for d in n.get("disks", [])
                       if d.get("size") is not None)
         total_gb = sum(d.get("size", 0) for n in reporting for d in n.get("disks", []) if d.get("size") is not None)
@@ -1463,70 +1380,6 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
         cluster_glance.append({"label": "Cluster disk latency (worst)",
                                "value": (f"{worst_latency:.1f}ms" if worst_latency is not None else "—"),
                                "sub": "slowest node/op, read or write", "state": "info"})
-
-        # Four focused NOTE banners, not one crammed table -- one concern each, one SHORT
-        # value per row, the same concision the systems report's own warning banners use
-        # (a row names ONE finding, never a run-on of every metric that device has). A node
-        # not answering gets exactly that said once, in every banner it would otherwise be
-        # missing from, rather than a blank cell.
-        node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
-
-        cpu_mem_rows, storage_rows, network_rows, latency_rows = [], [], [], []
-        for target, n in node_order:
-            label = n.get("display", target)
-            if not n.get("reachable"):
-                cpu_mem_rows.append({"label": label, "values": "not answering"})
-                storage_rows.append({"label": label, "values": "not answering"})
-                network_rows.append({"label": label, "values": "not answering"})
-                latency_rows.append({"label": label, "values": "not answering"})
-                continue
-            cpu_mem_rows.append({"label": label,
-                                 "values": f"CPU {n.get('cpu_pct', 0):.0f}%, RAM {n.get('mem_pct', 0):.0f}%"})
-            disks = n.get("disks", [])
-            storage_rows.append({"label": label,
-                                 "values": ", ".join(f"{d['volume']} {d.get('used', 0):.0f}% used"
-                                                     for d in disks) or "no volumes reported"})
-            net = n.get("net") or {}
-            network_rows.append({"label": label,
-                                 "values": f"{_fmt_bps(net.get('in_bps', 0))} in / {_fmt_bps(net.get('out_bps', 0))} out"
-                                           f"  —  {net.get('err_in', 0) + net.get('err_out', 0):.0f} errors, "
-                                           f"{net.get('disc_in', 0) + net.get('disc_out', 0):.0f} discards"})
-            lat = n.get("latency") or {}
-            lat_bits = [f"{v:.1f}ms {k}" for k, v in (("read", lat.get("read_ms")), ("write", lat.get("write_ms")))
-                       if v is not None]
-            latency_rows.append({"label": label, "values": ", ".join(lat_bits) if lat_bits else "not available"})
-
-        cluster_banners.append({"band": "info", "sev_label": "NOTE",
-                                "head": "Per-node CPU & memory — HCI Cluster", "rows": cpu_mem_rows})
-        cluster_banners.append({"band": "info", "sev_label": "NOTE",
-                                "head": "Per-node storage — HCI Cluster", "rows": storage_rows})
-        cluster_banners.append({
-            "band": "info", "sev_label": "NOTE",
-            "head": "Per-node network — HCI Cluster",
-            "rows": network_rows,
-            "detail": f"Errors and discards are over the last {RATE_WINDOW}. Genuinely high values are "
-                      "already flagged separately (per node) above this table.",
-        })
-        cluster_banners.append({
-            "band": "info", "sev_label": "NOTE",
-            "head": "Per-node disk latency — HCI Cluster",
-            "rows": latency_rows,
-            "detail": f"Average milliseconds per I/O operation over the last {RATE_WINDOW}, summed "
-                      "across each node's disks.",
-        })
-
-    # Same post-processing services.py's build_overview() uses: `band`/`sev_label` are DERIVED
-    # from `severity` rather than set by hand, so a banner can't read amber on screen and red
-    # in the file, and the two reports use one shared vocabulary. The informational NOTE
-    # banners already carry their own band/sev_label directly (no `severity` key -- they are
-    # not part of gr.SEVERITY's three tiers) and pass through unchanged, always last.
-    for b in fault_banners:
-        sev = b["severity"]
-        b["sev_label"] = gr.SEVERITY[sev]["label"]
-        b["band"] = {"imminent": "critical", "critical": "red", "warning": "amber"}[sev]
-        b.setdefault("rows", [])
-    fault_banners.sort(key=lambda b: gr.SEVERITY[b["severity"]]["rank"])
-    all_banners = fault_banners + cluster_banners
 
     return {
         "glance": [
@@ -1581,7 +1434,9 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
              "sub": "metrics | total requested", "state": warn(missing)},
             accuracy,
         ] + cluster_watch,
-        "banners": all_banners,
+        # This screen is tiles only now -- see the module docstring at the top of this
+        # function. Detail (which device, which node, which resource) lives in the xlsx.
+        "banners": [],
     }
 
 
@@ -1639,9 +1494,15 @@ def capture_snapshot(token: str, only: Optional[set] = None):
                                    win_cluster=list(wc.values()), hci_nodes=hci_nodes),
     )
     # carried for the report screen and for generation; the systems flow parks its engine
-    # objects on the same attributes.
+    # objects on the same attributes. _hci_nodes/_wc are network-specific additions: the web
+    # screen shows tiles only now (see _network_overview), the DETAIL these used to power as
+    # banners now renders as real tables in build_report()'s xlsx instead, from this same
+    # data -- not recomputed from a second query, so the xlsx never disagrees with what the
+    # admin reviewed on screen.
     snap._store = data
     snap._systems = rows + win_devices
+    snap._hci_nodes = hci_nodes
+    snap._wc = wc
     return snap
 
 
@@ -1763,39 +1624,50 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             paint(r)
             r += 1
 
-        def banner(b):
-            """An informational callout (see _network_overview's cluster banners) — same
-            head/rows/detail shape the web screen renders, coloured by `band`. Only "info"
-            exists today (CYAN, the app's own existing informational accent — not a new
-            colour), but red/amber are supported too so a future non-informational network
-            banner does not need a second renderer."""
+        def pct_band(v):
+            return None if v is None else ("red" if v >= cfg.chip_red else
+                                           "amber" if v >= cfg.chip_amber else None)
+
+        def table(title, headers, rows):
+            """A real, multi-column data table -- header row + data rows -- for the detail
+            that used to render as a banner (see _network_overview's docstring): who/what,
+            not a passive summary. Same visual language the tile bands (`band`) and the
+            per-device Findings table below already use: HDR-filled title/header, CARD-filled
+            data rows, thin borders throughout. `rows` is a list of rows, each a list of
+            (text, chip_band_or_None) pairs, one per header -- chip_band colours that cell
+            the same red/amber/green a percentage chip gets anywhere else in this app.
+            """
             nonlocal r
-            accent = {"critical": CHIP["critical"][0], "red": CHIP["red"][0],
-                     "amber": CHIP["amber"][0]}.get(b.get("band"), CYAN)
             paint(r)
-            ws.cell(r, FIRST, f"{b.get('sev_label', 'NOTE')}  —  {b['head']}").font = Font(
-                bold=True, size=11, color=accent)
+            ws.cell(r, FIRST, title.upper()).font = Font(bold=True, size=10, color=INK)
             for c in range(FIRST, LAST):
-                ws.cell(r, c).fill = card
+                ws.cell(r, c).fill = head
+                ws.cell(r, c).border = box
             r += 1
-            for row in b.get("rows", []):
+            paint(r)
+            cols = list(range(FIRST, FIRST + len(headers)))
+            for h, c in zip(headers, cols):
+                cell = ws.cell(r, c, h)
+                cell.font = Font(bold=True, size=9, color=SUB)
+                cell.fill = head
+                cell.border = box
+            for c in range(FIRST + len(headers), LAST):
+                ws.cell(r, c).fill = head
+                ws.cell(r, c).border = box
+            r += 1
+            for row_vals in rows:
                 paint(r)
-                ws.cell(r, FIRST, row["label"]).font = Font(bold=True, size=9, color=GREY)
-                v = ws.cell(r, FIRST + 1, row["values"])
-                v.font = Font(size=9, color=INK)
-                v.alignment = Alignment(wrap_text=True, vertical="top")
-                ws.merge_cells(start_row=r, start_column=FIRST + 1, end_row=r, end_column=LAST - 1)
                 for c in range(FIRST, LAST):
                     ws.cell(r, c).fill = card
-                r += 1
-            if b.get("detail"):
-                paint(r)
-                d = ws.cell(r, FIRST, b["detail"])
-                d.font = Font(size=8, color=SUB)
-                d.alignment = Alignment(wrap_text=True, vertical="top")
-                ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=LAST - 1)
-                for c in range(FIRST, LAST):
-                    ws.cell(r, c).fill = card
+                    ws.cell(r, c).border = box
+                for (text, chip_band), c in zip(row_vals, cols):
+                    cell = ws.cell(r, c, text)
+                    if chip_band:
+                        fg, bg = CHIP[chip_band]
+                        cell.font = Font(bold=True, size=10, color=fg)
+                        cell.fill = PatternFill("solid", fgColor=bg)
+                    else:
+                        cell.font = Font(size=10, color=INK)
                 r += 1
             paint(r)
             r += 1
@@ -1804,13 +1676,13 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
         band("At a glance", ov.get("glance", []))
         band("Immediate attention", ov.get("immediate", []))
         band("Watch list", ov.get("watch", []))
-        for b in ov.get("banners", []):
-            banner(b)
 
         # "N interfaces" describes the switch; a windows_exporter device (e.g. HCI Cluster)
         # has no interface count in this report's sense, so it gets the same "host(s)"
         # wording reports/form.html already uses for it on the live screen.
         win_names = {d["name"] for d in DEVICES if d.get("kind") == "windows"}
+        hci_nodes = getattr(snapshot, "_hci_nodes", None) or {}
+        wc = getattr(snapshot, "_wc", None) or {}
         for sysvm in snapshot.systems:
             paint(r)
             ws.cell(r, FIRST, sysvm.name.upper()).font = Font(bold=True, size=12, color=CYAN)
@@ -1818,6 +1690,128 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
                    else f"{sysvm.hosts} interfaces")
             ws.cell(r, FIRST + 1, sub).font = Font(color=SUB, size=10)
             r += 1
+
+            # HCI Cluster gets real tables here -- Nodes/Drives/Network/Cluster Resources --
+            # the detail that used to render as banners on the web screen (see
+            # _network_overview's docstring: that screen is tiles-only now, capturing admin
+            # sign-off on flagged anomalies, not a second report). Sourced from the exact
+            # snapshot the admin reviewed (snapshot._hci_nodes/_wc), not a fresh query, so
+            # the xlsx can never disagree with what was on screen. Only rendered for the
+            # device that actually has this data -- the switch's own card is untouched.
+            if sysvm.name == "HCI Cluster" and hci_nodes:
+                node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
+
+                def _row(label, *cells):
+                    return [(label, None)] + list(cells)
+
+                def _down(label, n_cells):
+                    return _row(label, *[("not answering", "red")] * n_cells)
+
+                nodes_rows = []
+                for target, n in node_order:
+                    label = n.get("display", target)
+                    if not n.get("reachable"):
+                        nodes_rows.append(_down(label, 2))
+                        continue
+                    cpu, mem = n.get("cpu_pct"), n.get("mem_pct")
+                    nodes_rows.append(_row(label,
+                        (f"{cpu:.0f}%" if cpu is not None else "—", pct_band(cpu)),
+                        (f"{mem:.0f}%" if mem is not None else "—", pct_band(mem))))
+                table("Nodes", ("Host", "CPU %", "RAM %"), nodes_rows)
+
+                drives_rows = []
+                for target, n in node_order:
+                    label = n.get("display", target)
+                    if not n.get("reachable"):
+                        drives_rows.append(_down(label, 4))
+                        continue
+                    disks = n.get("disks", [])
+                    if not disks:
+                        drives_rows.append(_row(label, ("—", None), ("—", None), ("—", None), ("—", None)))
+                    for d in disks:
+                        used = d.get("used")
+                        free = d.get("free")
+                        size = d.get("size")
+                        drives_rows.append(_row(
+                            label, (d.get("volume", "—"), None),
+                            (f"{used:.0f}%" if used is not None else "—", pct_band(used)),
+                            (f"{free:.1f}" if free is not None else "—", None),
+                            (f"{size:.0f}" if size is not None else "—", None)))
+                table("Drives", ("Host", "Volume", "Used %", "Free GB", "Size GB"), drives_rows)
+
+                network_rows = []
+                for target, n in node_order:
+                    label = n.get("display", target)
+                    if not n.get("reachable"):
+                        network_rows.append(_down(label, 4))
+                        continue
+                    net = n.get("net") or {}
+                    err = net.get("err_in", 0) + net.get("err_out", 0)
+                    disc = net.get("disc_in", 0) + net.get("disc_out", 0)
+                    network_rows.append(_row(
+                        label, (_fmt_bps(net.get("in_bps", 0)), None), (_fmt_bps(net.get("out_bps", 0)), None),
+                        (f"{err:.0f}", "red" if err >= _NODE_ERR_RED else None),
+                        (f"{disc:.0f}", "amber" if disc >= _NODE_DISC_RED else None)))
+                table(f"Network (errors/discards over {RATE_WINDOW})",
+                     ("Host", "In", "Out", "Errors", "Discards"), network_rows)
+
+                latency_rows = []
+                for target, n in node_order:
+                    label = n.get("display", target)
+                    if not n.get("reachable"):
+                        latency_rows.append(_down(label, 2))
+                        continue
+                    lat = n.get("latency") or {}
+                    read_ms, write_ms = lat.get("read_ms"), lat.get("write_ms")
+                    latency_rows.append(_row(
+                        label,
+                        (f"{read_ms:.1f}ms" if read_ms is not None else "—",
+                         "red" if (read_ms or 0) >= _NODE_LATENCY_RED_MS else
+                         "amber" if (read_ms or 0) >= _NODE_LATENCY_AMBER_MS else None),
+                        (f"{write_ms:.1f}ms" if write_ms is not None else "—",
+                         "red" if (write_ms or 0) >= _NODE_LATENCY_RED_MS else
+                         "amber" if (write_ms or 0) >= _NODE_LATENCY_AMBER_MS else None)))
+                table("Disk latency (avg ms/op)", ("Host", "Read", "Write"), latency_rows)
+
+                # Cluster state: node up/down and clustered resource (mostly VM) counts, plus
+                # WHICH resources are offline/failed, grouped by owning node -- the same join
+                # (resource -> group -> owner) the old banners used, now a table.
+                cnodes = [n for w in wc.values() for n in w.get("nodes", [])]
+                cres = {"online": 0, "offline": 0, "failed": 0, "other": 0}
+                offline_pairs, failed_pairs, group_owner = [], [], {}
+                for w in wc.values():
+                    res = w.get("resources") or {}
+                    for k in ("online", "offline", "failed", "other"):
+                        cres[k] += res.get(k, 0)
+                    offline_pairs += res.get("offline_names", [])
+                    failed_pairs += res.get("failed_names", [])
+                    group_owner.update(w.get("group_owner") or {})
+                if cnodes:
+                    nstate_rows = [_row(name,
+                                        (state_text, None if up else "red"))
+                                  for name, state_text, up in sorted(cnodes)]
+                    table("Cluster nodes (state)", ("Node", "State"), nstate_rows)
+                if cres["online"] or cres["offline"] or cres["failed"] or cres["other"]:
+                    total = sum(cres.values())
+                    table("Cluster resources (summary)", ("Online", "Offline", "Failed", "Other"), [[
+                        (f"{cres['online']} / {total}", None),
+                        (f"{cres['offline']} / {total}", None),
+                        (f"{cres['failed']} / {total}", "red" if cres["failed"] else None),
+                        (f"{cres['other']} / {total}", None),
+                    ]])
+
+                def _by_node(pairs):
+                    by_node: Dict[str, list] = {}
+                    for name, group in pairs:
+                        by_node.setdefault(group_owner.get(group, "Unknown"), []).append(name)
+                    return [_row(node, (", ".join(sorted(names)), None))
+                           for node, names in sorted(by_node.items())]
+
+                if failed_pairs:
+                    table("Cluster resources — Failed", ("Node", "Failed resources"), _by_node(failed_pairs))
+                if offline_pairs:
+                    table("Cluster resources — Offline (informational, not a fault)",
+                         ("Node", "Offline resources"), _by_node(offline_pairs))
 
             paint(r)
             for label, col in (("Finding", FIRST), ("Band", FIRST + 1), ("Detail", FIRST + 2),
