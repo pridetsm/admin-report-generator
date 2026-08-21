@@ -2824,7 +2824,7 @@ class NetworkGenerate(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"],
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        self.assertIn("Network Admin Report", resp["Content-Disposition"])
+        self.assertIn("Infrastructure Report", resp["Content-Disposition"])
         self.assertGreater(len(resp.content), 4000)
         self.assertTrue(resp.content.startswith(b"PK"))      # a real zip container
 

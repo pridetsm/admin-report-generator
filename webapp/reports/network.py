@@ -1649,7 +1649,7 @@ def network_report_filename(theme: str = "dark", when=None) -> str:
     """Named like the systems report, theme and all, so the two sit together in a folder."""
     import datetime
     when = when or datetime.datetime.now()
-    return f"Network Admin Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+    return f"Infrastructure Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
 
 
 def build_report(snapshot, *, theme: str = "dark", author: str,
@@ -1690,7 +1690,7 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
 
         wb = Workbook()
         ws = wb.active
-        ws.title = "Network Admin Report"
+        ws.title = "Infrastructure Report"
         ws.sheet_view.showGridLines = False
         ws.sheet_properties.tabColor = CYAN
         for col, width in zip("BCDEFG", (34, 15, 62, 12, 34, 4)):
@@ -1733,9 +1733,9 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
         # column A is the crest gutter, so the title block starts at B — as it does there
         ws.column_dimensions["A"].width = 9
 
-        ws.cell(3, 2, "NETWORK ADMIN REPORT").font = Font(bold=True, size=22, color=INK)
+        ws.cell(3, 2, "INFRASTRUCTURE REPORT").font = Font(bold=True, size=22, color=INK)
         ws.cell(4, 2, snapshot.captured_at.strftime(
-            "snapshot generated %d %b %Y  ·  %H:%M      •      Network Analyses Dashboard")).font =             Font(color=SUB, size=9)
+            "snapshot generated %d %b %Y  ·  %H:%M      •      Infrastructure Analyses Dashboard")).font =             Font(color=SUB, size=9)
         ws.cell(5, 2, "Static snapshot.   Device telemetry captured by SNMP.").font = Font(color=GREY, size=9)
         ws.cell(7, 2, f"By  {author}").font = Font(color=SUB, size=9)
         r = 9

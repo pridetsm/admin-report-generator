@@ -871,7 +871,11 @@ def network_report(request):
         "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
         # the shared screen's nouns and destinations, so a network admin is not handed the
         # systems screen with a switch on it
-        "dash_title": "Network Analyses Dashboard",
+        # Still the Network Admin role/routes (see network_report's own docstring) -- this is
+        # a wording-only rename: what started as switch monitoring is now mostly HCI Cluster
+        # infrastructure data, so the displayed title says so. Kept under Network Admin for
+        # now; moving it to its own role/section is a separate, later change.
+        "dash_title": "Infrastructure Analyses Dashboard",
         "subject": "device",
         "draft_key": "draft:network:" + ",".join(sorted(keys)),
         "picker_url": reverse("network_dashboard"),
