@@ -1470,11 +1470,6 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
     return {
         "glance": [
             {"label": "Devices", "value": len(devices), "state": "info"},
-            {"label": "Uptime", "value": (f"{data['uptime_days']:.0f}d" if data.get("uptime_days") is not None else "—"),
-             "state": "info"},
-            {"label": "Interfaces", "value": iface_total, "state": "info"},
-            {"label": "Links up", "value": data["up_count"], "state": "info"},
-            {"label": "Carrying traffic", "value": data["carrying_count"], "state": "info"},
             {"label": "Throughput in", "value": data["total_in_text"], "state": "info"},
             {"label": "MAC / ARP entries", "value": f"{data.get('mac_count', 0)} | {data.get('arp_count', 0)}",
              "sub": "entry count, not % of capacity", "state": "info"},
