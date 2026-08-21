@@ -26,9 +26,11 @@
 </div>
 
 {% if alpha_grouped and letter_index %}
-{# ---- A-Z letter key: fixed in the LEFT gutter, same unpanelled treatment as the countdown
-       above (no card/border, just floating text). Plain in-page anchor links -- the browser's
-       own jump-to-anchor is all a "scroll to this letter" nav needs, no script required. ---- #}
+{% comment %}
+  A-Z letter key: fixed in the LEFT gutter, below the fixed Back button (.backnav occupies
+  this same top:98px/left:gutter spot -- see app.css) so the two don't overlap. Plain
+  in-page anchor links -- the browser's own jump-to-anchor is all this needs, no script.
+{% endcomment %}
 <nav class="az-margin" aria-label="Jump to system">
   {% for letter in letter_index %}
   <a href="#letter-{{ letter }}" class="az-margin-letter" data-letter="{{ letter }}">{{ letter }}</a>
@@ -176,11 +178,13 @@
   {% for sys in snapshot.systems %}
   {% if alpha_grouped %}
   {% ifchanged sys.name|first|upper %}
-  {# snapshot.systems is sorted alphabetically (see the view) before this ever renders, so
-     each new first letter starts exactly one contiguous group -- ifchanged, not a second
-     (re)grouping pass, so forloop.counter0 below stays the GLOBAL index generate() expects
-     for fix__<i>__<j>/comment__<i> field names (a nested per-letter loop would reset it to
-     0 at every new letter and silently break answer parsing). #}
+  {% comment %}
+    snapshot.systems is sorted alphabetically (see the view) before this ever renders, so
+    each new first letter starts exactly one contiguous group -- ifchanged, not a second
+    (re)grouping pass, so forloop.counter0 below stays the GLOBAL index generate() expects
+    for the fix/comment field names (a nested per-letter loop would reset it at every new
+    letter and silently break answer parsing).
+  {% endcomment %}
   <div class="section-label alpha-divider" id="letter-{{ sys.name|first|upper }}">{{ sys.name|first|upper }}</div>
   {% endifchanged %}
   {% endif %}
