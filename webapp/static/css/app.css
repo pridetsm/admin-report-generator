@@ -413,6 +413,26 @@ table.hist tr:last-child td { border-bottom: 0; }
 /* below ~1300px the right gutter is too narrow — hide it (the expiry popup still fires) */
 @media (max-width: 1300px) { .cd-margin { display: none; } }
 
+/* ---- A-Z letter key: fixed in the LEFT gutter, mirroring .cd-margin's unpanelled treatment
+   (no card/border) at the same top offset -- but this one is clickable, so pointer-events
+   stay on and it gets its own hover/focus state instead of being purely decorative. ---- */
+.az-margin {
+  position: fixed; top: 98px; left: max(16px, calc(50% - 680px)); z-index: 15;
+  display: flex; flex-direction: column; gap: 2px; max-height: calc(100vh - 130px);
+  overflow-y: auto; scrollbar-width: none;
+}
+.az-margin::-webkit-scrollbar { display: none; }
+.az-margin-letter {
+  font-size: 13px; font-weight: 600; color: var(--muted); text-decoration: none;
+  padding: 1px 4px; border-radius: 4px;
+}
+.az-margin-letter:hover, .az-margin-letter:focus-visible { color: var(--accent); background: var(--accent-bg); }
+/* below ~1300px there's no room for either gutter — same cutoff .cd-margin already uses */
+@media (max-width: 1300px) { .az-margin { display: none; } }
+
+/* the sticky topbar (see .topbar) would otherwise cover a jumped-to letter's heading */
+.alpha-divider { scroll-margin-top: 90px; }
+
 /* ---- forced-refresh popup (Android-style popup menu) ---- */
 .popup-backdrop {
   position: fixed; inset: 0; z-index: 60; display: none;

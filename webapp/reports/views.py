@@ -466,6 +466,12 @@ def report(request):
         messages.error(request, "None of the selected systems were found. Please choose again.")
         request.session.pop("report_systems", None)
         return redirect("report_form")
+    # Alphabetical, for the System Analyses Dashboard's A-Z letter key (see form.html) --
+    # sorted once, HERE, before caching: generate()'s fix__<i>__<j> field names are built from
+    # enumerate(snapshot.systems) against this SAME cached object, so the order fixed at
+    # cache-write time is what both the page render and the answer-parsing on Generate agree
+    # on. Sorting again later (or differently) would desync the two.
+    snapshot.systems.sort(key=lambda s: s.name.lower())
     cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
     request.session["snapshot_token"] = token
     # The open report lapses on the same clock as its snapshot, so the picker's resume bar
@@ -496,6 +502,12 @@ def report(request):
         "generate_default": reverse("generate"),
         "dash_title": "System Analyses Dashboard",
         "subject": "system",
+        # Only the systems flow's list is sorted (above) -- the network estate is 2 devices
+        # today and its own list isn't alphabetised, so grouping it here would be undefined.
+        "alpha_grouped": True,
+        # Distinct first letters actually present, in order -- the LHS letter key only ever
+        # lists a letter it can jump to (no dead "Q" that scrolls nowhere).
+        "letter_index": sorted({s.name[0].upper() for s in snapshot.systems if s.name}),
         # Per-estate, per-selection draft key. One shared "reportDraft" meant a systems draft
         # was restored into a network report, where none of the card names match — so the
         # typed answers silently went nowhere and the page looked like it had forgotten them.
