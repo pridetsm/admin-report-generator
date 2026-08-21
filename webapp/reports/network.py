@@ -815,8 +815,10 @@ def _windows_cluster_metrics(only: Optional[set] = None) -> Dict[str, dict]:
 
     Returns {target: {"nodes": [(name, state_text, up_bool), ...],
                        "resources": {"online": n, "offline": n, "failed": n, "other": n,
-                                     "offline_names": [...], "failed_names": [...]},
-                       "owners": {node_name: group_count}}}.
+                                     "offline_names": [(resource, group), ...],
+                                     "failed_names": [(resource, group), ...]},
+                       "owners": {node_name: group_count},
+                       "group_owner": {group_name: node_name}}}.
     """
     wanted = [d for d in DEVICES if d.get("kind") == "windows" and (only is None or d["key"] in only)]
     if not wanted:
@@ -847,25 +849,29 @@ def _windows_cluster_metrics(only: Optional[set] = None) -> Dict[str, dict]:
         c = res_by_target.setdefault(inst, {"online": 0, "offline": 0, "failed": 0, "other": 0,
                                             "offline_names": [], "failed_names": []})
         name = r["labels"].get("name", "?")
+        group = r["labels"].get("group", "?")
         if state == 2:
             c["online"] += 1
         elif state == 3:
             c["offline"] += 1
-            c["offline_names"].append(name)
+            c["offline_names"].append((name, group))   # (resource, group) -- group joins to owners below
         elif state == 4:
             c["failed"] += 1
-            c["failed_names"].append(name)
+            c["failed_names"].append((name, group))
         else:
             c["other"] += 1
 
-    owners_by_target: Dict[str, dict] = {}
+    owners_by_target: Dict[str, dict] = {}          # {inst: {node: group_count}} -- placement banner
+    group_owner_by_target: Dict[str, dict] = {}      # {inst: {group: node}} -- joins a resource to its node
     for r in q("windows_mscluster_resourcegroup_owner_node"):
         inst = r["labels"].get("instance")
         if not inst or r["value"] != 1.0:      # one-hot: only the row naming the ACTUAL owner is 1
             continue
         node = r["labels"].get("node", "?")
+        group = r["labels"].get("name", "?")   # this metric's OWN "name" label is the group name
         owners_by_target.setdefault(inst, {})
         owners_by_target[inst][node] = owners_by_target[inst].get(node, 0) + 1
+        group_owner_by_target.setdefault(inst, {})[group] = node
 
     out = {}
     for d in wanted:
@@ -877,6 +883,7 @@ def _windows_cluster_metrics(only: Optional[set] = None) -> Dict[str, dict]:
             "resources": res_by_target.get(t, {"online": 0, "offline": 0, "failed": 0, "other": 0,
                                                "offline_names": [], "failed_names": []}),
             "owners": owners_by_target.get(t, {}),
+            "group_owner": group_owner_by_target.get(t, {}),
         }
     return out
 
@@ -972,7 +979,7 @@ def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None,
             if not up:
                 flags.append(FlagVM(f"cluster_node_down:{name}",
                                     f"Cluster node {name} is {state_text}", "red", "unreachable"))
-        for name in cluster.get("resources", {}).get("failed_names", []):
+        for name, _group in cluster.get("resources", {}).get("failed_names", []):
             flags.append(FlagVM(f"cluster_resource_failed:{name}",
                                 f"Cluster resource '{name}' is in a Failed state", "red", "service"))
     return flags
@@ -1319,6 +1326,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
         cnodes_up = sum(1 for _, _, up in cnodes if up)
         cres = {"online": 0, "offline": 0, "failed": 0, "other": 0, "offline_names": [], "failed_names": []}
         owners: Dict[str, int] = {}
+        group_owner: Dict[str, str] = {}
         for wc in win_cluster:
             r = wc.get("resources") or {}
             for k in ("online", "offline", "failed", "other"):
@@ -1327,7 +1335,20 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             cres["failed_names"] += r.get("failed_names", [])
             for node, count in (wc.get("owners") or {}).items():
                 owners[node] = owners.get(node, 0) + count
+            group_owner.update(wc.get("group_owner") or {})
         cres_total = cres["online"] + cres["offline"] + cres["failed"] + cres["other"]
+
+        # Group a list of (resource_name, group) pairs by owning NODE -- one row per node,
+        # comma-joined names within it -- the same shape every grouped banner on this report
+        # (and the systems report's own PLAIN HTTP/BACKUPS UNTRACKED) already uses: one row
+        # per owner, not every affected item crammed into a single cell. A resource whose
+        # group has no known owner (shouldn't normally happen) falls under "Unknown".
+        def _by_node(pairs):
+            by_node: Dict[str, list] = {}
+            for name, group in pairs:
+                by_node.setdefault(group_owner.get(group, "Unknown"), []).append(name)
+            return [{"label": node, "values": ", ".join(sorted(names))}
+                    for node, names in sorted(by_node.items())]
 
         cluster_glance = [
             {"label": "Cluster nodes", "value": f"{cnodes_up} | {len(cnodes)}",
@@ -1355,7 +1376,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             fault_banners.append({
                 "severity": "critical",
                 "head": f"CLUSTER RESOURCE FAILED  —  {cres['failed']} resource(s)",
-                "rows": [{"label": "Failed", "values": "   ".join(sorted(cres["failed_names"]))}],
+                "rows": _by_node(cres["failed_names"]),
                 "detail": "These clustered resources are in a genuine Failed state (not simply Offline) "
                           "— the cluster could not bring them online. Investigate and repair/restart as needed.",
             })
@@ -1363,7 +1384,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             cluster_banners.append({
                 "band": "info", "sev_label": "NOTE",
                 "head": f"{cres['offline']} cluster resource(s) offline — informational, not flagged",
-                "rows": [{"label": "Offline", "values": "   ".join(sorted(cres["offline_names"]))}],
+                "rows": _by_node(cres["offline_names"]),
                 "detail": "These clustered resources (mostly VMs) are currently Offline. Many are "
                           "deliberately powered off (test/UAT/DR/lab boxes), so this is not treated as "
                           "a fault — only a genuinely Failed resource state is flagged above.",
@@ -1443,33 +1464,55 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
                                "value": (f"{worst_latency:.1f}ms" if worst_latency is not None else "—"),
                                "sub": "slowest node/op, read or write", "state": "info"})
 
-        rows = []
-        for target, n in sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0])):
+        # Four focused NOTE banners, not one crammed table -- one concern each, one SHORT
+        # value per row, the same concision the systems report's own warning banners use
+        # (a row names ONE finding, never a run-on of every metric that device has). A node
+        # not answering gets exactly that said once, in every banner it would otherwise be
+        # missing from, rather than a blank cell.
+        node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
+
+        cpu_mem_rows, storage_rows, network_rows, latency_rows = [], [], [], []
+        for target, n in node_order:
             label = n.get("display", target)
             if not n.get("reachable"):
-                rows.append({"label": label, "values": "not answering"})
+                cpu_mem_rows.append({"label": label, "values": "not answering"})
+                storage_rows.append({"label": label, "values": "not answering"})
+                network_rows.append({"label": label, "values": "not answering"})
+                latency_rows.append({"label": label, "values": "not answering"})
                 continue
-            cpu = n.get("cpu_pct")
-            mem = n.get("mem_pct")
+            cpu_mem_rows.append({"label": label,
+                                 "values": f"CPU {n.get('cpu_pct', 0):.0f}%, RAM {n.get('mem_pct', 0):.0f}%"})
             disks = n.get("disks", [])
-            store = "  ·  ".join(f"{d['volume']} {d.get('used', 0):.0f}%" for d in disks) or "—"
+            storage_rows.append({"label": label,
+                                 "values": ", ".join(f"{d['volume']} {d.get('used', 0):.0f}% used"
+                                                     for d in disks) or "no volumes reported"})
             net = n.get("net") or {}
+            network_rows.append({"label": label,
+                                 "values": f"{_fmt_bps(net.get('in_bps', 0))} in / {_fmt_bps(net.get('out_bps', 0))} out"
+                                           f"  —  {net.get('err_in', 0) + net.get('err_out', 0):.0f} errors, "
+                                           f"{net.get('disc_in', 0) + net.get('disc_out', 0):.0f} discards"})
             lat = n.get("latency") or {}
             lat_bits = [f"{v:.1f}ms {k}" for k, v in (("read", lat.get("read_ms")), ("write", lat.get("write_ms")))
                        if v is not None]
-            rows.append({"label": label,
-                        "values": f"CPU {cpu:.0f}%  ·  RAM {mem:.0f}%  ·  {store}  ·  "
-                                  f"{_fmt_bps(net.get('in_bps', 0))} in / {_fmt_bps(net.get('out_bps', 0))} out  ·  "
-                                  f"{net.get('err_in', 0) + net.get('err_out', 0):.0f} err / "
-                                  f"{net.get('disc_in', 0) + net.get('disc_out', 0):.0f} disc  ·  "
-                                  + (", ".join(lat_bits) if lat_bits else "latency n/a")})
+            latency_rows.append({"label": label, "values": ", ".join(lat_bits) if lat_bits else "not available"})
+
+        cluster_banners.append({"band": "info", "sev_label": "NOTE",
+                                "head": "Per-node CPU & memory — HCI Cluster", "rows": cpu_mem_rows})
+        cluster_banners.append({"band": "info", "sev_label": "NOTE",
+                                "head": "Per-node storage — HCI Cluster", "rows": storage_rows})
         cluster_banners.append({
             "band": "info", "sev_label": "NOTE",
-            "head": "Per-node CPU / storage / network — HCI Cluster",
-            "rows": rows,
-            "detail": f"Errors/discards and latency are over the last {RATE_WINDOW}. Genuinely high "
-                      "values are already flagged separately above (per node, on this system's card) "
-                      "— this table is the full picture, not just what crossed a threshold.",
+            "head": "Per-node network — HCI Cluster",
+            "rows": network_rows,
+            "detail": f"Errors and discards are over the last {RATE_WINDOW}. Genuinely high values are "
+                      "already flagged separately (per node) above this table.",
+        })
+        cluster_banners.append({
+            "band": "info", "sev_label": "NOTE",
+            "head": "Per-node disk latency — HCI Cluster",
+            "rows": latency_rows,
+            "detail": f"Average milliseconds per I/O operation over the last {RATE_WINDOW}, summed "
+                      "across each node's disks.",
         })
 
     # Same post-processing services.py's build_overview() uses: `band`/`sev_label` are DERIVED
