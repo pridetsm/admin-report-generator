@@ -837,6 +837,10 @@ def network_report(request):
             messages.error(request, "Those devices are no longer being monitored. Please choose again.")
             request.session.pop("network_devices", None)
             return redirect("network_dashboard")
+        # Alphabetical, same as the systems flow (see report()) and for the same reason: sort
+        # once, HERE, before caching, so the page render and network_generate()'s enumerate()
+        # over this same cached object agree on the same order.
+        snapshot.systems.sort(key=lambda s: s.name.lower())
         cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
         request.session["network_token"] = token
         request.session["network_expires_at"] = time.time() + settings.SNAPSHOT_TTL
@@ -859,6 +863,8 @@ def network_report(request):
         "recipient_options": recipient_options(),
         "default_filename": network.network_report_filename(
             getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
+        "alpha_grouped": True,
+        "letter_index": sorted({s.name[0].upper() for s in snapshot.systems if s.name}),
         "ttl_minutes": settings.SNAPSHOT_TTL // 60,
         "ttl_seconds": settings.SNAPSHOT_TTL,
         "remaining_seconds": remaining,

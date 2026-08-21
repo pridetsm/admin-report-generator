@@ -1135,6 +1135,25 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
     # never counted toward "immediate"/"watch". Nothing here renders at all when no windows
     # device in scope exposes cluster metrics (win_cluster empty) -- an empty "0 | 0" tile
     # would read as a broken cluster rather than as "not applicable".
+    # ---- real-fault banners, in the SAME vocabulary/structure the systems report uses --
+    # gr.SEVERITY (imminent/critical/warning), not a separate scheme, so the two reports read
+    # as one language. Built here (device unreachable) and just below (cluster node/resource
+    # faults); the informational NOTE banners (offline resources, placement) stay outside this
+    # -- gr.SEVERITY has no neutral tier, and turning "many of these are deliberately off" into
+    # an amber finding would be exactly the false alarm that banner was written to avoid.
+    fault_banners: list = []
+    if unreachable or unscraped:
+        rows = ([{"label": d["name"], "values": "not responding"} for d in sorted(unreachable, key=lambda d: d["name"])]
+                + [{"label": d["name"], "values": "never scraped by Prometheus"}
+                   for d in sorted(unscraped, key=lambda d: d["name"])])
+        fault_banners.append({
+            "severity": "imminent",
+            "head": f"UNREACHABLE  —  {len(unreachable) + len(unscraped)} device(s)",
+            "rows": rows,
+            "detail": "Prometheus can no longer scrape these targets — the device is down, the "
+                      "exporter has stopped, or there are network/connectivity issues. Treat as urgent.",
+        })
+
     cluster_glance, cluster_immediate, cluster_banners = [], [], []
     win_cluster = win_cluster or []
     if win_cluster:
@@ -1165,6 +1184,23 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
             {"label": "Cluster resources failed", "value": f"{cres['failed']} | {cres_total}",
              "sub": "failed | total", "state": bad(cres["failed"])},
         ]
+        down_nodes = [(name, state_text) for name, state_text, up in cnodes if not up]
+        if down_nodes:
+            fault_banners.append({
+                "severity": "critical",
+                "head": f"CLUSTER NODE DOWN  —  {len(down_nodes)} of {len(cnodes)} HCI Cluster node(s)",
+                "rows": [{"label": name, "values": f"state: {state_text}"} for name, state_text in sorted(down_nodes)],
+                "detail": "A cluster node is not Up. Depending how many nodes remain, the cluster may be "
+                          "running degraded or without quorum. Investigate immediately.",
+            })
+        if cres["failed_names"]:
+            fault_banners.append({
+                "severity": "critical",
+                "head": f"CLUSTER RESOURCE FAILED  —  {cres['failed']} resource(s)",
+                "rows": [{"label": "Failed", "values": "   ".join(sorted(cres["failed_names"]))}],
+                "detail": "These clustered resources are in a genuine Failed state (not simply Offline) "
+                          "— the cluster could not bring them online. Investigate and repair/restart as needed.",
+            })
         if cres["offline_names"]:
             cluster_banners.append({
                 "band": "info", "sev_label": "NOTE",
@@ -1181,6 +1217,19 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
                 "rows": [{"label": node, "values": f"{count} group(s)"}
                         for node, count in sorted(owners.items())],
             })
+
+    # Same post-processing services.py's build_overview() uses: `band`/`sev_label` are DERIVED
+    # from `severity` rather than set by hand, so a banner can't read amber on screen and red
+    # in the file, and the two reports use one shared vocabulary. The informational NOTE
+    # banners already carry their own band/sev_label directly (no `severity` key -- they are
+    # not part of gr.SEVERITY's three tiers) and pass through unchanged, always last.
+    for b in fault_banners:
+        sev = b["severity"]
+        b["sev_label"] = gr.SEVERITY[sev]["label"]
+        b["band"] = {"imminent": "critical", "critical": "red", "warning": "amber"}[sev]
+        b.setdefault("rows", [])
+    fault_banners.sort(key=lambda b: gr.SEVERITY[b["severity"]]["rank"])
+    all_banners = fault_banners + cluster_banners
 
     return {
         "glance": [
@@ -1240,7 +1289,7 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
              "sub": "metrics | total requested", "state": warn(missing)},
             accuracy,
         ],
-        "banners": cluster_banners,
+        "banners": all_banners,
     }
 
 
@@ -1425,7 +1474,8 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             colour), but red/amber are supported too so a future non-informational network
             banner does not need a second renderer."""
             nonlocal r
-            accent = {"red": CHIP["red"][0], "amber": CHIP["amber"][0]}.get(b.get("band"), CYAN)
+            accent = {"critical": CHIP["critical"][0], "red": CHIP["red"][0],
+                     "amber": CHIP["amber"][0]}.get(b.get("band"), CYAN)
             paint(r)
             ws.cell(r, FIRST, f"{b.get('sev_label', 'NOTE')}  —  {b['head']}").font = Font(
                 bold=True, size=11, color=accent)
