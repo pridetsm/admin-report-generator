@@ -48,6 +48,7 @@ import smtplib
 import ssl
 import sys
 import tempfile
+import time
 from email.message import EmailMessage
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -789,10 +790,29 @@ def plain_summary(unreach, crit, warn, nodata, report_url=None, attachment_name=
 XLSX_MIME = ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+# Retries for the SMTP conversation itself (connect/STARTTLS/login/send) -- NOT for anything
+# upstream (capture, xlsx render), which either works or doesn't and re-running buys nothing.
+# Office365 has been observed taking 15s+ just to answer AUTH on an otherwise-healthy
+# connection (measured directly against this account), so a single slow morning can outrun a
+# tight timeout even with nothing actually wrong -- confirmed 2026-08-21 after an unattended
+# run's login read timed out at 30s and the whole report silently never reached anyone, with
+# no retry to absorb what looks like ordinary O365 latency/throttling rather than an outage.
+_SMTP_ATTEMPTS = 3
+_SMTP_RETRY_DELAYS = (5, 20)          # seconds between attempts 1->2 and 2->3
+_SMTP_TIMEOUT = 45                    # was 30s; the observed slow-but-working login took 15s
+
+
 def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
                text_body: str, attachment: Optional[Path] = None) -> None:
     """Send the multipart/alternative e-mail, optionally with the XLSX report attached.
-       `attachment` is a path — its file NAME becomes the attachment name."""
+       `attachment` is a path — its file NAME becomes the attachment name.
+
+       Retries the whole SMTP conversation (fresh connection each time -- a half-open one
+       from a failed attempt is not reused) on a transient network/timeout error, since this
+       runs unattended every morning with nobody watching to re-run it by hand. A persistent
+       failure (bad credentials, SMTP rejects the message, etc.) still raises after the last
+       attempt -- retrying is for "the network/server hiccuped", not a substitute for
+       reporting a real, non-transient failure."""
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = f'{mail["from_name"]} <{mail["from_address"]}>'
@@ -807,14 +827,27 @@ def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
     if mail["skip_verify"]:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    with smtplib.SMTP(mail["host"], mail["port"], timeout=30) as srv:
-        srv.ehlo(mail["ehlo"])
-        if mail["starttls"]:
-            srv.starttls(context=ctx)
-            srv.ehlo(mail["ehlo"])
-        if mail["user"]:
-            srv.login(mail["user"], mail["password"])
-        srv.send_message(msg)
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, _SMTP_ATTEMPTS + 1):
+        try:
+            with smtplib.SMTP(mail["host"], mail["port"], timeout=_SMTP_TIMEOUT) as srv:
+                srv.ehlo(mail["ehlo"])
+                if mail["starttls"]:
+                    srv.starttls(context=ctx)
+                    srv.ehlo(mail["ehlo"])
+                if mail["user"]:
+                    srv.login(mail["user"], mail["password"])
+                srv.send_message(msg)
+            return
+        except (smtplib.SMTPException, OSError, TimeoutError) as exc:
+            last_exc = exc
+            if attempt < _SMTP_ATTEMPTS:
+                delay = _SMTP_RETRY_DELAYS[attempt - 1]
+                print(f"[!] SMTP attempt {attempt}/{_SMTP_ATTEMPTS} failed "
+                      f"({type(exc).__name__}: {exc}) -- retrying in {delay}s ...", file=sys.stderr)
+                time.sleep(delay)
+    raise last_exc
 
 
 # ----------------------------------------------------------------- report engine
