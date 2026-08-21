@@ -431,7 +431,17 @@ table.hist tr:last-child td { border-bottom: 0; }
 @media (max-width: 1300px) { .az-margin { display: none; } }
 
 /* the sticky topbar (see .topbar) would otherwise cover a jumped-to letter's heading */
-.alpha-divider { scroll-margin-top: 90px; }
+.alpha-divider {
+  scroll-margin-top: 90px;
+  /* sitting flush above the card it labels made it hard to see (it just read as the card's
+     own top edge) -- pulled left of the content column, past where the card starts, so it
+     no longer sits exactly above the panel, and sized up 30% from .section-label's 12px. */
+  font-size: 15.6px;
+  margin-left: -96px;
+}
+/* same cutoff .az-margin/.cd-margin use -- below it there's no longer 200px of gutter to
+   absorb the shift, so it would otherwise push the letter off the edge of a narrow viewport */
+@media (max-width: 1300px) { .alpha-divider { margin-left: 2px; } }
 
 /* ---- forced-refresh popup (Android-style popup menu) ---- */
 .popup-backdrop {
