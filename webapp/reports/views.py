@@ -1504,20 +1504,26 @@ def config_snmp(request):
 
 
 def _parse_backup_policy_post(post, all_instances) -> dict:
-    """{instance: {"frequency_days": N}, ...} — sparse: only instances whose submitted value
-    differs from the daily default are kept, matching the engine's own sparse-override
-    design (a host absent from the dict just gets DEFAULT_BACKUP_MAX_AGE_DAYS)."""
+    """{instance: {"frequency_days": N, "off_weekdays": [...]}, ...} — sparse: an instance is
+    only kept if it has a non-default frequency AND/OR at least one off-weekday checked,
+    matching the engine's own sparse-override design (a host absent from the dict just gets
+    DEFAULT_BACKUP_MAX_AGE_DAYS and no off-days)."""
     policy: dict = {}
     for inst in all_instances:
+        entry: dict = {}
         raw = (post.get(f"freq__{inst}") or "").strip()
-        if not raw:
-            continue
-        try:
-            days = int(raw)
-        except ValueError:
-            continue
-        if days > 0 and days != backup_policy_admin.DEFAULT_FREQUENCY_DAYS:
-            policy[inst] = {backup_policy_admin.FREQUENCY_FIELD: days}
+        if raw:
+            try:
+                days = int(raw)
+            except ValueError:
+                days = None
+            if days is not None and days > 0 and days != backup_policy_admin.DEFAULT_FREQUENCY_DAYS:
+                entry[backup_policy_admin.FREQUENCY_FIELD] = days
+        off_days = sorted({int(d) for d in post.getlist(f"off__{inst}") if d.isdigit() and 0 <= int(d) <= 6})
+        if off_days:
+            entry[backup_policy_admin.OFF_WEEKDAYS_FIELD] = off_days
+        if entry:
+            policy[inst] = entry
     return policy
 
 
@@ -1573,13 +1579,20 @@ def config_backup_policy(request):
     default_days = backup_policy_admin.DEFAULT_FREQUENCY_DAYS
     groups = []
     for s in systems:
-        hosts = [{
-            "label": c.label, "instance": c.instance,
-            "days": view_policy.get(c.instance, {}).get(
-                backup_policy_admin.FREQUENCY_FIELD, default_days),
-        } for c in s.components]
+        hosts = []
+        for c in s.components:
+            entry = view_policy.get(c.instance, {})
+            off_days = set(entry.get(backup_policy_admin.OFF_WEEKDAYS_FIELD, []))
+            hosts.append({
+                "label": c.label, "instance": c.instance,
+                "days": entry.get(backup_policy_admin.FREQUENCY_FIELD, default_days),
+                "off_weekdays": [{"value": i, "label": lbl, "checked": i in off_days}
+                                 for i, lbl in enumerate(backup_policy_admin.WEEKDAY_LABELS)],
+            })
         groups.append({"name": s.name, "hosts": hosts,
-                       "overridden": any(h["days"] != default_days for h in hosts)})
+                       "overridden": any(h["days"] != default_days or
+                                        any(d["checked"] for d in h["off_weekdays"])
+                                        for h in hosts)})
 
     return render(request, "reports/config_backup_policy.html", {
         **_config_context("config_backup_policy"),

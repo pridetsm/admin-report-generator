@@ -426,23 +426,37 @@ BACKUP_MAX_AGE_DAYS = {
 }
 DEFAULT_BACKUP_MAX_AGE_DAYS = 1    # daily backup = today or yesterday
 
+# Weekdays (Python's date.weekday(): Monday=0 .. Sunday=6) a host is NOT expected to back up
+# at all — distinct from BACKUP_MAX_AGE_DAYS's fixed rolling window: RTGS/CSD run daily
+# EXCEPT Sunday, so a flat "N days back" window would either miss real Tue-Sat gaps (if
+# widened to 2 every day) or wrongly flag Saturday's backup as stale on a Monday-morning
+# check (at 1). backup_cutoff() instead walks back from `now`, skipping any day listed here,
+# until it has counted BACKUP_MAX_AGE_DAYS real (non-off) days — so Monday's cutoff reaches
+# back to Saturday specifically, while every other day keeps the normal 1-day window.
+#   RTGS/CSD: confirmed 2026-08-24 -- neither system runs a backup on Sundays by design.
+BACKUP_OFF_WEEKDAYS = {
+    "10.100.249.220:9100": {6},    # RTGS Database
+    "10.100.250.82:9100": {6},     # CSD Database
+}
+
 # Overridable at runtime via the webapp's Backup Policy screen (Configuration -> Backup
-# policy) rather than only by editing the dict above and redeploying. BACKUP_POLICY_PATH
+# policy) rather than only by editing the dicts above and redeploying. BACKUP_POLICY_PATH
 # sits next to config.ini — a per-deployment file, same as config.ini itself, not one this
 # repo tracks — and reload_backup_policy() re-reads it fresh at the top of every capture()
 # (see below), so an admin's edit takes effect on the very next report with no restart.
-# Absent or unparseable: BACKUP_MAX_AGE_DAYS simply stays at the hardcoded defaults above —
-# those are also what the config screen shows on its very first-ever load, before anyone has
-# saved a policy yet (see webapp/reports/backup_policy_admin.py).
+# Absent or unparseable: BACKUP_MAX_AGE_DAYS/BACKUP_OFF_WEEKDAYS simply stay at the
+# hardcoded defaults above — those are also what the config screen shows on its very
+# first-ever load, before anyone has saved a policy yet (see
+# webapp/reports/backup_policy_admin.py).
 BACKUP_POLICY_PATH = HERE / "backup_policy.json"
 
 
 def reload_backup_policy() -> None:
-    """Repopulate BACKUP_MAX_AGE_DAYS from BACKUP_POLICY_PATH if it exists and parses —
-    called at the top of every capture() so a policy edit takes effect on the very next
-    report. Never raises: a missing or broken file just leaves the current values in place
-    rather than reverting every host to the daily default mid-incident."""
-    global BACKUP_MAX_AGE_DAYS
+    """Repopulate BACKUP_MAX_AGE_DAYS/BACKUP_OFF_WEEKDAYS from BACKUP_POLICY_PATH if it
+    exists and parses — called at the top of every capture() so a policy edit takes effect
+    on the very next report. Never raises: a missing or broken file just leaves the current
+    values in place rather than reverting every host to the daily default mid-incident."""
+    global BACKUP_MAX_AGE_DAYS, BACKUP_OFF_WEEKDAYS
     try:
         raw = json.loads(BACKUP_POLICY_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -452,6 +466,9 @@ def reload_backup_policy() -> None:
     BACKUP_MAX_AGE_DAYS = {inst: int(fields["frequency_days"])
                            for inst, fields in raw.items()
                            if isinstance(fields, dict) and "frequency_days" in fields}
+    BACKUP_OFF_WEEKDAYS = {inst: {int(d) for d in fields["off_weekdays"]}
+                           for inst, fields in raw.items()
+                           if isinstance(fields, dict) and fields.get("off_weekdays")}
 
 
 def backup_cutoff(instance: str, now: datetime.datetime | None = None) -> float:
@@ -460,10 +477,54 @@ def backup_cutoff(instance: str, now: datetime.datetime | None = None) -> float:
     Midnight-based, matching how the backup_monitor scripts judge age, so the verdict
     doesn't drift with the time of day the report happens to run. Hosts absent from
     BACKUP_MAX_AGE_DAYS get the daily default = yesterday-midnight, exactly as before.
+
+    Walks back day by day, skipping any weekday listed in BACKUP_OFF_WEEKDAYS for this
+    instance, until BACKUP_MAX_AGE_DAYS real (non-off) days have been counted. A host with
+    no off-days behaves exactly as before (every day is "counted", so this is just
+    today - max_age days); RTGS/CSD's Sunday-off policy makes a Monday check's cutoff land
+    on Saturday specifically, without loosening any other day's 1-day window.
     """
     now = now or datetime.datetime.now()
-    tmid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    return tmid - 86400 * BACKUP_MAX_AGE_DAYS.get(instance, DEFAULT_BACKUP_MAX_AGE_DAYS)
+    max_age = BACKUP_MAX_AGE_DAYS.get(instance, DEFAULT_BACKUP_MAX_AGE_DAYS)
+    off_days = BACKUP_OFF_WEEKDAYS.get(instance, ())
+    d = now.date()
+    counted = 0
+    while counted < max_age:
+        d -= datetime.timedelta(days=1)
+        if d.weekday() not in off_days:
+            counted += 1
+    cutoff_dt = datetime.datetime(d.year, d.month, d.day)
+    return cutoff_dt.timestamp()
+
+
+def backup_gap_expected(instance: str, ok: Optional[bool], now: datetime.datetime | None = None) -> bool:
+    """True when a host with NO fresh backup file today is exactly where BACKUP_OFF_WEEKDAYS
+    says to expect one: yesterday was a day this host doesn't back up on at all (RTGS/CSD,
+    Sundays). Deliberately a SEPARATE question from backup_cutoff's widened window: the
+    check scripts on these hosts only ever report a file dated today or yesterday (confirmed
+    live 2026-08-24 — backup_check_success=1, backup_file_count=0, no backup_file series at
+    all on a Monday) — there is no older mtime for backup_cutoff's widening to find. Changing
+    that script-side window was considered and explicitly rejected: the app should be
+    informed by the backup POLICY (which can change), not by hand-editing a remote script to
+    match it. So this suppresses the finding on policy grounds alone, without any file data
+    to point to as evidence.
+
+    Only ever fires on the single day right after the off-day, and never when the check
+    itself failed (ok is False, e.g. "FOLDER UNREADABLE") — a real check failure is a real
+    fault regardless of what day it is. The inherent trade-off, stated plainly: if the LAST
+    real backup (Saturday, for a Sunday-off host) also failed, this masks that too, for
+    exactly the one day the expected gap would otherwise hide it behind — there is no way to
+    tell "skipped by design" from "also broken" without the script itself reporting how old
+    the newest file really is, which is the one change ruled out here.
+    """
+    if ok is False:
+        return False
+    off_days = BACKUP_OFF_WEEKDAYS.get(instance)
+    if not off_days:
+        return False
+    now = now or datetime.datetime.now()
+    yesterday = (now.date() - datetime.timedelta(days=1)).weekday()
+    return yesterday in off_days
 
 
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
@@ -1179,7 +1240,7 @@ def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, s
                 continue
             cutoff = backup_cutoff(c.instance, now)
             fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
-            if not fresh:
+            if not fresh and not backup_gap_expected(c.instance, d.get("ok"), now):
                 missing.append((s.name, c.label,
                                 "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
     return missing
@@ -1249,7 +1310,8 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
         if d is None:
             continue
         cutoff = backup_cutoff(c.instance, now)
-        if not any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or [])):
+        fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
+        if not fresh and not backup_gap_expected(c.instance, d.get("ok"), now):
             reason = "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"
             flags.append(Flag(f"backup:{c.label}", f"{c.label} · {reason}", "red", "backup"))
     # untracked: no host on the system runs the backup check at all
@@ -1995,7 +2057,7 @@ class ReportBuilder:
         _now  = datetime.datetime.now()
         _tmid = _now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         _ymid = _tmid - 86400
-        bk_files, bk_missing = [], []            # (filename, day, mtime)  /  (host, reason)
+        bk_files, bk_missing, bk_expected_off = [], [], []   # (filename, day, mtime) / (host, reason) / (host, reason)
         for c in sysm.components:
             d = store.backups.get(c.instance)
             if d is None:
@@ -2014,11 +2076,19 @@ class ReportBuilder:
                 # else: past the policy window -> stale, does NOT count as a fresh backup
             if fresh:
                 bk_files.extend(fresh)
+            elif backup_gap_expected(c.instance, d.get("ok"), _now):
+                # policy says this host doesn't back up on the day before today (RTGS/CSD,
+                # Sundays) -- an expected gap, not a fault (see backup_gap_expected's own
+                # docstring for why this can't just be a wider backup_cutoff window). A
+                # distinct row, not silence, so the panel still says something rather than
+                # looking like the host was never checked at all.
+                bk_expected_off.append((c.label, "no backup expected (off-day policy)"))
             else:
                 bk_missing.append((c.label, "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
         bk_files.sort(key=lambda ft: (0 if ft[1] == "today" else 1, ft[0]))   # today first
-        bk_rows = [("file", fname, fday, mtime) for fname, fday, mtime in bk_files] + \
-                  [("missing", host, reason) for host, reason in bk_missing]   # ("file", name, day, mtime) | ("missing", host, reason)
+        bk_rows = ([("file", fname, fday, mtime) for fname, fday, mtime in bk_files]
+                  + [("missing", host, reason) for host, reason in bk_missing]
+                  + [("expected_off", host, reason) for host, reason in bk_expected_off])
         nbk_missing = len(bk_missing)
         # system-wide backup blind spot: NOT ONE host reports the backup check (matches the
         # overview BACKUP TRACKING tile). Distinct from NO BACKUP — a host that DOES run the
@@ -2189,6 +2259,12 @@ class ReportBuilder:
                         self._cell(r, 16, gen, Theme.font(9, False, Theme.GREY), al="center", border=True)
                         self._chip(r, 17, {"today": "TODAY", "yesterday": "YESTERDAY"}.get(fday, "PRESENT"),
                                    "green", sz=8)
+                    elif brow[0] == "expected_off":
+                        _, host, reason = brow
+                        self._cell(r, 15, f"{reason}  ·  {host}",
+                                   Theme.font(9, False, Theme.SUB), border=True)
+                        self._cell(r, 16, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                        self._chip(r, 17, "OFF-DAY", "green", sz=8)
                     else:
                         _, host, reason = brow
                         self._cell(r, 15, f"{reason}  ·  {host}",

@@ -22,10 +22,13 @@
       host backs up daily, so <b>{{ default_days }}</b> (today or yesterday) is the default for
       any host left blank here; a host on a slower cycle (e.g. a database whose full backup
       runs every 3rd day) needs its own number, otherwise the gap between its runs reads as a
-      missing backup. <b>Frequency</b> is the only setting this covers today. Every Save
-      creates a new, permanent revision below — nothing is ever edited or deleted. <b>Save</b>
-      only records the revision. <b>Save &amp; Apply</b> also rewrites the live policy file —
-      no service to restart, so it takes effect on the very next report.
+      missing backup. <b>Off days</b> are a separate setting, for a host that simply doesn't
+      run a backup on a given day of the week at all (not a slower fixed cycle like the
+      3-day example above) — tick a day and a check run the morning after it will not treat
+      that gap as a missing backup. Every Save creates a new, permanent revision below —
+      nothing is ever edited or deleted. <b>Save</b> only records the revision.
+      <b>Save &amp; Apply</b> also rewrites the live policy file — no service to restart, so
+      it takes effect on the very next report.
     </p>
 
     <form method="post" id="backupPolicyForm">
@@ -38,19 +41,31 @@
             <h2>{{ g.name }}</h2>
             <span class="sub">{{ g.hosts|length }} host{{ g.hosts|length|pluralize }}</span>
             <span class="spacer"></span>
-            {% if g.overridden %}<span class="chip accent" title="At least one host here differs from the daily default">custom frequency</span>{% endif %}
+            {% if g.overridden %}<span class="chip accent" title="At least one host here differs from the daily default">custom policy</span>{% endif %}
             <span class="chev">▾</span>
           </header>
           <div class="body">
             <div class="cfg-group">
               <div class="cfg-grid3">
                 {% for h in g.hosts %}
-                <label class="field">
-                  <span>{{ h.label }} <b class="cfg-hint" style="display:inline;text-transform:none;letter-spacing:0">— days</b></span>
-                  <input type="number" min="1" step="1"
-                         name="freq__{{ h.instance }}" value="{{ h.days }}"
-                         autocomplete="off">
-                </label>
+                <div class="field">
+                  <label>
+                    <span>{{ h.label }} <b class="cfg-hint" style="display:inline;text-transform:none;letter-spacing:0">— days</b></span>
+                    <input type="number" min="1" step="1"
+                           name="freq__{{ h.instance }}" value="{{ h.days }}"
+                           autocomplete="off">
+                  </label>
+                  <span class="cfg-hint">Off days (no backup expected)</span>
+                  <div class="cfg-weekdays">
+                    {% for d in h.off_weekdays %}
+                    <label class="cfg-weekday-check" title="{{ d.label }}">
+                      <input type="checkbox" name="off__{{ h.instance }}" value="{{ d.value }}"
+                             {% if d.checked %}checked{% endif %}>
+                      <span>{{ d.label|slice:":1" }}</span>
+                    </label>
+                    {% endfor %}
+                  </div>
+                </div>
                 {% endfor %}
               </div>
             </div>

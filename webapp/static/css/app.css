@@ -632,6 +632,19 @@ table.hist tr:last-child td { border-bottom: 0; }
 .cfg-sub-label .cfg-hint { display: inline; text-transform: none; letter-spacing: 0; margin-left: 6px; }
 .cfg-scheme { max-width: 220px; margin-top: 12px; }
 
+/* per-host "off days" row on the Backup policy screen -- seven compact day toggles, not a
+   multi-select, so ticking Sunday for a host is a glance, not a modal. */
+.cfg-weekdays { display: flex; gap: 4px; margin-top: 6px; }
+.cfg-weekday-check {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 6px; border: 1px solid var(--line);
+  font-size: 11px; font-weight: 600; color: var(--muted); cursor: pointer; user-select: none;
+}
+.cfg-weekday-check input { position: absolute; opacity: 0; width: 0; height: 0; }
+.cfg-weekday-check:has(input:checked) {
+  background: var(--accent-bg); border-color: var(--accent); color: var(--accent);
+}
+
 /* key/value rows (extra labels, external labels) */
 .cfg-kv { display: flex; flex-direction: column; gap: 8px; }
 .cfg-kv-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }

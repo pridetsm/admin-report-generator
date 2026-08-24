@@ -5,11 +5,15 @@ host backs up daily (the engine's own DEFAULT_BACKUP_MAX_AGE_DAYS = 1); a host o
 cycle needs an override here, otherwise the gap between its runs reads as a missing backup —
 e.g. BSA's database, whose MSSQL full backup runs every 3rd day.
 
-"Frequency" (frequency_days) is the only field a host's entry carries today. Kept as
-{field: value} per host, not a bare int, so a second component (e.g. an expected
-time-of-day, once that becomes something worth alerting on) can be added later without
-reshaping what is already stored — the same reasoning webapp/reports/snmp_admin.py's
-profiles dict follows for its own per-item fields.
+"Frequency" (frequency_days) was the only field a host's entry carried at first. Kept as
+{field: value} per host, not a bare int, specifically so a second component could be added
+later without reshaping what is already stored — the same reasoning
+webapp/reports/snmp_admin.py's profiles dict follows for its own per-item fields. That
+happened: "off weekdays" (off_weekdays) is a SEPARATE dimension from frequency, for a host
+that simply doesn't run a backup on a given day of the week at all (RTGS/CSD, Sundays) —
+distinct from a slower fixed cycle like BSA's, see generate_report.backup_cutoff's own
+docstring for why a flat frequency override can't express "skip Sunday" without also
+loosening every other day's window.
 
 BACKUP_POLICY_PATHS are the LIVE files generate_report.capture() reads fresh on every
 report — no restart, no service: the very next capture (webapp, mail_report.py, or the
@@ -34,18 +38,27 @@ BACKUP_POLICY_PATHS = [
 FREQUENCY_FIELD = "frequency_days"
 DEFAULT_FREQUENCY_DAYS = gr.DEFAULT_BACKUP_MAX_AGE_DAYS   # 1 — daily
 
+OFF_WEEKDAYS_FIELD = "off_weekdays"
+# Monday=0 .. Sunday=6 (Python's own date.weekday(), what generate_report.backup_cutoff
+# compares against) — the order this module and the config screen always present them in.
+WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
 
 def parse_live_policy() -> Dict[str, dict]:
-    """{instance: {"frequency_days": N}, ...} — the live file if this webapp has ever saved
-    one, else generate_report's own hardcoded defaults (BSA's 3-day override today), so the
-    very first edit-screen load shows real current behaviour rather than an empty form."""
+    """{instance: {"frequency_days": N, "off_weekdays": [...]}, ...} — the live file if this
+    webapp has ever saved one, else generate_report's own hardcoded defaults (BSA's 3-day
+    override, RTGS/CSD's Sunday-off policy), so the very first edit-screen load shows real
+    current behaviour rather than an empty form."""
     path = BACKUP_POLICY_PATHS[0]
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
-    return {inst: {FREQUENCY_FIELD: days} for inst, days in gr.BACKUP_MAX_AGE_DAYS.items()}
+    merged: Dict[str, dict] = {inst: {FREQUENCY_FIELD: days} for inst, days in gr.BACKUP_MAX_AGE_DAYS.items()}
+    for inst, off_days in gr.BACKUP_OFF_WEEKDAYS.items():
+        merged.setdefault(inst, {})[OFF_WEEKDAYS_FIELD] = sorted(off_days)
+    return merged
 
 
 def write_policy(policy: Dict[str, dict]) -> Tuple[bool, str]:
