@@ -551,6 +551,67 @@ def backup_policy_comment(instance: str, now: datetime.datetime | None = None) -
             f"not a fault. The next backup file is expected {when}.")
 
 
+def backup_frequency_comment(instance: str, now: datetime.datetime | None = None) -> str:
+    """The automatic explanation for a SLOWER-than-daily backup cadence (see
+    BACKUP_MAX_AGE_DAYS) — e.g. BSA's MSSQL full backup, which only runs every 3rd day.
+    Distinct from backup_policy_comment (an ABSENCE explained by an off-day policy): this
+    explains a file that IS present and within policy, just older than a daily reader would
+    expect (rendered as PRESENT in the Backups panel, named by weekday rather than "today"/
+    "yesterday" — see _system_card's own file-bucketing). Returns "" for any host on the
+    ordinary 1-day cadence (nothing unusual to explain)."""
+    now = now or datetime.datetime.now()
+    days = BACKUP_MAX_AGE_DAYS.get(instance, DEFAULT_BACKUP_MAX_AGE_DAYS)
+    if days <= 1:
+        return ""
+    return (f"This host's backup policy expects a full backup only every {days} days, not "
+            f"daily — a file from earlier in that cycle is still within policy, not a fault.")
+
+
+# Close-of-business (T24) does not run on Sundays -- same "policy-expected gap" shape as
+# BACKUP_OFF_WEEKDAYS, but for a single global metric (cob_time) rather than a per-host
+# backup check, so it's a plain set of weekdays rather than a per-instance dict, and it's
+# only ever relevant to the one system that owns COB.
+COB_OFF_WEEKDAYS = {6}          # Sunday
+COB_OWNER_SYSTEM = "Temenos"    # T24 -- the only system cob_policy_comment ever attaches to
+
+
+def cob_policy_comment(now: datetime.datetime | None = None) -> str:
+    """Names which day's close-of-business run the report's COB figure actually reflects,
+    whenever "yesterday" was a day COB doesn't run on (Sunday) — regardless of whether the
+    metric currently reads N/A or a real-looking number. cob_time only turns NaN once it's
+    been stale long enough (see capture()'s own note on the collector), so a report generated
+    on or shortly after a COB off-day can still show a plain minutes figure that's actually
+    carried over from the LAST real run (Saturday), not evidence Sunday's non-existent COB
+    completed. Unlike backup_gap_expected this fires purely off the calendar — it isn't
+    gating a flag, just always naming which day is really being shown whenever that isn't
+    obviously "yesterday". Returns "" on a normal day (yesterday was a real COB day)."""
+    now = now or datetime.datetime.now()
+    yesterday = now.date() - datetime.timedelta(days=1)
+    if yesterday.weekday() not in COB_OFF_WEEKDAYS:
+        return ""
+    last_real = yesterday
+    while last_real.weekday() in COB_OFF_WEEKDAYS:
+        last_real -= datetime.timedelta(days=1)
+    nxt = now.date()
+    while nxt.weekday() in COB_OFF_WEEKDAYS:
+        nxt += datetime.timedelta(days=1)
+    when = "today" if nxt == now.date() else nxt.strftime("%A %d %b %Y")
+    names = " and ".join(f"{_WEEKDAY_NAMES[d]}s" for d in sorted(COB_OFF_WEEKDAYS))
+    return (f"The time shown for COB is from this {last_real.strftime('%A')}. COB policy "
+            f"states that no COB is expected on {names}. The next COB is expected {when}.")
+
+
+def cob_policy_notes_for_system(sysm: "System", now: datetime.datetime | None = None) -> List[str]:
+    """Informational note for the COB owner's own card (see cob_policy_comment) — never a
+    Flag, mirrors backup_policy_notes_for_system's own non-actionable shape. Purely
+    calendar-driven (no store/metric lookup needed): only fires for COB_OWNER_SYSTEM, and
+    only on the day(s) right after a COB off-day."""
+    if sysm.name != COB_OWNER_SYSTEM:
+        return []
+    text = cob_policy_comment(now)
+    return [text] if text else []
+
+
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
@@ -1370,23 +1431,39 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
 
 def backup_policy_notes_for_system(store: "Store", sysm: "System",
                                     now: datetime.datetime | None = None) -> List[str]:
-    """Informational, non-actionable notes for a system's components currently sitting in a
-    policy-expected backup gap (see backup_gap_expected/backup_policy_comment) — e.g. RTGS/CSD
-    DB the Monday after their Sunday off-day. Deliberately separate from flagged_for_system's
-    Flags: those drive the web form's Fix-needed/Resolved decision, and this is never a fault,
-    so it must never appear as one. Mirrors flagged_for_system's own backup freshness check
-    (same cutoff, same "not fresh" gate) so this and the xlsx Backups panel never disagree
-    about which components are in this state."""
+    """Informational, non-actionable notes for a system's components currently sitting in
+    either of two policy-explainable backup states — deliberately separate from
+    flagged_for_system's Flags (those drive the web form's Fix-needed/Resolved decision, and
+    neither of these is ever a fault, so neither must appear as one):
+
+    1. A policy-expected GAP (see backup_gap_expected/backup_policy_comment) — e.g. RTGS/CSD
+       DB the Monday after their Sunday off-day: no fresh file at all, even under the
+       widened cutoff window.
+    2. A slower-than-daily CADENCE (see backup_frequency_comment) — e.g. BSA's MSSQL full
+       backup, which only runs every 3rd day: a file IS present and within policy, just older
+       than today/yesterday, which is what makes it "fresh" only under the widened window and
+       not under the plain (today, yesterday) pair a daily reader would expect.
+
+    Mirrors flagged_for_system's own backup freshness check (same cutoff) so this and the
+    xlsx Backups panel never disagree about which components are in either state."""
     now = now or datetime.datetime.now()
     notes: List[str] = []
+    ymid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() - 86400
     for c in sysm.components:
         d = store.backups.get(c.instance)
         if d is None:
             continue
+        files = d.get("files") or []
         cutoff = backup_cutoff(c.instance, now)
-        fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
-        if not fresh and backup_gap_expected(c.instance, d.get("ok"), now):
-            text = backup_policy_comment(c.instance, now)
+        widely_fresh = any(mt and mt >= cutoff for _n, _day, mt in files)
+        if not widely_fresh:
+            if backup_gap_expected(c.instance, d.get("ok"), now):
+                text = backup_policy_comment(c.instance, now)
+                if text:
+                    notes.append(f"{c.label} — {text}")
+        elif not any(mt and mt >= ymid for _n, _day, mt in files):
+            # fresh only via the widened window, not today/yesterday -> a slower cadence
+            text = backup_frequency_comment(c.instance, now)
             if text:
                 notes.append(f"{c.label} — {text}")
     return notes
@@ -2360,9 +2437,11 @@ class ReportBuilder:
         #      this system actually has an entry -- most systems have none. A gap row first
         #      (same "small gap" spacing used between every other pair of tables on this
         #      card), then title + header rows matching Disk's own styling exactly, then one
-        #      data row per folder. Actual GB is always chipped amber (never red) when over
-        #      Expected -- see FOLDER_EXPECTED_PCT's docstring: this is "keep an eye on it",
-        #      not an outage, however large the folder grows. ----
+        #      data row per folder. Actual GB and the % of Expected column are banded the SAME
+        #      way as the Disk usage table (self._band -- green/amber/red at chip_amber/
+        #      chip_red, just against % of Expected instead of % of drive) rather than a flat
+        #      amber, so a folder that's crept close to its threshold reads as a warning
+        #      before it actually crosses it, not just the moment it does. ----
         folders_bottom = top + rows - 1
         if folders:
             fy = top + rows
@@ -2377,7 +2456,7 @@ class ReportBuilder:
             fy += 1
             for c in range(2, 9):
                 self._cell(fy, c, bg=Theme.BG)
-            for c, t in zip((9, 10, 11, 12, 13), ("Host", "Name", "Expected GB", "Actual GB", "")):
+            for c, t in zip((9, 10, 11, 12, 13), ("Host", "Name", "Expected GB", "Actual GB", "% of Expected")):
                 self._cell(fy, c, t, Theme.font(8, True, Theme.GREY), bg=Theme.HDR,
                            al=("left" if c <= 10 else "center"), border=True)
             for c in range(14, 19):
@@ -2392,11 +2471,17 @@ class ReportBuilder:
                 self._cell(r, 10, name, Theme.font(9, False, Theme.GREY), border=True)
                 self._cell(r, 11, f"{expected:.1f}" if expected is not None else "—",
                            Theme.font(9, False, Theme.WHITE), al="center", border=True)
-                if expected is not None and gb > expected:
-                    self._chip(r, 12, f"{gb:.1f}", "amber", sz=9)
+                # banded like the Disk usage table (self._band): green/amber/red against
+                # % of EXPECTED rather than % of the drive itself, so "Actual GB" and the new
+                # "% of Expected" column always agree on colour with each other.
+                pct = (gb / expected * 100) if expected else None
+                if pct is not None:
+                    band = self._band(pct)
+                    self._chip(r, 12, f"{gb:.1f}", band, sz=9)
+                    self._chip(r, 13, f"{pct:.0f}%", band, sz=9)
                 else:
                     self._cell(r, 12, f"{gb:.1f}", Theme.font(9, False, Theme.WHITE), al="center", border=True)
-                self._cell(r, 13, "", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                    self._cell(r, 13, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
                 for c in range(14, 19):
                     self._cell(r, c, bg=Theme.BG)
             folders_bottom = ftop + len(folders) - 1
