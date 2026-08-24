@@ -34,6 +34,7 @@ class SystemVM:
     name: str
     hosts: int
     flags: List[FlagVM]
+    notes: List[str] = field(default_factory=list)   # informational only — never a Fix/Resolved item
 
     @property
     def red(self) -> int:
@@ -340,7 +341,8 @@ def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = Fa
     for sysm in systems:
         flags = [FlagVM(f.key, f.text, f.band, f.category)
                  for f in gr.flagged_for_system(store, sysm, cfg)]
-        svms.append(SystemVM(name=sysm.name, hosts=len(sysm.components), flags=flags))
+        notes = gr.backup_policy_notes_for_system(store, sysm)
+        svms.append(SystemVM(name=sysm.name, hosts=len(sysm.components), flags=flags, notes=notes))
 
     return Snapshot(
         token=token,

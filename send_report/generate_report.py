@@ -1346,6 +1346,30 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
     return flags
 
 
+def backup_policy_notes_for_system(store: "Store", sysm: "System",
+                                    now: datetime.datetime | None = None) -> List[str]:
+    """Informational, non-actionable notes for a system's components currently sitting in a
+    policy-expected backup gap (see backup_gap_expected/backup_policy_comment) — e.g. RTGS/CSD
+    DB the Monday after their Sunday off-day. Deliberately separate from flagged_for_system's
+    Flags: those drive the web form's Fix-needed/Resolved decision, and this is never a fault,
+    so it must never appear as one. Mirrors flagged_for_system's own backup freshness check
+    (same cutoff, same "not fresh" gate) so this and the xlsx Backups panel never disagree
+    about which components are in this state."""
+    now = now or datetime.datetime.now()
+    notes: List[str] = []
+    for c in sysm.components:
+        d = store.backups.get(c.instance)
+        if d is None:
+            continue
+        cutoff = backup_cutoff(c.instance, now)
+        fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
+        if not fresh and backup_gap_expected(c.instance, d.get("ok"), now):
+            text = backup_policy_comment(c.instance, now)
+            if text:
+                notes.append(f"{c.label} — {text}")
+    return notes
+
+
 def backup_missing_band(count: int) -> str:
     """Card state for the overview MISSING BACKUPS tile. No misses -> good (green).
        Freshness is judged on a (today, yesterday) pair. Work days are Mon–Sat,

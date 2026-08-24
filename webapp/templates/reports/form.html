@@ -255,6 +255,10 @@
         {% endfor %}
       {% endif %}
 
+      {% for note in sys.notes %}
+      <div class="healthy-note"><span class="chip green">POLICY</span> {{ note }}</div>
+      {% endfor %}
+
       <label class="field" style="margin-top:14px">
         <textarea name="comment__{{ forloop.counter0 }}" rows="2" placeholder="Optional note that appears in this {{ subject }}'s Notes panel"></textarea>
       </label>
