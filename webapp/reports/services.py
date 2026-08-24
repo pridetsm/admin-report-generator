@@ -75,17 +75,17 @@ class Snapshot:
 
     @property
     def default_summary_text(self) -> str:
-        """Per-system listing of every system that already has something WORTH SAYING in its
-        own Comment box by default (see SystemVM.notes_text) -- e.g. an auto-captured
-        backup-policy explanation -- so Summary Notes starts already showing it instead of
-        blank, and the admin isn't re-typing what's already sitting on that system's own
-        card. Excludes NO_ISSUES_COMMENT specifically: every system carries that filler when
-        it has nothing else to say (see capture_snapshot), and a Summary Notes box listing
-        "System X: All clear" twenty times over would bury the systems that actually need a
-        look. Only a starting point for the form's textarea (see form.html's live recompute);
-        this property itself is never touched once the page has rendered."""
-        lines = [f"{s.name}: {s.notes_text}" for s in self.systems
-                 if s.notes and s.notes != [gr.NO_ISSUES_COMMENT]]
+        """Per-system listing of EVERY system's own Comment box by default (see
+        SystemVM.notes_text) -- an auto-captured backup-policy/COB explanation, or the plain
+        NO_ISSUES_COMMENT fallback when there's nothing else to say -- so Summary Notes
+        starts already showing all of it instead of blank, and the admin isn't re-typing
+        what's already sitting on each system's own card. Deliberately NOT filtered down to
+        only the "interesting" systems: every system always has a comment now (see
+        capture_snapshot), and the whole point of this property is to mirror that, one line
+        per system, not to re-introduce a judgment call about what's worth showing. Only a
+        starting point for the form's textarea (see form.html's live recompute); this
+        property itself is never touched once the page has rendered."""
+        lines = [f"{s.name}: {s.notes_text}" for s in self.systems if s.notes]
         return "\n\n".join(lines)
 
     @property
