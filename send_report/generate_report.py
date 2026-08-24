@@ -623,6 +623,28 @@ def cob_policy_notes_for_system(sysm: "System", now: datetime.datetime | None = 
 NO_ISSUES_COMMENT = "No pending issues detected on this run. All clear."
 
 
+def system_comment_text(store: "Store", sysm: "System", flagged: list,
+                         annotations: Optional[dict],
+                         now: datetime.datetime | None = None) -> str:
+    """What ONE system's Comment box says, right now: the admin's own typed text if the web
+    form gave one, else the same auto-notes (backup/COB policy) the box falls back to on its
+    own, else NO_ISSUES_COMMENT when the system is flag-free with nothing else to say, else
+    "" when it's flagged and awaiting a real admin comment (an empty box, not a fabricated
+    one). Computed the SAME way regardless of caller, so _system_card's own box and
+    _overview's Summary Notes per-system listing can never disagree — and, critically, so
+    Summary Notes is populated straight from live data (store/systems), not from whatever the
+    web form's summary box happened to be submitted with. That's what makes it show up in a
+    CLI/scheduled report too, where there's no web form step and annotations is always {}."""
+    ann = annotations.get(sysm.name, {}) if annotations else {}
+    comment = ann.get("comment") if isinstance(ann, dict) else None
+    if comment:
+        return comment
+    if flagged:
+        return ""
+    notes = backup_policy_notes_for_system(store, sysm, now) + cob_policy_notes_for_system(sysm, now)
+    return "\n\n".join(notes) if notes else NO_ISSUES_COMMENT
+
+
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
@@ -2117,8 +2139,22 @@ class ReportBuilder:
                 self._cell(r, c, bg=Theme.CARD).border = field
         self.ws.cell(tt + 1, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
         self.ws.merge_cells(start_row=tt + 1, start_column=nl, end_row=notes_bottom, end_column=nr)
-        if self.summary_comment:                       # pre-fill the summary box from the web form
-            self.ws.cell(tt + 1, nl).value = self.summary_comment
+        # Per-system listing, compiled HERE from live store/systems data via
+        # system_comment_text -- the SAME thing each system's own Comment box shows (see
+        # _system_card) -- rather than depending on whatever the web form's summary box
+        # happened to be submitted with. That's what makes this show up in a CLI/scheduled
+        # report too (no web form step, self.annotations is always {} there) instead of only
+        # after an admin reviews and submits interactively. self.summary_comment (an optional
+        # freeform overall remark, admin- or CLI-supplied) leads if present.
+        per_system = []
+        for sysm in systems:
+            flagged_s = flagged_for_system(store, sysm, self.cfg)
+            text = system_comment_text(store, sysm, flagged_s, self.annotations)
+            if text:
+                per_system.append(f"{sysm.name}: {text}")
+        parts = ([self.summary_comment] if self.summary_comment else []) + per_system
+        if parts:
+            self.ws.cell(tt + 1, nl).value = "\n\n".join(parts)
         # author line — this is the MASTER name cell (drawn first), every system's "By" mirrors it.
         # Below whichever is taller: the banners or this now-short box.
         by = max(content_bottom, notes_bottom) + 1
@@ -2515,7 +2551,6 @@ class ReportBuilder:
         flagged = flagged_for_system(store, sysm, self.cfg)
         ann = self.annotations.get(sysm.name, {}) if self.annotations else {}
         ann_flags = ann.get("flags", {}) if isinstance(ann, dict) else {}
-        has_comment = isinstance(ann, dict) and bool(ann.get("comment"))
 
         mcol = nr - 2                                        # metric spans nl..mcol; fix=nr-1; resolved=nr
         fixL = get_column_letter(nr - 1)
@@ -2567,10 +2602,9 @@ class ReportBuilder:
                 self._cell(rr, c, bg=Theme.CARD).border = field
         self.ws.cell(cmt_top, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
         self.ws.merge_cells(start_row=cmt_top, start_column=nl, end_row=cmt_bottom, end_column=nr)
-        if has_comment:
-            self.ws.cell(cmt_top, nl).value = ann["comment"]
-        elif not flagged:
-            self.ws.cell(cmt_top, nl).value = NO_ISSUES_COMMENT
+        comment_text = system_comment_text(store, sysm, flagged, self.annotations, _now)
+        if comment_text:
+            self.ws.cell(cmt_top, nl).value = comment_text
 
         # author line beneath everything:  By [____ name ____]
         by = cmt_bottom + 1

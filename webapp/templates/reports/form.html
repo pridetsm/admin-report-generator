@@ -266,13 +266,11 @@
   <div class="section-label">Summary note</div>
   <div class="card"><div class="body" style="padding-top:16px">
     <label class="field">
-      <span>Overall summary (appears in the report's Summary Notes)</span>
-      <textarea name="summary_comment" id="summaryComment" rows="3"
-                placeholder="Optional overall commentary for this snapshot"
-                data-auto="1">{{ snapshot.default_summary_text }}</textarea>
+      <span>Overall summary (appears above the per-system listing in the report's Summary Notes)</span>
+      <textarea name="summary_comment" rows="3" placeholder="Optional overall commentary for this snapshot"></textarea>
       <span class="cfg-hint">
-        Auto-filled, one line per system, from every system's own Comment box below — edit
-        freely; typing here stops it following further changes to those boxes.
+        Every system's own Comment box (below) is compiled into Summary Notes automatically
+        when the report is generated — this box is only for an optional remark on top of that.
       </span>
     </label>
   </div></div>
@@ -536,29 +534,8 @@
     function val(sel) { var el = document.querySelector(sel); return el ? el.value : ""; }
     var theme = document.querySelector("input[name=theme]:checked");
     return { ts: Date.now(), author: val("input[name=author]"), recipients: val("input[name=recipients]"),
-             summary: val("textarea[name=summary_comment]"), summaryTouched: summaryTouched,
+             summary: val("textarea[name=summary_comment]"),
              theme: theme ? theme.value : "dark", systems: systems, flagText: flagText };
-  }
-
-  // ---- Summary Notes: auto-compiled from every system's own Comment box, until the admin
-  // types into it directly (see the summaryComment textarea's own hint text). ----
-  var summaryBox = document.getElementById("summaryComment");
-  var summaryTouched = false;
-  function recomputeSummary() {
-    if (!summaryBox || summaryTouched) return;
-    var lines = [];
-    document.querySelectorAll(".card[data-collapsible][data-system]").forEach(function (card) {
-      var sys = card.getAttribute("data-system");
-      var cmt = card.querySelector('textarea[name^="comment__"]');
-      var val = cmt ? cmt.value.trim() : "";
-      if (val) lines.push(sys + ": " + val);
-    });
-    summaryBox.value = lines.join("\n\n");
-  }
-  if (summaryBox) {
-    summaryBox.addEventListener("input", function () { summaryTouched = true; });
-    document.querySelectorAll('.card[data-collapsible][data-system] textarea[name^="comment__"]')
-      .forEach(function (cmt) { cmt.addEventListener("input", recomputeSummary); });
   }
 
   var DRAFT_KEY = (function () {
@@ -592,9 +569,7 @@
 
     var a = document.querySelector("input[name=author]"); if (a && d.author) a.value = d.author;
     if (d.recipients) applyRecipients(d.recipients);
-    var s = document.querySelector("textarea[name=summary_comment]");
-    if (s && d.summary) { s.value = d.summary; summaryTouched = true; }
-    else if (d.summaryTouched) { summaryTouched = true; }
+    var s = document.querySelector("textarea[name=summary_comment]"); if (s && d.summary) s.value = d.summary;
     if (d.theme) { var tr = document.querySelector('input[name=theme][value="' + d.theme + '"]'); if (tr) tr.checked = true; }
     syncEmail();
 
