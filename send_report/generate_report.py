@@ -2123,22 +2123,19 @@ class ReportBuilder:
 
         # ---- Summary Notes: RHS panel beside the AT A GLANCE / tile bands (explain anything,
         #      incl. the alert) ----
-        # O:W (15-23), rows 9-18 -- a fixed box beside the tile bands specifically, not a tall
-        # one running the full height of however many banners render below. notes_bottom is
-        # the box's own visual bottom; content_bottom (the banners' true bottom, already
+        # O:W (15-23), rows 9-18 by default -- a box beside the tile bands specifically, not
+        # one running the full height of however many banners render below. Grows past 18
+        # when its own content needs it (see _wrapped_rows below): wrap_text alone does NOT
+        # grow a merged cell's row height in Excel, so a long compiled listing would otherwise
+        # clip or spill past this box's own bottom edge instead of visibly wrapping. notes_bottom
+        # is the box's own visual bottom; content_bottom (the banners' true bottom, already
         # updated above) still governs where the author line and the NEXT section start, so a
-        # tall banner stack is never overlapped just because this box is now short.
+        # tall banner stack is never overlapped just because this box happens to be shorter.
         nl, nr = 15, 23
-        notes_bottom = 18
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         # title sits LOW — level with the cards (row 9), mirroring the per-system notes titles
         tt = 9
-        self._merge(tt, nl, nr, "Summary Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
-        for r in range(tt + 1, notes_bottom + 1):      # writable box directly beneath the title
-            for c in range(nl, nr + 1):
-                self._cell(r, c, bg=Theme.CARD).border = field
-        self.ws.cell(tt + 1, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        self.ws.merge_cells(start_row=tt + 1, start_column=nl, end_row=notes_bottom, end_column=nr)
+
         # Per-system listing, compiled HERE from live store/systems data via
         # system_comment_text -- the SAME thing each system's own Comment box shows (see
         # _system_card) -- rather than depending on whatever the web form's summary box
@@ -2153,8 +2150,25 @@ class ReportBuilder:
             if text:
                 per_system.append(f"{sysm.name}: {text}")
         parts = ([self.summary_comment] if self.summary_comment else []) + per_system
-        if parts:
-            self.ws.cell(tt + 1, nl).value = "\n\n".join(parts)
+        summary_text = "\n\n".join(parts)
+
+        # Row estimate for wrap_text: CHARS_PER_ROW is a rough fit for this box's own
+        # rendered width (cols O-W's summed column widths, ~111 units), erring conservative
+        # (more rows than strictly needed) since a few blank trailing rows are harmless but
+        # clipped text is a real problem. Never shorter than 9 rows (the box's original fixed
+        # size), so a short/empty summary still reads as a normal-sized panel.
+        CHARS_PER_ROW = 100
+        needed = sum(max(1, -(-len(p) // CHARS_PER_ROW)) for p in parts) if parts else 0
+        notes_bottom = max(18, tt + needed)
+
+        self._merge(tt, nl, nr, "Summary Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+        for r in range(tt + 1, notes_bottom + 1):      # writable box directly beneath the title
+            for c in range(nl, nr + 1):
+                self._cell(r, c, bg=Theme.CARD).border = field
+        self.ws.cell(tt + 1, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        self.ws.merge_cells(start_row=tt + 1, start_column=nl, end_row=notes_bottom, end_column=nr)
+        if summary_text:
+            self.ws.cell(tt + 1, nl).value = summary_text
         # author line — this is the MASTER name cell (drawn first), every system's "By" mirrors it.
         # Below whichever is taller: the banners or this now-short box.
         by = max(content_bottom, notes_bottom) + 1
