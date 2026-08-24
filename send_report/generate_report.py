@@ -527,6 +527,30 @@ def backup_gap_expected(instance: str, ok: Optional[bool], now: datetime.datetim
     return yesterday in off_days
 
 
+_WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def backup_policy_comment(instance: str, now: datetime.datetime | None = None) -> str:
+    """The automatic explanation for a policy-expected backup gap (see backup_gap_expected) —
+    names the off-day(s) and computes the actual date the next backup is due, rather than a
+    static "off-day policy" label. Written to stand alone wherever it's shown (the Backups
+    panel row today; anywhere else an auto-explained finding is wanted later) — a reader
+    should not need to go check backup_policy.json to know what it means or when this stops
+    being true. Returns "" if `instance` has no off-days configured (nothing to explain).
+    """
+    now = now or datetime.datetime.now()
+    off_days = BACKUP_OFF_WEEKDAYS.get(instance)
+    if not off_days:
+        return ""
+    names = " and ".join(f"{_WEEKDAY_NAMES[d]}s" for d in sorted(off_days))
+    d = now.date()
+    while d.weekday() in off_days:              # first day ON/AFTER today that isn't off
+        d += datetime.timedelta(days=1)
+    when = "today" if d == now.date() else d.strftime("%A %d %b %Y")
+    return (f"Backup policy states that no backup is expected on {names} — this is expected, "
+            f"not a fault. The next backup file is expected {when}.")
+
+
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
@@ -2082,7 +2106,7 @@ class ReportBuilder:
                 # docstring for why this can't just be a wider backup_cutoff window). A
                 # distinct row, not silence, so the panel still says something rather than
                 # looking like the host was never checked at all.
-                bk_expected_off.append((c.label, "no backup expected (off-day policy)"))
+                bk_expected_off.append((c.label, backup_policy_comment(c.instance, _now)))
             else:
                 bk_missing.append((c.label, "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
         bk_files.sort(key=lambda ft: (0 if ft[1] == "today" else 1, ft[0]))   # today first
@@ -2260,10 +2284,15 @@ class ReportBuilder:
                         self._chip(r, 17, {"today": "TODAY", "yesterday": "YESTERDAY"}.get(fday, "PRESENT"),
                                    "green", sz=8)
                     elif brow[0] == "expected_off":
+                        # reason is now a full sentence (backup_policy_comment) rather than a
+                        # short phrase, so it gets the Generated column too (merged O:P) instead
+                        # of being clipped behind that column's own "—" -- host leads so the
+                        # row still reads host-first at a glance, sentence explains why.
                         _, host, reason = brow
-                        self._cell(r, 15, f"{reason}  ·  {host}",
+                        self._cell(r, 15, f"{host} — {reason}",
                                    Theme.font(9, False, Theme.SUB), border=True)
-                        self._cell(r, 16, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                        self._cell(r, 16, "", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                        self.ws.merge_cells(start_row=r, start_column=15, end_row=r, end_column=16)
                         self._chip(r, 17, "OFF-DAY", "green", sz=8)
                     else:
                         _, host, reason = brow
