@@ -75,13 +75,17 @@ class Snapshot:
 
     @property
     def default_summary_text(self) -> str:
-        """Per-system listing of every system that already has something in its own Comment
-        box by default (see SystemVM.notes_text) -- e.g. an auto-captured backup-policy
-        explanation -- so Summary Notes starts already showing it instead of blank, and the
-        admin isn't re-typing what's already sitting on that system's own card. Only a
-        starting point for the form's textarea (see form.html's live recompute); this
-        property itself is never touched once the page has rendered."""
-        lines = [f"{s.name}: {s.notes_text}" for s in self.systems if s.notes]
+        """Per-system listing of every system that already has something WORTH SAYING in its
+        own Comment box by default (see SystemVM.notes_text) -- e.g. an auto-captured
+        backup-policy explanation -- so Summary Notes starts already showing it instead of
+        blank, and the admin isn't re-typing what's already sitting on that system's own
+        card. Excludes NO_ISSUES_COMMENT specifically: every system carries that filler when
+        it has nothing else to say (see capture_snapshot), and a Summary Notes box listing
+        "System X: All clear" twenty times over would bury the systems that actually need a
+        look. Only a starting point for the form's textarea (see form.html's live recompute);
+        this property itself is never touched once the page has rendered."""
+        lines = [f"{s.name}: {s.notes_text}" for s in self.systems
+                 if s.notes and s.notes != [gr.NO_ISSUES_COMMENT]]
         return "\n\n".join(lines)
 
     @property
@@ -360,6 +364,8 @@ def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = Fa
         flags = [FlagVM(f.key, f.text, f.band, f.category)
                  for f in gr.flagged_for_system(store, sysm, cfg)]
         notes = gr.backup_policy_notes_for_system(store, sysm) + gr.cob_policy_notes_for_system(sysm)
+        if not flags and not notes:   # nothing flagged, nothing policy-explained -- see NO_ISSUES_COMMENT
+            notes = [gr.NO_ISSUES_COMMENT]
         svms.append(SystemVM(name=sysm.name, hosts=len(sysm.components), flags=flags, notes=notes))
 
     return Snapshot(

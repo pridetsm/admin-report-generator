@@ -612,6 +612,17 @@ def cob_policy_notes_for_system(sysm: "System", now: datetime.datetime | None = 
     return [text] if text else []
 
 
+# The Comment box's own fallback when a system has neither a flagged metric nor any other
+# note (policy-driven or admin-typed) to show — used by _system_card directly (so a CLI/
+# scheduled report still gets it, not just the web-form path) and by
+# webapp/reports/services.py to pre-fill the same text into the form's comment box, so the
+# xlsx and the web form always agree on what an all-clear system's box says. Chosen over
+# leaving the box blank or removing it entirely: a reader scanning every card for something
+# written in the box shouldn't have to distinguish "nothing to report" from "this card was
+# skipped" -- every card says something.
+NO_ISSUES_COMMENT = "No pending issues detected on this run. All clear."
+
+
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
@@ -2536,46 +2547,30 @@ class ReportBuilder:
                 res = self._cell(r, nr, "", Theme.font(9), bg=Theme.CARD, al="center", border=True)
                 res.value = f'=IF({fixL}{r}="No","Yes",IF({fixL}{r}="Yes","No",""))'
             table_bottom = r
-        elif has_comment:
-            # nothing flagged, but there IS something to say (an admin comment, or an
-            # auto-captured one like the backup/COB policy notes) -- keep the explicit
-            # "no critical/warning metrics" line so that comment doesn't read as answering
-            # something that isn't there.
+        else:
             self._merge(r, nl, nr, "  No critical or warning metrics this run.",
                         Theme.font(9, False, Theme.SUB), bg=Theme.CARD, al="left")
             for c in range(nl, nr + 1):
                 self.ws.cell(r, c).border = field
             table_bottom = r
-        else:
-            # nothing flagged AND nothing to say -- collapse the whole Notes body (this row
-            # AND the comment box below it), not just the comment box on its own, so an
-            # all-clear system with no comment reads as truly empty under the title rather
-            # than as an unbordered box with "no issues" restated for no reason.
-            table_bottom = tn_row
 
-        # free-text comment box, stretched down to at least the tables' height -- but only
-        # when there's something to show: an all-clear system (no flagged metrics) that also
-        # got no admin comment from the web form has nothing to say, so the empty bordered
-        # box (which reads as "fill this in") is skipped entirely rather than rendered blank.
-        if flagged or has_comment:
-            cmt_title = table_bottom + 1
-            self._merge(cmt_title, nl, nr, "  Comment", Theme.font(8, True, Theme.SUB), bg=Theme.CARD, al="left")
-            cmt_top = cmt_title + 1
-            cmt_bottom = max(cmt_top + 2, last_data)
-            for rr in range(cmt_top, cmt_bottom + 1):
-                for c in range(nl, nr + 1):
-                    self._cell(rr, c, bg=Theme.CARD).border = field
-            self.ws.cell(cmt_top, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-            self.ws.merge_cells(start_row=cmt_top, start_column=nl, end_row=cmt_bottom, end_column=nr)
-            if has_comment:
-                self.ws.cell(cmt_top, nl).value = ann["comment"]
-        else:
-            # still keep the card's height matching the taller panels alongside it (Disk /
-            # Backups), just plain and unbordered -- no visual box implying input is wanted.
-            cmt_bottom = max(table_bottom, last_data)
-            for rr in range(table_bottom + 1, cmt_bottom + 1):
-                for c in range(nl, nr + 1):
-                    self._cell(rr, c, bg=Theme.CARD)
+        # free-text comment box -- always shown, never removed: a card with nothing to
+        # report falls back to NO_ISSUES_COMMENT rather than an empty or missing box, so
+        # every card visibly says something and the admin never has to type the same
+        # "nothing to report" note by hand.
+        cmt_title = table_bottom + 1
+        self._merge(cmt_title, nl, nr, "  Comment", Theme.font(8, True, Theme.SUB), bg=Theme.CARD, al="left")
+        cmt_top = cmt_title + 1
+        cmt_bottom = max(cmt_top + 2, last_data)
+        for rr in range(cmt_top, cmt_bottom + 1):
+            for c in range(nl, nr + 1):
+                self._cell(rr, c, bg=Theme.CARD).border = field
+        self.ws.cell(cmt_top, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        self.ws.merge_cells(start_row=cmt_top, start_column=nl, end_row=cmt_bottom, end_column=nr)
+        if has_comment:
+            self.ws.cell(cmt_top, nl).value = ann["comment"]
+        elif not flagged:
+            self.ws.cell(cmt_top, nl).value = NO_ISSUES_COMMENT
 
         # author line beneath everything:  By [____ name ____]
         by = cmt_bottom + 1

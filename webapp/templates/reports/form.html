@@ -544,6 +544,11 @@
   // types into it directly (see the summaryComment textarea's own hint text). ----
   var summaryBox = document.getElementById("summaryComment");
   var summaryTouched = false;
+  // Must match generate_report.NO_ISSUES_COMMENT exactly -- every system's Comment box now
+  // falls back to this when there's nothing to report, so it has to be excluded here the
+  // same way Snapshot.default_summary_text excludes it server-side, or Summary Notes would
+  // list "System X: All clear" for every healthy system and bury the ones that need a look.
+  var NO_ISSUES_COMMENT = "No pending issues detected on this run. All clear.";
   function recomputeSummary() {
     if (!summaryBox || summaryTouched) return;
     var lines = [];
@@ -551,7 +556,7 @@
       var sys = card.getAttribute("data-system");
       var cmt = card.querySelector('textarea[name^="comment__"]');
       var val = cmt ? cmt.value.trim() : "";
-      if (val) lines.push(sys + ": " + val);
+      if (val && val !== NO_ISSUES_COMMENT) lines.push(sys + ": " + val);
     });
     summaryBox.value = lines.join("\n\n");
   }
