@@ -34,7 +34,10 @@ class SystemVM:
     name: str
     hosts: int
     flags: List[FlagVM]
-    notes: List[str] = field(default_factory=list)   # informational only — never a Fix/Resolved item
+    # auto-captured, recurring explanations (e.g. a policy-expected backup gap) — pre-filled
+    # into the comment box (see notes_text) so the admin isn't re-typing the same explanation
+    # every report; never a Fix/Resolved item like .flags.
+    notes: List[str] = field(default_factory=list)
 
     @property
     def red(self) -> int:
@@ -47,6 +50,10 @@ class SystemVM:
     @property
     def healthy(self) -> bool:
         return not self.flags
+
+    @property
+    def notes_text(self) -> str:
+        return "\n\n".join(self.notes)
 
 
 @dataclass
