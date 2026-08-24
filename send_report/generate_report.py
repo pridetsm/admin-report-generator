@@ -642,7 +642,11 @@ def system_comment_text(store: "Store", sysm: "System", flagged: list,
     if flagged:
         return ""
     notes = backup_policy_notes_for_system(store, sysm, now) + cob_policy_notes_for_system(sysm, now)
-    return "\n\n".join(notes) if notes else NO_ISSUES_COMMENT
+    # single newline between a system's OWN multiple notes (keeps them visually grouped as
+    # one block), reserving the blank-line (\n\n) separator for BETWEEN different systems --
+    # see _overview's Summary Notes, which would otherwise read a multi-note system as two
+    # separate entries with no way to tell it apart from a real system boundary.
+    return "\n".join(notes) if notes else NO_ISSUES_COMMENT
 
 
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
@@ -2143,23 +2147,46 @@ class ReportBuilder:
         # report too (no web form step, self.annotations is always {} there) instead of only
         # after an admin reviews and submits interactively. self.summary_comment (an optional
         # freeform overall remark, admin- or CLI-supplied) leads if present.
+        # CHARS_PER_ROW is a rough fit for this box's own rendered width (cols O-W's summed
+        # column widths, ~111 units) -- used both to size the box (wrap_text alone doesn't
+        # grow a merged cell's row height in Excel) and to cap how far it's allowed to grow.
+        CHARS_PER_ROW = 100
+
+        def _rows_for(text: str) -> int:
+            return max(1, -(-len(text) // CHARS_PER_ROW))         # ceil division
+
+        lead = [self.summary_comment] if self.summary_comment else []
         per_system = []
         for sysm in systems:
             flagged_s = flagged_for_system(store, sysm, self.cfg)
             text = system_comment_text(store, sysm, flagged_s, self.annotations)
             if text:
                 per_system.append(f"{sysm.name}: {text}")
-        parts = ([self.summary_comment] if self.summary_comment else []) + per_system
-        summary_text = "\n\n".join(parts)
 
-        # Row estimate for wrap_text: CHARS_PER_ROW is a rough fit for this box's own
-        # rendered width (cols O-W's summed column widths, ~111 units), erring conservative
-        # (more rows than strictly needed) since a few blank trailing rows are harmless but
-        # clipped text is a real problem. Never shorter than 9 rows (the box's original fixed
-        # size), so a short/empty summary still reads as a normal-sized panel.
-        CHARS_PER_ROW = 100
-        needed = sum(max(1, -(-len(p) // CHARS_PER_ROW)) for p in parts) if parts else 0
-        notes_bottom = max(18, tt + needed)
+        # Hard ceiling on the per-system listing specifically (the admin's own lead note is
+        # never truncated -- they wrote it deliberately). On an unusually bad day where most
+        # of the estate has something to say, an unbounded box would grow tall enough to
+        # distort the whole "AT A GLANCE" section it sits beside. Nothing here is actually
+        # LOST when the cap bites: every system's own card still carries its own comment in
+        # full (see _system_card) -- this is only ever a display limit on the compiled copy.
+        MAX_SUMMARY_ROWS = 30
+        used = sum(_rows_for(p) for p in lead)
+        included, overflow = [], 0
+        for entry in per_system:
+            rows = _rows_for(entry)
+            if included and used + rows > MAX_SUMMARY_ROWS:
+                overflow += 1
+                continue
+            included.append(entry)
+            used += rows
+        if overflow:
+            note = f"…and {overflow} more system(s) — see each system's own Comment box."
+            included.append(note)
+            used += _rows_for(note)
+
+        parts = lead + included
+        summary_text = "\n\n".join(parts)                          # ONE consistent blank line
+        notes_bottom = max(18, tt + used)                           # between every entry, always
 
         self._merge(tt, nl, nr, "Summary Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
         for r in range(tt + 1, notes_bottom + 1):      # writable box directly beneath the title
