@@ -267,7 +267,13 @@
   <div class="card"><div class="body" style="padding-top:16px">
     <label class="field">
       <span>Overall summary (appears in the report's Summary Notes)</span>
-      <textarea name="summary_comment" rows="3" placeholder="Optional overall commentary for this snapshot"></textarea>
+      <textarea name="summary_comment" id="summaryComment" rows="3"
+                placeholder="Optional overall commentary for this snapshot"
+                data-auto="1">{{ snapshot.default_summary_text }}</textarea>
+      <span class="cfg-hint">
+        Auto-filled, one line per system, from every system's own Comment box below — edit
+        freely; typing here stops it following further changes to those boxes.
+      </span>
     </label>
   </div></div>
 
@@ -510,7 +516,12 @@
 
   function collect() {
     var systems = {}, flagText = {};
-    document.querySelectorAll("[data-system]").forEach(function (card) {
+    // .card[data-collapsible] specifically -- a per-host "Connect" button also carries its
+    // own data-system (same value, a different purpose entirely: see the cxs-chip block
+    // above), and a bare [data-system] selector matches those too. They come AFTER the real
+    // card in document order, so without this qualifier every system with a connect host
+    // silently overwrote its own just-collected comment/flags with blanks on every draft save.
+    document.querySelectorAll(".card[data-collapsible][data-system]").forEach(function (card) {
       var sys = card.getAttribute("data-system"), flags = {}, texts = {};
       card.querySelectorAll("[data-flag-key]").forEach(function (row) {
         var key = row.getAttribute("data-flag-key");
@@ -525,8 +536,29 @@
     function val(sel) { var el = document.querySelector(sel); return el ? el.value : ""; }
     var theme = document.querySelector("input[name=theme]:checked");
     return { ts: Date.now(), author: val("input[name=author]"), recipients: val("input[name=recipients]"),
-             summary: val("textarea[name=summary_comment]"), theme: theme ? theme.value : "dark",
-             systems: systems, flagText: flagText };
+             summary: val("textarea[name=summary_comment]"), summaryTouched: summaryTouched,
+             theme: theme ? theme.value : "dark", systems: systems, flagText: flagText };
+  }
+
+  // ---- Summary Notes: auto-compiled from every system's own Comment box, until the admin
+  // types into it directly (see the summaryComment textarea's own hint text). ----
+  var summaryBox = document.getElementById("summaryComment");
+  var summaryTouched = false;
+  function recomputeSummary() {
+    if (!summaryBox || summaryTouched) return;
+    var lines = [];
+    document.querySelectorAll(".card[data-collapsible][data-system]").forEach(function (card) {
+      var sys = card.getAttribute("data-system");
+      var cmt = card.querySelector('textarea[name^="comment__"]');
+      var val = cmt ? cmt.value.trim() : "";
+      if (val) lines.push(sys + ": " + val);
+    });
+    summaryBox.value = lines.join("\n\n");
+  }
+  if (summaryBox) {
+    summaryBox.addEventListener("input", function () { summaryTouched = true; });
+    document.querySelectorAll('.card[data-collapsible][data-system] textarea[name^="comment__"]')
+      .forEach(function (cmt) { cmt.addEventListener("input", recomputeSummary); });
   }
 
   var DRAFT_KEY = (function () {
@@ -560,12 +592,14 @@
 
     var a = document.querySelector("input[name=author]"); if (a && d.author) a.value = d.author;
     if (d.recipients) applyRecipients(d.recipients);
-    var s = document.querySelector("textarea[name=summary_comment]"); if (s && d.summary) s.value = d.summary;
+    var s = document.querySelector("textarea[name=summary_comment]");
+    if (s && d.summary) { s.value = d.summary; summaryTouched = true; }
+    else if (d.summaryTouched) { summaryTouched = true; }
     if (d.theme) { var tr = document.querySelector('input[name=theme][value="' + d.theme + '"]'); if (tr) tr.checked = true; }
     syncEmail();
 
     var gone = [];
-    document.querySelectorAll("[data-system]").forEach(function (card) {
+    document.querySelectorAll(".card[data-collapsible][data-system]").forEach(function (card) {
       var sys = card.getAttribute("data-system"), saved = (d.systems || {})[sys];
       if (!saved) return;
       var cmt = card.querySelector('textarea[name^="comment__"]'); if (cmt && saved.comment) cmt.value = saved.comment;

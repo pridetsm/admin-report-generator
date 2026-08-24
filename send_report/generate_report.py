@@ -555,11 +555,30 @@ def backup_policy_comment(instance: str, now: datetime.datetime | None = None) -
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
 LDAP_DEPENDENTS = {"GCMS", "GMS"}
-# folder_exporter target name -> expected size in GB, for the Folders table (see
-# _system_card / FOLDER OVER EXPECTED SIZE banner). A folder over its expectation is ALWAYS
-# a warning here, never critical, however far over it grows -- this is "keep an eye on it",
-# not an outage, unlike a near-full disk. Extend as more logging-role folders are watched.
-FOLDER_EXPECTED_GB = {"T24 Log File": 5}
+# folder_exporter target name -> (volume/mount it lives on, expected size as a FRACTION of
+# that volume's own total capacity), for the Folders table (see _system_card / FOLDER OVER
+# EXPECTED SIZE banner / folder_expected_gb). Percentage-of-drive rather than a fixed GB
+# number so the threshold scales with the actual volume the folder lives on and moves
+# automatically if that volume is ever resized -- a flat number (T24 Log File was 5 GB) reads
+# as a false alarm the moment the drive is bigger than the number assumed. T24 Log File lives
+# on T24 DB's F: (a 500 GB volume dedicated to logging), so 80% is ~400 GB of headroom before
+# this is worth a look -- generous on purpose, this is "keep an eye on it", not a hard cap.
+# A folder over its expectation is ALWAYS a warning here, never critical, however far over it
+# grows. Extend as more logging-role folders are watched.
+FOLDER_EXPECTED_PCT: Dict[str, Tuple[str, float]] = {"T24 Log File": ("F:", 0.80)}
+
+
+def folder_expected_gb(store: "Store", instance: Optional[str], name: str) -> Optional[float]:
+    """Expected size for a watched folder (see FOLDER_EXPECTED_PCT) -- computed fresh, every
+    report, from the actual current size of the volume it lives on. None if `name` isn't a
+    watched folder, or that host's disk data for the configured volume isn't available
+    (host unreachable this capture)."""
+    cfg = FOLDER_EXPECTED_PCT.get(name)
+    if cfg is None or instance is None:
+        return None
+    mount, pct = cfg
+    size = store.disk.get(instance, {}).get(mount, {}).get("size")
+    return size * pct if size is not None else None
 # `system` label values that are not real systems. "rbz network" is the core switch / network
 # device estate (see the `snmp` job in prometheus.yml and DEVICES in webapp/reports/network.py)
 # — those get their own Network Admin Report and are deliberately excluded here so a switch
@@ -785,7 +804,7 @@ class Store:
     # guess. Deliberately separate from `disk`: a folder's size has no capacity to be a % OF,
     # so it must never enter total_disks()/disk_high()/disk_near_full(), which all read
     # `disk` directly. Rendered in its own Folders table instead (see _system_card), each
-    # entry judged against FOLDER_EXPECTED_GB rather than banded like a real volume.
+    # entry judged against FOLDER_EXPECTED_PCT rather than banded like a real volume.
     log_files: Dict[str, List[Tuple[str, float, str]]] = field(default_factory=dict)
 
 
@@ -1219,16 +1238,19 @@ def http_links_detail(store: "Store", systems: List["System"]) -> List[Tuple[str
 
 
 def folder_over_expected_detail(store: "Store", systems: List["System"]) -> List[Tuple[str, str, float, float]]:
-    """Every watched folder (see Store.log_files / FOLDER_EXPECTED_GB) currently over its
+    """Every watched folder (see Store.log_files / FOLDER_EXPECTED_PCT) currently over its
     expected size -> [(system, name, expected_gb, actual_gb), ...]. Always a WARNING, never
     escalated to critical no matter how far over expected the folder grows -- this is "keep
     an eye on it" (e.g. a log file not being rotated), not an outage like a near-full disk."""
     rows: List[Tuple[str, str, float, float]] = []
-    by_name = {_norm(s.name): s.name for s in systems}
+    by_sys = {_norm(s.name): s for s in systems}
     for sysname_lower, entries in store.log_files.items():
-        real_name = by_name.get(_norm(sysname_lower), sysname_lower)
-        for name, gb, _source_ip in entries:
-            expected = FOLDER_EXPECTED_GB.get(name)
+        sysm = by_sys.get(_norm(sysname_lower))
+        real_name = sysm.name if sysm else sysname_lower
+        for name, gb, source_ip in entries:
+            instance = next((c.instance for c in (sysm.components if sysm else [])
+                             if c.instance.split(":")[0] == source_ip), None)
+            expected = folder_expected_gb(store, instance, name)
             if expected is not None and gb > expected:
                 rows.append((real_name, name, expected, gb))
     return rows
@@ -1926,7 +1948,7 @@ class ReportBuilder:
 
         # 3c) watched folders (e.g. T24 Log File) over their expected size — see the Folders
         #     table on the owning system's card. Always warning, never critical, however far
-        #     over expected the folder grows (see FOLDER_EXPECTED_GB's docstring) — this is
+        #     over expected the folder grows (see FOLDER_EXPECTED_PCT's docstring) — this is
         #     "keep an eye on it", not an outage.
         over_folders = folder_over_expected_detail(store, systems)
         if over_folders:
@@ -2077,7 +2099,7 @@ class ReportBuilder:
                  for c in sysm.components
                  for mp, dd in sorted(store.disk.get(c.instance, {}).items(),
                                       key=lambda kv: -kv[1].get("used", 0))]
-        # watched folders (see Store.log_files / FOLDER_EXPECTED_GB) get their own Folders
+        # watched folders (see Store.log_files / FOLDER_EXPECTED_PCT) get their own Folders
         # table, directly under Disk -- never store.disk itself, so they can't be mistaken
         # for a real volume by total_disks()/disk_high()/disk_near_full(). Keyed by SYSTEM
         # (see Store.log_files), not per-component -- attributed to the component whose OWN
@@ -2088,10 +2110,11 @@ class ReportBuilder:
         # nothing on this system shares that IP.
         folders = []
         for name, gb, source_ip in store.log_files.get(sysm.name.lower(), []):
-            host = next((c.label for c in sysm.components
-                        if c.instance.split(":")[0] == source_ip),
-                       sysm.components[0].label if sysm.components else sysm.name)
-            folders.append((host, name, gb))
+            owner = next((c for c in sysm.components
+                         if c.instance.split(":")[0] == source_ip),
+                        sysm.components[0] if sysm.components else None)
+            host = owner.label if owner else sysm.name
+            folders.append((host, name, gb, owner.instance if owner else None))
         nd = sum(1 for _, st, _ in mems if st == "down")           # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
              sum(1 for _, st, v in mems if st == "ok" and v >= self.cfg.chip_red) + \
@@ -2338,7 +2361,7 @@ class ReportBuilder:
         #      (same "small gap" spacing used between every other pair of tables on this
         #      card), then title + header rows matching Disk's own styling exactly, then one
         #      data row per folder. Actual GB is always chipped amber (never red) when over
-        #      Expected -- see FOLDER_EXPECTED_GB's docstring: this is "keep an eye on it",
+        #      Expected -- see FOLDER_EXPECTED_PCT's docstring: this is "keep an eye on it",
         #      not an outage, however large the folder grows. ----
         folders_bottom = top + rows - 1
         if folders:
@@ -2360,11 +2383,11 @@ class ReportBuilder:
             for c in range(14, 19):
                 self._cell(fy, c, bg=Theme.BG)
             ftop = fy + 1
-            for i, (host, name, gb) in enumerate(folders):
+            for i, (host, name, gb, instance) in enumerate(folders):
                 r = ftop + i
                 for c in range(2, 9):
                     self._cell(r, c, bg=Theme.BG)
-                expected = FOLDER_EXPECTED_GB.get(name)
+                expected = folder_expected_gb(store, instance, name)
                 self._cell(r, 9, host, Theme.font(9, False, Theme.GREY), border=True)
                 self._cell(r, 10, name, Theme.font(9, False, Theme.GREY), border=True)
                 self._cell(r, 11, f"{expected:.1f}" if expected is not None else "—",
@@ -2434,18 +2457,30 @@ class ReportBuilder:
                 self.ws.cell(r, c).border = field
             table_bottom = r
 
-        # free-text comment box, stretched down to at least the tables' height
-        cmt_title = table_bottom + 1
-        self._merge(cmt_title, nl, nr, "  Comment", Theme.font(8, True, Theme.SUB), bg=Theme.CARD, al="left")
-        cmt_top = cmt_title + 1
-        cmt_bottom = max(cmt_top + 2, last_data)
-        for rr in range(cmt_top, cmt_bottom + 1):
-            for c in range(nl, nr + 1):
-                self._cell(rr, c, bg=Theme.CARD).border = field
-        self.ws.cell(cmt_top, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        self.ws.merge_cells(start_row=cmt_top, start_column=nl, end_row=cmt_bottom, end_column=nr)
-        if isinstance(ann, dict) and ann.get("comment"):     # pre-fill from the web form, if given
-            self.ws.cell(cmt_top, nl).value = ann["comment"]
+        # free-text comment box, stretched down to at least the tables' height -- but only
+        # when there's something to show: an all-clear system (no flagged metrics) that also
+        # got no admin comment from the web form has nothing to say, so the empty bordered
+        # box (which reads as "fill this in") is skipped entirely rather than rendered blank.
+        has_comment = isinstance(ann, dict) and bool(ann.get("comment"))
+        if flagged or has_comment:
+            cmt_title = table_bottom + 1
+            self._merge(cmt_title, nl, nr, "  Comment", Theme.font(8, True, Theme.SUB), bg=Theme.CARD, al="left")
+            cmt_top = cmt_title + 1
+            cmt_bottom = max(cmt_top + 2, last_data)
+            for rr in range(cmt_top, cmt_bottom + 1):
+                for c in range(nl, nr + 1):
+                    self._cell(rr, c, bg=Theme.CARD).border = field
+            self.ws.cell(cmt_top, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            self.ws.merge_cells(start_row=cmt_top, start_column=nl, end_row=cmt_bottom, end_column=nr)
+            if has_comment:
+                self.ws.cell(cmt_top, nl).value = ann["comment"]
+        else:
+            # still keep the card's height matching the taller panels alongside it (Disk /
+            # Backups), just plain and unbordered -- no visual box implying input is wanted.
+            cmt_bottom = max(table_bottom, last_data)
+            for rr in range(table_bottom + 1, cmt_bottom + 1):
+                for c in range(nl, nr + 1):
+                    self._cell(rr, c, bg=Theme.CARD)
 
         # author line beneath everything:  By [____ name ____]
         by = cmt_bottom + 1

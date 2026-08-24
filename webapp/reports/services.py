@@ -74,6 +74,17 @@ class Snapshot:
         return getattr(self._cfg, "grafana", "") or ""
 
     @property
+    def default_summary_text(self) -> str:
+        """Per-system listing of every system that already has something in its own Comment
+        box by default (see SystemVM.notes_text) -- e.g. an auto-captured backup-policy
+        explanation -- so Summary Notes starts already showing it instead of blank, and the
+        admin isn't re-typing what's already sitting on that system's own card. Only a
+        starting point for the form's textarea (see form.html's live recompute); this
+        property itself is never touched once the page has rendered."""
+        lines = [f"{s.name}: {s.notes_text}" for s in self.systems if s.notes]
+        return "\n\n".join(lines)
+
+    @property
     def hosts_count(self) -> int:
         return sum(s.hosts for s in self.systems)
 
