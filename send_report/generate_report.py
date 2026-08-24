@@ -393,9 +393,14 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
         Service("Post Trade 1.9 Ticket Printer RESZ",
                 win_service("PT_1.9_TKTPRT_RESZ", "10.100.245.216:9182")),
     ],
+    # "Assets Mgt" (assetsmgt.service) was removed 2026-08-24: confirmed via a full active-unit
+    # listing on this host that the unit no longer exists at all (not failed/stopped -- gone,
+    # not in node_exporter's systemd collector output under any state), so this check had been
+    # reporting DOWN on every single report regardless of the app's real health -- a standing
+    # false alarm, not a real finding. asset-management.service is the live, currently-active
+    # unit and is the one actually worth watching (confirmed active).
     "assetregistry": [
         Service("Asset Management", systemd("10.100.245.249:9100", "asset-management.service", "simple")),
-        Service("Assets Mgt",        systemd("10.100.245.249:9100", "assetsmgt.service", "simple")),
         Service("MySQL",            systemd("10.100.245.249:9100", "mysql.service", "notify")),
     ],
     # httpd/postgres run INSIDE Docker containers on both hosts, not as systemd units — no
