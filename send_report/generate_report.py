@@ -2504,6 +2504,7 @@ class ReportBuilder:
         flagged = flagged_for_system(store, sysm, self.cfg)
         ann = self.annotations.get(sysm.name, {}) if self.annotations else {}
         ann_flags = ann.get("flags", {}) if isinstance(ann, dict) else {}
+        has_comment = isinstance(ann, dict) and bool(ann.get("comment"))
 
         mcol = nr - 2                                        # metric spans nl..mcol; fix=nr-1; resolved=nr
         fixL = get_column_letter(nr - 1)
@@ -2535,18 +2536,27 @@ class ReportBuilder:
                 res = self._cell(r, nr, "", Theme.font(9), bg=Theme.CARD, al="center", border=True)
                 res.value = f'=IF({fixL}{r}="No","Yes",IF({fixL}{r}="Yes","No",""))'
             table_bottom = r
-        else:
+        elif has_comment:
+            # nothing flagged, but there IS something to say (an admin comment, or an
+            # auto-captured one like the backup/COB policy notes) -- keep the explicit
+            # "no critical/warning metrics" line so that comment doesn't read as answering
+            # something that isn't there.
             self._merge(r, nl, nr, "  No critical or warning metrics this run.",
                         Theme.font(9, False, Theme.SUB), bg=Theme.CARD, al="left")
             for c in range(nl, nr + 1):
                 self.ws.cell(r, c).border = field
             table_bottom = r
+        else:
+            # nothing flagged AND nothing to say -- collapse the whole Notes body (this row
+            # AND the comment box below it), not just the comment box on its own, so an
+            # all-clear system with no comment reads as truly empty under the title rather
+            # than as an unbordered box with "no issues" restated for no reason.
+            table_bottom = tn_row
 
         # free-text comment box, stretched down to at least the tables' height -- but only
         # when there's something to show: an all-clear system (no flagged metrics) that also
         # got no admin comment from the web form has nothing to say, so the empty bordered
         # box (which reads as "fill this in") is skipped entirely rather than rendered blank.
-        has_comment = isinstance(ann, dict) and bool(ann.get("comment"))
         if flagged or has_comment:
             cmt_title = table_bottom + 1
             self._merge(cmt_title, nl, nr, "  Comment", Theme.font(8, True, Theme.SUB), bg=Theme.CARD, al="left")
