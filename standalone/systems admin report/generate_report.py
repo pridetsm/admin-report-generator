@@ -815,7 +815,7 @@ SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest"}
 # than System Admin's business-systems topology. Same split SKIP_SYSTEMS already makes for
 # "rbz network" above, just for a second, non-network estate with its own report screens
 # (see webapp/reports/roles.py's Infrastructure Admin role and views.infra_form/infra_report).
-INFRA_SYSTEMS = {"hci cluster", "oracle hosts"}
+INFRA_SYSTEMS = {"hci cluster", "oracle hosts", "root domain controllers"}
 
 # Scrape jobs whose targets carry a `system` label for a DIFFERENT feature's benefit, not
 # because the target is a host this report should track CPU/RAM/disk on. folder_exporter's
