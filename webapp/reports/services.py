@@ -74,6 +74,26 @@ class Snapshot:
         return getattr(self._cfg, "grafana", "") or ""
 
     @property
+    def comment_groups(self) -> List[Tuple[str, List[str]]]:
+        """Systems grouped by IDENTICAL Comment-box text (SystemVM.notes_text) -- the same
+        grouping generate_report.py's xlsx Summary Notes table uses, so the web form can show
+        (and let the admin bulk-edit) the same compiled view before ever submitting. A flagged
+        system with nothing yet (empty notes_text) is excluded, matching what its own Comment
+        box shows: nothing, awaiting a real answer, not a fabricated one."""
+        groups: List[Tuple[str, List[str]]] = []
+        seen: Dict[str, int] = {}
+        for s in self.systems:
+            text = s.notes_text
+            if not text:
+                continue
+            if text in seen:
+                groups[seen[text]][1].append(s.name)
+            else:
+                seen[text] = len(groups)
+                groups.append((text, [s.name]))
+        return groups
+
+    @property
     def hosts_count(self) -> int:
         return sum(s.hosts for s in self.systems)
 

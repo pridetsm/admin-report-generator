@@ -273,6 +273,30 @@
         when the report is generated — this box is only for an optional remark on top of that.
       </span>
     </label>
+
+    {% if snapshot.comment_groups %}
+    <div class="section-label" style="margin-top:18px">Per-system comments, grouped</div>
+    <p class="cfg-hint" style="margin:0 0 10px">
+      Systems sharing the exact same comment are grouped into one row, same as the report's
+      own Summary Notes table. Edit a row here to update every listed system's own Comment
+      box below in one go — or edit a single system's box directly if you only want to
+      change that one.
+    </p>
+    <div style="overflow-x:auto">
+      <table class="hist">
+        <thead><tr><th style="width:34px">#</th><th style="width:200px">Systems</th><th>Comment</th></tr></thead>
+        <tbody>
+        {% for text, names in snapshot.comment_groups %}
+          <tr class="summary-group-row" data-systems="{{ names|join:"|" }}">
+            <td>{{ forloop.counter }}</td>
+            <td>{{ names|join:", " }}</td>
+            <td><textarea class="summary-group-comment" rows="2">{{ text }}</textarea></td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
   </div></div>
 
 </div>
@@ -510,6 +534,21 @@
   });
   document.querySelectorAll("[data-confirm-cancel]").forEach(function (b) {
     b.addEventListener("click", function () { if (confirmPop) confirmPop.classList.remove("show"); });
+  });
+
+  // ---- grouped Summary Notes table: editing a row bulk-updates every listed system's own
+  // Comment box, which is what collect()/the form submission actually reads from -- this
+  // table has no field of its own, it's just a convenient bulk editor over those boxes.
+  document.querySelectorAll(".summary-group-comment").forEach(function (ta) {
+    ta.addEventListener("input", function () {
+      var row = ta.closest(".summary-group-row");
+      var names = row ? (row.getAttribute("data-systems") || "").split("|") : [];
+      names.forEach(function (name) {
+        var card = document.querySelector('.card[data-collapsible][data-system="' + name + '"]');
+        var cmt = card ? card.querySelector('textarea[name^="comment__"]') : null;
+        if (cmt) cmt.value = ta.value;
+      });
+    });
   });
 
   function collect() {
