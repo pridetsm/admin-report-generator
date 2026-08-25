@@ -669,7 +669,7 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     ]
     _disk_high_h, disk_high_d, disk_high_state = engine.disk_high(store, systems, thr, CRIT)
     disk_high_color = {"good": GREEN, "warn": AMBER, "bad": RED}[disk_high_state]
-    n_untracked = len(engine.backup_untracked(store, systems))
+    n_untracked = len(engine.backup_untracked_unexplained(store, systems))
     n_tracked = len(systems) - n_untracked
     # Every tile reads affected-out-of-TOTAL, matching the xlsx and the webapp: a bare count
     # can't be judged (3 is alarming out of 5 hosts, unremarkable out of 56).

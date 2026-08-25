@@ -124,7 +124,7 @@ def build_overview(store, systems, cfg) -> dict:
     dh_total = gr.total_disks(store, systems)
     miss = gr.backup_missing(store, systems)
     nmiss = len(miss)
-    n_untracked = len(gr.backup_untracked(store, systems))
+    n_untracked = len(gr.backup_untracked_unexplained(store, systems))
     n_tracked = len(systems) - n_untracked
     cert_expired, cert_expiring = gr.cert_rollup(store)
     ur = gr.unreachable(store, systems)
@@ -206,7 +206,7 @@ def build_overview(store, systems, cfg) -> dict:
                         "head": f"Missing backups — {len(miss)} host(s) with no fresh backup",
                         "rows": [{"label": h, "values": ", ".join(v)}
                                  for h, v in sorted(bysys.items())]})
-    untracked = gr.backup_untracked(store, systems)
+    untracked = gr.backup_untracked_unexplained(store, systems)
     if untracked:
         # Warning, not critical: a blind spot ("we can't tell"), not an active failure
         # ("it's broken") — nothing here is judged missing, since nothing is being watched.

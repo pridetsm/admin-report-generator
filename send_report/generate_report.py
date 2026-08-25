@@ -1523,9 +1523,10 @@ def backup_untracked(store: "Store", systems: List["System"]) -> List[str]:
     """Systems where NO component reports the backup check at all (no instance in
        store.backups) -> [system names]. These are a blind spot: backup_missing skips
        them (nothing to judge), so they never show as MISSING despite being unmonitored.
-       Unfiltered — includes BACKUP_UNTRACKED_EXEMPT systems too, since they genuinely have
-       no on-host check either; this stays the honest denominator for the Backup Tracking
-       tile. Use backup_untracked_unexplained for anything that should actually WARN."""
+       Unfiltered — includes BACKUP_UNTRACKED_EXEMPT systems too. Use
+       backup_untracked_unexplained wherever an untracked system should actually count
+       against something (a flag, a banner, the Backup Tracking tile) — exempt systems have
+       a stated reason, not a gap, so nothing here should read as if they're a problem."""
     return [s.name for s in systems
             if not any(c.instance in store.backups for c in s.components)]
 
@@ -1546,11 +1547,13 @@ BACKUP_UNTRACKED_EXEMPT = {
 
 
 def backup_untracked_unexplained(store: "Store", systems: List["System"]) -> List[str]:
-    """backup_untracked(), minus BACKUP_UNTRACKED_EXEMPT -- the subset that actually needs a
-    warning (an unexplained monitoring gap), as opposed to every untracked system. Used
-    anywhere an untracked system should raise a flag/banner; backup_untracked itself stays
-    unfiltered for tile-count purposes (an exempt system genuinely has no on-host check
-    either — that fact doesn't change just because there's a good reason for it)."""
+    """backup_untracked(), minus BACKUP_UNTRACKED_EXEMPT -- the subset that actually counts as
+    a monitoring gap, as opposed to every system with zero on-host backup check. This is what
+    every real consumer uses: flagged_for_system's amber flag, the BACKUPS UNTRACKED banner/
+    email block, and the Backup Tracking tile's own count -- an exempt system reads as tracked/
+    expected everywhere, not as an untracked one with a footnote. backup_untracked() itself is
+    the raw, unfiltered fact (kept for anything that genuinely needs to know "no check exists
+    here at all", exemption or not)."""
     return [s for s in backup_untracked(store, systems) if s not in BACKUP_UNTRACKED_EXEMPT]
 
 
@@ -2008,8 +2011,10 @@ class ReportBuilder:
         # amber if only elevated, green when zero — so 0 is always green (the colour rule).
         _disk_high_h, disk_high_d, disk_high_state = disk_high(
             store, systems, thr, self.cfg.chip_red)
-        # systems with no backup check at all (a monitoring blind spot) -> amber when any
-        n_untracked = len(backup_untracked(store, systems))
+        # systems with no backup check at all (a monitoring blind spot) -> amber when any.
+        # BACKUP_UNTRACKED_EXEMPT systems don't count here either -- a stated reason, not a
+        # gap, so they read as tracked/expected rather than pulling this tile down.
+        n_untracked = len(backup_untracked_unexplained(store, systems))
         n_tracked = len(systems) - n_untracked
         # web-encryption posture: green ONLY when no endpoint is plain HTTP; red when plain
         # HTTP endpoints OUTNUMBER the encrypted ones; amber for anything in between.
