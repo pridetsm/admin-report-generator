@@ -275,17 +275,18 @@
     </label>
 
     {% if snapshot.comment_groups %}
+    <div id="summaryGroupsWrap">
     <div class="section-label" style="margin-top:18px">Per-system comments, grouped</div>
     <p class="cfg-hint" style="margin:0 0 10px">
       Systems sharing the exact same comment are grouped into one row, same as the report's
       own Summary Notes table. Edit a row here to update every listed system's own Comment
       box below in one go — or edit a single system's box directly if you only want to
-      change that one.
+      change that one; this table refreshes as soon as you leave that box.
     </p>
     <div style="overflow-x:auto">
       <table class="hist">
         <thead><tr><th style="width:34px">#</th><th style="width:200px">Systems</th><th>Comment</th></tr></thead>
-        <tbody>
+        <tbody id="summaryGroupsBody">
         {% for text, names in snapshot.comment_groups %}
           <tr class="summary-group-row" data-systems="{{ names|join:"|" }}">
             <td>{{ forloop.counter }}</td>
@@ -295,6 +296,7 @@
         {% endfor %}
         </tbody>
       </table>
+    </div>
     </div>
     {% endif %}
   </div></div>
@@ -536,20 +538,62 @@
     b.addEventListener("click", function () { if (confirmPop) confirmPop.classList.remove("show"); });
   });
 
-  // ---- grouped Summary Notes table: editing a row bulk-updates every listed system's own
-  // Comment box, which is what collect()/the form submission actually reads from -- this
-  // table has no field of its own, it's just a convenient bulk editor over those boxes.
-  document.querySelectorAll(".summary-group-comment").forEach(function (ta) {
-    ta.addEventListener("input", function () {
-      var row = ta.closest(".summary-group-row");
-      var names = row ? (row.getAttribute("data-systems") || "").split("|") : [];
-      names.forEach(function (name) {
-        var card = document.querySelector('.card[data-collapsible][data-system="' + name + '"]');
-        var cmt = card ? card.querySelector('textarea[name^="comment__"]') : null;
-        if (cmt) cmt.value = ta.value;
-      });
+  // ---- grouped Summary Notes table: two-way sync with each system's own Comment box, which
+  // is what collect()/the form submission actually reads from -- this table has no field of
+  // its own, it's a convenient bulk view/editor over those boxes, kept in step both ways:
+  //   group -> systems: typing in a group row's textarea pushes that text to every system
+  //                      listed in its data-systems, live (every keystroke).
+  //   systems -> group: leaving (blur) any individual system's own Comment box rebuilds the
+  //                      whole table from every box's CURRENT value, so a manual edit there
+  //                      is reflected (regrouped if it now matches/no-longer-matches another
+  //                      box's text) without waiting for a full page reload.
+  function groupCommentInput() {
+    var row = this.closest(".summary-group-row");
+    var names = row ? (row.getAttribute("data-systems") || "").split("|") : [];
+    var value = this.value;
+    names.forEach(function (name) {
+      var card = document.querySelector('.card[data-collapsible][data-system="' + name + '"]');
+      var cmt = card ? card.querySelector('textarea[name^="comment__"]') : null;
+      if (cmt) cmt.value = value;
     });
+  }
+  function rebuildSummaryGroups() {
+    var tbody = document.getElementById("summaryGroupsBody");
+    if (!tbody) return;
+    var groups = [], index = {};
+    document.querySelectorAll(".card[data-collapsible][data-system]").forEach(function (card) {
+      var name = card.getAttribute("data-system");
+      var cmt = card.querySelector('textarea[name^="comment__"]');
+      var text = cmt ? cmt.value.trim() : "";
+      if (!text) return;
+      if (Object.prototype.hasOwnProperty.call(index, text)) {
+        groups[index[text]].names.push(name);
+      } else {
+        index[text] = groups.length;
+        groups.push({ text: text, names: [name] });
+      }
+    });
+    tbody.innerHTML = "";
+    groups.forEach(function (g, i) {
+      var tr = document.createElement("tr");
+      tr.className = "summary-group-row";
+      tr.setAttribute("data-systems", g.names.join("|"));
+      var tdNum = document.createElement("td"); tdNum.textContent = String(i + 1);
+      var tdSys = document.createElement("td"); tdSys.textContent = g.names.join(", ");
+      var tdCmt = document.createElement("td");
+      var ta = document.createElement("textarea");
+      ta.className = "summary-group-comment"; ta.rows = 2; ta.value = g.text;
+      ta.addEventListener("input", groupCommentInput);
+      tdCmt.appendChild(ta);
+      tr.appendChild(tdNum); tr.appendChild(tdSys); tr.appendChild(tdCmt);
+      tbody.appendChild(tr);
+    });
+  }
+  document.querySelectorAll(".summary-group-comment").forEach(function (ta) {
+    ta.addEventListener("input", groupCommentInput);
   });
+  document.querySelectorAll('.card[data-collapsible][data-system] textarea[name^="comment__"]')
+    .forEach(function (cmt) { cmt.addEventListener("blur", rebuildSummaryGroups); });
 
   function collect() {
     var systems = {}, flagText = {};
@@ -627,6 +671,7 @@
         if (!present[key]) gone.push(sys + ": “" + ((d.flagText[sys] || {})[key] || key) + "” is no longer flagged (back to normal).");
       });
     });
+    rebuildSummaryGroups();   // restored comments above set .value directly (no blur fires)
     toast("Snapshot refreshed — your entries were kept.", "success");
     gone.slice(0, 4).forEach(function (m) { toast(m, "info"); });
     if (gone.length > 4) toast((gone.length - 4) + " more items are no longer flagged.", "info");
