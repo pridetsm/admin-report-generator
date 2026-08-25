@@ -802,20 +802,25 @@ def folder_expected_gb(store: "Store", instance: Optional[str], name: str) -> Op
 # `system` label values that are not real systems. "rbz network" is the core switch / network
 # device estate (see the `snmp` job in prometheus.yml and DEVICES in webapp/reports/network.py)
 # — those get their own Network Admin Report and are deliberately excluded here so a switch
-# never appears among RTGS and Temenos on the System Admin side. "rtgstest" is RTGS's own
-# test environment, not a business system anyone needs a report on — kept OUT of the System
-# Admin estate the same way, rather than reporting on non-production infrastructure alongside
-# the real one. (DR/staging role components -- Eagle's "dr", LMS's "staging", etc. -- are
-# left alone: those are real infrastructure belonging to a real system, not test systems in
+# never appears among RTGS and Temenos on the System Admin side. "root domain controllers" is
+# the same situation, added later: two standalone AD DCs (10.100.249.200/.201), also a
+# DEVICES entry (kind="windows") rather than an INFRA_SYSTEMS card -- see network.py's DEVICES
+# list for why (not a cluster, no bespoke multi-node treatment needed, so the plain
+# device-picker path already covers them with zero new code, unlike HCI Cluster). "rtgstest"
+# is RTGS's own test environment, not a business system anyone needs a report on — kept OUT of
+# the System Admin estate the same way, rather than reporting on non-production infrastructure
+# alongside the real one. (DR/staging role components -- Eagle's "dr", LMS's "staging", etc. --
+# are left alone: those are real infrastructure belonging to a real system, not test systems in
 # their own right, so excluding them here would be wrong.)
-SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest"}
+SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest", "root domain controllers"}
 
 # `system` label values that ARE real systems, but belong to Infrastructure Admin's own
 # estate (hyper-converged clusters, standalone DB hosts — the underlying hardware) rather
 # than System Admin's business-systems topology. Same split SKIP_SYSTEMS already makes for
-# "rbz network" above, just for a second, non-network estate with its own report screens
-# (see webapp/reports/roles.py's Infrastructure Admin role and views.infra_form/infra_report).
-INFRA_SYSTEMS = {"hci cluster", "oracle hosts", "root domain controllers"}
+# "rbz network"/"root domain controllers" above, just for a second, non-network estate with
+# its own report screens (see webapp/reports/roles.py's Infrastructure Admin role and
+# views.infra_form/infra_report).
+INFRA_SYSTEMS = {"hci cluster", "oracle hosts"}
 
 # Scrape jobs whose targets carry a `system` label for a DIFFERENT feature's benefit, not
 # because the target is a host this report should track CPU/RAM/disk on. folder_exporter's

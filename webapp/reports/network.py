@@ -619,6 +619,31 @@ DEVICES = [
         "job": "hci_cluster",            # the prometheus.yml job this target's `up` lives under
         "report": "network_report",
     },
+    # Root Domain Controllers (AD forest root, HQ) -- two independent standalone DCs, not a
+    # cluster, so unlike HCI Cluster (whose real multi-node data comes from the bespoke,
+    # job-scoped _hci_node_metrics()) these need no special-case code at all: each is its own
+    # plain kind="windows" entry, picked up by the generic single-target _windows_metrics()
+    # path the same way any future standalone Windows device would be. Identified via reverse
+    # DNS + windows_exporter's own service list (ADWS/DNS/KDC/Netlogon), confirmed 2026-08-25.
+    # Only the service collector is enabled on both -- CPU/RAM/disk read no-data here.
+    {
+        "key": "root-dc-1",
+        "name": "RBZHQ-ROOT-01",
+        "kind": "windows",
+        "target": "10.100.249.200:9182",
+        "system": "Root Domain Controllers",
+        "job": "root_domain_controllers",
+        "report": "network_report",
+    },
+    {
+        "key": "root-dc-2",
+        "name": "RBZ-HQ-ROOT-02",
+        "kind": "windows",
+        "target": "10.100.249.201:9182",
+        "system": "Root Domain Controllers",
+        "job": "root_domain_controllers",
+        "report": "network_report",
+    },
 ]
 
 # volume filter for windows_logical_disk queries -- mirrors generate_report.py's own _VOL
