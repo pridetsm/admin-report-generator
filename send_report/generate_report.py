@@ -2245,11 +2245,27 @@ class ReportBuilder:
             overflow = sum(len(names) for _, names in groups[MAX_TABLE_ROWS:])
             groups = groups[:MAX_TABLE_ROWS]
 
-        LINE_PT = 14                # per-line row height, matches this box's own font size
         SYS_CHARS, CMT_CHARS = 20, 50   # rough fit for the Systems / Comment columns' own widths
 
         def _lines(text: str, chars: int) -> int:
             return max(1, -(-len(text) // chars))          # ceil division
+
+        # Tall content is given more ROWS (vertically merged), never a taller row via
+        # row_dimensions[r].height -- these rows are shared with the "AT A GLANCE" tile bands
+        # in columns B-N (Excel row height is whole-row, not per-column), so setting an
+        # explicit height here previously stretched every tile in that row apart too. Merging
+        # more rows at their own existing height achieves the same visible space without
+        # touching a property the tiles also depend on.
+        def _span(top: int, lines: int, c1: int, c2: int, value, font, al: str) -> None:
+            bottom = top + lines - 1
+            for rr in range(top, bottom + 1):
+                for c in range(c1, c2 + 1):
+                    self._cell(rr, c, bg=Theme.CARD).border = field
+            self.ws.cell(top, c1).value = value
+            self.ws.cell(top, c1).font = font
+            self.ws.cell(top, c1).alignment = Alignment(horizontal=al, vertical="top", wrap_text=True)
+            if c2 > c1 or bottom > top:
+                self.ws.merge_cells(start_row=top, start_column=c1, end_row=bottom, end_column=c2)
 
         r = tt + 1
 
@@ -2257,13 +2273,9 @@ class ReportBuilder:
         # plain wrapped line ABOVE the table since it isn't tied to specific systems, so it
         # doesn't force an artificial "Systems" value into the table's own structure.
         if self.summary_comment:
-            self.ws.row_dimensions[r].height = LINE_PT * _lines(self.summary_comment, 100)
-            self._cell(r, nl, self.summary_comment, Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, border=True)
-            for c in range(nl + 1, nr + 1):
-                self._cell(r, c, bg=Theme.CARD).border = field
-            self.ws.cell(r, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-            self.ws.merge_cells(start_row=r, start_column=nl, end_row=r, end_column=nr)
-            r += 1
+            lines = _lines(self.summary_comment, 100)
+            _span(r, lines, nl, nr, self.summary_comment, Theme.font(9, False, Theme.WHITE), "left")
+            r += lines
 
         if groups or overflow:
             # column layout within nl..nr: # (col O alone, centered -- unavoidably wide since O
@@ -2280,26 +2292,15 @@ class ReportBuilder:
 
             for i, (text, names) in enumerate(groups, start=1):
                 sys_text = ", ".join(names)
-                self.ws.row_dimensions[r].height = LINE_PT * max(_lines(sys_text, SYS_CHARS),
-                                                                   _lines(text, CMT_CHARS))
-                self._cell(r, num_c, str(i), Theme.font(9, False, Theme.WHITE), bg=Theme.CARD,
-                          al="center", border=True)
-                self._merge(r, sys1, sys2, sys_text, Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="left")
-                self._merge(r, cmt1, cmt2, text, Theme.font(9, False, Theme.SUB), bg=Theme.CARD, al="left")
-                for cc in (sys1, sys2, cmt1, cmt2):
-                    self.ws.cell(r, cc).border = field
-                self.ws.cell(r, num_c).alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
-                self.ws.cell(r, sys1).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-                self.ws.cell(r, cmt1).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-                r += 1
+                lines = max(_lines(sys_text, SYS_CHARS), _lines(text, CMT_CHARS))
+                _span(r, lines, num_c, num_c, str(i), Theme.font(9, False, Theme.WHITE), "center")
+                _span(r, lines, sys1, sys2, sys_text, Theme.font(9, False, Theme.WHITE), "left")
+                _span(r, lines, cmt1, cmt2, text, Theme.font(9, False, Theme.SUB), "left")
+                r += lines
 
             if overflow:
                 note = f"…and {overflow} more system(s) — see each system's own Comment box."
-                self._cell(r, nl, note, Theme.font(9, False, Theme.SUB), bg=Theme.CARD, border=True)
-                for c in range(nl + 1, nr + 1):
-                    self._cell(r, c, bg=Theme.CARD).border = field
-                self.ws.cell(r, nl).alignment = Alignment(horizontal="left", vertical="center")
-                self.ws.merge_cells(start_row=r, start_column=nl, end_row=r, end_column=nr)
+                _span(r, 1, nl, nr, note, Theme.font(9, False, Theme.SUB), "left")
                 r += 1
 
         notes_bottom = max(18, r - 1)
