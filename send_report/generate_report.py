@@ -1522,9 +1522,36 @@ def backup_tracked_hosts(store: "Store", systems: List["System"]) -> int:
 def backup_untracked(store: "Store", systems: List["System"]) -> List[str]:
     """Systems where NO component reports the backup check at all (no instance in
        store.backups) -> [system names]. These are a blind spot: backup_missing skips
-       them (nothing to judge), so they never show as MISSING despite being unmonitored."""
+       them (nothing to judge), so they never show as MISSING despite being unmonitored.
+       Unfiltered — includes BACKUP_UNTRACKED_EXEMPT systems too, since they genuinely have
+       no on-host check either; this stays the honest denominator for the Backup Tracking
+       tile. Use backup_untracked_unexplained for anything that should actually WARN."""
     return [s.name for s in systems
             if not any(c.instance in store.backups for c in s.components)]
+
+
+# Systems deliberately excluded from the BACKUPS UNTRACKED warning/flag -- not because they
+# ARE backed up (there's no on-host check here to verify that), but because monitoring a
+# local backup genuinely doesn't apply, for a stated reason rather than a silent gap. Distinct
+# from every BACKUP_* policy above (which explain a GAP in an EXISTING check): this explains
+# why there's no check to begin with. Surfaced as an automatic comment on the system's own
+# card (see backup_policy_notes_for_system) instead of the amber UNTRACKED flag, the same
+# "explain, don't just suppress" principle every other automatic comment here follows.
+BACKUP_UNTRACKED_EXEMPT = {
+    "Refinitiv (Reuters)": ("Admins maintain this system backs up directly to the vendor's "
+                            "cloud, not to local storage — there is nothing on-host for this "
+                            "app to check."),
+    "GMS": "This system is currently under development — backup monitoring has not been set up yet.",
+}
+
+
+def backup_untracked_unexplained(store: "Store", systems: List["System"]) -> List[str]:
+    """backup_untracked(), minus BACKUP_UNTRACKED_EXEMPT -- the subset that actually needs a
+    warning (an unexplained monitoring gap), as opposed to every untracked system. Used
+    anywhere an untracked system should raise a flag/banner; backup_untracked itself stays
+    unfiltered for tile-count purposes (an exempt system genuinely has no on-host check
+    either — that fact doesn't change just because there's a good reason for it)."""
+    return [s for s in backup_untracked(store, systems) if s not in BACKUP_UNTRACKED_EXEMPT]
 
 
 # One flagged item on a system's card: something the admin must answer for. `key` is a
@@ -1580,8 +1607,11 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
         if not fresh and not backup_gap_expected_any(c.instance, d.get("ok"), now):
             reason = "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"
             flags.append(Flag(f"backup:{c.label}", f"{c.label} · {reason}", "red", "backup"))
-    # untracked: no host on the system runs the backup check at all
-    if not any(c.instance in store.backups for c in sysm.components):
+    # untracked: no host on the system runs the backup check at all -- except systems in
+    # BACKUP_UNTRACKED_EXEMPT, where that's expected (a stated reason, not a gap); those get
+    # an explanatory comment instead (see backup_policy_notes_for_system), never this flag.
+    if (sysm.name not in BACKUP_UNTRACKED_EXEMPT
+            and not any(c.instance in store.backups for c in sysm.components)):
         flags.append(Flag(f"untracked:{sysm.name}",
                           f"{sysm.name} · UNTRACKED (no backup check on any host)", "amber", "untracked"))
     flags.sort(key=lambda f: 0 if f.band == "red" else 1)   # critical first (stable)
@@ -1603,9 +1633,17 @@ def backup_policy_notes_for_system(store: "Store", sysm: "System",
        than today/yesterday, which is what makes it "fresh" only under the widened window and
        not under the plain (today, yesterday) pair a daily reader would expect.
 
+    3. An UNTRACKED exemption (BACKUP_UNTRACKED_EXEMPT) — no component reports the backup
+       check at all, but for a stated reason (backs up to the vendor's cloud, still under
+       development, ...) rather than an unexplained monitoring gap. Returned alone, since
+       there's nothing else to check on a system with zero tracked components.
+
     Mirrors flagged_for_system's own backup freshness check (same cutoff) so this and the
     xlsx Backups panel never disagree about which components are in either state."""
     now = now or datetime.datetime.now()
+    reason = BACKUP_UNTRACKED_EXEMPT.get(sysm.name)
+    if reason and not any(c.instance in store.backups for c in sysm.components):
+        return [reason]
     notes: List[str] = []
     ymid = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() - 86400
     for c in sysm.components:
@@ -2108,7 +2146,9 @@ class ReportBuilder:
         #     nothing is being watched to judge). Warning, not critical: this is "we can't
         #     tell" rather than "it's broken" — but it still needs an answer, since a blind
         #     spot is exactly the condition under which a real gap goes unnoticed.
-        untracked = backup_untracked(store, systems)
+        #     BACKUP_UNTRACKED_EXEMPT systems are excluded here (a stated reason, not an
+        #     unexplained gap) -- see their own automatic comment on the system's card.
+        untracked = backup_untracked_unexplained(store, systems)
         if untracked:
             banners.append((
                 "warning",

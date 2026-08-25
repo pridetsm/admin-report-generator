@@ -114,7 +114,8 @@ def load_mail_config(ini_path) -> dict:
 #  ANALYSIS  — all pressure/rollup/reachability metrics come from generate_report.py
 #  (engine.disk_high, engine.disk_near_full, engine.ram_pressure, engine.cpu_pressure,
 #  engine.cert_rollup, engine.cert_monitored, engine.is_unreachable, engine.backup_missing,
-#  engine.backup_tracked_hosts, engine.backup_untracked, engine.backup_missing_band,
+#  engine.backup_tracked_hosts, engine.backup_untracked, engine.backup_untracked_unexplained,
+#  engine.backup_missing_band,
 #  engine.total_services, engine.services_down) — this module only buckets them into the
 #  four e-mail finding lists below.
 # ============================================================================ #
@@ -363,8 +364,9 @@ def _backup_missing_block(store, systems) -> str:
 def _backups_untracked_block(store, systems) -> str:
     """A callout listing systems where NOT ONE host runs the backup check at all -- a
     monitoring blind spot, not an active failure: nothing here is judged missing, since
-    nothing is being watched to judge."""
-    untracked = engine.backup_untracked(store, systems)
+    nothing is being watched to judge. Excludes engine.BACKUP_UNTRACKED_EXEMPT systems (a
+    stated reason, not an unexplained gap) -- matches the xlsx's own banner."""
+    untracked = engine.backup_untracked_unexplained(store, systems)
     if not untracked:
         return ""
     # one row per system, matching every other banner -- not all names crammed into a
