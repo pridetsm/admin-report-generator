@@ -155,7 +155,7 @@ class Theme:
 
     @staticmethod
     def font(size: int = 9, bold: bool = False, color: Optional[str] = None) -> Font:
-        return Font(name="Consolas", size=size, bold=bold, color=Color(rgb=color or Theme.WHITE))
+        return Font(name="Times New Roman", size=size, bold=bold, color=Color(rgb=color or Theme.WHITE))
 
     @staticmethod
     def fill(color: str) -> PatternFill:
@@ -2196,74 +2196,113 @@ class ReportBuilder:
         # ---- Summary Notes: RHS panel beside the AT A GLANCE / tile bands (explain anything,
         #      incl. the alert) ----
         # O:W (15-23), rows 9-18 by default -- a box beside the tile bands specifically, not
-        # one running the full height of however many banners render below. Grows past 18
-        # when its own content needs it (see _wrapped_rows below): wrap_text alone does NOT
-        # grow a merged cell's row height in Excel, so a long compiled listing would otherwise
-        # clip or spill past this box's own bottom edge instead of visibly wrapping. notes_bottom
-        # is the box's own visual bottom; content_bottom (the banners' true bottom, already
-        # updated above) still governs where the author line and the NEXT section start, so a
-        # tall banner stack is never overlapped just because this box happens to be shorter.
+        # one running the full height of however many banners render below. Grows past 18 when
+        # its own content needs it: wrap_text alone does NOT grow a row's height in Excel, so
+        # long content would otherwise clip instead of visibly wrapping. notes_bottom is the
+        # box's own visual bottom; content_bottom (the banners' true bottom, already updated
+        # above) still governs where the author line and the NEXT section start, so a tall
+        # banner stack is never overlapped just because this box happens to be shorter.
         nl, nr = 15, 23
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         # title sits LOW — level with the cards (row 9), mirroring the per-system notes titles
         tt = 9
+        self._merge(tt, nl, nr, "Summary Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
 
-        # Per-system listing, compiled HERE from live store/systems data via
+        # Per-system findings, compiled HERE from live store/systems data via
         # system_comment_text -- the SAME thing each system's own Comment box shows (see
         # _system_card) -- rather than depending on whatever the web form's summary box
         # happened to be submitted with. That's what makes this show up in a CLI/scheduled
         # report too (no web form step, self.annotations is always {} there) instead of only
-        # after an admin reviews and submits interactively. self.summary_comment (an optional
-        # freeform overall remark, admin- or CLI-supplied) leads if present.
-        # CHARS_PER_ROW is a rough fit for this box's own rendered width (cols O-W's summed
-        # column widths, ~111 units) -- used both to size the box (wrap_text alone doesn't
-        # grow a merged cell's row height in Excel) and to cap how far it's allowed to grow.
-        CHARS_PER_ROW = 100
-
-        def _rows_for(text: str) -> int:
-            return max(1, -(-len(text) // CHARS_PER_ROW))         # ceil division
-
-        lead = [self.summary_comment] if self.summary_comment else []
-        per_system = []
+        # after an admin reviews and submits interactively.
+        #
+        # Rendered as a table (# | Systems | Comment), grouped by IDENTICAL comment text --
+        # several systems very often share the exact same sentence verbatim (most commonly
+        # NO_ISSUES_COMMENT, but also a shared policy explanation), and repeating it once per
+        # system just made the box longer without saying anything new. One row per DISTINCT
+        # comment; the Systems column lists everyone it applies to.
+        groups: List[Tuple[str, List[str]]] = []
+        seen: Dict[str, int] = {}
         for sysm in systems:
             flagged_s = flagged_for_system(store, sysm, self.cfg)
             text = system_comment_text(store, sysm, flagged_s, self.annotations)
-            if text:
-                per_system.append(f"{sysm.name}: {text}")
-
-        # Hard ceiling on the per-system listing specifically (the admin's own lead note is
-        # never truncated -- they wrote it deliberately). On an unusually bad day where most
-        # of the estate has something to say, an unbounded box would grow tall enough to
-        # distort the whole "AT A GLANCE" section it sits beside. Nothing here is actually
-        # LOST when the cap bites: every system's own card still carries its own comment in
-        # full (see _system_card) -- this is only ever a display limit on the compiled copy.
-        MAX_SUMMARY_ROWS = 30
-        used = sum(_rows_for(p) for p in lead)
-        included, overflow = [], 0
-        for entry in per_system:
-            rows = _rows_for(entry)
-            if included and used + rows > MAX_SUMMARY_ROWS:
-                overflow += 1
+            if not text:
                 continue
-            included.append(entry)
-            used += rows
-        if overflow:
-            note = f"…and {overflow} more system(s) — see each system's own Comment box."
-            included.append(note)
-            used += _rows_for(note)
+            if text in seen:
+                groups[seen[text]][1].append(sysm.name)
+            else:
+                seen[text] = len(groups)
+                groups.append((text, [sysm.name]))
 
-        parts = lead + included
-        summary_text = "\n\n".join(parts)                          # ONE consistent blank line
-        notes_bottom = max(18, tt + used)                           # between every entry, always
+        # Hard ceiling on the number of table rows. Grouping identical text already does most
+        # of the work of keeping this short, but on an unusually bad day with many DIFFERENT
+        # findings an unbounded table could still grow tall enough to distort the "AT A GLANCE"
+        # section it sits beside. Nothing is actually lost when the cap bites -- every system's
+        # own card still carries its own comment in full (see _system_card); this only limits
+        # the compiled copy here.
+        MAX_TABLE_ROWS = 20
+        overflow = 0
+        if len(groups) > MAX_TABLE_ROWS:
+            overflow = sum(len(names) for _, names in groups[MAX_TABLE_ROWS:])
+            groups = groups[:MAX_TABLE_ROWS]
 
-        self._merge(tt, nl, nr, "Summary Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
-        for r in range(tt + 1, notes_bottom + 1):      # writable box directly beneath the title
-            for c in range(nl, nr + 1):
+        LINE_PT = 14                # per-line row height, matches this box's own font size
+        SYS_CHARS, CMT_CHARS = 20, 50   # rough fit for the Systems / Comment columns' own widths
+
+        def _lines(text: str, chars: int) -> int:
+            return max(1, -(-len(text) // chars))          # ceil division
+
+        r = tt + 1
+
+        # Admin's own freeform overall remark (web form or CLI --summary), if any -- kept as a
+        # plain wrapped line ABOVE the table since it isn't tied to specific systems, so it
+        # doesn't force an artificial "Systems" value into the table's own structure.
+        if self.summary_comment:
+            self.ws.row_dimensions[r].height = LINE_PT * _lines(self.summary_comment, 100)
+            self._cell(r, nl, self.summary_comment, Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, border=True)
+            for c in range(nl + 1, nr + 1):
                 self._cell(r, c, bg=Theme.CARD).border = field
-        self.ws.cell(tt + 1, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
-        self.ws.merge_cells(start_row=tt + 1, start_column=nl, end_row=notes_bottom, end_column=nr)
-        if summary_text:
-            self.ws.cell(tt + 1, nl).value = summary_text
+            self.ws.cell(r, nl).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            self.ws.merge_cells(start_row=r, start_column=nl, end_row=r, end_column=nr)
+            r += 1
+
+        if groups or overflow:
+            # column layout within nl..nr: # (col O alone, centered -- unavoidably wide since O
+            # is shared with the per-system Backups panel's own filename column elsewhere on
+            # this sheet, but its content is always just 1-2 digits) | Systems (P-Q) | Comment
+            # (R-W, the widest share -- comments run longer than most system-name lists).
+            num_c, sys1, sys2, cmt1, cmt2 = nl, nl + 1, nl + 2, nl + 3, nr
+            self._cell(r, num_c, "#", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+            self._merge(r, sys1, sys2, "Systems", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="left")
+            self._merge(r, cmt1, cmt2, "Comment", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="left")
+            for cc in (sys1, sys2, cmt1, cmt2):
+                self.ws.cell(r, cc).border = field
+            r += 1
+
+            for i, (text, names) in enumerate(groups, start=1):
+                sys_text = ", ".join(names)
+                self.ws.row_dimensions[r].height = LINE_PT * max(_lines(sys_text, SYS_CHARS),
+                                                                   _lines(text, CMT_CHARS))
+                self._cell(r, num_c, str(i), Theme.font(9, False, Theme.WHITE), bg=Theme.CARD,
+                          al="center", border=True)
+                self._merge(r, sys1, sys2, sys_text, Theme.font(9, False, Theme.WHITE), bg=Theme.CARD, al="left")
+                self._merge(r, cmt1, cmt2, text, Theme.font(9, False, Theme.SUB), bg=Theme.CARD, al="left")
+                for cc in (sys1, sys2, cmt1, cmt2):
+                    self.ws.cell(r, cc).border = field
+                self.ws.cell(r, num_c).alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+                self.ws.cell(r, sys1).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                self.ws.cell(r, cmt1).alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+                r += 1
+
+            if overflow:
+                note = f"…and {overflow} more system(s) — see each system's own Comment box."
+                self._cell(r, nl, note, Theme.font(9, False, Theme.SUB), bg=Theme.CARD, border=True)
+                for c in range(nl + 1, nr + 1):
+                    self._cell(r, c, bg=Theme.CARD).border = field
+                self.ws.cell(r, nl).alignment = Alignment(horizontal="left", vertical="center")
+                self.ws.merge_cells(start_row=r, start_column=nl, end_row=r, end_column=nr)
+                r += 1
+
+        notes_bottom = max(18, r - 1)
         # author line — this is the MASTER name cell (drawn first), every system's "By" mirrors it.
         # Below whichever is taller: the banners or this now-short box.
         by = max(content_bottom, notes_bottom) + 1
