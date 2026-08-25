@@ -458,6 +458,32 @@ BACKUP_WEEKLY_DAY = {
     "10.100.245.150:9100": 4,      # FRS App/DB, Friday=4
 }
 
+# Hosts that back up ONCE A MONTH, at month-end (the actual last calendar day of the month —
+# never a fixed "31st", since not every month has one). A fourth shape, no better served by
+# BACKUP_WEEKLY_DAY (a fixed weekday) or the rolling-window BACKUP_MAX_AGE_DAYS than either of
+# those fit a weekly cadence. See backup_monthly_gap_expected's own docstring for the one
+# thing that makes this different from every policy shape above: it does NOT gate on the
+# check's own ok/success value.
+#   Intranet: backs up once a month, at month-end. Newly deployed (confirmed live
+#   2026-08-25 — backup_check_success=0, backup_file_count=0, since the very first sample);
+#   unlike BSA/FRS/RTGS/CSD's scripts (which report success=1 even with zero files, as long
+#   as the script itself ran), THIS script reports success=0 whenever it hasn't found a fresh
+#   file — meaning it will read as a FAILED check for the entire month until the month-end
+#   file actually appears, not "succeeded, nothing due yet". The usual "never suppress a real
+#   check failure" guard (ok is False) would keep this flagged as NO BACKUP for the whole
+#   month regardless of any policy configured here, so backup_monthly_gap_expected ignores
+#   `ok` entirely for instances in this set. The trade-off, stated plainly: this is a
+#   full-month blind spot for a genuine script failure on this host, wider than even FRS's
+#   weekly one — there is no way to tell "still waiting for month-end" from "actually broken"
+#   without file evidence the script doesn't have yet.
+BACKUP_MONTHLY_INSTANCES = {"10.100.248.40:9100"}   # Intranet App/DB
+
+
+def _month_end(d: datetime.date) -> datetime.date:
+    """The last calendar day of d's month (handles 28/29/30/31 correctly)."""
+    first_of_next = (d.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    return first_of_next - datetime.timedelta(days=1)
+
 # Overridable at runtime via the webapp's Backup Policy screen (Configuration -> Backup
 # policy) rather than only by editing the dicts above and redeploying. BACKUP_POLICY_PATH
 # sits next to config.ini — a per-deployment file, same as config.ini itself, not one this
@@ -605,18 +631,46 @@ def backup_weekly_comment(instance: str, now: datetime.datetime | None = None) -
             f"— this is expected, not a fault. The next backup is expected {when}.")
 
 
+def backup_monthly_gap_expected(instance: str, ok: Optional[bool], now: datetime.datetime | None = None) -> bool:
+    """True for any host in BACKUP_MONTHLY_INSTANCES — unconditionally, deliberately NOT gated
+    on `ok` (see BACKUP_MONTHLY_INSTANCES' own comment for exactly why this one policy shape
+    breaks from every other function here). `ok` is still accepted as a parameter, purely so
+    this has the same call signature as backup_gap_expected/backup_weekly_gap_expected and
+    backup_gap_expected_any can dispatch to all three uniformly."""
+    return instance in BACKUP_MONTHLY_INSTANCES
+
+
+def backup_monthly_comment(instance: str, now: datetime.datetime | None = None) -> str:
+    """The automatic explanation for a monthly-cadence backup gap (see
+    backup_monthly_gap_expected) — names the actual month-end date (never a fixed "31st").
+    Returns "" if `instance` has no monthly policy configured."""
+    if instance not in BACKUP_MONTHLY_INSTANCES:
+        return ""
+    now = now or datetime.datetime.now()
+    end = _month_end(now.date())
+    when = "today" if end == now.date() else end.strftime("%A %d %b %Y")
+    return (f"Backup policy states that this host backs up once a month, at month-end, not "
+            f"daily — this is expected, not a fault. The next backup is expected {when}.")
+
+
 def backup_gap_expected_any(instance: str, ok: Optional[bool], now: datetime.datetime | None = None) -> bool:
-    """True under EITHER policy-expected-gap shape currently supported: a single off-day
-    (backup_gap_expected) or a fixed weekly cadence (backup_weekly_gap_expected). Single
-    dispatch point so callers don't need to know how many policy shapes exist or OR them
-    together by hand — add a third shape here once, not at every call site."""
-    return backup_gap_expected(instance, ok, now) or backup_weekly_gap_expected(instance, ok, now)
+    """True under any policy-expected-gap shape currently supported: a single off-day
+    (backup_gap_expected), a fixed weekly cadence (backup_weekly_gap_expected), or a monthly
+    one (backup_monthly_gap_expected). Single dispatch point so callers don't need to know how
+    many policy shapes exist or OR them together by hand — add a new shape here once, not at
+    every call site."""
+    return (backup_gap_expected(instance, ok, now)
+            or backup_weekly_gap_expected(instance, ok, now)
+            or backup_monthly_gap_expected(instance, ok, now))
 
 
 def backup_gap_comment(instance: str, now: datetime.datetime | None = None) -> str:
-    """Whichever explanation applies for backup_gap_expected_any — off-day first, else the
-    weekly-cadence one. Only meaningful when backup_gap_expected_any is already True."""
-    return backup_policy_comment(instance, now) or backup_weekly_comment(instance, now)
+    """Whichever explanation applies for backup_gap_expected_any — off-day first, then
+    weekly-cadence, then monthly. Only meaningful when backup_gap_expected_any is already
+    True."""
+    return (backup_policy_comment(instance, now)
+            or backup_weekly_comment(instance, now)
+            or backup_monthly_comment(instance, now))
 
 
 def backup_frequency_comment(instance: str, now: datetime.datetime | None = None) -> str:
