@@ -444,6 +444,20 @@ BACKUP_OFF_WEEKDAYS = {
     "10.100.250.82:9100": {6},     # CSD Database
 }
 
+# Hosts that back up ONCE A WEEK on one fixed weekday — a third shape, distinct from both of
+# the above: not a rolling N-day window (BACKUP_MAX_AGE_DAYS, e.g. BSA's every-3rd-day cycle,
+# which doesn't land on the same weekday twice running) and not "daily except one off day"
+# (BACKUP_OFF_WEEKDAYS). backup_weekly_gap_expected/backup_weekly_comment below suppress and
+# explain the gap on every day that ISN'T the expected weekday, on the same policy-not-
+# evidence basis as backup_gap_expected (see its own docstring for why): FRS's backup check
+# script reports the identical signature RTGS/CSD's does (confirmed live 2026-08-25 —
+# backup_check_success=1, backup_file_count=0, no backup_file series persisted from one day to
+# the next), so there's no older mtime for backup_cutoff to find even with a widened window.
+#   FRS: backs up once a week, Fridays only.
+BACKUP_WEEKLY_DAY = {
+    "10.100.245.150:9100": 4,      # FRS App/DB, Friday=4
+}
+
 # Overridable at runtime via the webapp's Backup Policy screen (Configuration -> Backup
 # policy) rather than only by editing the dicts above and redeploying. BACKUP_POLICY_PATH
 # sits next to config.ini — a per-deployment file, same as config.ini itself, not one this
@@ -556,6 +570,55 @@ def backup_policy_comment(instance: str, now: datetime.datetime | None = None) -
             f"not a fault. The next backup file is expected {when}.")
 
 
+def backup_weekly_gap_expected(instance: str, ok: Optional[bool], now: datetime.datetime | None = None) -> bool:
+    """True when a host with a single fixed weekly backup day (BACKUP_WEEKLY_DAY) has no
+    fresh file, on the same policy-not-evidence grounds as backup_gap_expected (see its own
+    docstring for the full reasoning). Unlike the off-day case this suppresses on EVERY day
+    except the expected weekday itself, not just the single day after — a strictly wider
+    blind spot, inherent to "weekly" rather than "daily except one day": there is no way to
+    tell "still waiting for Friday" from "Friday came and went and nothing happened" without
+    the file evidence the script doesn't persist (same limitation as backup_gap_expected's
+    own trade-off). Never fires when the check itself failed (ok is False)."""
+    if ok is False:
+        return False
+    if instance not in BACKUP_WEEKLY_DAY:
+        return False
+    now = now or datetime.datetime.now()
+    return now.weekday() != BACKUP_WEEKLY_DAY[instance]
+
+
+def backup_weekly_comment(instance: str, now: datetime.datetime | None = None) -> str:
+    """The automatic explanation for a weekly-cadence backup gap (see
+    backup_weekly_gap_expected) — names the expected weekday and computes the actual date the
+    next backup is due, same shape as backup_policy_comment's off-day version. Returns "" if
+    `instance` has no weekly-day policy configured."""
+    now = now or datetime.datetime.now()
+    day = BACKUP_WEEKLY_DAY.get(instance)
+    if day is None:
+        return ""
+    name = _WEEKDAY_NAMES[day]
+    d = now.date()
+    while d.weekday() != day:                       # first upcoming occurrence of that weekday
+        d += datetime.timedelta(days=1)
+    when = "today" if d == now.date() else d.strftime("%A %d %b %Y")
+    return (f"Backup policy states that this host backs up once a week, on {name}s, not daily "
+            f"— this is expected, not a fault. The next backup is expected {when}.")
+
+
+def backup_gap_expected_any(instance: str, ok: Optional[bool], now: datetime.datetime | None = None) -> bool:
+    """True under EITHER policy-expected-gap shape currently supported: a single off-day
+    (backup_gap_expected) or a fixed weekly cadence (backup_weekly_gap_expected). Single
+    dispatch point so callers don't need to know how many policy shapes exist or OR them
+    together by hand — add a third shape here once, not at every call site."""
+    return backup_gap_expected(instance, ok, now) or backup_weekly_gap_expected(instance, ok, now)
+
+
+def backup_gap_comment(instance: str, now: datetime.datetime | None = None) -> str:
+    """Whichever explanation applies for backup_gap_expected_any — off-day first, else the
+    weekly-cadence one. Only meaningful when backup_gap_expected_any is already True."""
+    return backup_policy_comment(instance, now) or backup_weekly_comment(instance, now)
+
+
 def backup_frequency_comment(instance: str, now: datetime.datetime | None = None) -> str:
     """The automatic explanation for a SLOWER-than-daily backup cadence (see
     BACKUP_MAX_AGE_DAYS) — e.g. BSA's MSSQL full backup, which only runs every 3rd day.
@@ -657,7 +720,7 @@ def system_comment_text(store: "Store", sysm: "System", flagged: list,
 # Systems that depend on the shared LDAP / authentication service — if LDAP is down these
 # systems can't authenticate users. Source of truth for the "LDAP dependency" banner; extend
 # as more dependents are identified. (Names must match the `system` labels in prometheus.yml.)
-LDAP_DEPENDENTS = {"GCMS", "GMS"}
+LDAP_DEPENDENTS = {"GCMS", "GMS", "Attendance System"}
 # folder_exporter target name -> (volume/mount it lives on, expected size as a FRACTION of
 # that volume's own total capacity), for the Folders table (see _system_card / FOLDER OVER
 # EXPECTED SIZE banner / folder_expected_gb). Percentage-of-drive rather than a fixed GB
@@ -1389,7 +1452,7 @@ def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, s
                 continue
             cutoff = backup_cutoff(c.instance, now)
             fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
-            if not fresh and not backup_gap_expected(c.instance, d.get("ok"), now):
+            if not fresh and not backup_gap_expected_any(c.instance, d.get("ok"), now):
                 missing.append((s.name, c.label,
                                 "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
     return missing
@@ -1460,7 +1523,7 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
             continue
         cutoff = backup_cutoff(c.instance, now)
         fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
-        if not fresh and not backup_gap_expected(c.instance, d.get("ok"), now):
+        if not fresh and not backup_gap_expected_any(c.instance, d.get("ok"), now):
             reason = "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"
             flags.append(Flag(f"backup:{c.label}", f"{c.label} · {reason}", "red", "backup"))
     # untracked: no host on the system runs the backup check at all
@@ -1499,8 +1562,8 @@ def backup_policy_notes_for_system(store: "Store", sysm: "System",
         cutoff = backup_cutoff(c.instance, now)
         widely_fresh = any(mt and mt >= cutoff for _n, _day, mt in files)
         if not widely_fresh:
-            if backup_gap_expected(c.instance, d.get("ok"), now):
-                text = backup_policy_comment(c.instance, now)
+            if backup_gap_expected_any(c.instance, d.get("ok"), now):
+                text = backup_gap_comment(c.instance, now)
                 if text:
                     notes.append(f"{c.label} — {text}")
         elif not any(mt and mt >= ymid for _n, _day, mt in files):
@@ -2317,13 +2380,14 @@ class ReportBuilder:
                 # else: past the policy window -> stale, does NOT count as a fresh backup
             if fresh:
                 bk_files.extend(fresh)
-            elif backup_gap_expected(c.instance, d.get("ok"), _now):
-                # policy says this host doesn't back up on the day before today (RTGS/CSD,
-                # Sundays) -- an expected gap, not a fault (see backup_gap_expected's own
-                # docstring for why this can't just be a wider backup_cutoff window). A
-                # distinct row, not silence, so the panel still says something rather than
-                # looking like the host was never checked at all.
-                bk_expected_off.append((c.label, backup_policy_comment(c.instance, _now)))
+            elif backup_gap_expected_any(c.instance, d.get("ok"), _now):
+                # policy says this host isn't expected to have a fresh file today -- either a
+                # single off-day (RTGS/CSD, Sundays) or a fixed weekly cadence (FRS, Fridays
+                # only) -- an expected gap, not a fault (see backup_gap_expected/
+                # backup_weekly_gap_expected's own docstrings for why this can't just be a
+                # wider backup_cutoff window). A distinct row, not silence, so the panel still
+                # says something rather than looking like the host was never checked at all.
+                bk_expected_off.append((c.label, backup_gap_comment(c.instance, _now)))
             else:
                 bk_missing.append((c.label, "FOLDER UNREADABLE" if d.get("ok") is False else "NO BACKUP"))
         bk_files.sort(key=lambda ft: (0 if ft[1] == "today" else 1, ft[0]))   # today first
