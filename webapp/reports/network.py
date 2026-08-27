@@ -2084,19 +2084,21 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         ann = annotations.get(hci_sysvm.name, {})
         notes, critical, warning = _infra_notes(hci_sysvm, ann.get("comment", ""), ann.get("flags", {}))
         node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
-        if len(node_order) <= 1:
-            cpu_ram, disks = [], []
-            for target, n in node_order:
-                cr, dk = _infra_cpu_ram_disks(n, n.get("display", target))
-                if cr:
-                    cpu_ram.append(cr)
-                disks += dk
-            children = []
-        else:
-            cpu_ram, disks, children = [], [], []
-            for target, n in node_order:
-                label = n.get("display", target)
-                cr, dk = _infra_cpu_ram_disks(n, label)
+        # The parent "HCI Cluster" row always carries its own CPU/RAM/Disk table -- the same
+        # aggregate-across-hosts pattern generate_report.py uses for every multi-host system
+        # card (e.g. RTGS, Attendance System: one table listing every host's row) -- so it
+        # never sits structurally empty just because it also has per-node children below it.
+        # DeviceGroup.is_cluster_host names exactly this shape: a group with BOTH its own
+        # data AND children. Per-node children are additionally built once there's more than
+        # one node, giving the reachability/critical breakdown a flat host list can't carry.
+        cpu_ram, disks, children = [], [], []
+        for target, n in node_order:
+            label = n.get("display", target)
+            cr, dk = _infra_cpu_ram_disks(n, label)
+            if cr:
+                cpu_ram.append(cr)
+            disks += dk
+            if len(node_order) > 1:
                 child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
                                else [ir.NoteRow(f"{label} is not answering")])
                 children.append(ir.DeviceGroup(

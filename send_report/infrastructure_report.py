@@ -36,12 +36,23 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Union
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.utils import get_column_letter
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+
+# Same brand crest generate_report.py embeds in the System Admin Report's top-left corner --
+# "same title designs" per direct instruction means this report gets it too, not just a text
+# title. Lives in this same send_report/ folder (see generate_report.Config.logo's own
+# default), so no new asset/config wiring is needed.
+HERE = Path(__file__).resolve().parent
+LOGO_PATH = HERE / "logo.png"
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +347,15 @@ class Sheet:
 # ---------------------------------------------------------------------------
 
 def write_header(sh: Sheet, data: ReportData) -> None:
+    # company crest, top-left -- same brand mark generate_report.py embeds, scaled to fit this
+    # report's more compact 4-row header (no reserved gutter rows above the title here).
+    try:
+        img = XLImage(str(LOGO_PATH))
+        marker = AnchorMarker(col=1, colOff=200000, row=0, rowOff=40000)
+        img.anchor = OneCellAnchor(_from=marker, ext=XDRPositiveSize2D(cx=340000, cy=670000))
+        sh.ws.add_image(img)
+    except Exception as exc:                      # missing/unreadable logo -> carry on
+        print(f"[!] logo not embedded ({exc})", file=sys.stderr)
     sh.put(1, 3, "INFRASTRUCTURE REPORT", sz=22, bold=True, color=TEXT_PRIMARY,
            bg=BG, halign="left")
     sh.rowh(1, 26.25)
@@ -343,7 +363,12 @@ def write_header(sh: Sheet, data: ReportData) -> None:
                  f"{SUBTITLE_DASHBOARD}", sz=9, color=TEXT_MUTED, bg=BG,
            halign="left")
     sh.put(3, 3, ROW3_TEXT, sz=9, color=TEXT_SECONDARY, bg=BG, halign="left")
-    sh.put(3, 9, LIVE_LINK, sz=10, bold=True, color=ACCENT, bg=BG, halign="left")
+    # 12pt, matching generate_report.py's own live-dashboard button exactly (was 10pt) --
+    # no hyperlink target wired here: unlike generate_report.py's cfg.grafana (a real,
+    # configured URL), no live Infrastructure dashboard URL exists in ReportData to link to
+    # yet, and inventing one would be exactly the kind of fabrication this module's own
+    # docstring says not to do.
+    sh.put(3, 9, LIVE_LINK, sz=12, bold=True, color=ACCENT, bg=BG, halign="left")
     for r in (2, 3, 4):
         sh.rowh(r, 15.0)
 
