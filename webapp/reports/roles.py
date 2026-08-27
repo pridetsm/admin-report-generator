@@ -357,6 +357,13 @@ REPORTS = [
     # fixed morning to morning, but the picker is still how an engineer excludes a device
     # under maintenance rather than staring at a field for it.
     #
+    # The glyph is the Network Admin ROLE icon (img/roles/network-infrastructure.png), not
+    # one of the img/reports/ set — none of those four were free, and this one's own name
+    # already matches the report's ("Network Infrastructure"). It is visually distinct from
+    # the Network Report's tile (a node graph, not a rack-and-cloud), so the two never read
+    # as duplicates side by side, and its transparent background masks through .grad-glyph
+    # exactly like the others — the accent gradient replaces its own baked-in blue rather
+    # than clashing with it.
     ReportOption(
         "network_sod", "Network Infrastructure SOD Report",
         "The start-of-day checklist — core switches, firewalls, internet circuits, WLAN "
