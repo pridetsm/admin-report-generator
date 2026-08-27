@@ -1031,6 +1031,13 @@ class Store:
     # `disk` directly. Rendered in its own Folders table instead (see _system_card), each
     # entry judged against FOLDER_EXPECTED_PCT rather than banded like a real volume.
     log_files: Dict[str, List[Tuple[str, float, str]]] = field(default_factory=dict)
+    # instance -> total physical RAM in GB. A SEPARATE query from `ram` (which is already a
+    # ratio computed server-side in Prometheus, not a raw value this app could derive a total
+    # from) -- added so the Memory panel can show "82% of 32GB" instead of a bare "82%", which
+    # says nothing about whether that's a problem on a 8 GB box or plenty of headroom on a
+    # 128 GB one. Defaulted (not a positional field) so no existing Store(...) call needed
+    # updating; a Store built before this existed just reads every host as no-data here.
+    ram_total_gb: Dict[str, float] = field(default_factory=dict)
 
 
 # filters reused across every node_filesystem / windows_logical_disk query
@@ -1063,6 +1070,7 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     reload_backup_policy()   # fresh on every report — see BACKUP_POLICY_PATH above
     disk: Dict[str, Dict[str, dict]] = {}
     ram: Dict[str, float] = {}
+    ram_total: Dict[str, float] = {}
 
     def index(result: List[dict], field_: str, key: Callable[[dict], Optional[str]]) -> None:
         for row in result:
@@ -1085,6 +1093,12 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
         ram[r["labels"]["instance"]] = r["value"]
     for r in prom.query("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)"):
         ram[r["labels"]["instance"]] = r["value"]
+    # total physical RAM in GB -- a separate raw value, not derivable from the ratio above
+    # (see Store.ram_total_gb's own docstring for why this is worth capturing at all).
+    for r in prom.query("node_memory_MemTotal_bytes/1024/1024/1024"):
+        ram_total[r["labels"]["instance"]] = r["value"]
+    for r in prom.query("windows_memory_physical_total_bytes/1024/1024/1024"):
+        ram_total[r["labels"]["instance"]] = r["value"]
 
     # ---- cpu: uniform BUSY% (100 - idle, 5-min avg) for linux + windows ------
     cpu: Dict[str, float] = {}
@@ -1188,7 +1202,7 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     backups = capture_backups(prom)
 
     return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up,
-                log_files=log_files)
+                log_files=log_files, ram_total_gb=ram_total)
 
 
 def _is_url(inst: Optional[str]) -> bool:
@@ -1739,7 +1753,12 @@ class ReportBuilder:
     # column-sharing reason: J is also WEB ENCRYPTION's 2nd sub-column in the watch row and
     # SERVICES DOWN's 3rd in the immediate row, both of which only ever hold short values, so
     # widening it here costs them nothing.
-    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 8.140625, "E": 14, "F": 8,
+    # F (Memory·CPU's RAM % column) widened from 8 to 15 -- "82%" fit at 8, but "82% of 32GB"
+    # (see the Memory panel's own comment on why the total is shown) needs more room. F also
+    # backs the NEEDS IMMEDIATE ATTENTION tile card's own span (CARD_GROUPS' (5,7) group),
+    # same column-sharing reasoning as D/H/N above -- that card only ever holds a short
+    # number+label, so the extra width costs it nothing.
+    WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 8.140625, "E": 14, "F": 15,
               "G": 8, "H": 7.5703125, "I": 14, "J": 20, "K": 7, "L": 7,   # G = Memory·CPU's CPU % column
               "M": 11, "N": 7.85546875, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
               "R": 2,                                        # gap before Notes
@@ -2501,11 +2520,11 @@ class ReportBuilder:
         mems, cpus = [], []
         for c in sysm.components:
             if is_unreachable(store, c.instance):
-                mems.append((c.label, "down", None))
+                mems.append((c.label, "down", None, None))
                 cpus.append((c.label, "down", None))
             else:
-                mems.append((c.label, "ok", store.ram[c.instance]) if c.instance in store.ram
-                            else (c.label, "nodata", None))
+                mems.append((c.label, "ok", store.ram[c.instance], store.ram_total_gb.get(c.instance))
+                            if c.instance in store.ram else (c.label, "nodata", None, None))
                 cpus.append((c.label, "ok", store.cpu[c.instance]) if c.instance in store.cpu
                             else (c.label, "nodata", None))
         disks = [(c.label, mp, dd)
@@ -2528,9 +2547,9 @@ class ReportBuilder:
                         sysm.components[0] if sysm.components else None)
             host = owner.label if owner else sysm.name
             folders.append((host, name, gb, owner.instance if owner else None))
-        nd = sum(1 for _, st, _ in mems if st == "down")           # hosts Prometheus can't reach
+        nd = sum(1 for _, st, _, _ in mems if st == "down")         # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
-             sum(1 for _, st, v in mems if st == "ok" and v >= self.cfg.chip_red) + \
+             sum(1 for _, st, v, _ in mems if st == "ok" and v >= self.cfg.chip_red) + \
              sum(1 for _, st, v in cpus if st == "ok" and v >= self.cfg.chip_red)
         nw = sum(1 for *_, dd in disks if self.cfg.chip_amber <= dd.get("used", 0) < self.cfg.chip_red)
 
@@ -2690,12 +2709,18 @@ class ReportBuilder:
             self._cell(r, 4, bg=Theme.BG)
             # memory (one row per host; flags hosts Prometheus can't reach)
             if k < len(mems):
-                label, st, val = mems[k]
+                label, st, val, total_gb = mems[k]
                 self._cell(r, 5, label, Theme.font(9, False, Theme.WHITE), border=True)
                 if st == "down":
                     self._chip(r, 6, "DOWN", "red", sz=8)
                 elif st == "ok":
-                    self._chip(r, 6, f"{val:.0f}%", self._band(val), sz=9)
+                    # "of {total}GB" whenever the host's total RAM is known -- a bare
+                    # percentage says nothing about whether 82% is tight (8 GB box) or
+                    # roomy (128 GB one); falls back to the plain percentage if the total
+                    # query didn't return anything for this instance.
+                    pct_text = (f"{val:.0f}% of {total_gb:.0f}GB" if total_gb is not None
+                               else f"{val:.0f}%")
+                    self._chip(r, 6, pct_text, self._band(val), sz=9)
                 else:
                     self._cell(r, 6, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
             else:

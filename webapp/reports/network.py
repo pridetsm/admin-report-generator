@@ -741,8 +741,8 @@ def _hci_node_metrics() -> Dict[str, dict]:
     this level; "is this node's storage struggling" is the question.
 
     Returns {target: {"display":, "known":, "reachable":, "cpu_pct":, "mem_pct":,
-                       "disks": [...], "net": {in_bps, out_bps, err_in, err_out, disc_in,
-                       disc_out}, "latency": {read_ms, write_ms}}}.
+                       "mem_total_gb":, "disks": [...], "net": {in_bps, out_bps, err_in,
+                       err_out, disc_in, disc_out}, "latency": {read_ms, write_ms}}}.
     """
     prom, _ = _prometheus()
 
@@ -767,6 +767,12 @@ def _hci_node_metrics() -> Dict[str, dict]:
     mem = {r["labels"]["instance"]: r["value"]
           for r in q("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)")
           if r["labels"].get("instance")}
+    # total physical RAM in GB -- a separate raw value from the ratio above, so the Nodes
+    # table can show "61% of 64GB" instead of a bare percentage (matches the System Admin
+    # report's own Memory panel).
+    mem_total = {r["labels"]["instance"]: r["value"]
+                for r in q("windows_memory_physical_total_bytes/1024/1024/1024")
+                if r["labels"].get("instance")}
 
     used, free, size = {}, {}, {}
     for r in q(f"100*(1-windows_logical_disk_free_bytes{{{_WIN_VOL}}}/windows_logical_disk_size_bytes{{{_WIN_VOL}}})"):
@@ -812,6 +818,7 @@ def _hci_node_metrics() -> Dict[str, dict]:
             "reachable": reachable,
             "cpu_pct": cpu.get(inst),
             "mem_pct": mem.get(inst),
+            "mem_total_gb": mem_total.get(inst),
             "disks": disks,
             # None (not 0) when unreachable -- "no traffic measured" is not the same claim as
             # "measured zero traffic", the same distinction CPU/RAM already make via .get()
@@ -1738,10 +1745,16 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
                     if not n.get("reachable"):
                         nodes_rows.append(_down(label, 2))
                         continue
-                    cpu, mem = n.get("cpu_pct"), n.get("mem_pct")
+                    cpu, mem, mem_total = n.get("cpu_pct"), n.get("mem_pct"), n.get("mem_total_gb")
+                    if mem is None:
+                        mem_text = "—"
+                    elif mem_total is not None:
+                        mem_text = f"{mem:.0f}% of {mem_total:.0f}GB"
+                    else:
+                        mem_text = f"{mem:.0f}%"
                     nodes_rows.append(_row(label,
                         (f"{cpu:.0f}%" if cpu is not None else "—", pct_band(cpu)),
-                        (f"{mem:.0f}%" if mem is not None else "—", pct_band(mem))))
+                        (mem_text, pct_band(mem))))
                 table("Nodes", ("Host", "CPU %", "RAM %"), nodes_rows)
 
                 drives_rows = []
