@@ -1407,19 +1407,51 @@ def links_down(store: "Store") -> int:
     return sum(1 for d in store.links.values() if not d.get("up", False))
 
 
+# A row whose name starts with one of these is the SAME underlying check inserted once per
+# dependent system for in-context display (see LDAP_DEPENDENTS — "LDAP / auth (...)" is
+# prepended to EVERY dependent system's own service list, on purpose, so it shows up on each
+# card). That duplication is correct for the per-system cards, but total_services/
+# services_down must not count the one real check as N -- a shared probe with 3 dependents is
+# still ONE service, not three, no matter how many cards happen to show it. Matched by prefix
+# rather than an exact string since the target host in "LDAP / auth (host:port)" is
+# config-driven (cfg.ldap_target) and neither function receives cfg. No real per-system
+# service is ever named this way, so the prefix match can't collide with one.
+_SHARED_SERVICE_PREFIXES = ("LDAP / auth (",)
+
+
+def _distinct_service_rows(store: "Store"):
+    """Yields every (name, up, kind, group) row across all systems, but a shared row (see
+    _SHARED_SERVICE_PREFIXES) only once regardless of how many systems' lists it appears in.
+    The single iteration both total_services and services_down count from, so the two can
+    never disagree about which rows got deduplicated."""
+    seen_shared: set = set()
+    for rows in store.services.values():
+        for row in rows:
+            name = row[0]
+            if name.startswith(_SHARED_SERVICE_PREFIXES):
+                if name in seen_shared:
+                    continue
+                seen_shared.add(name)
+            yield row
+
+
 def services_down(store: "Store") -> int:
     """Total DOWN across BOTH service classes: PromQL service checks (store.services) AND web-link
        probes (store.links). Single source of truth for the overview 'SERVICES DOWN' tile and the
-       e-mail KPI, so every renderer agrees with what the per-system cards show as DOWN."""
-    svc = sum(1 for v in store.services.values() for row in v if not row[1])
+       e-mail KPI, so every renderer agrees with what the per-system cards show as DOWN. A shared
+       check (LDAP) counts once here even though it's down on every dependent system's card --
+       one real outage, not one per system that happens to show it."""
+    svc = sum(1 for row in _distinct_service_rows(store) if not row[1])
     return svc + links_down(store)
 
 
 def total_services(store: "Store") -> int:
     """SYSTEM/OFFERED services + web links — the SERVICES tile's total, and the denominator
        for SERVICES DOWN. Single source of truth shared by the xlsx, the webapp screen and
-       the e-mail, so the three can never disagree on this number."""
-    return sum(len(v) for v in store.services.values()) + len(store.links)
+       the e-mail, so the three can never disagree on this number. A shared check (LDAP)
+       counts once here, not once per dependent system whose card shows it (see
+       _SHARED_SERVICE_PREFIXES)."""
+    return sum(1 for _ in _distinct_service_rows(store)) + len(store.links)
 
 
 def _link_owner_name(url: str, systems: List["System"]) -> str:
@@ -2195,7 +2227,11 @@ class ReportBuilder:
                 bysys.setdefault(s, []).append(name)
             banners.append((
                 "critical",
-                f"SERVICES DOWN  —  {len(down_detail)} service(s)/link(s) across {len(bysys)} system(s)",
+                # services_down(store), not len(down_detail): a shared check (LDAP) appears
+                # once per dependent system in the detail rows below (so every affected system
+                # is still named), but the headline count must match the tile's own number --
+                # one real outage, not one per system that happens to show it.
+                f"SERVICES DOWN  —  {services_down(store)} service(s)/link(s) across {len(bysys)} system(s)",
                 [(s, ", ".join(sorted(names))) for s, names in sorted(bysys.items())],
                 "These checks or web links are currently reporting down. Confirm whether the outage "
                 "is real or the check itself needs attention, then restore service."))
