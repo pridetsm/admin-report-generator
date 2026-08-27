@@ -2053,6 +2053,18 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             disks += dk
             ann = annotations.get(sysvm.name, {})
             rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
+            if cr is None and m.get("reachable"):
+                # Reachable, but with no CPU/RAM/Disk data at all -- only the service
+                # collector is enabled on these hosts today (see DEVICES' own root-dc-1/2
+                # comment). Without this, the host has no CPU/RAM table row to appear in
+                # (cpu_ram/disks both end up empty for it) and no flag either (it's not
+                # down), so it would otherwise vanish from the report with nothing anywhere
+                # naming it -- indistinguishable from "not included at all". Prepended ahead
+                # of whatever _infra_notes produced so the admin's own comment (if any) is
+                # still kept, not overwritten.
+                rows = [ir.NoteRow(f"{sysvm.name}: reachable, but no CPU/RAM/Disk data is "
+                                   f"available — only the service check is monitored on "
+                                   f"this host today.")] + rows
             notes += rows
             critical += c
             warning += w
