@@ -1749,7 +1749,7 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
                     if mem is None:
                         mem_text = "—"
                     elif mem_total is not None:
-                        mem_text = f"{mem:.0f}% of {mem_total:.0f}GB"
+                        mem_text = f"{mem:.0f}% · {mem_total:.0f}GB"
                     else:
                         mem_text = f"{mem:.0f}%"
                     nodes_rows.append(_row(label,

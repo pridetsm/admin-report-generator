@@ -2714,11 +2714,12 @@ class ReportBuilder:
                 if st == "down":
                     self._chip(r, 6, "DOWN", "red", sz=8)
                 elif st == "ok":
-                    # "of {total}GB" whenever the host's total RAM is known -- a bare
+                    # "· {total}GB" whenever the host's total RAM is known -- a bare
                     # percentage says nothing about whether 82% is tight (8 GB box) or
                     # roomy (128 GB one); falls back to the plain percentage if the total
-                    # query didn't return anything for this instance.
-                    pct_text = (f"{val:.0f}% of {total_gb:.0f}GB" if total_gb is not None
+                    # query didn't return anything for this instance. Center dot matches
+                    # every other "A · B" separator already used throughout this report.
+                    pct_text = (f"{val:.0f}% · {total_gb:.0f}GB" if total_gb is not None
                                else f"{val:.0f}%")
                     self._chip(r, 6, pct_text, self._band(val), sz=9)
                 else:
