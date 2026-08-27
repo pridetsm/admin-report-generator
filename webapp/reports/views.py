@@ -1213,6 +1213,12 @@ def infra_report(request):
         "draft_key": "draft:infra:" + ",".join(sorted(keys)),
         "picker_url": reverse("infra_form"),
         "generate_url": reverse("infra_generate"),
+        # form.html's <form action> is `{{ generate_url|default:generate_default }}` -- the
+        # `default` filter still RESOLVES its argument even when generate_url is truthy (as it
+        # always is here), and a missing filter ARGUMENT (unlike a missing top-level {{ var }})
+        # is not silently swallowed -- it raises VariableDoesNotExist and 500s the whole page.
+        # report()/network_report() both already set this; this view just needed the same line.
+        "generate_default": reverse("generate"),
     })
 
 
