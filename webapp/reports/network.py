@@ -2164,11 +2164,12 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         # one node, giving the reachability/critical breakdown a flat host list can't carry.
         cpu_ram, disks, children = [], [], []
         for target, n in node_order:
-            # Bare hostname/IP, not the full "HCI Cluster Node N (...)" display string --
-            # these nodes already sit nested under the "HCI Cluster Host" parent section (in
-            # section titles AND every row entry: CPU/RAM, disk, notes, banners), so repeating
-            # that wrapper everywhere is redundant. See _infra_short_node.
-            label = _infra_short_node(n.get("display", target))
+            # Section title: the full "HCI Cluster Node N (...)" display string, unchanged.
+            # Row entries (CPU/RAM, disk, notes, banners): bare hostname/IP -- repeating the
+            # "HCI Cluster Node N" wrapper on every row under a section already titled that
+            # way is redundant. See _infra_short_node.
+            full_label = n.get("display", target)
+            label = _infra_short_node(full_label)
             cr, dk = _infra_cpu_ram_disks(n, label)
             if cr:
                 cpu_ram.append(cr)
@@ -2177,7 +2178,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
                                else [ir.NoteRow(f"{label} is not answering")])
                 children.append(ir.DeviceGroup(
-                    title=label, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
+                    title=full_label, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
                     critical=0 if n.get("reachable") else 1, count=1, count_label="node",
                     signed_by=author))
         groups.append(ir.DeviceGroup(
