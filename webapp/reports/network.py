@@ -625,7 +625,12 @@ DEVICES = [
     # plain kind="windows" entry, picked up by the generic single-target _windows_metrics()
     # path the same way any future standalone Windows device would be. Identified via reverse
     # DNS + windows_exporter's own service list (ADWS/DNS/KDC/Netlogon), confirmed 2026-08-25.
-    # Only the service collector is enabled on both -- CPU/RAM/disk read no-data here.
+    # windows_exporter runs with --collectors.enabled="service,textfile" on both -- CPU/RAM/
+    # disk are meant to arrive via the textfile collector (a script writing a .prom file to
+    # its configured directory), not the live cpu/memory/logical_disk collectors this app
+    # queries elsewhere, but confirmed live 2026-08-27 that collector reports
+    # windows_exporter_collector_success{collector="textfile"}=0 on both hosts -- nothing has
+    # been published there yet, so CPU/RAM/disk still read no-data here for now.
     {
         "key": "root-dc-1",
         "name": "RBZHQ-ROOT-01",
@@ -2054,17 +2059,18 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             ann = annotations.get(sysvm.name, {})
             rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
             if cr is None and m.get("reachable"):
-                # Reachable, but with no CPU/RAM/Disk data at all -- only the service
-                # collector is enabled on these hosts today (see DEVICES' own root-dc-1/2
-                # comment). Without this, the host has no CPU/RAM table row to appear in
-                # (cpu_ram/disks both end up empty for it) and no flag either (it's not
-                # down), so it would otherwise vanish from the report with nothing anywhere
-                # naming it -- indistinguishable from "not included at all". Prepended ahead
-                # of whatever _infra_notes produced so the admin's own comment (if any) is
-                # still kept, not overwritten.
-                rows = [ir.NoteRow(f"{sysvm.name}: reachable, but no CPU/RAM/Disk data is "
-                                   f"available — only the service check is monitored on "
-                                   f"this host today.")] + rows
+                # Reachable, but with no CPU/RAM/Disk data at all -- these hosts expose that
+                # via windows_exporter's textfile collector, not the live collectors this app
+                # queries elsewhere (see DEVICES' own root-dc-1/2 comment), and nothing has
+                # been published there yet (collector_success=0, confirmed live). Without
+                # this note, the host has no CPU/RAM table row to appear in (cpu_ram/disks
+                # both end up empty for it) and no flag either (it's not down), so it would
+                # otherwise vanish from the report with nothing anywhere naming it --
+                # indistinguishable from "not included at all". Prepended ahead of whatever
+                # _infra_notes produced so the admin's own comment (if any) is kept, not
+                # overwritten.
+                rows = [ir.NoteRow(f"{sysvm.name}: reachable, but CPU/RAM/Disk have not been "
+                                   f"published yet (expected via the textfile collector).")] + rows
             notes += rows
             critical += c
             warning += w
