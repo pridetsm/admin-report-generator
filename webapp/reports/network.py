@@ -1535,6 +1535,12 @@ def capture_snapshot(token: str, only: Optional[set] = None):
     snap._systems = rows + win_devices
     snap._hci_nodes = hci_nodes
     snap._wc = wc
+    # Raw per-target CPU/RAM/disk (see _windows_metrics) -- stashed for the same reason
+    # _hci_nodes/_wc are: build_infrastructure_report()'s tree-nested tables read exact
+    # numbers, not just the derived flag TEXT _windows_device_flags() produces, and they must
+    # come from THIS snapshot rather than a fresh query so the xlsx never disagrees with what
+    # the admin reviewed and annotated on screen.
+    snap._wm = wm
     return snap
 
 
@@ -1934,4 +1940,232 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
 
     buf = io.BytesIO()
     wb.save(buf)
+    return buf.getvalue()
+
+
+# =======================================================================================
+#  The Infrastructure Report — Infrastructure Admin's OWN report (see views.infra_report/
+#  infra_generate), reading the SAME annotated Snapshot build_report() above reads for the
+#  Network Report, rendered through the NEW tree-nested template (infrastructure_report.py,
+#  ported from the Infrastructure Report dashboard design) instead of the flat band/table
+#  layout. Never a fresh query -- see capture_snapshot's own docstring -- so this xlsx can
+#  never disagree with what the admin reviewed and annotated on screen.
+#
+#  Infrastructure Admin's estate is DISPLAY-ONLY here: ownership of these devices (who may
+#  select and annotate them) stays with Network Admin -- see DEVICES' own comments on
+#  root-dc-1/root-dc-2 and hci-cluster. This only reads the Snapshot capture_snapshot()
+#  already built for whichever role captured it.
+#
+#  Services are deliberately NOT rendered here (every DeviceGroup.services stays empty, so
+#  infrastructure_report.write_section skips that panel entirely): capture_snapshot() does
+#  not query the windows_exporter service collector today (see DEVICES' root-dc-1/2 comment
+#  -- confirmed present on Prometheus, but nothing here reads it yet), and inventing a fresh
+#  query for it would break the one-snapshot-in / one-report-out guarantee this module keeps
+#  everywhere else. The standalone infrastructure report CLI, which captures independently
+#  per run, does query it -- see standalone/infrastructure admin report/generate_report.py.
+# =======================================================================================
+def infrastructure_report_filename(theme: str = "dark", when=None) -> str:
+    """Same family name as network_report_filename -- see its own docstring -- so every
+    report this app produces for this estate sits together in a folder."""
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Infrastructure Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
+#: flag.text already carries its own label for these -- see _windows_device_flags: the "nodes"
+#: branch (node_*) prefixes every text with the node's own display name, and win_down/
+#: win_unscraped are written with the device's name baked in before any branching happens.
+#: Every OTHER flag (cpu_high/mem_high/disk_high, cluster_node_down/cluster_resource_failed)
+#: carries no name at all, so _infra_notes prefixes those with the device/group name itself.
+_INFRA_LABELED_FLAG_PREFIXES = ("win_down", "win_unscraped", "node_")
+
+
+def _infra_notes(sysvm, comment: str, flag_answers: dict) -> tuple:
+    """A device's flags -> NoteRow list + (critical, warning) counts, for one DeviceGroup.
+
+    The admin's one free-text comment for this device lands on the LAST row -- write_notes()
+    (infrastructure_report.py) renders every non-empty NoteRow.comment as one "Comment"
+    section below the flagged-metric rows, so one row carrying it is enough for it to show;
+    putting it on every row would repeat the same paragraph once per flag.
+    """
+    import infrastructure_report as ir
+
+    if not sysvm.flags:
+        return [ir.NoteRow(ir.SENTINEL_NOTE, comment=comment)], 0, 0
+    rows, critical, warning = [], 0, 0
+    last = len(sysvm.flags) - 1
+    for i, flag in enumerate(sysvm.flags):
+        if flag.band == "red":
+            critical += 1
+        else:
+            warning += 1
+        text = (flag.text if flag.key.startswith(_INFRA_LABELED_FLAG_PREFIXES)
+               else f"{sysvm.name} · {flag.text}")
+        rows.append(ir.NoteRow(
+            flagged_metric=text,
+            fix_needed=flag_answers.get(flag.key, ""),
+            comment=comment if i == last else "",
+        ))
+    return rows, critical, warning
+
+
+def _infra_cpu_ram_disks(m: dict, label: str):
+    """One windows_exporter target's raw metrics (see _windows_metrics/_hci_node_metrics) ->
+    (CpuRam-or-None, [DiskRow, ...]). None for CpuRam when the target has never been
+    reachable -- there is no percentage to show, not a fabricated 0%."""
+    import infrastructure_report as ir
+
+    if not m.get("reachable"):
+        return None, []
+    cpu_ram = None
+    if m.get("cpu_pct") is not None or m.get("mem_pct") is not None:
+        mem_total = m.get("mem_total_gb")
+        cpu_ram = ir.CpuRam(
+            node=label, cpu_pct=m.get("cpu_pct") or 0.0, ram_pct=m.get("mem_pct") or 0.0,
+            ram_size=f"{mem_total:.0f}GB" if mem_total is not None else None)
+    disks = [ir.DiskRow(host=label, used_pct=d["used"], size_gb=round(d["size"]), mount=d["volume"])
+            for d in m.get("disks", []) if d.get("used") is not None and d.get("size") is not None]
+    return cpu_ram, disks
+
+
+def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
+                                annotations: dict, summary_comment: str) -> bytes:
+    """Map the annotated Snapshot into a ReportData tree and render it via
+    infrastructure_report.build_report(). See this section's module docstring above."""
+    import infrastructure_report as ir
+
+    wm = getattr(snapshot, "_wm", None) or {}
+    hci_nodes = getattr(snapshot, "_hci_nodes", None) or {}
+    wc = getattr(snapshot, "_wc", None) or {}
+    by_name = {d["name"]: d for d in DEVICES}
+
+    groups = []
+    ad_hosts = [s for s in snapshot.systems if by_name.get(s.name, {}).get("system") == "Root Domain Controllers"]
+    if ad_hosts:
+        cpu_ram, disks, notes = [], [], []
+        critical = warning = 0
+        for sysvm in ad_hosts:
+            dev = by_name[sysvm.name]
+            m = wm.get(dev["target"], {"known": False, "reachable": False})
+            cr, dk = _infra_cpu_ram_disks(m, sysvm.name)
+            if cr:
+                cpu_ram.append(cr)
+            disks += dk
+            ann = annotations.get(sysvm.name, {})
+            rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
+            notes += rows
+            critical += c
+            warning += w
+        groups.append(ir.DeviceGroup(
+            title="Active Directory", cpu_ram=cpu_ram, disks=disks, notes=notes,
+            critical=critical, warning=warning, count=len(ad_hosts), count_label="devices",
+            signed_by=author))
+
+    hci_sysvm = next((s for s in snapshot.systems if by_name.get(s.name, {}).get("key") == "hci-cluster"), None)
+    if hci_sysvm is not None:
+        ann = annotations.get(hci_sysvm.name, {})
+        notes, critical, warning = _infra_notes(hci_sysvm, ann.get("comment", ""), ann.get("flags", {}))
+        node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
+        if len(node_order) <= 1:
+            cpu_ram, disks = [], []
+            for target, n in node_order:
+                cr, dk = _infra_cpu_ram_disks(n, n.get("display", target))
+                if cr:
+                    cpu_ram.append(cr)
+                disks += dk
+            children = []
+        else:
+            cpu_ram, disks, children = [], [], []
+            for target, n in node_order:
+                label = n.get("display", target)
+                cr, dk = _infra_cpu_ram_disks(n, label)
+                child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
+                               else [ir.NoteRow(f"{label} is not answering")])
+                children.append(ir.DeviceGroup(
+                    title=label, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
+                    critical=0 if n.get("reachable") else 1, count=1, count_label="node",
+                    signed_by=author))
+        groups.append(ir.DeviceGroup(
+            title="HCI Cluster", cpu_ram=cpu_ram, disks=disks, notes=notes, children=children,
+            critical=critical, warning=warning, count=max(1, len(node_order)),
+            count_label="node" if len(node_order) == 1 else "nodes", signed_by=author))
+
+    devices_total = len(snapshot.systems)
+    devices_down = sum(1 for s in snapshot.systems
+                       if any(f.key.startswith(("win_down", "win_unscraped", "node_down"))
+                              for f in s.flags))
+    all_disks = [d for g in groups for d in (g.disks + [dd for c in g.children for dd in c.disks])]
+    all_cpu_ram = [c for g in groups for c in (g.cpu_ram + [cc for ch in g.children for cc in ch.cpu_ram])]
+    cluster_nodes = len(hci_nodes)
+    cluster_nodes_down = sum(1 for n in hci_nodes.values() if not n.get("reachable"))
+    cres = {"online": 0, "offline": 0, "failed": 0, "other": 0}
+    for w in wc.values():
+        res = w.get("resources") or {}
+        for k in cres:
+            cres[k] += res.get(k, 0)
+
+    def _tone(count):
+        return "red" if count else "green"
+
+    def _watch_tone(count, red_count):
+        return "red" if red_count else ("amber" if count else "green")
+
+    storage_critical = sum(1 for d in all_disks if d.used_pct >= 95)
+    storage_amber = sum(1 for d in all_disks if 85 <= d.used_pct < 95)
+    mem_critical = sum(1 for c in all_cpu_ram if c.ram_pct >= 95)
+    cpu_amber = sum(1 for c in all_cpu_ram if c.cpu_pct >= 80)
+    cpu_red = sum(1 for c in all_cpu_ram if c.cpu_pct >= 90)
+    mem_amber = sum(1 for c in all_cpu_ram if 80 <= c.ram_pct < 95)
+
+    needs_attention = [
+        ir.SummaryMetric("DEVICES DOWN", devices_down, f"down | {devices_total} total",
+                         _tone(devices_down)),
+        ir.SummaryMetric("NODES DOWN", cluster_nodes_down, f"down | {cluster_nodes} total",
+                         _tone(cluster_nodes_down)),
+        ir.SummaryMetric("STORAGE CRITICAL >=95%", storage_critical,
+                         f"nodes | {len(all_disks)} total", _tone(storage_critical)),
+        ir.SummaryMetric("MEMORY CRITICAL >=95%", mem_critical,
+                         f"nodes | {len(all_cpu_ram)} total", _tone(mem_critical)),
+    ]
+    watch_list = [
+        ir.SummaryMetric("HIGH CPU", cpu_amber + cpu_red, f"nodes | {len(all_cpu_ram)} total",
+                         _watch_tone(cpu_amber + cpu_red, cpu_red)),
+        ir.SummaryMetric("HIGH MEMORY", mem_amber, f"nodes | {len(all_cpu_ram)} total",
+                         _watch_tone(mem_amber, 0)),
+        ir.SummaryMetric("STORAGE AT CAPACITY >=85%", storage_amber + storage_critical,
+                         f"nodes | {len(all_disks)} total",
+                         _watch_tone(storage_amber + storage_critical, storage_critical)),
+        # No AD replication-lag metric exists anywhere in this codebase (see this module's own
+        # docstring on stating what is not collected) -- this is a REAL signal instead: WSFC
+        # resources sitting Offline, which the flat report already treats as informational
+        # (see build_report's Cluster resources table above), never a red flag here either.
+        ir.SummaryMetric("CLUSTER RESOURCES OFFLINE", cres["offline"],
+                         f"resources | {sum(cres.values())} total",
+                         "amber" if cres["offline"] else "green"),
+    ]
+
+    import datetime
+    now = datetime.datetime.now()
+    data = ir.ReportData(
+        generated_at=now.strftime("%d %b %Y  ·  %H:%M"),
+        nodes_total=devices_total,
+        cluster_count=1 if hci_nodes else 0,
+        cluster_nodes=cluster_nodes,
+        # No real cluster-storage-capacity metric exists yet (see the module docstring above)
+        # -- an honest placeholder, not a fabricated figure. ReportData types this `int`, but
+        # infrastructure_report.Sheet.put() writes whatever value it is given straight into
+        # the cell, so a str renders exactly as intended.
+        cluster_resources_tb="—",
+        last_checked=now.strftime("%H:%M"),
+        needs_attention=needs_attention,
+        watch_list=watch_list,
+        summary_notes=([ir.SummaryNote("Infrastructure", summary_comment)]
+                       if summary_comment else []),
+        groups=groups,
+        summary_signed_by=author,
+    )
+
+    import io
+    buf = io.BytesIO()
+    ir.build_report(data, buf)
     return buf.getvalue()

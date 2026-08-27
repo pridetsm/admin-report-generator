@@ -26,6 +26,7 @@ urlpatterns = [
     path("network/sod/generate/", views.network_sod_generate, name="network_sod_generate"),
     path("infra/", views.infra_form, name="infra_form"),
     path("infra/report/", views.infra_report, name="infra_report"),
+    path("infra/generate/", views.infra_generate, name="infra_generate"),
     path("history/", views.history, name="history"),
     path("history/<int:pk>/", views.submission_detail, name="submission_detail"),
     path("recipients/search/", views.recipient_search, name="recipient_search"),

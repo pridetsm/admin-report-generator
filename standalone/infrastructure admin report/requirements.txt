@@ -1,0 +1,6 @@
+# Runtime requirements for the Infrastructure Report tools.
+# (mail_report.py uses only the Python standard library beyond this.)
+# No PyYAML: unlike the System Admin Report, this estate's topology is a small
+# fixed list in generate_report.py, not read from prometheus.yml.
+# No Pillow: report_generator.py's renderer writes text/cells only, no embedded logo image.
+openpyxl>=3.1

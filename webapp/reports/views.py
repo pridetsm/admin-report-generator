@@ -874,7 +874,10 @@ def network_report(request):
         # Still the Network Admin role/routes (see network_report's own docstring) -- this is
         # a wording-only rename: what started as switch monitoring is now mostly HCI Cluster
         # infrastructure data, so the displayed title says so. Kept under Network Admin for
-        # now; moving it to its own role/section is a separate, later change.
+        # now (this remains the place to SELECT and ANNOTATE these devices); Infrastructure
+        # Admin's OWN report (infra_form/infra_report/infra_generate) now reads the same live
+        # data read-only, through the new tree-nested template -- see
+        # network.build_infrastructure_report's module docstring.
         "dash_title": "Infrastructure Analyses Dashboard",
         "subject": "device",
         "draft_key": "draft:network:" + ",".join(sorted(keys)),
@@ -1105,98 +1108,175 @@ def network_sod_generate(request):
 @never_cache
 @login_required
 def infra_form(request):
-    """Infrastructure Admin's landing page — the SAME lightweight selection screen shape as
-    report_form, scoped to the hardware estate (HCI clusters, standalone DB hosts) instead of
-    business systems. See gr.INFRA_SYSTEMS / load_topology's `scope` for how the two
-    topologies split — a device added there never appears on both pickers.
+    """Infrastructure Admin's landing page — the SAME device-picker shape network_dashboard
+    uses (see its docstring), scoped to the windows-kind devices in network.DEVICES (HCI
+    Cluster, Root Domain Controllers) rather than the switch.
+
+    Reads network.device_inventory() directly, NOT gr.load_topology(scope="infra"): the real
+    data for this estate has always lived in network.DEVICES (see its own comments on
+    hci-cluster/root-dc-1/root-dc-2), and no scrape config actually assigns INFRA_SYSTEMS'
+    "hci cluster"/"oracle hosts" system labels to a real target, so that topology path was
+    dead — this screen would show devices with zero real data behind them. Infrastructure
+    Admin reads the SAME live Prometheus data Network Admin's own report reads; ownership of
+    these devices stays with Network Admin (display-only, per network.DEVICES' own comments).
     """
     if not is_infra_admin(request.user):
         return redirect("report_form")
-    recent = _recently_reported()
-    select_systems = [
-        {"name": s["name"], "hosts": s["hosts"], "reported": recent.get(s["name"]),
-         "mono_hue": _mono_hue(s["name"]),
-         "platform": s["platform"],
-         "platform_label": PLATFORM_LABELS.get(s["platform"], PLATFORM_LABELS[""])}
-        for s in list_systems(infra=True)
-    ]
+    try:
+        devices = [d for d in network.device_inventory() if d.get("kind") == "windows"]
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
     open_seconds = _open_report_seconds(request, "infra")
-    open_systems = (request.session.get("infra_report_systems") or []) if open_seconds else []
+    open_keys = (request.session.get("infra_report_systems") or []) if open_seconds else []
+    by_key = {d["key"]: d for d in devices}
     return render(request, "reports/infra_select.html", {
-        "select_systems": select_systems,
-        "recent_hours": _RECENT_REPORT_HOURS,
-        "total_hosts": sum(s["hosts"] for s in select_systems),
-        "recent_count": sum(1 for s in select_systems if s["reported"]),
-        "open_report": list(open_systems),
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
+        "total_hosts": len(devices),
+        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
         "open_seconds": open_seconds,
     })
 
 
 @login_required
 def infra_report(request):
-    """The report / annotation screen for the SELECTED infrastructure — mirrors `report`
-    exactly (see its docstring for the always-fresh-capture rationale), scoped to
-    Infrastructure Admin's own estate. Posts straight to the SHARED `generate` view: that
-    view is purely snapshot-driven, with nothing business-systems-specific in it, so this
-    estate needs no infra_generate twin — one download/e-mail path serves every estate.
+    """The annotation screen for the SELECTED infrastructure devices — mirrors network_report
+    exactly (device picker -> capture -> the shared form.html annotation screen), not `report`:
+    the data here is network.py's Snapshot/SystemVM shape (windows-kind devices), not
+    generate_report.py's business-system Store/System shape the plain systems flow expects, so
+    this estate posts to its own infra_generate rather than the shared `generate`.
+
+    Session key kept as "infra_report_systems" (now holding device KEYS rather than system
+    names) — context.py's back-button override only checks it for truthiness, so renaming it
+    would have touched a second file for no behavioural gain.
     """
     if not is_infra_admin(request.user):
         return redirect("report_form")
 
     if request.method == "POST":
-        names = [n for n in request.POST.getlist("include_system") if n]
-        if not names:
-            messages.error(request, "Select at least one item to include in the report.")
+        keys = [k for k in request.POST.getlist("include_device") if k]
+        known = {d["key"] for d in network.DEVICES if d.get("kind") == "windows"}
+        keys = [k for k in keys if k in known]
+        if not keys:
+            messages.error(request, "Select at least one device to include in the report.")
             return redirect("infra_form")
-        request.session["infra_report_systems"] = names
-        request.session.pop("infra_snapshot_token", None)
+        request.session["infra_report_systems"] = keys
+        request.session.pop("infra_snapshot_token", None)   # new selection -> fresh capture
         return redirect("infra_report")
 
-    names = request.session.get("infra_report_systems")
-    if not names:
+    keys = request.session.get("infra_report_systems")
+    if not keys:
         return redirect("infra_form")
 
-    token = uuid.uuid4().hex
-    try:
-        snapshot = capture_snapshot(token, only=set(names), infra=True)
-    except PrometheusUnavailable as exc:
-        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
-    if not snapshot.systems:
-        messages.error(request, "None of the selected infrastructure were found. Please choose again.")
-        request.session.pop("infra_report_systems", None)
-        return redirect("infra_form")
-    cache.set(_cache_key(token), snapshot, timeout=settings.SNAPSHOT_TTL)
-    request.session["infra_snapshot_token"] = token
-    request.session["infra_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+    force = request.GET.get("fresh") == "1"
+    snapshot = None
+    token = request.session.get("infra_snapshot_token", "")
+    if not force and token:
+        snapshot = cache.get(_cache_key(token))
+
+    if snapshot is None:
+        token = uuid.uuid4().hex
+        try:
+            snapshot = network.capture_snapshot(token, only=set(keys))
+        except network.NetworkUnavailable as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+        if not snapshot.systems:
+            messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+            request.session.pop("infra_report_systems", None)
+            return redirect("infra_form")
+        snapshot.systems.sort(key=lambda s: s.name.lower())
+        cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+        request.session["infra_snapshot_token"] = token
+        request.session["infra_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
 
     elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
     remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
 
-    hosts_by_system = connect.hosts_from_snapshot(snapshot._systems, snapshot._store)
-    connect.attach_flag_severity(hosts_by_system, snapshot.systems)
-    platforms = {s.name: gr.platform_of_system(s.components) for s in snapshot._systems}
-    for svm in snapshot.systems:
-        svm.connect_hosts = hosts_by_system.get(svm.name, [])
-        svm.platform = platforms.get(svm.name, "")
-        svm.platform_label = PLATFORM_LABELS.get(svm.platform, PLATFORM_LABELS[""])
-
     return render(request, "reports/form.html", {
-        "generate_default": reverse("generate"),
-        "dash_title": "Infrastructure Analyses Dashboard",
-        "subject": "system",
-        "draft_key": "draft:infra:" + ",".join(sorted(names)),
-        "picker_url": reverse("infra_form"),
         "snapshot": snapshot,
         "token": token,
         "selected_count": len(snapshot.systems),
         "suggested_author": _profile_author(request.user),
         "suggested_recipients": default_recipients(),
         "recipient_options": recipient_options(),
-        "default_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        "default_filename": network.infrastructure_report_filename(
+            getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
         "ttl_minutes": settings.SNAPSHOT_TTL // 60,
         "ttl_seconds": settings.SNAPSHOT_TTL,
         "remaining_seconds": remaining,
+        "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        # Its own nouns, matching the new tree-nested template's own subtitle rather than the
+        # generic "Infrastructure Analyses Dashboard" the systems/network flows share — this
+        # screen produces THAT dashboard now, not the flat card layout.
+        "dash_title": "Infrastructure & Cluster Dashboard",
+        "subject": "device",
+        "draft_key": "draft:infra:" + ",".join(sorted(keys)),
+        "picker_url": reverse("infra_form"),
+        "generate_url": reverse("infra_generate"),
     })
+
+
+@login_required
+@require_POST
+def infra_generate(request):
+    """Build the Infrastructure Report from the reviewed snapshot — network_generate's twin,
+    but rendering through the new tree-nested template (network.build_infrastructure_report)
+    instead of the flat band/table layout network.build_report still uses for the switch."""
+    if not is_infra_admin(request.user):
+        return redirect("report_form")
+
+    token = request.POST.get("token", "") or request.session.get("infra_snapshot_token", "")
+    snapshot = cache.get(_cache_key(token)) if token else None
+    if snapshot is None:
+        messages.error(request, "That snapshot has expired. Capture a fresh one.")
+        return redirect("infra_report")
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    annotations: dict = {}
+    for si, sysvm in enumerate(snapshot.systems):
+        answers = {}
+        for fi, flag in enumerate(sysvm.flags):
+            ans = request.POST.get(f"fix__{si}__{fi}", "")
+            if ans in ("Yes", "No"):
+                answers[flag.key] = ans
+        comment = request.POST.get(f"comment__{si}", "").strip()
+        if answers or comment:
+            annotations[sysvm.name] = {"flags": answers, "comment": comment}
+
+    data = network.build_infrastructure_report(
+        snapshot, theme=theme, author=author,
+        annotations=annotations, summary_comment=summary_comment)
+    filename = network.infrastructure_report_filename(theme, timezone.localtime())
+
+    report_content = {
+        "overview": snapshot.overview,
+        "systems": [{
+            "name": s.name, "hosts": s.hosts,
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category,
+                       "answer": annotations.get(s.name, {}).get("flags", {}).get(f.key, "")}
+                      for f in s.flags],
+            "comment": annotations.get(s.name, {}).get("comment", ""),
+        } for s in snapshot.systems],
+    }
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        annotations=annotations, report_content=report_content,
+        immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
+        summary_comment=summary_comment,
+    )
+
+    resp = HttpResponse(
+        data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
 
 
 @login_required

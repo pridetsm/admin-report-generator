@@ -1,30 +1,46 @@
 {% extends "base.html" %}
-{% block title %}Choose infrastructure · RBZ Monitoring Console{% endblock %}
+{% block title %}Infrastructure Device Picker{% endblock %}
+
+{% comment %}
+  Infrastructure Admin's landing screen — a structural twin of network_select.html (see its
+  own comment for why the two aren't merged into one file: same shape, different data). The
+  inventory here is the windows-kind subset of network.DEVICES (HCI Cluster, Root Domain
+  Controllers) — see views.infra_form's docstring for why this reads network.device_inventory()
+  rather than a topology-driven systems list.
+{% endcomment %}
 
 {% block body %}
-{# ---- selection screen polish; scoped here so app.css stays untouched ---- #}
+<style>
+  .badge-state {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    background: var(--red-bg); color: var(--red);
+  }
+  .badge-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge-state.unk { background: var(--panel-2); color: var(--muted); }
+</style>
+
 <form method="post" action="{% url 'infra_report' %}" id="selectForm">
 {% csrf_token %}
 
 <div class="container">
   <div class="snap" style="align-items:flex-start">
     <div style="min-width:0">
-      <h1>Infrastructure Picker</h1>
-      <div class="meta">Choose the infrastructure for this report — live metrics are captured only for what you pick.</div>
+      <h1>Infrastructure Device Picker</h1>
+      <div class="meta">Choose the devices for this report — live metrics are captured only for what you pick.</div>
       <div class="sys-stats">
-        <span class="sys-stat">{{ select_systems|length }} item{{ select_systems|length|pluralize }}</span>
-        <span class="sys-stat">{{ total_hosts }} host{{ total_hosts|pluralize }}</span>
-        {% if recent_count %}<span class="sys-stat">{{ recent_count }} reported recently</span>{% endif %}
+        <span class="sys-stat">{{ devices|length }} device{{ devices|length|pluralize }}</span>
+        {% if unreachable_count %}<span class="sys-stat">{{ unreachable_count }} not responding</span>{% endif %}
       </div>
     </div>
   </div>
 
   {% if open_report %}
   {% comment %}
-    A report is already open. This screen is the picker, so without this the only way
-    forward is to choose infrastructure again — which clears the snapshot token and discards
-    answers already typed. Landing here does not throw anything away; this simply makes
-    the way back visible, and says plainly what starting again would cost.
+    A report is already open. This screen is the picker, so without this the only way forward
+    is to choose devices again — which clears the snapshot token and discards answers already
+    typed. Landing here throws nothing away; this makes the way back visible and says plainly
+    what starting again would cost.
   {% endcomment %}
   <div class="resume-bar">
     <div class="resume-text">
@@ -33,26 +49,22 @@
     </div>
     <a class="btn primary" href="{% url 'infra_report' %}">Continue that report</a>
   </div>
-  <p class="meta" style="margin:-4px 2px 14px">Choosing infrastructure below starts a new report and
+  <p class="meta" style="margin:-4px 2px 14px">Choosing devices below starts a new report and
     discards the open one.</p>
   {% endif %}
 
-  <div class="section-label">Infrastructure to include</div>
+  <div class="section-label">Devices to include</div>
   <div class="card"><div class="body" style="padding-top:14px">
-    {% if recent_count %}
-    <p class="sys-key">
-      <span class="sys-key-swatch" aria-hidden="true"></span>
-      Amber = reported in the last {{ recent_hours }} hour{{ recent_hours|pluralize }}.
-      A heads-up so the same one isn't reported twice — you can still include them.
-    </p>
-    {% endif %}
+    <p class="meta" style="margin:0 0 4px;line-height:1.5">Only devices with windows_exporter
+      onboarded appear here — standalone database hosts and further private cloud cluster
+      hosts will appear automatically once they are added as Prometheus targets.</p>
 
     <div class="sys-toolbar">
-      <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All infrastructure</span></label>
+      <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All devices</span></label>
       <span class="sys-search">
         <span class="sys-search-ico" aria-hidden="true">⌕</span>
-        <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter…"
-               autocomplete="off" aria-label="Filter infrastructure">
+        <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter devices…"
+               autocomplete="off" aria-label="Filter devices">
         <button type="button" class="sys-clear" id="sysClear" hidden aria-label="Clear filter">×</button>
       </span>
       <span class="spacer" style="flex:1"></span>
@@ -60,58 +72,34 @@
     </div>
 
     <div class="sys-grid" id="selectList">
-      {% for s in select_systems %}
-      {% comment %}
-        A recently-reported tile is tinted amber rather than carrying a badge: the badge was a
-        third line inside the tile, which pushed the layout around and read as loud as the
-        name. The tint says the same thing at a glance, costs no space, and leaves the tile
-        to be a tile. Who and when stay on the title, for anyone who wants the detail.
-      {% endcomment %}
-      <label class="sys-tile{% if s.reported %} is-recent{% endif %}" data-name="{{ s.name|lower }}"
-             {% if s.reported %}title="Reported {{ s.reported.at|timesince }} ago by {{ s.reported.by|default:'—' }}"{% endif %}>
-        <input type="checkbox" class="select-check" name="include_system" value="{{ s.name }}">
-        {% comment %}
-          The platform glyph stands in for the monogram. An item whose scrape jobs don't
-          identify an OS keeps the letter, so the badge is never empty.
-
-          A hybrid item gets TWO badges rather than one badge holding both glyphs — each the
-          same size as every other badge, so the tile with the most to say isn't the one whose
-          glyphs are smallest. Each names its own platform for a screen reader; the pair is
-          just a layout wrapper, so it stays out of the accessibility tree.
-        {% endcomment %}
-        {% if s.platform == 'hybrid' %}
-        <span class="sys-os-pair" style="--mono-h:{{ s.mono_hue }}">
-          <span class="sys-mono" role="img" aria-label="Windows" title="Windows">
-            <i class="os-glyph os-windows"></i>
-          </span>
-          <span class="sys-mono" role="img" aria-label="Linux" title="Linux">
-            <i class="os-glyph os-linux"></i>
-          </span>
-        </span>
-        {% else %}
-        <span class="sys-mono"
-              style="--mono-h:{{ s.mono_hue }}"
-              {% if s.platform %}role="img" aria-label="{{ s.platform_label }}"
-              title="{{ s.platform_label }}"{% endif %}>
-          {% if s.platform %}<i class="os-glyph os-{{ s.platform }}"></i>
-          {% else %}{{ s.name.0|upper }}{% endif %}
-        </span>
-        {% endif %}
+      {% for d in devices %}
+      <label class="sys-tile" data-name="{{ d.name|lower }} {{ d.target }}">
+        <input type="checkbox" class="select-check" name="include_device" value="{{ d.key }}">
+        <span class="sys-mono" style="--mono-h:{{ d.mono_hue }}">{{ d.name.0|upper }}</span>
         <span class="sys-body">
-          <span class="sys-name">{{ s.name }}</span>
-          <span class="sys-sub">{{ s.hosts }} host{{ s.hosts|pluralize }}</span>
+          <span class="sys-name">{{ d.name }}</span>
+          <span class="sys-sub">{{ d.system }}</span>
+          {% if not d.known %}
+          {% comment %}
+            No `up` series at all is a different answer from up == 0: one means Prometheus has
+            never scraped this target, the other that it tried and failed.
+          {% endcomment %}
+          <span class="badge-state unk" title="Prometheus has no scrape for this target"><span class="dot"></span>not scraped</span>
+          {% elif not d.reachable %}
+          <span class="badge-state" title="The target is not answering"><span class="dot"></span>not responding</span>
+          {% endif %}
         </span>
         <span class="sys-tick" aria-hidden="true">✓</span>
       </label>
       {% empty %}
-      <div class="sys-empty"><span class="big">⌸</span>No infrastructure found in the topology.</div>
+      <div class="sys-empty"><span class="big">⌸</span>No infrastructure devices are being monitored yet.</div>
       {% endfor %}
     </div>
-    <div class="sys-empty" id="sysNoResults" hidden><span class="big">⌕</span>No infrastructure match your filter.</div>
+    <div class="sys-empty" id="sysNoResults" hidden><span class="big">⌕</span>No devices match your filter.</div>
   </div></div>
 </div>
 
-{# ---- sticky action bar ---- #}
+{% comment %} ---- sticky action bar ---- {% endcomment %}
 <div class="actionbar">
   <div class="container-inner">
     <span class="sel-pill"><b id="selCountNum">0</b><span id="selectCount"></span></span>
@@ -188,7 +176,7 @@
   if (form) form.addEventListener("submit", function (e) {
     if (!checks.some(function (c) { return c.checked; })) {
       e.preventDefault();
-      window.alert("Select at least one item to include in the report.");
+      window.alert("Select at least one device to include in the report.");
     }
   });
 

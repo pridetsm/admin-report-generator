@@ -51,6 +51,34 @@ scrape_configs:
           system: "AnotherSystem"
           display: "AnotherSystem Node"
 
+  # Infrastructure Admin's own estate (webapp/reports/network.py DEVICES + INFRA_SYSTEMS) —
+  # a SEPARATE job per device family, not the windows_exporter job above, because the report
+  # engine queries these BY JOB ("up{job=\"hci_cluster\"}"), so adding another target under the
+  # same job_name is the whole procedure for onboarding another cluster node or root DC — no
+  # code change needed either side.
+  - job_name: "hci_cluster"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["10.0.0.30:9182"]
+        labels:
+          app: "windows"
+          system: "HCI Cluster"
+          display: "HCI Cluster"
+
+  - job_name: "root_domain_controllers"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["10.0.0.31:9182"]
+        labels:
+          app: "windows"
+          system: "Root Domain Controllers"
+          display: "Root DC 1"
+      - targets: ["10.0.0.32:9182"]
+        labels:
+          app: "windows"
+          system: "Root Domain Controllers"
+          display: "Root DC 2"
+
   # Blackbox HTTP/SSL probes (optional) feed the "web encryption" and SSL-cert
   # rollups. Keep the job_name containing "blackbox" so the engine recognises it.
   - job_name: "blackbox_http"

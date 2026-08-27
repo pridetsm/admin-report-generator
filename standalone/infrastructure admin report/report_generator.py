@@ -1,0 +1,904 @@
+"""
+Infrastructure Report Generator — the rendering engine (data model -> .xlsx).
+
+Pure renderer, no Prometheus and no Django: build a ReportData tree and hand it to
+build_report(). The live-data capture that assembles that tree lives in
+webapp/reports/network.py (capture_infra_report/build_infrastructure_report), which is
+how the webapp reaches this module — the same way it reaches generate_report.py, both
+added to sys.path by webapp/config/settings.py's SEND_REPORT_DIR. The standalone CLI
+twin is standalone/infrastructure admin report/report_generator.py (kept identical by
+hand, same convention as generate_report.py's own standalone twin).
+
+    python infrastructure_report.py data.json out.xlsx     # renders data.json as-is
+
+Layout model
+------------
+* LEFT tables (Services, CPU/RAM) step one column right per nesting level
+  (section -> cluster host -> node): the visual tree indent.
+* RIGHT tables (Disk, Cluster Storage, Notes) sit at FIXED columns at every
+  nesting level -- one consistent table spacing, so Used % / Fix needed? /
+  Resolved / the title badge all line up straight down the page.
+* The Notes table lands its Resolved column on the shared right edge,
+  column W (RIGHT_EDGE).
+* "Cluster Storage" is rendered only for cluster hosts (a host that owns
+  child nodes).
+
+Groups written into the workbook
+--------------------------------
+* named range ``dashboard`` -> AT A GLANCE + NEEDS IMMEDIATE ATTENTION +
+  NEEDS ATTENTION
+* named range ``banners``   -> the CRITICAL / WARNING banner block
+* named range ``RHS_Edge``  -> column W
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import dataclass, field
+from typing import Optional, Union
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.utils import get_column_letter
+
+
+# ---------------------------------------------------------------------------
+# Column plan  (1 = A).
+#
+# LEFT tables tree-indent one column right per nesting level (section ->
+# cluster host -> node) -- the visual tree indent, kept from the reference.
+# The RIGHT tables sit at FIXED columns; the block is positioned so that even
+# at the deepest indent that carries a Disk table (a cluster host, indent 1)
+# there is still a clear gap column between CPU/RAM and Disk -- column I is
+# that guaranteed gap.  Beyond it, one fixed gap column between each table.
+#
+#   Services (2+i):(3+i) | gap | CPU/RAM (5+i):(7+i) | gap I | Disk J:N |
+#   gap O | Cluster Storage P:S | (variable gap) | Notes  flagged U:W, Fix X, Resolved Y
+#
+# The gap before the Notes panel varies with each system's table config
+# (cluster host = 1 col, plain host / node = more); the Notes right edge
+# (Fix needed? / Resolved / the title badge) is always column Y.
+# ---------------------------------------------------------------------------
+
+def services_col(indent):   return 2 + indent           # B.., C.., D..  (name, status)
+def cpuram_col(indent):     return 5 + indent           # E.., F.., G..  (node, cpu, ram)
+
+DISK_COL = 10          # J  Host   (K Used %, L Size GB, M Mount, N Free GB)
+DISK_LAST = 14         # N
+#                       # O  gap
+CLUSTER_COL = 16       # P  Pool   (Q Used %, R Size GB, S Free GB)
+CLUSTER_LAST = 19      # S
+#                       # T  gap (absorbs the config variance)
+NOTES_COL = 21         # U  Flagged metric  (merged U:W), X Fix needed?, Y Resolved
+NOTES_FLAG_LAST = 23   # W
+FIX_COL = 24           # X
+RIGHT_EDGE = 25        # Y  Resolved  ==  shared right edge
+
+DASH_LEFT = 2          # B   dashboard tiles / banners left edge
+DASH_RIGHT = 19        # S   dashboard tiles / banners right edge (stretched)
+NOTES_CARD_RIGHT = RIGHT_EDGE
+
+MAX_COL = 26           # Z
+MAX_ROW = 260
+
+TITLE_WIDTH = 6
+
+# ---------------------------------------------------------------------------
+# Theme
+# ---------------------------------------------------------------------------
+
+BG = "FF0E1620"
+CARD = "FF121E2B"
+TABLE_HEADER_BG = "FF1B2836"
+TEXT_PRIMARY = "FFE7EEF5"
+TEXT_SECONDARY = "FFAFBBC7"
+TEXT_MUTED = "FF7F93A6"
+ACCENT = "FF5BC0D4"
+
+CHIP_GREEN_BG, CHIP_GREEN_TXT = "FF14322B", "FF4CC9A4"
+CHIP_AMBER_BG, CHIP_AMBER_TXT = "FF3A2F14", "FFE8B04B"
+CHIP_RED_BG, CHIP_RED_TXT = "FF3A1A16", "FFEF6A5A"
+
+# nesting cues -- neutral, on-theme.  Section title brightness steps down per
+# nesting level; a spine in the gutter column brackets a host with its nodes.
+NEST_TITLE = {0: ACCENT, 1: "FF6F9DB0", 2: "FF5E7686"}
+SPINE = {0: "FF17242E", 1: "FF243B4E"}
+
+
+def title_color(indent: int) -> str:
+    return NEST_TITLE.get(indent, NEST_TITLE[max(NEST_TITLE)])
+
+
+def spine_color(indent: int) -> str:
+    return SPINE.get(indent, SPINE[max(SPINE)])
+
+TONE_BG = {"green": CHIP_GREEN_BG, "amber": CHIP_AMBER_BG, "red": CHIP_RED_BG}
+TONE_TXT = {"green": CHIP_GREEN_TXT, "amber": CHIP_AMBER_TXT, "red": CHIP_RED_TXT}
+
+FONT_NAME = "Times New Roman"
+
+SUBTITLE_DASHBOARD = "Infrastructure & Cluster Dashboard"
+ROW3_TEXT = ("Static snapshot. Device telemetry captured via host agents and "
+             "hypervisor API.   For LIVE, auto-refreshing monitoring, click  →")
+LIVE_LINK = "▸  OPEN LIVE INFRASTRUCTURE DASHBOARD"
+ADD_GROUP_TITLE = "+ ADD A DEVICE GROUP"
+ADD_GROUP_BLURB = (
+    "Every host or node tracks the same core columns — Services, CPU/RAM, "
+    "Disk, Notes (cluster hosts also carry Cluster Storage). A cluster host "
+    "or node gets its own physically-indented section, one step right per "
+    "nesting level, same style as every other system. Onboard a new host, "
+    "cluster, or device family by duplicating the closest section and "
+    "dropping in its inventory.")
+FOOTER_LINES = [
+    ("chip key:  green under 75%   ·   amber 75-90%   ·   red 90% and over"
+     "      |      device status UP / DOWN      |      live from host agents / "
+     "hypervisor API"),
+    ("hosts:  AD-ROOT/AD-CHILD = Active Directory domain controller (forest root "
+     "/ child domain)   ·   PC-HOST = private cloud host, each running its own "
+     "independent cluster (HCI or otherwise)   ·   DB = standalone database "
+     "host   ·   CPU/RAM/Disk are tracked on every host"),
+    ("Network devices (routers, switches, links) are tracked in the separate "
+     "Network Infrastructure Report, not here."),
+]
+SENTINEL_NOTE = "No critical or warning metrics this run."
+
+
+def chip_colors(pct: float) -> tuple[str, str]:
+    if pct >= 90:
+        return CHIP_RED_BG, CHIP_RED_TXT
+    if pct >= 75:
+        return CHIP_AMBER_BG, CHIP_AMBER_TXT
+    return CHIP_GREEN_BG, CHIP_GREEN_TXT
+
+
+def badge_tone(critical: int, warning: int) -> str:
+    if critical > 0:
+        return "red"
+    if warning > 0:
+        return "amber"
+    return "green"
+
+
+# ---------------------------------------------------------------------------
+# Data model
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ServiceRow:
+    name: str
+    status: str = "RUNNING"
+
+
+@dataclass
+class CpuRam:
+    node: str
+    cpu_pct: float
+    ram_pct: float
+    ram_size: Optional[str] = None
+
+
+@dataclass
+class DiskRow:
+    host: str
+    used_pct: float
+    size_gb: int
+    mount: str = "C:"
+
+    @property
+    def free_gb(self) -> int:
+        return round(self.size_gb * (1 - self.used_pct / 100))
+
+
+@dataclass
+class ClusterStorageRow:
+    pool: str
+    used_pct: float
+    size_gb: int
+
+    @property
+    def free_gb(self) -> int:
+        return round(self.size_gb * (1 - self.used_pct / 100))
+
+
+@dataclass
+class NoteRow:
+    flagged_metric: str
+    fix_needed: str = ""
+    resolved: str = ""
+    comment: str = ""
+
+
+@dataclass
+class DeviceGroup:
+    title: str
+    services: list[ServiceRow] = field(default_factory=list)
+    cpu_ram: list[CpuRam] = field(default_factory=list)
+    disks: list[DiskRow] = field(default_factory=list)
+    cluster_storage: list[ClusterStorageRow] = field(default_factory=list)
+    notes: list[NoteRow] = field(default_factory=list)
+    critical: int = 0
+    warning: int = 0
+    count: int = 0
+    count_label: str = "devices"
+    signed_by: str = "Pride Moyo"
+    children: list["DeviceGroup"] = field(default_factory=list)
+
+    @property
+    def is_cluster_host(self) -> bool:
+        return bool(self.children) and bool(self.cpu_ram or self.disks)
+
+
+@dataclass
+class SummaryMetric:
+    label: str
+    value: Union[str, int]
+    sublabel: str = ""
+    tone: str = "green"
+
+
+@dataclass
+class SummaryNote:
+    group: str
+    comment: str
+
+
+@dataclass
+class BannerRow:
+    label: str
+    detail: str
+
+
+@dataclass
+class Banner:
+    severity: str
+    title: str
+    subtitle: str
+    rows: list[BannerRow] = field(default_factory=list)
+    note: str = ""
+
+    @property
+    def tone(self) -> str:
+        return "red" if self.severity.upper() == "CRITICAL" else "amber"
+
+    @property
+    def heading(self) -> str:
+        return f"{self.severity} — {self.title} — {self.subtitle}"
+
+
+@dataclass
+class ReportData:
+    generated_at: str
+    nodes_total: int
+    cluster_count: int
+    cluster_nodes: int
+    cluster_resources_tb: int
+    last_checked: str
+    needs_attention: list[SummaryMetric]
+    watch_list: list[SummaryMetric]
+    summary_notes: list[SummaryNote]
+    groups: list[DeviceGroup]
+    banners: list[Banner] = field(default_factory=list)
+    summary_signed_by: str = "Pride Moyo"
+
+
+# ---------------------------------------------------------------------------
+# Sheet helper
+# ---------------------------------------------------------------------------
+
+class Sheet:
+    def __init__(self, ws):
+        self.ws = ws
+
+    def put(self, row, col, value=None, *, sz=8.0, bold=False, italic=False,
+            color=TEXT_PRIMARY, bg=None, halign=None, valign="center",
+            wrap=False):
+        cell = self.ws.cell(row=row, column=col)
+        if value is not None:
+            cell.value = value
+        cell.font = Font(name=FONT_NAME, size=sz, bold=bold, italic=italic,
+                         color=color)
+        if bg:
+            cell.fill = PatternFill(fill_type="solid", fgColor=bg)
+        if halign or wrap or valign != "center":
+            cell.alignment = Alignment(horizontal=halign, vertical=valign,
+                                       wrap_text=wrap)
+
+    def merge(self, r1, c1, r2, c2, bg=None):
+        self.ws.merge_cells(start_row=r1, start_column=c1, end_row=r2,
+                            end_column=c2)
+        if bg:
+            self.ws.cell(row=r1, column=c1).fill = PatternFill(
+                fill_type="solid", fgColor=bg)
+
+    def fill(self, r1, c1, r2, c2, color):
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                self.ws.cell(row=r, column=c).fill = PatternFill(
+                    fill_type="solid", fgColor=color)
+
+    def rowh(self, row, height):
+        self.ws.row_dimensions[row].height = height
+
+    def spine(self, r1, r2, color, col=1):
+        """Paint the gutter column for a nesting bracket, without overwriting a
+        deeper (already-painted) child bracket."""
+        for r in range(r1, r2 + 1):
+            cell = self.ws.cell(row=r, column=col)
+            rgb = cell.fill.fgColor.rgb if cell.fill and cell.fill.fill_type else None
+            if rgb in (None, "00000000", BG):
+                cell.fill = PatternFill(fill_type="solid", fgColor=color)
+
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+
+def write_header(sh: Sheet, data: ReportData) -> None:
+    sh.put(1, 3, "INFRASTRUCTURE REPORT", sz=22, bold=True, color=TEXT_PRIMARY,
+           bg=BG, halign="left")
+    sh.rowh(1, 26.25)
+    sh.put(2, 3, f"snapshot generated {data.generated_at}      •      "
+                 f"{SUBTITLE_DASHBOARD}", sz=9, color=TEXT_MUTED, bg=BG,
+           halign="left")
+    sh.put(3, 3, ROW3_TEXT, sz=9, color=TEXT_SECONDARY, bg=BG, halign="left")
+    sh.put(3, 9, LIVE_LINK, sz=10, bold=True, color=ACCENT, bg=BG, halign="left")
+    for r in (2, 3, 4):
+        sh.rowh(r, 15.0)
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+def _split_cols(left, right, n):
+    """Divide [left, right] into n contiguous column spans; any extra width
+    goes to the rightmost spans."""
+    total = right - left + 1
+    base, extra = divmod(total, n)
+    spans, c = [], left
+    for i in range(n):
+        w = base + (1 if i >= n - extra else 0)
+        spans.append((c, c + w - 1))
+        c += w
+    return spans
+
+
+# The dashboard + banner sections copy the System Admin Report's visual
+# treatment: a compact 2-row AT A GLANCE band, "count / total" fraction tiles
+# for the two attention panels, and full-bleed severity-tinted banner blocks.
+
+def _parse_total(sublabel: str) -> tuple[str, str]:
+    """'down | 10 total' -> ('DOWN', '10');  'nodes | 10 total' -> ('NODES','10')."""
+    left, sep, right = sublabel.partition("|")
+    unit = left.strip().upper() if sep else ""
+    toks = right.strip().split()
+    return unit, (toks[0] if toks else "")
+
+
+def _glance_tile(sh, row, c1, c2, label, value):
+    sh.merge(row, c1, row, c2, bg=TABLE_HEADER_BG)
+    sh.put(row, c1, label, sz=8, bold=True, color=TEXT_MUTED, bg=TABLE_HEADER_BG,
+           halign="center")
+    sh.merge(row + 1, c1, row + 1, c2, bg=TABLE_HEADER_BG)
+    sh.put(row + 1, c1, value, sz=22, bold=True, color=ACCENT, bg=TABLE_HEADER_BG,
+           halign="center")
+
+
+def _frac_tile(sh, lbl_row, c1, c2, label, sub_l, sub_r, val_l, val_r, tint,
+               val_txt):
+    mid = (c1 + c2) // 2
+    sh.merge(lbl_row, c1, lbl_row, c2, bg=tint)
+    sh.put(lbl_row, c1, label, sz=8, bold=True, color=TEXT_MUTED, bg=tint,
+           halign="center")
+    for (a, b, sv, vv) in ((c1, mid, sub_l, val_l), (mid + 1, c2, sub_r, val_r)):
+        sh.merge(lbl_row + 1, a, lbl_row + 1, b, bg=tint)
+        sh.put(lbl_row + 1, a, sv, sz=8, bold=True, color=TEXT_MUTED, bg=tint,
+               halign="center")
+        sh.merge(lbl_row + 2, a, lbl_row + 2, b, bg=tint)
+        sh.put(lbl_row + 2, a, vv, sz=22, bold=True, color=val_txt, bg=tint,
+               halign="center")
+
+
+def write_dashboard(sh: Sheet, data: ReportData) -> tuple[int, int, int, int]:
+    sh.put(5, 2, "Summary", sz=13, bold=True, color=ACCENT, bg=BG, halign="left")
+    sh.rowh(5, 18.0)
+    sh.put(6, 2, "  AT A GLANCE  ·  inventory & readings", sz=8, bold=True,
+           color=TEXT_MUTED, bg=BG, halign="left")
+    sh.rowh(6, 14.0)
+
+    glance = [
+        ("NODES", data.nodes_total),
+        ("CLUSTER COUNT", data.cluster_count),
+        ("CLUSTER NODES", data.cluster_nodes),
+        ("CLUSTER RESOURCES · TB", data.cluster_resources_tb),
+        ("LAST CHECKED", data.last_checked),
+    ]
+    for (c1, c2), (label, value) in zip(
+            _split_cols(DASH_LEFT, DASH_RIGHT, len(glance)), glance):
+        _glance_tile(sh, 7, c1, c2, label, value)
+    sh.rowh(8, 30.0)
+
+    def attention_panel(hdr_row, title, metrics, tone_of):
+        sh.put(hdr_row, 2, f"  {title}", sz=8, bold=True, color=TEXT_MUTED, bg=BG,
+               halign="left")
+        sh.rowh(hdr_row, 14.0)
+        for (c1, c2), m in zip(_split_cols(DASH_LEFT, DASH_RIGHT, len(metrics)),
+                               metrics):
+            unit, total = _parse_total(m.sublabel)
+            tone = tone_of(m)
+            _frac_tile(sh, hdr_row + 1, c1, c2, m.label, unit or "COUNT", "TOTAL",
+                       str(m.value), total, TONE_BG[tone], TONE_TXT[tone])
+        sh.rowh(hdr_row + 3, 30.0)
+
+    def _nii_tone(m):
+        try:
+            return "green" if int(str(m.value).split()[0]) == 0 else "red"
+        except ValueError:
+            return "green"
+
+    attention_panel(9, "NEEDS IMMEDIATE ATTENTION", data.needs_attention,
+                    _nii_tone)
+    attention_panel(13, "NEEDS ATTENTION", data.watch_list,
+                    lambda m: m.tone)
+
+    watch_end = 16
+    sh.rowh(17, 8.0)
+
+    # ----- banners (System Admin Report style: consecutive, full-bleed) ---
+    r = 18
+    banner_start = r
+    for banner in data.banners:
+        tint = TONE_BG[banner.tone]
+        head_txt = TONE_TXT[banner.tone]
+        sh.merge(r, DASH_LEFT, r, DASH_RIGHT, bg=tint)
+        sh.put(r, DASH_LEFT,
+               f"  {banner.severity}  —  {banner.title}  —  {banner.subtitle}",
+               sz=10, bold=True, color=head_txt, bg=tint, halign="left",
+               valign="top", wrap=True)
+        sh.rowh(r, 20.0)
+        r += 1
+        for br in banner.rows:
+            sh.merge(r, DASH_LEFT, r, DASH_LEFT + 3, bg=tint)
+            sh.put(r, DASH_LEFT, f"  {br.label}", sz=9, bold=True,
+                   color=TEXT_PRIMARY, bg=tint, halign="left", valign="top",
+                   wrap=True)
+            sh.merge(r, DASH_LEFT + 4, r, DASH_RIGHT, bg=tint)
+            sh.put(r, DASH_LEFT + 4, br.detail, sz=9, color=TEXT_SECONDARY,
+                   bg=tint, halign="left", valign="top", wrap=True)
+            sh.rowh(r, 18.0)
+            r += 1
+        sh.merge(r, DASH_LEFT, r, DASH_RIGHT, bg=tint)
+        sh.put(r, DASH_LEFT, f"  {banner.note}", sz=8, color=TEXT_MUTED, bg=tint,
+               halign="left", valign="top", wrap=True)
+        sh.rowh(r, 34.0)
+        r += 1
+    banner_end = (r - 1) if data.banners else watch_end
+    left_end = banner_end
+
+    # ----- Summary Notes panel (right) -----------------------------------
+    nc = NOTES_COL
+    notes = data.summary_notes
+    by_row = max(left_end, 8 + 3 * max(1, len(notes))) + 1
+
+    sh.merge(7, nc, 7, RIGHT_EDGE, bg=CARD)
+    sh.put(7, nc, "Summary Notes", sz=9, bold=True, color=ACCENT, bg=CARD,
+           halign="left")
+
+    sh.put(8, nc, "#", sz=8, bold=True, color=TEXT_SECONDARY, bg=TABLE_HEADER_BG,
+           halign="center")
+    sh.merge(8, nc + 1, 8, nc + 2, bg=TABLE_HEADER_BG)
+    sh.put(8, nc + 1, "Group", sz=8, bold=True, color=TEXT_SECONDARY,
+           bg=TABLE_HEADER_BG, halign="left")
+    sh.merge(8, nc + 3, 8, RIGHT_EDGE, bg=TABLE_HEADER_BG)
+    sh.put(8, nc + 3, "Comment", sz=8, bold=True, color=TEXT_SECONDARY,
+           bg=TABLE_HEADER_BG, halign="left")
+
+    sh.fill(9, nc, by_row, RIGHT_EDGE, CARD)
+    if notes:
+        spans = _split_cols(9, by_row - 1, len(notes))
+        for i, (nt, (r1, r2)) in enumerate(zip(notes, spans), start=1):
+            sh.merge(r1, nc, r2, nc, bg=CARD)
+            sh.put(r1, nc, str(i), sz=9, color=TEXT_PRIMARY, bg=CARD,
+                   halign="center", valign="top")
+            sh.merge(r1, nc + 1, r2, nc + 2, bg=CARD)
+            sh.put(r1, nc + 1, nt.group, sz=9, color=TEXT_PRIMARY, bg=CARD,
+                   halign="left", valign="top", wrap=True)
+            sh.merge(r1, nc + 3, r2, RIGHT_EDGE, bg=CARD)
+            sh.put(r1, nc + 3, nt.comment, sz=9, color=TEXT_MUTED, bg=CARD,
+                   halign="left", valign="top", wrap=True)
+
+    sh.put(by_row, nc, "By  ", sz=8, color=TEXT_MUTED, bg=CARD, halign="right")
+    sh.merge(by_row, nc + 1, by_row, RIGHT_EDGE, bg=CARD)
+    sh.put(by_row, nc + 1, data.summary_signed_by, sz=9, color=TEXT_PRIMARY,
+           bg=CARD, halign="left")
+
+    return by_row + 2, watch_end, banner_start, banner_end
+
+
+# ---------------------------------------------------------------------------
+# Device section
+# ---------------------------------------------------------------------------
+
+def _notes_title(title: str, indent: int) -> str:
+    if indent == 1 and "(" in title and ")" in title:
+        return title[title.index("(") + 1:title.index(")")] + " Notes"
+    if indent >= 2:
+        return title + " Notes"
+    return title.split(" (")[0] + " Notes"
+
+
+def _flagged_style(text: str, group: DeviceGroup) -> tuple[str, bool]:
+    if text.strip() == SENTINEL_NOTE:
+        return TEXT_MUTED, True
+    if group.critical > 0:
+        return CHIP_RED_TXT, False
+    if group.warning > 0:
+        return CHIP_AMBER_TXT, False
+    return TEXT_MUTED, False
+
+
+def write_title_bar(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> None:
+    left = services_col(indent)
+    sh.fill(row, left, row, RIGHT_EDGE, CARD)
+    sh.merge(row, left, row, left + TITLE_WIDTH - 1, bg=CARD)
+    sh.put(row, left, f"▌  {group.title}", sz=13, bold=True,
+           color=title_color(indent), bg=CARD, halign="left")
+    badge_col = left + TITLE_WIDTH + 1
+    tone = badge_tone(group.critical, group.warning)
+    sh.merge(row, badge_col, row, RIGHT_EDGE, bg=CARD)
+    sh.put(row, badge_col,
+           f"{group.critical} critical  ·  {group.warning} warning  ·  "
+           f"{group.count} {group.count_label}",
+           sz=9, color=TONE_TXT[tone], bg=CARD, halign="right")
+    sh.rowh(row, 15.75)
+
+
+def write_services(sh, top, scol, group) -> int:
+    sh.merge(top, scol, top, scol + 1, bg=CARD)
+    sh.put(top, scol, "Services", sz=9, bold=True, color=ACCENT, bg=CARD,
+           halign="left")
+    r = top + 2
+    sh.put(r, scol, "  SYSTEM SERVICES", sz=8, bold=True, color=TEXT_MUTED,
+           bg=CARD, halign="left")
+    r += 1
+    grouped = len(group.cpu_ram) > 1
+    hosts = [cr.node for cr in group.cpu_ram] if grouped else [None]
+    for host in hosts:
+        if host is not None:
+            sh.put(r, scol, f"    {host}", sz=8, italic=True, color=TEXT_MUTED,
+                   bg=CARD, halign="left")
+            r += 1
+        for svc in group.services:
+            sh.put(r, scol, svc.name, sz=8.5, color=TEXT_PRIMARY, bg=CARD,
+                   halign="left")
+            sh.put(r, scol + 1, svc.status, sz=8, bold=True, color=CHIP_GREEN_TXT,
+                   bg=CHIP_GREEN_BG, halign="center")
+            r += 1
+    end = r - 1
+    sh.fill(top, scol, end, scol + 1, CARD)
+    sh.put(top + 1, scol, "Service Name", sz=8, bold=True, color=TEXT_SECONDARY,
+           bg=TABLE_HEADER_BG, halign="left")
+    sh.put(top + 1, scol + 1, "Status", sz=8, bold=True, color=TEXT_SECONDARY,
+           bg=TABLE_HEADER_BG, halign="left")
+    rr = top + 3
+    for host in hosts:
+        if host is not None:
+            rr += 1
+        for svc in group.services:
+            sh.put(rr, scol + 1, svc.status, sz=8, bold=True,
+                   color=CHIP_GREEN_TXT, bg=CHIP_GREEN_BG, halign="center")
+            rr += 1
+    return end
+
+
+def write_cpu_ram(sh, top, ccol, rows) -> int:
+    sh.merge(top, ccol, top, ccol + 2, bg=CARD)
+    sh.put(top, ccol, "CPU · RAM", sz=9, bold=True, color=ACCENT, bg=CARD,
+           halign="left")
+    for j, lab in enumerate(("Node", "CPU", "RAM")):
+        sh.put(top + 1, ccol + j, lab, sz=8, bold=True, color=TEXT_SECONDARY,
+               bg=TABLE_HEADER_BG, halign="left")
+    r = top + 2
+    for cr in rows:
+        cbg, ctxt = chip_colors(cr.cpu_pct)
+        rbg, rtxt = chip_colors(cr.ram_pct)
+        ram = (f"{cr.ram_pct:.0f}% · {cr.ram_size}" if cr.ram_size
+               else f"{cr.ram_pct:.0f}%")
+        sh.put(r, ccol, cr.node, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+               halign="left")
+        sh.put(r, ccol + 1, f"{cr.cpu_pct:.0f}%", sz=8, bold=True, color=ctxt,
+               bg=cbg, halign="center")
+        sh.put(r, ccol + 2, ram, sz=8, bold=True, color=rtxt, bg=rbg,
+               halign="center")
+        r += 1
+    return r - 1
+
+
+def _fixed_table(sh, top, col, last, title, headers):
+    sh.merge(top, col, top, last, bg=CARD)
+    sh.put(top, col, title, sz=9, bold=True, color=ACCENT, bg=CARD, halign="left")
+    for j, lab in enumerate(headers):
+        sh.put(top + 1, col + j, lab, sz=8, bold=True, color=TEXT_SECONDARY,
+               bg=TABLE_HEADER_BG, halign="left")
+
+
+def write_disk(sh, top, rows) -> int:
+    _fixed_table(sh, top, DISK_COL, DISK_LAST, "Disk",
+                 ("Host", "Used %", "Size GB", "Mount", "Free GB"))
+    r = top + 2
+    for d in sorted(rows, key=lambda x: x.host):
+        ubg, utxt = chip_colors(d.used_pct)
+        sh.put(r, DISK_COL, d.host, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+               halign="left")
+        sh.put(r, DISK_COL + 1, f"{d.used_pct:.0f}%", sz=8, bold=True, color=utxt,
+               bg=ubg, halign="center")
+        sh.put(r, DISK_COL + 2, d.size_gb, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+               halign="center")
+        sh.put(r, DISK_COL + 3, d.mount, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+               halign="left")
+        sh.put(r, DISK_COL + 4, d.free_gb, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+               halign="center")
+        r += 1
+    return r - 1
+
+
+def write_cluster_storage(sh, top, rows) -> int:
+    _fixed_table(sh, top, CLUSTER_COL, CLUSTER_LAST, "Cluster Storage",
+                 ("Pool", "Used %", "Size GB", "Free GB"))
+    r = top + 2
+    for s in rows:
+        ubg, utxt = chip_colors(s.used_pct)
+        sh.put(r, CLUSTER_COL, s.pool, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+               halign="left")
+        sh.put(r, CLUSTER_COL + 1, f"{s.used_pct:.0f}%", sz=8, bold=True,
+               color=utxt, bg=ubg, halign="center")
+        sh.put(r, CLUSTER_COL + 2, s.size_gb, sz=8.5, color=TEXT_SECONDARY,
+               bg=CARD, halign="center")
+        sh.put(r, CLUSTER_COL + 3, s.free_gb, sz=8.5, color=TEXT_SECONDARY,
+               bg=CARD, halign="center")
+        r += 1
+    return r - 1
+
+
+def write_notes(sh, top, indent, title, notes, group, by_row) -> None:
+    nc = NOTES_COL
+    ref_letter = get_column_letter(FIX_COL)
+
+    sh.fill(top, nc, by_row, RIGHT_EDGE, CARD)
+    sh.merge(top, nc, top, RIGHT_EDGE, bg=CARD)
+    sh.put(top, nc, title, sz=9, bold=True, color=ACCENT, bg=CARD, halign="left")
+
+    hdr = top + 1
+    sh.merge(hdr, nc, hdr, NOTES_FLAG_LAST, bg=TABLE_HEADER_BG)
+    sh.put(hdr, nc, "  Flagged metric", sz=8, bold=True, color=TEXT_SECONDARY,
+           bg=TABLE_HEADER_BG, halign="left")
+    sh.put(hdr, FIX_COL, "Fix needed?", sz=8, bold=True, color=TEXT_SECONDARY,
+           bg=TABLE_HEADER_BG, halign="center")
+    sh.put(hdr, RIGHT_EDGE, "Resolved", sz=8, bold=True, color=TEXT_SECONDARY,
+           bg=TABLE_HEADER_BG, halign="center")
+
+    r = hdr + 1
+    for n in notes:
+        color, italic = _flagged_style(n.flagged_metric, group)
+        sh.merge(r, nc, r, NOTES_FLAG_LAST, bg=CARD)
+        sh.put(r, nc, f"  {n.flagged_metric}", sz=8, italic=italic, color=color,
+               bg=CARD, halign="left")
+        if n.fix_needed:
+            sh.put(r, FIX_COL, n.fix_needed, sz=8, color=TEXT_SECONDARY, bg=CARD,
+                   halign="center")
+            sh.put(r, RIGHT_EDGE,
+                   f'=IF({ref_letter}{r}="No","Yes",IF({ref_letter}{r}="Yes",'
+                   f'"No",""))',
+                   sz=8, color=TEXT_SECONDARY, bg=CARD, halign="center")
+        r += 1
+    sh.merge(r, nc, r, RIGHT_EDGE, bg=CARD)
+    sh.put(r, nc, "  Comment", sz=8, bold=True, color=TEXT_MUTED, bg=CARD,
+           halign="left")
+    r += 1
+    for n in notes:
+        if n.comment:
+            sh.merge(r, nc, r, RIGHT_EDGE, bg=CARD)
+            sh.put(r, nc, n.comment, sz=8, color=TEXT_PRIMARY, bg=CARD,
+                   halign="left", valign="top", wrap=True)
+            sh.rowh(r, 25.5)
+            r += 1
+
+    sh.put(by_row, nc, "By  ", sz=8, color=TEXT_MUTED, bg=CARD, halign="right")
+    sh.merge(by_row, nc + 1, by_row, RIGHT_EDGE, bg=CARD)
+    sh.put(by_row, nc + 1, group.signed_by, sz=9, color=TEXT_PRIMARY, bg=CARD,
+           halign="left")
+
+
+def _notes_content_end(top, notes) -> int:
+    r = top + 2
+    r += len(notes)
+    r += 1
+    r += sum(1 for n in notes if n.comment)
+    return r - 1
+
+
+def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
+    start = row
+    write_title_bar(sh, row, indent, group)
+    top = row + 2
+
+    has_tables = any((group.services, group.cpu_ram, group.disks,
+                      group.cluster_storage, group.notes))
+    if has_tables:
+        notes_title = _notes_title(group.title, indent)
+        notes_content_end = (_notes_content_end(top, group.notes)
+                             if group.notes else top)
+
+        ends = [top]
+        if group.services:
+            ends.append(write_services(sh, top, services_col(indent), group))
+        if group.cpu_ram:
+            ends.append(write_cpu_ram(sh, top, cpuram_col(indent), group.cpu_ram))
+        if group.disks:
+            ends.append(write_disk(sh, top, group.disks))
+        if group.cluster_storage:
+            ends.append(write_cluster_storage(sh, top, group.cluster_storage))
+        ends.append(notes_content_end)
+        by_row = max(ends) + 1
+        write_notes(sh, top, indent, notes_title, group.notes, group, by_row)
+        row = by_row + 2
+    else:
+        row = top
+
+    for child in group.children:
+        row = write_section(sh, row, indent + 1, child)
+
+    # nesting bracket: a group with children gets a gutter spine spanning its
+    # whole subtree; children have already painted their (deeper) portions.
+    if group.children:
+        sh.spine(start, max(start, row - 2), spine_color(indent))
+
+    return row
+
+
+# ---------------------------------------------------------------------------
+# Footer
+# ---------------------------------------------------------------------------
+
+def write_footer(sh: Sheet, row: int) -> None:
+    sh.merge(row, 2, row, RIGHT_EDGE, bg=TABLE_HEADER_BG)
+    sh.put(row, 2, ADD_GROUP_TITLE, sz=10, bold=True, color=ACCENT,
+           bg=TABLE_HEADER_BG, halign="center")
+    sh.merge(row + 1, 2, row + 1, RIGHT_EDGE, bg=TABLE_HEADER_BG)
+    sh.put(row + 1, 2, ADD_GROUP_BLURB, sz=8, color=TEXT_MUTED,
+           bg=TABLE_HEADER_BG, halign="center", valign="top", wrap=True)
+    sh.rowh(row + 1, 30.0)
+    r = row + 3
+    for line in FOOTER_LINES:
+        sh.put(r, 2, line, sz=8, color=TEXT_MUTED, bg=BG, halign="left")
+        r += 1
+
+
+# ---------------------------------------------------------------------------
+# Assembly
+# ---------------------------------------------------------------------------
+
+# Some columns do double duty -- a gap at one nesting level, a data column at
+# another -- so widths are sized for the widest role each column can take.
+COL_WIDTHS = {
+    "A": 6.43,                                             # gutter / nesting spine
+    "B": 12, "C": 13, "D": 12,                             # Services (name/status, shifts by indent)
+    "E": 14, "F": 12, "G": 13, "H": 13,                    # CPU / RAM (shifts by indent)
+    "I": 5,                                                # guaranteed gap: CPU/RAM <-> Disk
+    "J": 14, "K": 8, "L": 8, "M": 8.43, "N": 8,            # Disk (fixed)
+    "O": 3,                                                # gap
+    "P": 12, "Q": 7, "R": 8, "S": 7,                       # Cluster Storage (fixed)
+    "T": 3,                                                # gap (absorbs config variance)
+    "U": 30, "V": 12, "W": 12,                             # Notes: Flagged metric (U:W)
+    "X": 13, "Y": 13,                                      # Notes: Fix needed? / Resolved
+}
+
+
+def build_report(data: ReportData, out_path: str) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Infrastructure Report"
+    ws.sheet_view.showGridLines = False
+    sh = Sheet(ws)
+
+    for col, w in COL_WIDTHS.items():
+        ws.column_dimensions[col].width = w
+
+    write_header(sh, data)
+    first_row, watch_end, banner_start, banner_end = write_dashboard(sh, data)
+    row = first_row
+    for group in data.groups:
+        row = write_section(sh, row, 0, group)
+    write_footer(sh, row)
+
+    for r in range(1, MAX_ROW + 1):
+        rd = ws.row_dimensions[r]
+        if rd.height is None:
+            rd.height = 15.0
+        for c in range(1, MAX_COL + 1):
+            cell = ws.cell(row=r, column=c)
+            rgb = cell.fill.fgColor.rgb if cell.fill and cell.fill.fill_type else None
+            if rgb in (None, "00000000"):
+                cell.fill = PatternFill(fill_type="solid", fgColor=BG)
+
+    sn = "Infrastructure Report"
+    dl = get_column_letter(DASH_LEFT)
+    dr = get_column_letter(DASH_RIGHT)
+    we = get_column_letter(RIGHT_EDGE)
+    wb.defined_names["dashboard"] = DefinedName(
+        "dashboard", attr_text=f"'{sn}'!${dl}$6:${dr}${watch_end}")
+    wb.defined_names["banners"] = DefinedName(
+        "banners", attr_text=f"'{sn}'!${dl}${banner_start}:${dr}${banner_end}")
+    wb.defined_names["RHS_Edge"] = DefinedName(
+        "RHS_Edge", attr_text=f"'{sn}'!${we}:${we}")
+
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    wb.save(out_path)
+
+
+# ---------------------------------------------------------------------------
+# JSON loading
+# ---------------------------------------------------------------------------
+
+def _banner_from_dict(b) -> Banner:
+    return Banner(
+        severity=b["severity"], title=b["title"], subtitle=b["subtitle"],
+        rows=[BannerRow(*r) if isinstance(r, list) else BannerRow(**r)
+              for r in b.get("rows", [])],
+        note=b.get("note", ""),
+    )
+
+
+def _service_row(s):
+    return ServiceRow(**s) if isinstance(s, dict) else ServiceRow(s)
+
+
+def load_data(path: str) -> ReportData:
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+
+    def group_from_dict(g) -> DeviceGroup:
+        return DeviceGroup(
+            title=g["title"],
+            services=[_service_row(s) for s in g.get("services", [])],
+            cpu_ram=[CpuRam(**c) for c in g.get("cpu_ram", [])],
+            disks=[DiskRow(**d) for d in g.get("disks", [])],
+            cluster_storage=[ClusterStorageRow(**s)
+                             for s in g.get("cluster_storage", [])],
+            notes=[NoteRow(**n) for n in g.get("notes", [])],
+            critical=g.get("critical", 0),
+            warning=g.get("warning", 0),
+            count=g.get("count", 0),
+            count_label=g.get("count_label", "devices"),
+            signed_by=g.get("signed_by", "Pride Moyo"),
+            children=[group_from_dict(c) for c in g.get("children", [])],
+        )
+
+    return ReportData(
+        generated_at=raw["generated_at"],
+        nodes_total=raw["nodes_total"],
+        cluster_count=raw["cluster_count"],
+        cluster_nodes=raw["cluster_nodes"],
+        cluster_resources_tb=raw["cluster_resources_tb"],
+        last_checked=raw["last_checked"],
+        needs_attention=[SummaryMetric(**m) for m in raw["needs_attention"]],
+        watch_list=[SummaryMetric(**m) for m in raw["watch_list"]],
+        summary_notes=[SummaryNote(**n) for n in raw["summary_notes"]],
+        groups=[group_from_dict(g) for g in raw["groups"]],
+        banners=[_banner_from_dict(b) for b in raw.get("banners", [])],
+        summary_signed_by=raw.get("summary_signed_by", "Pride Moyo"),
+    )
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("usage: python report_generator.py data.json out.xlsx")
+        sys.exit(1)
+    build_report(load_data(sys.argv[1]), sys.argv[2])
+    print(f"wrote {sys.argv[2]}")
