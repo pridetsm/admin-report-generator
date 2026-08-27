@@ -284,7 +284,7 @@ class ReportData:
     nodes_total: int
     cluster_count: int
     cluster_nodes: int
-    cluster_resources_tb: int
+    cluster_resources_total: int
     last_checked: str
     needs_attention: list[SummaryMetric]
     watch_list: list[SummaryMetric]
@@ -458,7 +458,7 @@ def write_dashboard(sh: Sheet, data: ReportData) -> tuple[int, int, int, int]:
         ("COMPONENTS", data.components_total),
         ("CLUSTER COUNT", data.cluster_count),
         ("CLUSTER NODES", data.cluster_nodes),
-        ("CLUSTER RESOURCES · TB", data.cluster_resources_tb),
+        ("CLUSTER RESOURCES", data.cluster_resources_total),
         ("LAST CHECKED", data.last_checked),
     ]
     for (c1, c2), (label, value) in zip(
@@ -611,6 +611,7 @@ def write_services(sh, top, scol, group) -> int:
     r += 1
     grouped = len(group.cpu_ram) > 1
     hosts = [cr.node for cr in group.cpu_ram] if grouped else [None]
+    chips = []          # (row, status) for every service row -- re-stamped after the fill below
     for host in hosts:
         if host is not None:
             sh.put(r, scol, f"    {host}", sz=8, italic=True, color=TEXT_MUTED,
@@ -619,23 +620,22 @@ def write_services(sh, top, scol, group) -> int:
         for svc in group.services:
             sh.put(r, scol, svc.name, sz=8.5, color=TEXT_PRIMARY, bg=CARD,
                    halign="left")
-            sh.put(r, scol + 1, svc.status, sz=8, bold=True, color=CHIP_GREEN_TXT,
-                   bg=CHIP_GREEN_BG, halign="center")
+            chips.append((r, svc.status))
             r += 1
     end = r - 1
+    # fill() repaints the whole card CARD-colored, which would wipe out any chip background
+    # set inside the loop above -- stamp status chips in a second pass, after the fill, not
+    # before it.
     sh.fill(top, scol, end, scol + 1, CARD)
     sh.put(top + 1, scol, "Service Name", sz=8, bold=True, color=TEXT_SECONDARY,
            bg=TABLE_HEADER_BG, halign="left")
     sh.put(top + 1, scol + 1, "Status", sz=8, bold=True, color=TEXT_SECONDARY,
            bg=TABLE_HEADER_BG, halign="left")
-    rr = top + 3
-    for host in hosts:
-        if host is not None:
-            rr += 1
-        for svc in group.services:
-            sh.put(rr, scol + 1, svc.status, sz=8, bold=True,
-                   color=CHIP_GREEN_TXT, bg=CHIP_GREEN_BG, halign="center")
-            rr += 1
+    for row, status in chips:
+        sbg, stxt = ((CHIP_GREEN_BG, CHIP_GREEN_TXT) if status.upper() == "RUNNING"
+                    else (CHIP_RED_BG, CHIP_RED_TXT))
+        sh.put(row, scol + 1, status, sz=8, bold=True, color=stxt, bg=sbg,
+               halign="center")
     return end
 
 
@@ -931,7 +931,7 @@ def load_data(path: str) -> ReportData:
         nodes_total=raw["nodes_total"],
         cluster_count=raw["cluster_count"],
         cluster_nodes=raw["cluster_nodes"],
-        cluster_resources_tb=raw["cluster_resources_tb"],
+        cluster_resources_total=raw["cluster_resources_total"],
         last_checked=raw["last_checked"],
         needs_attention=[SummaryMetric(**m) for m in raw["needs_attention"]],
         watch_list=[SummaryMetric(**m) for m in raw["watch_list"]],

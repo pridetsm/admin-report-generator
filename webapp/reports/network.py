@@ -39,6 +39,7 @@ WHAT IS ACTUALLY COLLECTED TODAY (phase 2 — the exporter is a real service now
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Dict, Optional
 
@@ -1984,6 +1985,18 @@ def infrastructure_report_filename(theme: str = "dark", when=None) -> str:
 #: carries no name at all, so _infra_notes prefixes those with the device/group name itself.
 _INFRA_LABELED_FLAG_PREFIXES = ("win_down", "win_unscraped", "node_")
 
+#: The tree-nested Infrastructure Report already nests each HCI node under its "HCI Cluster
+#: Host" parent section, so the "HCI Cluster Node N (...)" wrapper prometheus.yml's `display`
+#: label bakes into every metric/flag naming a node is redundant everywhere it shows up in this
+#: report -- not just the section titles (see build_infrastructure_report's children loop) but
+#: every row entry too: CPU/RAM node names, disk host names, notes, and banner rows. Strips it
+#: down to the bare hostname/IP inside the parens; text with no match passes through unchanged.
+_HCI_NODE_LABEL_RE = re.compile(r"HCI Cluster Node \d+ \(([^)]+)\)")
+
+
+def _infra_short_node(text: str) -> str:
+    return _HCI_NODE_LABEL_RE.sub(r"\1", text)
+
 
 def _infra_notes(sysvm, comment: str, flag_answers: dict) -> tuple:
     """A device's flags -> NoteRow list + (critical, warning) counts, for one DeviceGroup.
@@ -2006,6 +2019,7 @@ def _infra_notes(sysvm, comment: str, flag_answers: dict) -> tuple:
             warning += 1
         text = (flag.text if flag.key.startswith(_INFRA_LABELED_FLAG_PREFIXES)
                else f"{sysvm.name} · {flag.text}")
+        text = _infra_short_node(text)
         rows.append(ir.NoteRow(
             flagged_metric=text,
             fix_needed=flag_answers.get(flag.key, ""),
@@ -2033,6 +2047,54 @@ def _infra_cpu_ram_disks(m: dict, label: str):
     return cpu_ram, disks
 
 
+# CPU/RAM/Disk on the Root DCs comes from windows_exporter's textfile collector, not yet
+# publishing (see the note this module builds for them). But the OTHER enabled collector,
+# `service`, is scraping right now -- a host with no resource metrics is not the same as a
+# host with no metrics at all. These are the AD Domain Controller role's own core services,
+# confirmed present on both root DCs via windows_exporter's own service list: (metric `name`
+# label, matched case-insensitively -- observed as "w32time" on one DC and "W32Time" on the
+# other -> friendly display name).
+_AD_SERVICES = [
+    ("ADWS", "ADWS (AD Web Services)"),
+    ("DNS", "DNS Server"),
+    ("DFSR", "DFSR (SYSVOL replication)"),
+    ("Kdc", "Kerberos KDC"),
+    ("Netlogon", "Netlogon"),
+    ("IsmServ", "Intersite Messaging"),
+    ("W32Time", "Windows Time"),
+]
+
+
+def _ad_service_states(targets: list) -> Dict[str, dict]:
+    """{target: {service_key: running_bool}} for _AD_SERVICES, one query across every target
+    and service name. A service absent from the result (host unreachable, or genuinely not
+    installed) is left out of the inner dict entirely -- not the same claim as "confirmed
+    stopped", so the caller can skip it rather than guess."""
+    if not targets:
+        return {}
+    prom, _ = _prometheus()
+    # No re.escape() here: PromQL label-matcher strings consume a backslash as a STRING escape
+    # before RE2 ever sees the regex, so `\.` (what re.escape gives a dotted IP) comes back as
+    # "unknown escape sequence" -- confirmed live. `.` un-escaped just means "any character" in
+    # the regex, harmless for these fixed, internally-configured name/IP:port values.
+    names_re = "|".join(k for k, _ in _AD_SERVICES)
+    targets_re = "|".join(targets)
+    try:
+        rows = prom.query(
+            f'max by (instance, name) (windows_service_state{{'
+            f'name=~"(?i)^({names_re})$", instance=~"{targets_re}"}})')
+    except Exception:                       # noqa: BLE001
+        rows = []
+    by_lower = {k.lower(): k for k, _ in _AD_SERVICES}
+    out: Dict[str, dict] = {t: {} for t in targets}
+    for r in rows:
+        inst = r["labels"].get("instance")
+        key = by_lower.get(r["labels"].get("name", "").lower())
+        if inst in out and key:
+            out[inst][key] = r["value"] >= 1
+    return out
+
+
 def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                                 annotations: dict, summary_comment: str) -> bytes:
     """Map the annotated Snapshot into a ReportData tree and render it via
@@ -2047,8 +2109,9 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
     groups = []
     ad_hosts = [s for s in snapshot.systems if by_name.get(s.name, {}).get("system") == "Root Domain Controllers"]
     if ad_hosts:
-        cpu_ram, disks, notes = [], [], []
+        cpu_ram, disks, notes, services = [], [], [], []
         critical = warning = 0
+        ad_svc_states = _ad_service_states([by_name[s.name]["target"] for s in ad_hosts])
         for sysvm in ad_hosts:
             dev = by_name[sysvm.name]
             m = wm.get(dev["target"], {"known": False, "reachable": False})
@@ -2056,6 +2119,12 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             if cr:
                 cpu_ram.append(cr)
             disks += dk
+            for key, display_name in _AD_SERVICES:
+                running = ad_svc_states.get(dev["target"], {}).get(key)
+                if running is None:
+                    continue
+                services.append(ir.ServiceRow(f"{display_name} ({sysvm.name})",
+                                              "RUNNING" if running else "DOWN"))
             ann = annotations.get(sysvm.name, {})
             rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
             if cr is None and m.get("reachable"):
@@ -2068,16 +2137,18 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 # otherwise vanish from the report with nothing anywhere naming it --
                 # indistinguishable from "not included at all". Prepended ahead of whatever
                 # _infra_notes produced so the admin's own comment (if any) is kept, not
-                # overwritten.
+                # overwritten. The `service` collector IS live for these hosts though (unlike
+                # textfile) -- see the Services table below, not another blank gap.
                 rows = [ir.NoteRow(f"{sysvm.name}: reachable, but CPU/RAM/Disk have not been "
-                                   f"published yet (expected via the textfile collector).")] + rows
+                                   f"published yet (expected via the textfile collector); "
+                                   f"service status below is live.")] + rows
             notes += rows
             critical += c
             warning += w
         groups.append(ir.DeviceGroup(
-            title="Active Directory", cpu_ram=cpu_ram, disks=disks, notes=notes,
-            critical=critical, warning=warning, count=len(ad_hosts), count_label="devices",
-            signed_by=author))
+            title="Active Directory", services=services, cpu_ram=cpu_ram, disks=disks,
+            notes=notes, critical=critical, warning=warning, count=len(ad_hosts),
+            count_label="devices", signed_by=author))
 
     hci_sysvm = next((s for s in snapshot.systems if by_name.get(s.name, {}).get("key") == "hci-cluster"), None)
     if hci_sysvm is not None:
@@ -2093,7 +2164,11 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         # one node, giving the reachability/critical breakdown a flat host list can't carry.
         cpu_ram, disks, children = [], [], []
         for target, n in node_order:
-            label = n.get("display", target)
+            # Bare hostname/IP, not the full "HCI Cluster Node N (...)" display string --
+            # these nodes already sit nested under the "HCI Cluster Host" parent section (in
+            # section titles AND every row entry: CPU/RAM, disk, notes, banners), so repeating
+            # that wrapper everywhere is redundant. See _infra_short_node.
+            label = _infra_short_node(n.get("display", target))
             cr, dk = _infra_cpu_ram_disks(n, label)
             if cr:
                 cpu_ram.append(cr)
@@ -2101,14 +2176,8 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             if len(node_order) > 1:
                 child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
                                else [ir.NoteRow(f"{label} is not answering")])
-                # Section title only: hostname/IP alone, not the full "HCI Cluster Node N
-                # (...)" display string -- these children already sit nested under the "HCI
-                # Cluster Host" parent section, so repeating that wrapper here is redundant.
-                # cpu_ram/notes above still use the full `label` (unrelated to this).
-                short_title = (label[label.index("(") + 1:-1]
-                              if "(" in label and label.endswith(")") else target)
                 children.append(ir.DeviceGroup(
-                    title=short_title, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
+                    title=label, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
                     critical=0 if n.get("reachable") else 1, count=1, count_label="node",
                     signed_by=author))
         groups.append(ir.DeviceGroup(
@@ -2203,6 +2272,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 lbl, detail = text[: -len(" has never been scraped by Prometheus")], "never scraped by Prometheus"
             else:
                 lbl, detail = s.name, text
+            lbl = _infra_short_node(lbl)
             if (lbl, detail) in seen_down:
                 continue
             seen_down.add((lbl, detail))
@@ -2300,11 +2370,13 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         nodes_total=devices_total,
         cluster_count=1 if hci_nodes else 0,
         cluster_nodes=cluster_nodes,
-        # No real cluster-storage-capacity metric exists yet (see the module docstring above)
-        # -- an honest placeholder, not a fabricated figure. ReportData types this `int`, but
-        # infrastructure_report.Sheet.put() writes whatever value it is given straight into
-        # the cell, so a str renders exactly as intended.
-        cluster_resources_tb="—",
+        # Real count, not storage capacity: WSFC's own cluster resource objects (VM roles,
+        # disks, IP addresses, network names, ...) -- the same `cres` totals already behind the
+        # CLUSTER RESOURCES OFFLINE watch tile and the offline/failed banners above. No cluster
+        # storage-pool/CSV capacity metric is collected (each node's own windows_logical_disk_
+        # size_bytes only sees its local C:, confirmed live), so this tile counts resource
+        # objects rather than fabricating a TB figure from data that isn't there.
+        cluster_resources_total=sum(cres.values()),
         last_checked=now.strftime("%H:%M"),
         needs_attention=needs_attention,
         watch_list=watch_list,
