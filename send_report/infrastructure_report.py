@@ -708,6 +708,16 @@ def write_cluster_storage(sh, top, rows) -> int:
     return r - 1
 
 
+# Widening a column only helps up to a point -- some flagged-metric text (e.g. the Root DCs'
+# "reachable, but CPU/RAM/Disk have not been published yet..." note) runs well past what any
+# reasonable column width could hold on one line. Wrap instead, and grow the row to fit rather
+# than truncating -- ~100 chars/line is what the Notes table's merged width (U:W) fits at this
+# font/size without the row growing for the common short one-line case.
+def _wrapped_row_height(text: str, chars_per_line: int = 100, line_height: float = 15.75) -> float:
+    lines = max(1, -(-len(text) // chars_per_line))
+    return line_height * lines
+
+
 def write_notes(sh, top, indent, title, notes, group, by_row) -> None:
     nc = NOTES_COL
     ref_letter = get_column_letter(FIX_COL)
@@ -730,7 +740,8 @@ def write_notes(sh, top, indent, title, notes, group, by_row) -> None:
         color, italic = _flagged_style(n.flagged_metric, group)
         sh.merge(r, nc, r, NOTES_FLAG_LAST, bg=CARD)
         sh.put(r, nc, f"  {n.flagged_metric}", sz=8, italic=italic, color=color,
-               bg=CARD, halign="left")
+               bg=CARD, halign="left", valign="top", wrap=True)
+        sh.rowh(r, _wrapped_row_height(n.flagged_metric))
         if n.fix_needed:
             sh.put(r, FIX_COL, n.fix_needed, sz=8, color=TEXT_SECONDARY, bg=CARD,
                    halign="center")
@@ -830,14 +841,14 @@ def write_footer(sh: Sheet, row: int) -> None:
 # another -- so widths are sized for the widest role each column can take.
 COL_WIDTHS = {
     "A": 6.43,                                             # gutter / nesting spine
-    "B": 12, "C": 13, "D": 12,                             # Services (name/status, shifts by indent)
-    "E": 14, "F": 12, "G": 13, "H": 13,                    # CPU / RAM (shifts by indent)
+    "B": 32, "C": 16, "D": 16,                             # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
+    "E": 15, "F": 15, "G": 13, "H": 13,                    # CPU / RAM (shifts by indent) -- E/F fit e.g. "HRE-HCIHOST-01"
     "I": 5,                                                # guaranteed gap: CPU/RAM <-> Disk
     "J": 14, "K": 8, "L": 8, "M": 8.43, "N": 8,            # Disk (fixed)
     "O": 3,                                                # gap
     "P": 12, "Q": 7, "R": 8, "S": 7,                       # Cluster Storage (fixed)
     "T": 3,                                                # gap (absorbs config variance)
-    "U": 30, "V": 12, "W": 12,                             # Notes: Flagged metric (U:W)
+    "U": 36, "V": 12, "W": 12,                             # Notes: Flagged metric (U:W)
     "X": 13, "Y": 13,                                      # Notes: Fix needed? / Resolved
 }
 
