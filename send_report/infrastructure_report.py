@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
@@ -292,6 +292,7 @@ class ReportData:
     groups: list[DeviceGroup]
     banners: list[Banner] = field(default_factory=list)
     summary_signed_by: str = "Pride Moyo"
+    components_total: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -347,12 +348,14 @@ class Sheet:
 # ---------------------------------------------------------------------------
 
 def write_header(sh: Sheet, data: ReportData) -> None:
-    # company crest, top-left -- same brand mark generate_report.py embeds, scaled to fit this
-    # report's more compact 4-row header (no reserved gutter rows above the title here).
+    # company crest, top-left -- same brand mark and anchor/size generate_report.py uses,
+    # shifted up 2 rows to line up with this report's title on row 1 (not row 3). Row 4's
+    # height below is padded to give the full-size logo the same vertical room generate_report
+    # gives it across its own 4 header rows, so nothing gets visually clipped.
     try:
         img = XLImage(str(LOGO_PATH))
-        marker = AnchorMarker(col=1, colOff=200000, row=0, rowOff=40000)
-        img.anchor = OneCellAnchor(_from=marker, ext=XDRPositiveSize2D(cx=340000, cy=670000))
+        marker = AnchorMarker(col=1, colOff=448946, row=0, rowOff=95250)
+        img.anchor = OneCellAnchor(_from=marker, ext=XDRPositiveSize2D(cx=503554, cy=990599))
         sh.ws.add_image(img)
     except Exception as exc:                      # missing/unreadable logo -> carry on
         print(f"[!] logo not embedded ({exc})", file=sys.stderr)
@@ -362,15 +365,21 @@ def write_header(sh: Sheet, data: ReportData) -> None:
     sh.put(2, 3, f"snapshot generated {data.generated_at}      •      "
                  f"{SUBTITLE_DASHBOARD}", sz=9, color=TEXT_MUTED, bg=BG,
            halign="left")
+    # Text and button live in SEPARATE merged column ranges (not just adjacent single cells)
+    # so a long text value can never visually run into the button, matching how
+    # generate_report.py's own row-5 text (cols 3-8) and button (cols 9-13) are structured.
+    sh.merge(3, 3, 3, 8, bg=BG)
     sh.put(3, 3, ROW3_TEXT, sz=9, color=TEXT_SECONDARY, bg=BG, halign="left")
     # 12pt, matching generate_report.py's own live-dashboard button exactly (was 10pt) --
     # no hyperlink target wired here: unlike generate_report.py's cfg.grafana (a real,
     # configured URL), no live Infrastructure dashboard URL exists in ReportData to link to
     # yet, and inventing one would be exactly the kind of fabrication this module's own
     # docstring says not to do.
+    sh.merge(3, 9, 3, 14, bg=BG)
     sh.put(3, 9, LIVE_LINK, sz=12, bold=True, color=ACCENT, bg=BG, halign="left")
-    for r in (2, 3, 4):
+    for r in (2, 3):
         sh.rowh(r, 15.0)
+    sh.rowh(4, 30.0)
 
 
 # ---------------------------------------------------------------------------
@@ -413,17 +422,28 @@ def _glance_tile(sh, row, c1, c2, label, value):
 
 def _frac_tile(sh, lbl_row, c1, c2, label, sub_l, sub_r, val_l, val_r, tint,
                val_txt):
+    # Thick accent-coloured left border on the tile's own first column, matching
+    # generate_report.py's card()/panel() -- this IS the "gap" between adjacent tiles: two
+    # differently-tinted tiles sitting flush against each other read as separated because of
+    # this bar, not because of an actual blank spacer column.
+    bar = Border(left=Side(style="thick", color=val_txt))
+    div = Border(left=Side(style="thin", color=TEXT_MUTED))   # divider between sub-columns
     mid = (c1 + c2) // 2
     sh.merge(lbl_row, c1, lbl_row, c2, bg=tint)
     sh.put(lbl_row, c1, label, sz=8, bold=True, color=TEXT_MUTED, bg=tint,
            halign="center")
-    for (a, b, sv, vv) in ((c1, mid, sub_l, val_l), (mid + 1, c2, sub_r, val_r)):
+    for i, (a, b, sv, vv) in enumerate(((c1, mid, sub_l, val_l), (mid + 1, c2, sub_r, val_r))):
         sh.merge(lbl_row + 1, a, lbl_row + 1, b, bg=tint)
         sh.put(lbl_row + 1, a, sv, sz=8, bold=True, color=TEXT_MUTED, bg=tint,
                halign="center")
         sh.merge(lbl_row + 2, a, lbl_row + 2, b, bg=tint)
         sh.put(lbl_row + 2, a, vv, sz=22, bold=True, color=val_txt, bg=tint,
                halign="center")
+        if i:
+            sh.ws.cell(lbl_row + 1, a).border = div
+            sh.ws.cell(lbl_row + 2, a).border = div
+    for r in range(lbl_row, lbl_row + 3):
+        sh.ws.cell(r, c1).border = bar
 
 
 def write_dashboard(sh: Sheet, data: ReportData) -> tuple[int, int, int, int]:
@@ -434,7 +454,8 @@ def write_dashboard(sh: Sheet, data: ReportData) -> tuple[int, int, int, int]:
     sh.rowh(6, 14.0)
 
     glance = [
-        ("NODES", data.nodes_total),
+        ("DEVICES", data.nodes_total),
+        ("COMPONENTS", data.components_total),
         ("CLUSTER COUNT", data.cluster_count),
         ("CLUSTER NODES", data.cluster_nodes),
         ("CLUSTER RESOURCES · TB", data.cluster_resources_tb),

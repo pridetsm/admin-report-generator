@@ -2101,19 +2101,22 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             if len(node_order) > 1:
                 child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
                                else [ir.NoteRow(f"{label} is not answering")])
+                # Section title only: hostname/IP alone, not the full "HCI Cluster Node N
+                # (...)" display string -- these children already sit nested under the "HCI
+                # Cluster Host" parent section, so repeating that wrapper here is redundant.
+                # cpu_ram/notes above still use the full `label` (unrelated to this).
+                short_title = (label[label.index("(") + 1:-1]
+                              if "(" in label and label.endswith(")") else target)
                 children.append(ir.DeviceGroup(
-                    title=label, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
+                    title=short_title, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
                     critical=0 if n.get("reachable") else 1, count=1, count_label="node",
                     signed_by=author))
         groups.append(ir.DeviceGroup(
-            title="HCI Cluster", cpu_ram=cpu_ram, disks=disks, notes=notes, children=children,
+            title="HCI Cluster Host", cpu_ram=cpu_ram, disks=disks, notes=notes, children=children,
             critical=critical, warning=warning, count=max(1, len(node_order)),
             count_label="node" if len(node_order) == 1 else "nodes", signed_by=author))
 
     devices_total = len(snapshot.systems)
-    devices_down = sum(1 for s in snapshot.systems
-                       if any(f.key.startswith(("win_down", "win_unscraped", "node_down"))
-                              for f in s.flags))
     all_disks = [d for g in groups for d in (g.disks + [dd for c in g.children for dd in c.disks])]
     all_cpu_ram = [c for g in groups for c in (g.cpu_ram + [cc for ch in g.children for cc in ch.cpu_ram])]
     cluster_nodes = len(hci_nodes)
@@ -2123,6 +2126,24 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         res = w.get("resources") or {}
         for k in cres:
             cres[k] += res.get(k, 0)
+
+    # Components are counted at the finest tracked granularity: a device with sub-nodes (the
+    # HCI Cluster Host) contributes one component PER NODE, not one for the whole device --
+    # everything else (Root DCs, ...) is a single component. "Devices down"/"components down"
+    # differ the same way: the HCI device counts as one down device even when several of its
+    # nodes are down, which understates the real down-count, so the tile below is measured in
+    # components (cluster_nodes_down, not a 0/1 per device) rather than devices.
+    hci_name = hci_sysvm.name if hci_sysvm is not None else None
+    components_total = 0
+    components_down = 0
+    for s in snapshot.systems:
+        if s.name == hci_name:
+            components_total += cluster_nodes if cluster_nodes else 1
+            components_down += cluster_nodes_down
+        else:
+            components_total += 1
+            if any(f.key.startswith(("win_down", "win_unscraped")) for f in s.flags):
+                components_down += 1
 
     def _tone(count):
         return "red" if count else "green"
@@ -2138,8 +2159,8 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
     mem_amber = sum(1 for c in all_cpu_ram if 80 <= c.ram_pct < 95)
 
     needs_attention = [
-        ir.SummaryMetric("DEVICES DOWN", devices_down, f"down | {devices_total} total",
-                         _tone(devices_down)),
+        ir.SummaryMetric("COMPONENTS DOWN", components_down, f"down | {components_total} total",
+                         _tone(components_down)),
         ir.SummaryMetric("NODES DOWN", cluster_nodes_down, f"down | {cluster_nodes} total",
                          _tone(cluster_nodes_down)),
         ir.SummaryMetric("STORAGE CRITICAL >=95%", storage_critical,
@@ -2164,6 +2185,114 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                          "amber" if cres["offline"] else "green"),
     ]
 
+    # ---- banners: named detail behind the tile counts above, System Admin Report style ----
+    # Only ever built from detail this module already has (flag.text, wc's per-resource
+    # offline_names/failed_names, per-host disk/cpu_ram rows) -- never a bare count standing
+    # in for a name that isn't actually available (see this module's own docstring).
+    banners: list = []
+
+    down_rows, seen_down = [], set()
+    for s in snapshot.systems:
+        for f in s.flags:
+            if not f.key.startswith(("win_down", "win_unscraped", "node_down")):
+                continue
+            text = f.text
+            if text.endswith(" is not answering"):
+                lbl, detail = text[: -len(" is not answering")], "not answering"
+            elif text.endswith(" has never been scraped by Prometheus"):
+                lbl, detail = text[: -len(" has never been scraped by Prometheus")], "never scraped by Prometheus"
+            else:
+                lbl, detail = s.name, text
+            if (lbl, detail) in seen_down:
+                continue
+            seen_down.add((lbl, detail))
+            down_rows.append(ir.BannerRow(lbl, detail))
+    if down_rows:
+        banners.append(ir.Banner(
+            "CRITICAL", "COMPONENTS DOWN",
+            f"{len(down_rows)} component(s) unreachable",
+            rows=down_rows,
+            note="These devices/nodes are not responding to monitoring right now -- confirm "
+                 "power, network path, and the host agent/exporter service."))
+
+    failed_res_rows, offline_res_rows = [], []
+    for w in wc.values():
+        res = w.get("resources") or {}
+        group_owner = w.get("group_owner") or {}
+        for name, group in res.get("failed_names", []):
+            owner = group_owner.get(group)
+            detail = f"group {group}" + (f" · owner {owner}" if owner else "")
+            failed_res_rows.append(ir.BannerRow(name, detail))
+        for name, group in res.get("offline_names", []):
+            owner = group_owner.get(group)
+            detail = f"group {group}" + (f" · owner {owner}" if owner else "")
+            offline_res_rows.append(ir.BannerRow(name, detail))
+    if failed_res_rows:
+        banners.append(ir.Banner(
+            "CRITICAL", "CLUSTER RESOURCES FAILED",
+            f"{len(failed_res_rows)} resource(s) in a failed state",
+            rows=failed_res_rows,
+            note="A failed cluster resource has exhausted its restart attempts and needs "
+                 "manual intervention in Failover Cluster Manager."))
+
+    storage_critical_rows = [ir.BannerRow(d.host, f"{d.mount}  {d.used_pct:.0f}%")
+                             for d in all_disks if d.used_pct >= 95]
+    if storage_critical_rows:
+        banners.append(ir.Banner(
+            "CRITICAL", "DISK NEAR-FULL",
+            f"{len(storage_critical_rows)} disk(s) at/over 95%",
+            rows=storage_critical_rows,
+            note="These volumes are almost full -- an imminent outage that can take the "
+                 "service down. Free space or extend the disk now."))
+
+    mem_critical_rows = [ir.BannerRow(c.node, f"RAM {c.ram_pct:.0f}%")
+                         for c in all_cpu_ram if c.ram_pct >= 95]
+    if mem_critical_rows:
+        banners.append(ir.Banner(
+            "CRITICAL", "MEMORY CRITICAL",
+            f"{len(mem_critical_rows)} node(s) at/over 95% RAM",
+            rows=mem_critical_rows,
+            note="Memory this high risks paging/swapping and service instability -- "
+                 "investigate the top consumer or add memory."))
+
+    if offline_res_rows:
+        banners.append(ir.Banner(
+            "WARNING", "CLUSTER RESOURCES OFFLINE",
+            f"{len(offline_res_rows)} resource(s) offline",
+            rows=offline_res_rows,
+            note="These cluster resources are deliberately or unexpectedly offline -- "
+                 "confirm whether this is planned maintenance."))
+
+    cpu_hot_rows = [ir.BannerRow(c.node, f"CPU {c.cpu_pct:.0f}%")
+                   for c in all_cpu_ram if c.cpu_pct >= 80]
+    if cpu_hot_rows:
+        banners.append(ir.Banner(
+            "WARNING", "HIGH CPU",
+            f"{len(cpu_hot_rows)} node(s) at/over 80% CPU",
+            rows=cpu_hot_rows,
+            note="Sustained high CPU degrades response times before it causes an outage -- "
+                 "watch for a runaway process or plan capacity."))
+
+    mem_warn_rows = [ir.BannerRow(c.node, f"RAM {c.ram_pct:.0f}%")
+                     for c in all_cpu_ram if 80 <= c.ram_pct < 95]
+    if mem_warn_rows:
+        banners.append(ir.Banner(
+            "WARNING", "HIGH MEMORY",
+            f"{len(mem_warn_rows)} node(s) at/over 80% RAM",
+            rows=mem_warn_rows,
+            note="Not yet critical, but trending toward it -- worth a look before it becomes "
+                 "an imminent issue."))
+
+    storage_warn_rows = [ir.BannerRow(d.host, f"{d.mount}  {d.used_pct:.0f}%")
+                         for d in all_disks if 85 <= d.used_pct < 95]
+    if storage_warn_rows:
+        banners.append(ir.Banner(
+            "WARNING", "STORAGE AT CAPACITY",
+            f"{len(storage_warn_rows)} disk(s) at/over 85%",
+            rows=storage_warn_rows,
+            note="Not yet imminent, but these volumes are filling up -- plan space now "
+                 "before they reach the near-full threshold."))
+
     import datetime
     now = datetime.datetime.now()
     data = ir.ReportData(
@@ -2182,7 +2311,9 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         summary_notes=([ir.SummaryNote("Infrastructure", summary_comment)]
                        if summary_comment else []),
         groups=groups,
+        banners=banners,
         summary_signed_by=author,
+        components_total=components_total,
     )
 
     import io
