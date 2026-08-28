@@ -923,9 +923,15 @@ COL_WIDTHS = {
     # same way G/H already fit theirs. J is NEVER real content at any indent actually in use
     # (only ever the deepest gap) so it's free -- set to 15 to keep F a real, comfortable
     # width, which then fixes E=I+J=28 and D=H+I+J=41 by the equations above.
-    "B": 32, "C": 16, "D": 41,                             # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
-    "E": 28, "F": 15, "G": 15, "H": 13, "I": 13,           # CPU / RAM (shifts by indent) -- E/F/G fit e.g. "HRE-HCIHOST-01"
-    "J": 15,                                               # guaranteed gap: CPU/RAM <-> Disk -- see the equations above
+    #
+    # B:J scaled by 0.7 (indentation 30% narrower, on request) AFTER solving the equations
+    # above -- a uniform scale preserves every equality exactly (0.7*D = 0.7*H+0.7*I+0.7*J
+    # still holds whenever D = H+I+J did), so the gap-consistency work doesn't need re-solving,
+    # just resizing. K onward (Disk/Cluster/Notes) intentionally NOT scaled -- those are fixed
+    # regardless of indent, so they carry no "indentation" to reduce.
+    "B": 22.4, "C": 11.2, "D": 28.7,                       # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
+    "E": 19.6, "F": 10.5, "G": 10.5, "H": 9.1, "I": 9.1,   # CPU / RAM (shifts by indent) -- E/F/G fit e.g. "HRE-HCIHOST-01"
+    "J": 10.5,                                             # guaranteed gap: CPU/RAM <-> Disk -- see the equations above
     "K": 14, "L": 8, "M": 8, "N": 8.43, "O": 8,            # Disk (fixed)
     "P": 3,                                                # gap
     "Q": 12, "R": 7, "S": 8, "T": 7,                       # Cluster Storage (fixed)
