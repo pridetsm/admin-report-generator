@@ -88,7 +88,12 @@ FIX_COL = 24           # X
 RIGHT_EDGE = 25        # Y  Resolved  ==  shared right edge
 
 DASH_LEFT = 2          # B   dashboard tiles / banners left edge
-DASH_RIGHT = 19        # S   dashboard tiles / banners right edge (stretched)
+# J, not S: matches the System Admin Report's own AT A GLANCE/banner width (its B:L span
+# totals ~132 width units) as closely as a whole-column boundary allows on this report's own,
+# individually wider columns (~137 at J vs ~123 at I) -- S stretched the band out to ~206,
+# nearly the full row width, which read as disproportionately long/distracting next to the
+# System report's much narrower one.
+DASH_RIGHT = 10        # J   dashboard tiles / banners right edge
 NOTES_CARD_RIGHT = RIGHT_EDGE
 
 MAX_COL = 26           # Z
