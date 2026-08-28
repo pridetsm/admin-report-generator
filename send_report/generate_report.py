@@ -448,14 +448,20 @@ BACKUP_OFF_WEEKDAYS = {
 # the above: not a rolling N-day window (BACKUP_MAX_AGE_DAYS, e.g. BSA's every-3rd-day cycle,
 # which doesn't land on the same weekday twice running) and not "daily except one off day"
 # (BACKUP_OFF_WEEKDAYS). backup_weekly_gap_expected/backup_weekly_comment below suppress and
-# explain the gap on every day that ISN'T the expected weekday, on the same policy-not-
-# evidence basis as backup_gap_expected (see its own docstring for why): FRS's backup check
-# script reports the identical signature RTGS/CSD's does (confirmed live 2026-08-25 —
-# backup_check_success=1, backup_file_count=0, no backup_file series persisted from one day to
-# the next), so there's no older mtime for backup_cutoff to find even with a widened window.
-#   FRS: backs up once a week, Fridays only.
+# explain the gap on every day EXCEPT the one right after the expected weekday, on the same
+# policy-not-evidence basis as backup_gap_expected (see its own docstring for why): FRS's
+# backup check script reports the identical signature RTGS/CSD's does (confirmed live
+# 2026-08-25 — backup_check_success=1, backup_file_count=0, no backup_file series persisted
+# from one day to the next), so there's no older mtime for backup_cutoff to find even with a
+# widened window. The visible/checked day is the day AFTER the backup's weekday, not the
+# weekday itself, because the report's own daily check runs in the MORNING while the backup
+# runs that same day's EVENING (confirmed with the FRS admin 2026-08-28) — a Friday-morning
+# check would always find Friday's file missing (it hasn't run yet) even when everything is
+# fine, so Friday is folded into the expected-gap window too and the file is only expected to
+# have appeared by the Saturday check.
+#   FRS: backs up once a week, Friday evenings — visible from Saturday's check onward.
 BACKUP_WEEKLY_DAY = {
-    "10.100.245.150:9100": 4,      # FRS App/DB, Friday=4
+    "10.100.245.150:9100": 4,      # FRS App/DB, Friday=4 (backs up Friday evening)
 }
 
 # Hosts that back up ONCE A MONTH, at month-end (the actual last calendar day of the month —
@@ -599,18 +605,21 @@ def backup_policy_comment(instance: str, now: datetime.datetime | None = None) -
 def backup_weekly_gap_expected(instance: str, ok: Optional[bool], now: datetime.datetime | None = None) -> bool:
     """True when a host with a single fixed weekly backup day (BACKUP_WEEKLY_DAY) has no
     fresh file, on the same policy-not-evidence grounds as backup_gap_expected (see its own
-    docstring for the full reasoning). Unlike the off-day case this suppresses on EVERY day
-    except the expected weekday itself, not just the single day after — a strictly wider
-    blind spot, inherent to "weekly" rather than "daily except one day": there is no way to
-    tell "still waiting for Friday" from "Friday came and went and nothing happened" without
-    the file evidence the script doesn't persist (same limitation as backup_gap_expected's
-    own trade-off). Never fires when the check itself failed (ok is False)."""
+    docstring for the full reasoning). Suppresses on every day EXCEPT the one right after the
+    expected weekday (FRS backs up Friday evening but the daily check runs Friday morning, so
+    Friday itself is folded into the expected gap too — see BACKUP_WEEKLY_DAY's own comment).
+    That leaves a strictly wider blind spot than the off-day case's single day-after check,
+    inherent to "weekly" rather than "daily except one day": there is no way to tell "still
+    waiting for Friday evening" from "Friday came and went and nothing happened" without the
+    file evidence the script doesn't persist (same limitation as backup_gap_expected's own
+    trade-off). Never fires when the check itself failed (ok is False)."""
     if ok is False:
         return False
     if instance not in BACKUP_WEEKLY_DAY:
         return False
     now = now or datetime.datetime.now()
-    return now.weekday() != BACKUP_WEEKLY_DAY[instance]
+    check_day = (BACKUP_WEEKLY_DAY[instance] + 1) % 7
+    return now.weekday() != check_day
 
 
 def backup_weekly_comment(instance: str, now: datetime.datetime | None = None) -> str:
