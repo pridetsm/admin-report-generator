@@ -881,9 +881,20 @@ def write_footer(sh: Sheet, row: int) -> None:
 # another -- so widths are sized for the widest role each column can take.
 COL_WIDTHS = {
     "A": 6.43,                                             # gutter / nesting spine
-    "B": 32, "C": 16, "D": 16,                             # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
+    # D and I are gaps at indent 0 (nothing occupies D; H+I sits blank before Disk) but real
+    # content at indent 1 (D = Services' own Status column; E sits blank as indent 1's gap
+    # before CPU/RAM, unused since CPU/RAM shifted onto F/G/H). Column widths are per-column,
+    # not per-row, so the SAME D/I values are seen at both indents -- picked here so the two
+    # gaps within any ONE section's own row (Services<->CPU/RAM and CPU/RAM<->Disk) land equal
+    # at BOTH indents: D == H+I (indent 0) and E == I (indent 1). With E=15, H=13 fixed by
+    # their own indent-1/indent-0 content needs, that means I=15 and D=H+I=28 -- solve for
+    # either indent alone and the other goes crooked, e.g. a node's own Services<->CPU/RAM gap
+    # (15, via E) reading nearly 5x its own CPU/RAM<->Disk gap (3, via I) at the old values.
+    # Cluster Storage (O/T, P:S below) never actually renders today (no DeviceGroup populates
+    # it) so it isn't part of this equation; revisit if that changes.
+    "B": 32, "C": 16, "D": 28,                             # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
     "E": 15, "F": 15, "G": 13, "H": 13,                    # CPU / RAM (shifts by indent) -- E/F fit e.g. "HRE-HCIHOST-01"
-    "I": 3,                                                # guaranteed gap: CPU/RAM <-> Disk (matches O/T below)
+    "I": 15,                                               # guaranteed gap: CPU/RAM <-> Disk -- see D's own comment above
     "J": 14, "K": 8, "L": 8, "M": 8.43, "N": 8,            # Disk (fixed)
     "O": 3,                                                # gap
     "P": 12, "Q": 7, "R": 8, "S": 7,                       # Cluster Storage (fixed)
