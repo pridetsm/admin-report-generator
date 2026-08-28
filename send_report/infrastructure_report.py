@@ -22,15 +22,6 @@ Layout model
   column Z (RIGHT_EDGE).
 * "Cluster Storage" is rendered only for cluster hosts (a host that owns
   child nodes).
-* GOLDEN RULE: a section's card background (CARD) covers its ENTIRE row
-  span, every column from its own left edge (services_col(indent)) to
-  RIGHT_EDGE, painted before any table is written -- never just the
-  columns a table happens to occupy. The gap columns between tables are
-  real, deliberately-sized spacers (see COL_WIDTHS' own gap-consistency
-  equations), not empty space to leave unpainted; a bare page-background
-  (BG) strip showing through between two tables in the same section
-  reads as a hole in the card, not a subtle gap, and gets MORE visible
-  the narrower indentation gets. See write_section's own blanket fill.
 
 Groups written into the workbook
 --------------------------------
@@ -851,16 +842,6 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
     has_tables = any((group.services, group.cpu_ram, group.disks,
                       group.cluster_storage, group.notes))
     if has_tables:
-        # GOLDEN RULE (see this module's own docstring): paint the section's full row span --
-        # every column from its own left edge to RIGHT_EDGE -- with the card background BEFORE
-        # any table is written, so the gap columns between tables never show bare page
-        # background through. _section_span gives the exact height this section will end up
-        # needing (same math as the by_row computed below, just computed up front, before
-        # anything is actually written) so this doesn't have to wait until afterward -- and
-        # painting first means each table's own real content (status/percentage chips) simply
-        # overwrites its own cells on top, never the other way around.
-        sh.fill(top, services_col(indent), start + _section_span(group) - 2, RIGHT_EDGE, CARD)
-
         notes_title = _notes_title(group.title, indent)
         notes_content_end = (_notes_content_end(top, group.notes)
                              if group.notes else top)
