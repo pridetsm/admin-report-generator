@@ -2347,13 +2347,17 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         ir.SummaryMetric("STORAGE AT CAPACITY >=85%", storage_amber + storage_critical,
                          f"nodes | {len(all_disks)} total",
                          _watch_tone(storage_amber + storage_critical, storage_critical)),
-        # No AD replication-lag metric exists anywhere in this codebase (see this module's own
-        # docstring on stating what is not collected) -- this is a REAL signal instead: WSFC
-        # resources sitting Offline, which the flat report already treats as informational
-        # (see build_report's Cluster resources table above), never a red flag here either.
-        ir.SummaryMetric("CLUSTER RESOURCES OFFLINE", cres["offline"],
-                         f"resources | {sum(cres.values())} total",
-                         "amber" if cres["offline"] else "green"),
+        # Offline is deliberately NOT tracked here (see _CLUSTER_RESOURCE_STATE's own comment:
+        # most of this estate's Offline resources are powered-off test/UAT/DR VMs, informational
+        # not a fault). Failed is the real signal -- a resource that has exhausted its restart
+        # attempts. Kept in THIS panel (not moved to needs_attention) because each panel splits
+        # its own width evenly across its tiles (_split_cols) and every tile needs at least 2
+        # columns for its own label/total sub-split -- a 5th tile in needs_attention's narrower
+        # span doesn't fit (confirmed: raises a merge-range error). _tone still renders this red
+        # when any resource has failed, same severity as the banner/flag below, just laid out
+        # in this row.
+        ir.SummaryMetric("CLUSTER RESOURCES FAILED", cres["failed"],
+                         f"resources | {sum(cres.values())} total", _tone(cres["failed"])),
     ]
 
     # ---- banners: named detail behind the tile counts above, System Admin Report style ----
@@ -2387,7 +2391,9 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             note="These devices/nodes are not responding to monitoring right now -- confirm "
                  "power, network path, and the host agent/exporter service."))
 
-    failed_res_rows, offline_res_rows = [], []
+    # offline_names (also in `res`) is deliberately never turned into a row here -- see the
+    # CLUSTER RESOURCES FAILED SummaryMetric's own comment above.
+    failed_res_rows = []
     for w in wc.values():
         res = w.get("resources") or {}
         group_owner = w.get("group_owner") or {}
@@ -2395,10 +2401,6 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             owner = group_owner.get(group)
             detail = f"group {group}" + (f" · owner {owner}" if owner else "")
             failed_res_rows.append(ir.BannerRow(name, detail))
-        for name, group in res.get("offline_names", []):
-            owner = group_owner.get(group)
-            detail = f"group {group}" + (f" · owner {owner}" if owner else "")
-            offline_res_rows.append(ir.BannerRow(name, detail))
     if failed_res_rows:
         banners.append(ir.Banner(
             "CRITICAL", "CLUSTER RESOURCES FAILED",
@@ -2426,14 +2428,6 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             rows=mem_critical_rows,
             note="Memory this high risks paging/swapping and service instability -- "
                  "investigate the top consumer or add memory."))
-
-    if offline_res_rows:
-        banners.append(ir.Banner(
-            "WARNING", "CLUSTER RESOURCES OFFLINE",
-            f"{len(offline_res_rows)} resource(s) offline",
-            rows=offline_res_rows,
-            note="These cluster resources are deliberately or unexpectedly offline -- "
-                 "confirm whether this is planned maintenance."))
 
     cpu_hot_rows = [ir.BannerRow(c.node, f"CPU {c.cpu_pct:.0f}%")
                    for c in all_cpu_ram if c.cpu_pct >= 80]
@@ -2474,7 +2468,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         cluster_nodes=cluster_nodes,
         # Real count, not storage capacity: WSFC's own cluster resource objects (VM roles,
         # disks, IP addresses, network names, ...) -- the same `cres` totals already behind the
-        # CLUSTER RESOURCES OFFLINE watch tile and the offline/failed banners above. No cluster
+        # CLUSTER RESOURCES FAILED tile and the failed-resource banner above. No cluster
         # storage-pool/CSV capacity metric is collected (each node's own windows_logical_disk_
         # size_bytes only sees its local C:, confirmed live), so this tile counts resource
         # objects rather than fabricating a TB figure from data that isn't there.
