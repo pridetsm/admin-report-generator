@@ -930,12 +930,23 @@ COL_WIDTHS = {
     # just resizing. K onward (Disk/Cluster/Notes) intentionally NOT scaled -- those are fixed
     # regardless of indent, so they carry no "indentation" to reduce.
     #
-    # B further reduced by 10% on top of that (20.16 = 22.4*0.9): B is what actually produces
-    # the level-1 step -- indent 1's title starts right after it -- and, unlike C/D/E/.../J, it
-    # never appears in the gap-consistency equations above (it's purely indent 0's own Services
-    # "name" column, no gap or indent-2 role to protect), so it can move on its own without
-    # touching anything those equations depend on.
-    "B": 20.16, "C": 11.2, "D": 28.7,                      # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
+    # B further reduced by 10% on top of that (20.16 = 22.4*0.9), then another 3% (19.5552):
+    # B is what actually produces the level-1 step -- indent 1's title starts right after it --
+    # and, unlike D/E/.../J, it never appears in the gap-consistency equations above (it's
+    # purely indent 0's own Services "name" column, no gap or indent-2 role to protect), so it
+    # can move on its own without touching anything those equations depend on.
+    #
+    # C cut 20% (11.2 -> 8.96): the step that produces level 2 (indent 2's title starts right
+    # after it), same reasoning as B -- C is indent 0's own Services "status" column and
+    # indent 1's "name" column, neither a gap role, so it's equally free to move alone. Content
+    # risk worth flagging though, unlike B: indent 1's OWN Services table (HCI Cluster Node's
+    # service names -- "Hyper-V Virtual Machine Management" is 34 characters) uses C as its
+    # NAME column, with D (a real Status chip, never blank) immediately to its right -- Excel
+    # only lets text overflow into a truly EMPTY neighbor, so a name longer than ~9 characters
+    # will visibly clip here, not just overflow harmlessly. B never hit this because indent 0's
+    # own equivalent long names (HCI Cluster Host's rolled-up "Cluster Service (HRE-HCIHOST-01)")
+    # sit at a still-generous 19.56 wide.
+    "B": 19.5552, "C": 8.96, "D": 28.7,                    # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
     "E": 19.6, "F": 10.5, "G": 10.5, "H": 9.1, "I": 9.1,   # CPU / RAM (shifts by indent) -- E/F/G fit e.g. "HRE-HCIHOST-01"
     "J": 10.5,                                             # guaranteed gap: CPU/RAM <-> Disk -- see the equations above
     "K": 14, "L": 8, "M": 8, "N": 8.43, "O": 8,            # Disk (fixed)
