@@ -368,7 +368,8 @@ def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = Fa
     for sysm in systems:
         flags = [FlagVM(f.key, f.text, f.band, f.category)
                  for f in gr.flagged_for_system(store, sysm, cfg)]
-        notes = gr.backup_policy_notes_for_system(store, sysm) + gr.cob_policy_notes_for_system(sysm)
+        notes = (gr.backup_policy_notes_for_system(store, sysm) + gr.cob_policy_notes_for_system(sysm)
+                 + gr.ram_policy_notes_for_system(sysm))
         if not flags and not notes:   # nothing flagged, nothing policy-explained -- see NO_ISSUES_COMMENT
             notes = [gr.NO_ISSUES_COMMENT]
         svms.append(SystemVM(name=sysm.name, hosts=len(sysm.components), flags=flags, notes=notes))
