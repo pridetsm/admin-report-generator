@@ -19,7 +19,7 @@ Layout model
   nesting level -- one consistent table spacing, so Used % / Fix needed? /
   Resolved / the title badge all line up straight down the page.
 * The Notes table lands its Resolved column on the shared right edge,
-  column W (RIGHT_EDGE).
+  column Z (RIGHT_EDGE).
 * "Cluster Storage" is rendered only for cluster hosts (a host that owns
   child nodes).
 
@@ -76,24 +76,33 @@ LOGO_PATH = HERE / "logo.png"
 def services_col(indent):   return 2 + indent           # B.., C.., D..  (name, status)
 def cpuram_col(indent):     return 5 + indent           # E.., F.., G..  (node, cpu, ram)
 
-DISK_COL = 10          # J  Host   (K Used %, L Size GB, M Mount, N Free GB)
-DISK_LAST = 14         # N
-#                       # O  gap
-CLUSTER_COL = 16       # P  Pool   (Q Used %, R Size GB, S Free GB)
-CLUSTER_LAST = 19      # S
-#                       # T  gap (absorbs the config variance)
-NOTES_COL = 21         # U  Flagged metric  (merged U:W), X Fix needed?, Y Resolved
-NOTES_FLAG_LAST = 23   # W
-FIX_COL = 24           # X
-RIGHT_EDGE = 25        # Y  Resolved  ==  shared right edge
+# Disk (and everything after it) is FIXED -- it never shifts with indent, unlike Services/
+# CPU-RAM above -- so it needs a gap column wide enough to survive the deepest indent actually
+# used. 3 levels (Active Directory -> Root/Child Domain Controllers -> each DC) need a column
+# reserved at J for that; see COL_WIDTHS' own comment for the full gap-consistency equations
+# this and D/E/F/G/H/I below are solved together against.
+DISK_COL = 11          # K  Host   (L Used %, M Size GB, N Mount, O Free GB)
+DISK_LAST = 15         # O
+#                       # P  gap
+CLUSTER_COL = 17       # Q  Pool   (R Used %, S Size GB, T Free GB)
+CLUSTER_LAST = 20      # T
+#                       # U  gap (absorbs the config variance)
+NOTES_COL = 22         # V  Flagged metric  (merged V:X), Y Fix needed?, Z Resolved
+NOTES_FLAG_LAST = 24   # X
+FIX_COL = 25           # Y
+RIGHT_EDGE = 26        # Z  Resolved  ==  shared right edge
 
 DASH_LEFT = 2          # B   dashboard tiles / banners left edge
-# J, not S: matches the System Admin Report's own AT A GLANCE/banner width (its B:L span
+# I, not J: matches the System Admin Report's own AT A GLANCE/banner width (its B:L span
 # totals ~132 width units) as closely as a whole-column boundary allows on this report's own,
-# individually wider columns (~137 at J vs ~123 at I) -- S stretched the band out to ~206,
-# nearly the full row width, which read as disproportionately long/distracting next to the
-# System report's much narrower one.
-DASH_RIGHT = 10        # J   dashboard tiles / banners right edge
+# individually wider columns (~173 at I) -- S stretched the band out to ~206, nearly the full
+# row width, which read as disproportionately long/distracting next to the System report's
+# much narrower one. Can't pull this in any further: attention_panel's own tiles (4 per row)
+# each need at least 2 columns for their own label/total sub-split (_frac_tile), so anything
+# under 8 columns (B:I) raises a merge-range error -- confirmed live. D/E widened for the
+# gap-consistency equations below pushed the natural nearest-match boundary from F (~132, but
+# only 5 columns -- too narrow for 4 tiles) out to I.
+DASH_RIGHT = 9         # I   dashboard tiles / banners right edge
 NOTES_CARD_RIGHT = RIGHT_EDGE
 
 MAX_COL = 26           # Z
@@ -881,26 +890,38 @@ def write_footer(sh: Sheet, row: int) -> None:
 # another -- so widths are sized for the widest role each column can take.
 COL_WIDTHS = {
     "A": 6.43,                                             # gutter / nesting spine
-    # D and I are gaps at indent 0 (nothing occupies D; H+I sits blank before Disk) but real
-    # content at indent 1 (D = Services' own Status column; E sits blank as indent 1's gap
-    # before CPU/RAM, unused since CPU/RAM shifted onto F/G/H). Column widths are per-column,
-    # not per-row, so the SAME D/I values are seen at both indents -- picked here so the two
-    # gaps within any ONE section's own row (Services<->CPU/RAM and CPU/RAM<->Disk) land equal
-    # at BOTH indents: D == H+I (indent 0) and E == I (indent 1). With E=15, H=13 fixed by
-    # their own indent-1/indent-0 content needs, that means I=15 and D=H+I=28 -- solve for
-    # either indent alone and the other goes crooked, e.g. a node's own Services<->CPU/RAM gap
-    # (15, via E) reading nearly 5x its own CPU/RAM<->Disk gap (3, via I) at the old values.
-    # Cluster Storage (O/T, P:S below) never actually renders today (no DeviceGroup populates
-    # it) so it isn't part of this equation; revisit if that changes.
-    "B": 32, "C": 16, "D": 28,                             # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
-    "E": 15, "F": 15, "G": 13, "H": 13,                    # CPU / RAM (shifts by indent) -- E/F fit e.g. "HRE-HCIHOST-01"
-    "I": 15,                                               # guaranteed gap: CPU/RAM <-> Disk -- see D's own comment above
-    "J": 14, "K": 8, "L": 8, "M": 8.43, "N": 8,            # Disk (fixed)
-    "O": 3,                                                # gap
-    "P": 12, "Q": 7, "R": 8, "S": 7,                       # Cluster Storage (fixed)
-    "T": 3,                                                # gap (absorbs config variance)
-    "U": 36, "V": 12, "W": 12,                             # Notes: Flagged metric (U:W)
-    "X": 13, "Y": 13,                                      # Notes: Fix needed? / Resolved
+    # D through J are gap columns at SOME indent, real content at others -- Services/CPU-RAM
+    # shift one column per indent level (services_col/cpuram_col) while Disk stays fixed at
+    # DISK_COL, so the column that sits blank as "the gap before Disk" is different at every
+    # indent, and shrinks by one column each level deeper (nothing left to shrink is exactly
+    # the bug 3 levels ran into: indent 2's CPU/RAM ram column landed ON TOP of the old
+    # DISK_COL, leaving zero gap at all -- see DISK_COL's own comment). Column widths are
+    # per-column, not per-row, so whatever value a column has here is what EVERY indent that
+    # reuses it gets, whether that indent needs it as a gap or as real content.
+    #
+    # Solved for 3 indent levels (0/1/2 -- Active Directory > Root/Child Domain Controllers >
+    # each DC, or any group nested that deep) so that, AT EACH indent, the Services<->CPU/RAM
+    # gap equals that same indent's own CPU/RAM<->Disk gap (the "table spacing consistent
+    # within a section" rule from earlier still has to hold at every depth, not just 0 and 1):
+    #   indent 0: Gap1 = D            Gap2 = H + I + J        -> D = H+I+J
+    #   indent 1: Gap1 = E            Gap2 = I + J            -> E = I+J
+    #   indent 2: Gap1 = F            Gap2 = J                -> F = J
+    # F, G, H, I carry real minimum widths from whichever indent actually uses them as data
+    # (node/cpu/ram values, hostnames) -- F=15 and H=13 were already sized for that at indents
+    # 0/1; G widened 13->15 so indent 2's own "node" column (a full hostname, not a bare %)
+    # fits as comfortably as indent 0/1's already do; I=13 fits indent 2's "ram" column the
+    # same way G/H already fit theirs. J is NEVER real content at any indent actually in use
+    # (only ever the deepest gap) so it's free -- set to 15 to keep F a real, comfortable
+    # width, which then fixes E=I+J=28 and D=H+I+J=41 by the equations above.
+    "B": 32, "C": 16, "D": 41,                             # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
+    "E": 28, "F": 15, "G": 15, "H": 13, "I": 13,           # CPU / RAM (shifts by indent) -- E/F/G fit e.g. "HRE-HCIHOST-01"
+    "J": 15,                                               # guaranteed gap: CPU/RAM <-> Disk -- see the equations above
+    "K": 14, "L": 8, "M": 8, "N": 8.43, "O": 8,            # Disk (fixed)
+    "P": 3,                                                # gap
+    "Q": 12, "R": 7, "S": 8, "T": 7,                       # Cluster Storage (fixed)
+    "U": 3,                                                # gap (absorbs config variance)
+    "V": 36, "W": 12, "X": 12,                             # Notes: Flagged metric (V:X)
+    "Y": 13, "Z": 13,                                      # Notes: Fix needed? / Resolved
 }
 
 
