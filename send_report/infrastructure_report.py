@@ -929,7 +929,13 @@ COL_WIDTHS = {
     # still holds whenever D = H+I+J did), so the gap-consistency work doesn't need re-solving,
     # just resizing. K onward (Disk/Cluster/Notes) intentionally NOT scaled -- those are fixed
     # regardless of indent, so they carry no "indentation" to reduce.
-    "B": 22.4, "C": 11.2, "D": 28.7,                       # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
+    #
+    # B further reduced by 10% on top of that (20.16 = 22.4*0.9): B is what actually produces
+    # the level-1 step -- indent 1's title starts right after it -- and, unlike C/D/E/.../J, it
+    # never appears in the gap-consistency equations above (it's purely indent 0's own Services
+    # "name" column, no gap or indent-2 role to protect), so it can move on its own without
+    # touching anything those equations depend on.
+    "B": 20.16, "C": 11.2, "D": 28.7,                      # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
     "E": 19.6, "F": 10.5, "G": 10.5, "H": 9.1, "I": 9.1,   # CPU / RAM (shifts by indent) -- E/F/G fit e.g. "HRE-HCIHOST-01"
     "J": 10.5,                                             # guaranteed gap: CPU/RAM <-> Disk -- see the equations above
     "K": 14, "L": 8, "M": 8, "N": 8.43, "O": 8,            # Disk (fixed)
