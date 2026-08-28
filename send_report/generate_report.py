@@ -1348,6 +1348,42 @@ def disk_near_full(store: "Store", systems: List["System"], red: int) -> List[Tu
     return out
 
 
+# RAM THRESHOLD POLICY — per-instance amber/red % overrides for the estate-wide RAM chip
+# boundaries (cfg.chip_amber/chip_red, 75/90 by default). Almost every host's RAM is judged
+# against that flat pair; a host whose own admins have confirmed a different normal operating
+# range needs its own boundary here, otherwise routine usage on that host misreports as a
+# fault every single day.
+#   T24 DB: T24 admins confirm the database routinely runs its buffer cache/working set at
+#   90-95% RAM by design — below 90% is normal, 90-95% is a caution (amber), 95-100% escalates
+#   to red, the same two-band shape as the estate default just shifted higher. Confirmed with
+#   T24 admins 2026-08-28.
+RAM_THRESHOLD_OVERRIDES: Dict[str, Tuple[int, int]] = {
+    "10.0.212.4:9182": (90, 95),   # Temenos/T24 DB
+}
+
+
+def ram_thresholds(instance: str, amber: int, red: int) -> Tuple[int, int]:
+    """(amber, red) RAM% boundaries for `instance` — the caller's own flat pair unless
+    RAM_THRESHOLD_OVERRIDES states a different pair for this host (e.g. T24 DB)."""
+    return RAM_THRESHOLD_OVERRIDES.get(instance, (amber, red))
+
+
+def ram_threshold_comment(instance: str, v: float) -> str:
+    """The automatic explanation for a RAM reading that only reads as a fault because of the
+    estate-wide default — e.g. T24 DB's confirmed 90-95% normal range (see
+    RAM_THRESHOLD_OVERRIDES). Written to stand alone wherever it's shown (appended straight
+    onto the flagged item's own text, so a reader sees the explanation right next to the
+    number, not a separate lookup) — see backup_policy_comment for the same "explain, don't
+    just suppress" reasoning applied there. Returns "" for any host with no override, or when
+    `v` is below this host's own amber boundary (nothing to explain yet)."""
+    bounds = RAM_THRESHOLD_OVERRIDES.get(instance)
+    if not bounds or v < bounds[0]:
+        return ""
+    amber, red = bounds
+    return (f"T24 admins confirm this database routinely runs at {amber}-{red}% RAM "
+            f"utilisation by design — expected, not a fault, unless it climbs past {red}%.")
+
+
 def _usage_pressure(values: Dict[str, float], systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
     """For a summary usage tile (RAM / CPU): the hosts carrying a warning-or-worse
        marker (>= amber%) and the colour BAND OF THEIR AVERAGE usage. Returns (count, state):
@@ -1641,10 +1677,12 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
             flags.append(Flag(f"unreachable:{c.label}", f"{c.label} · unreachable", "red", "unreachable"))
         else:
             v = store.ram.get(c.instance)
-            if v is not None and v >= cfg.chip_red:
-                flags.append(Flag(f"ram:{c.label}", f"{c.label} · RAM {v:.0f}%", "red", "ram"))
-            elif v is not None and v >= cfg.chip_amber:
-                flags.append(Flag(f"ram:{c.label}", f"{c.label} · RAM {v:.0f}%", "amber", "ram"))
+            amber, red = ram_thresholds(c.instance, cfg.chip_amber, cfg.chip_red)
+            if v is not None and v >= amber:
+                band = "red" if v >= red else "amber"
+                note = ram_threshold_comment(c.instance, v)
+                text = f"{c.label} · RAM {v:.0f}%" + (f" — {note}" if note else "")
+                flags.append(Flag(f"ram:{c.label}", text, band, "ram"))
     # high CPU
     for c in sysm.components:
         cu = store.cpu.get(c.instance)
@@ -2526,14 +2564,16 @@ class ReportBuilder:
                 svc_rows.append(("cert", _link_display(url), cd))
         # one Memory row per host, carrying its reachability:  ("down" | "ok" | "nodata", value)
         # a parallel CPU row per host (same order) feeds the Memory · CPU table's CPU % column
+        # mems carries the instance alongside the value (unlike cpus) so its band can be judged
+        # against that host's own RAM threshold override -- see RAM_THRESHOLD_OVERRIDES.
         mems, cpus = [], []
         for c in sysm.components:
             if is_unreachable(store, c.instance):
-                mems.append((c.label, "down", None, None))
+                mems.append((c.label, "down", None, None, c.instance))
                 cpus.append((c.label, "down", None))
             else:
-                mems.append((c.label, "ok", store.ram[c.instance], store.ram_total_gb.get(c.instance))
-                            if c.instance in store.ram else (c.label, "nodata", None, None))
+                mems.append((c.label, "ok", store.ram[c.instance], store.ram_total_gb.get(c.instance), c.instance)
+                            if c.instance in store.ram else (c.label, "nodata", None, None, c.instance))
                 cpus.append((c.label, "ok", store.cpu[c.instance]) if c.instance in store.cpu
                             else (c.label, "nodata", None))
         disks = [(c.label, mp, dd)
@@ -2556,9 +2596,10 @@ class ReportBuilder:
                         sysm.components[0] if sysm.components else None)
             host = owner.label if owner else sysm.name
             folders.append((host, name, gb, owner.instance if owner else None))
-        nd = sum(1 for _, st, _, _ in mems if st == "down")         # hosts Prometheus can't reach
+        nd = sum(1 for _, st, _, _, _ in mems if st == "down")      # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
-             sum(1 for _, st, v, _ in mems if st == "ok" and v >= self.cfg.chip_red) + \
+             sum(1 for _, st, v, _, inst in mems
+                 if st == "ok" and v >= ram_thresholds(inst, self.cfg.chip_amber, self.cfg.chip_red)[1]) + \
              sum(1 for _, st, v in cpus if st == "ok" and v >= self.cfg.chip_red)
         nw = sum(1 for *_, dd in disks if self.cfg.chip_amber <= dd.get("used", 0) < self.cfg.chip_red)
 
@@ -2718,7 +2759,7 @@ class ReportBuilder:
             self._cell(r, 4, bg=Theme.BG)
             # memory (one row per host; flags hosts Prometheus can't reach)
             if k < len(mems):
-                label, st, val, total_gb = mems[k]
+                label, st, val, total_gb, mem_inst = mems[k]
                 self._cell(r, 5, label, Theme.font(9, False, Theme.WHITE), border=True)
                 if st == "down":
                     self._chip(r, 6, "DOWN", "red", sz=8)
@@ -2730,7 +2771,9 @@ class ReportBuilder:
                     # every other "A · B" separator already used throughout this report.
                     pct_text = (f"{val:.0f}% · {total_gb:.0f}GB" if total_gb is not None
                                else f"{val:.0f}%")
-                    self._chip(r, 6, pct_text, self._band(val), sz=9)
+                    ram_amber, ram_red = ram_thresholds(mem_inst, self.cfg.chip_amber, self.cfg.chip_red)
+                    band = "red" if val >= ram_red else ("amber" if val >= ram_amber else "green")
+                    self._chip(r, 6, pct_text, band, sz=9)
                 else:
                     self._cell(r, 6, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
             else:
