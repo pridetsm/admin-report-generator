@@ -22,6 +22,12 @@ Layout model
   column Z (RIGHT_EDGE).
 * "Cluster Storage" is rendered only for cluster hosts (a host that owns
   child nodes).
+* GOLDEN RULE: MAX_COL stays at least 3 columns past RIGHT_EDGE, always kept
+  in that relative position -- not a fixed absolute value -- so the "paint
+  every unfilled cell BG" pass (see build_report) leaves a dark margin past
+  the report's own right edge instead of raw white Excel starting flush
+  against it. If RIGHT_EDGE ever moves again (it has, more than once), move
+  MAX_COL the same amount to preserve the margin; don't leave it behind.
 
 Groups written into the workbook
 --------------------------------
@@ -106,11 +112,13 @@ DASH_LEFT = 2          # B   dashboard tiles / banners left edge
 DASH_RIGHT = 9         # I   dashboard tiles / banners right edge
 NOTES_CARD_RIGHT = RIGHT_EDGE
 
-# 3 columns past RIGHT_EDGE (Z), on request: the "paint every unfilled cell BG" pass below
-# only reaches MAX_COL, so content ending flush at RIGHT_EDGE had raw white Excel showing
-# immediately past it with no margin -- these three don't hold content, they're a dark buffer
-# so the report doesn't look cut off at its own right edge.
-MAX_COL = 29           # AC (RIGHT_EDGE=Z + 3 margin columns)
+# GOLDEN RULE, enforced structurally (see this module's own docstring): MAX_COL is always
+# RIGHT_EDGE + 3, never a standalone literal -- the "paint every unfilled cell BG" pass below
+# only reaches MAX_COL, so content ending flush at RIGHT_EDGE would otherwise show raw white
+# Excel immediately past it with no margin. Deriving it from RIGHT_EDGE means the next time
+# RIGHT_EDGE moves (it has, more than once), this margin moves with it automatically instead
+# of quietly going stale.
+MAX_COL = RIGHT_EDGE + 3   # 3 dark margin columns past the report's own right edge
 MAX_ROW = 260
 
 TITLE_WIDTH = 6
