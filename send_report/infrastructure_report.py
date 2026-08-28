@@ -780,6 +780,41 @@ def _notes_content_end(top, notes) -> int:
     return r - 1
 
 
+def _section_span(group: DeviceGroup) -> int:
+    """Rows write_section would consume for this group's OWN title+tables+notes+gap block
+    (its children excluded) -- pure arithmetic, no sheet writes, mirroring write_section's
+    exact math (top = start+2, ends[], by_row = max(ends)+1, return by_row+2) with start=0 so
+    callers get a SPAN rather than an absolute row. Lets sibling sections' natural heights be
+    compared and equalized (see write_section's children loop) before any of them are actually
+    written -- e.g. one HCI cluster node currently has a live Services table the other three
+    (not yet reporting) don't, which made its own section visibly taller and threw off the
+    gap between node sections. Keep in sync with write_section/write_services if either
+    changes shape."""
+    top = 2
+    has_tables = any((group.services, group.cpu_ram, group.disks,
+                      group.cluster_storage, group.notes))
+    if not has_tables:
+        return top
+    ends = [top]
+    if group.services:
+        # +2 (not -1): write_services' "SYSTEM SERVICES" subheader consumes its own row
+        # ahead of the per-host/per-service loop, on top of the title+column-header rows
+        # every other table's ends already include -- see write_services itself.
+        grouped = len(group.cpu_ram) > 1
+        loop_rows = (len(group.cpu_ram) * (1 + len(group.services)) if grouped
+                    else len(group.services))
+        ends.append(top + 2 + loop_rows)
+    if group.cpu_ram:
+        ends.append(top + 2 + len(group.cpu_ram) - 1)
+    if group.disks:
+        ends.append(top + 2 + len(group.disks) - 1)
+    if group.cluster_storage:
+        ends.append(top + 2 + len(group.cluster_storage) - 1)
+    ends.append(_notes_content_end(top, group.notes) if group.notes else top)
+    by_row = max(ends) + 1
+    return by_row + 2
+
+
 def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
     start = row
     write_title_bar(sh, row, indent, group)
@@ -808,8 +843,16 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
     else:
         row = top
 
+    # Pad every child to the tallest sibling's own natural span, so the gap between child
+    # sections reads the same no matter which one currently has more content (see
+    # _section_span's own docstring for why that happens at all -- e.g. HCI cluster nodes not
+    # yet reporting have no Services table, making a currently-reporting node's own section
+    # taller than its siblings').
+    sibling_span = max((_section_span(c) for c in group.children), default=0)
     for child in group.children:
+        child_start = row
         row = write_section(sh, row, indent + 1, child)
+        row = max(row, child_start + sibling_span)
 
     # nesting bracket: a group with children gets a gutter spine spanning its
     # whole subtree; children have already painted their (deeper) portions.
