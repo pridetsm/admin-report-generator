@@ -835,7 +835,7 @@ COL_WIDTHS = {
     "A": 6.43,                                             # gutter / nesting spine
     "B": 32, "C": 16, "D": 16,                             # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
     "E": 15, "F": 15, "G": 13, "H": 13,                    # CPU / RAM (shifts by indent) -- E/F fit e.g. "HRE-HCIHOST-01"
-    "I": 5,                                                # guaranteed gap: CPU/RAM <-> Disk
+    "I": 3,                                                # guaranteed gap: CPU/RAM <-> Disk (matches O/T below)
     "J": 14, "K": 8, "L": 8, "M": 8.43, "N": 8,            # Disk (fixed)
     "O": 3,                                                # gap
     "P": 12, "Q": 7, "R": 8, "S": 7,                       # Cluster Storage (fixed)
