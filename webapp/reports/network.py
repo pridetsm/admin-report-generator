@@ -1545,8 +1545,22 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
     def _watch_tone(n, red_n):
         return "bad" if red_n else ("warn" if n else "good")
 
+    import datetime
+    now = datetime.datetime.now()
+
     return {
-        "glance": [],
+        # Same 6 inventory readings as the xlsx's own AT A GLANCE band, same formulas
+        # (devices_total/cluster_count/cluster_resources_total in build_infrastructure_report)
+        # -- informational, never a state color, so "info" throughout like _network_overview's
+        # own glance tiles use for the equivalent readings there.
+        "glance": [
+            {"label": "Devices", "value": len(win_devices), "state": "info"},
+            {"label": "Components", "value": components_total, "state": "info"},
+            {"label": "Cluster count", "value": 1 if hci_nodes else 0, "state": "info"},
+            {"label": "Cluster nodes", "value": cluster_nodes, "state": "info"},
+            {"label": "Cluster resources", "value": sum(cres.values()), "state": "info"},
+            {"label": "Last checked", "value": now.strftime("%H:%M"), "state": "info"},
+        ],
         "immediate": [
             {"label": "Components down", "value": f"{components_down} | {components_total}",
              "sub": "down | total", "state": _tone(components_down)},
