@@ -2169,7 +2169,15 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
     groups = []
     ad_hosts = [s for s in snapshot.systems if by_name.get(s.name, {}).get("system") == "Root Domain Controllers"]
     if ad_hosts:
-        cpu_ram, disks, notes, services = [], [], [], []
+        # Each Root DC gets its OWN section (child), not one Services table combining both --
+        # today's two domain controllers were the only ones onboarded so far, more are coming,
+        # and a shared table only ever distinguished rows by suffixing the hostname onto every
+        # service name. Same parent+children shape as HCI Cluster Host/its nodes below: the
+        # parent still carries an aggregate CPU/RAM/Disk/Services view across every DC (same
+        # aggregate-across-hosts pattern every multi-host system card in this app uses), and
+        # each DC's own comment/flag answers land on ITS OWN section (annotations are already
+        # keyed per host, sysvm.name) instead of being merged into one shared notes list.
+        cpu_ram, disks, children, parent_services = [], [], [], []
         critical = warning = 0
         ad_svc_states = _ad_service_states([by_name[s.name]["target"] for s in ad_hosts])
         for sysvm in ad_hosts:
@@ -2179,12 +2187,12 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             if cr:
                 cpu_ram.append(cr)
             disks += dk
-            for key, display_name in _AD_SERVICES:
-                running = ad_svc_states.get(dev["target"], {}).get(key)
-                if running is None:
-                    continue
-                services.append(ir.ServiceRow(f"{display_name} ({sysvm.name})",
-                                              "RUNNING" if running else "DOWN"))
+            host_services = [ir.ServiceRow(display_name, "RUNNING" if running else "DOWN")
+                             for key, display_name in _AD_SERVICES
+                             for running in [ad_svc_states.get(dev["target"], {}).get(key)]
+                             if running is not None]
+            parent_services += [ir.ServiceRow(f"{row.name} ({sysvm.name})", row.status)
+                                for row in host_services]
             ann = annotations.get(sysvm.name, {})
             rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
             if cr is None and m.get("reachable"):
@@ -2199,15 +2207,18 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 # _infra_notes produced so the admin's own comment (if any) is kept, not
                 # overwritten. The `service` collector IS live for these hosts though (unlike
                 # textfile) -- see the Services table below, not another blank gap.
-                rows = [ir.NoteRow(f"{sysvm.name}: reachable, but CPU/RAM/Disk have not been "
-                                   f"published yet (expected via the textfile collector); "
-                                   f"service status below is live.")] + rows
-            notes += rows
+                rows = [ir.NoteRow(f"Reachable, but CPU/RAM/Disk have not been published yet "
+                                   f"(expected via the textfile collector); service status "
+                                   f"below is live.")] + rows
             critical += c
             warning += w
+            children.append(ir.DeviceGroup(
+                title=sysvm.name, services=host_services, cpu_ram=[cr] if cr else [], disks=dk,
+                notes=rows, critical=c, warning=w, count=1, count_label="host",
+                signed_by=author))
         groups.append(ir.DeviceGroup(
-            title="Active Directory", services=services, cpu_ram=cpu_ram, disks=disks,
-            notes=notes, critical=critical, warning=warning, count=len(ad_hosts),
+            title="Active Directory", services=parent_services, cpu_ram=cpu_ram, disks=disks,
+            notes=[], children=children, critical=critical, warning=warning, count=len(ad_hosts),
             count_label="devices", signed_by=author))
 
     hci_sysvm = next((s for s in snapshot.systems if by_name.get(s.name, {}).get("key") == "hci-cluster"), None)
