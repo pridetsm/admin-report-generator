@@ -370,7 +370,7 @@ REPORTS = [
         "controllers and the Radware WAF, captured each morning by the on-duty engineer.",
         "network_sod_select", {NETWORK_ADMIN_ROLE}, "img/reports/network-sod.png"),
     ReportOption(
-        "infrastructure", "Infrastructure Report",
+        "infrastructure", "Infrastructure Admin Report",
         "The hardware underneath the systems — hyper-converged clusters and standalone "
         "database hosts.",
         "infra_form", {INFRA_ADMIN_ROLE}, "img/reports/infrastructure.png"),

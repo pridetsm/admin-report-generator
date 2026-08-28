@@ -112,7 +112,7 @@ _NAV_LABEL = {
     "role_empty": "Home",
     "network_report": "Core Switch",
     "infra_form": "Infrastructure Picker",
-    "infra_report": "Infrastructure Report",
+    "infra_report": "Infrastructure Admin Report",
     "history": "History",
     "roles_console": "Roles",
     "configuration": "Configuration",

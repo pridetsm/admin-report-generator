@@ -1975,7 +1975,7 @@ def infrastructure_report_filename(theme: str = "dark", when=None) -> str:
     report this app produces for this estate sits together in a folder."""
     import datetime
     when = when or datetime.datetime.now()
-    return f"Infrastructure Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+    return f"Infrastructure Admin Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
 
 
 #: flag.text already carries its own label for these -- see _windows_device_flags: the "nodes"

@@ -20,7 +20,7 @@
   .badge-state.unk { background: var(--panel-2); color: var(--muted); }
 </style>
 
-<form method="post" action="{% url 'infra_report' %}" id="selectForm">
+<form method="post" action="{% url 'infra_report' %}" id="selectForm" autocomplete="off">
 {% csrf_token %}
 
 <div class="container">
@@ -134,7 +134,9 @@
       t.classList.toggle("checked", on);
       if (on) n++;
     });
-    if (allBox) { allBox.checked = n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
+    // checks.length > 0 guard: n === checks.length is vacuously true with zero tiles (e.g. no
+    // devices at all), which would otherwise show "select all" checked with nothing selected.
+    if (allBox) { allBox.checked = checks.length > 0 && n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
     counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
 
     if (grid) grid.classList.toggle("has-selection", n > 0);

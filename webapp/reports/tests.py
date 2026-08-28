@@ -4542,7 +4542,7 @@ class ReportsScreen(TestCase):
                 ("sys", "System Admin", ["System Health Report"]),
                 ("net", "Network Admin", ["Network Report",
                                           "Network Infrastructure SOD Report"]),
-                ("inf", "Infrastructure Admin", ["Infrastructure Report"])):
+                ("inf", "Infrastructure Admin", ["Infrastructure Admin Report"])):
             self._user(name, role)
             self._as(name, role)
             labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]

@@ -1205,10 +1205,7 @@ def infra_report(request):
         "ttl_seconds": settings.SNAPSHOT_TTL,
         "remaining_seconds": remaining,
         "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
-        # Its own nouns, matching the new tree-nested template's own subtitle rather than the
-        # generic "Infrastructure Analyses Dashboard" the systems/network flows share — this
-        # screen produces THAT dashboard now, not the flat card layout.
-        "dash_title": "Infrastructure & Cluster Dashboard",
+        "dash_title": "Infrastructure Analyses Dashboard",
         "subject": "device",
         "draft_key": "draft:infra:" + ",".join(sorted(keys)),
         "picker_url": reverse("infra_form"),

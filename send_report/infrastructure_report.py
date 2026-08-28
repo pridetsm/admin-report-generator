@@ -130,7 +130,7 @@ TONE_TXT = {"green": CHIP_GREEN_TXT, "amber": CHIP_AMBER_TXT, "red": CHIP_RED_TX
 
 FONT_NAME = "Times New Roman"
 
-SUBTITLE_DASHBOARD = "Infrastructure & Cluster Dashboard"
+SUBTITLE_DASHBOARD = "Infrastructure Analyses Dashboard"
 ROW3_TEXT = ("Static snapshot. Device telemetry captured via host agents and "
              "hypervisor API.   For LIVE, auto-refreshing monitoring, click  →")
 LIVE_LINK = "▸  OPEN LIVE INFRASTRUCTURE DASHBOARD"
@@ -359,7 +359,7 @@ def write_header(sh: Sheet, data: ReportData) -> None:
         sh.ws.add_image(img)
     except Exception as exc:                      # missing/unreadable logo -> carry on
         print(f"[!] logo not embedded ({exc})", file=sys.stderr)
-    sh.put(1, 3, "INFRASTRUCTURE REPORT", sz=22, bold=True, color=TEXT_PRIMARY,
+    sh.put(1, 3, "INFRASTRUCTURE ADMIN REPORT", sz=22, bold=True, color=TEXT_PRIMARY,
            bg=BG, halign="left")
     sh.rowh(1, 26.25)
     sh.put(2, 3, f"snapshot generated {data.generated_at}      •      "
@@ -856,7 +856,7 @@ COL_WIDTHS = {
 def build_report(data: ReportData, out_path: str) -> None:
     wb = Workbook()
     ws = wb.active
-    ws.title = "Infrastructure Report"
+    ws.title = "Infrastructure Admin Report"
     ws.sheet_view.showGridLines = False
     sh = Sheet(ws)
 
@@ -880,7 +880,7 @@ def build_report(data: ReportData, out_path: str) -> None:
             if rgb in (None, "00000000"):
                 cell.fill = PatternFill(fill_type="solid", fgColor=BG)
 
-    sn = "Infrastructure Report"
+    sn = "Infrastructure Admin Report"
     dl = get_column_letter(DASH_LEFT)
     dr = get_column_letter(DASH_RIGHT)
     we = get_column_letter(RIGHT_EDGE)
