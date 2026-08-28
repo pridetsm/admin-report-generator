@@ -2222,7 +2222,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         # DeviceGroup.is_cluster_host names exactly this shape: a group with BOTH its own
         # data AND children. Per-node children are additionally built once there's more than
         # one node, giving the reachability/critical breakdown a flat host list can't carry.
-        cpu_ram, disks, children = [], [], []
+        cpu_ram, disks, children, parent_services = [], [], [], []
         hci_svc_states = _hci_service_states([target for target, _ in node_order])
         for target, n in node_order:
             # Section title: the full "HCI Cluster Node N (...)" display string, unchanged.
@@ -2235,22 +2235,29 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             if cr:
                 cpu_ram.append(cr)
             disks += dk
+            # A node not yet reporting (see _hci_node_metrics) has nothing in
+            # hci_svc_states[target] at all -- an empty services list, not a table full of
+            # "unknown", same as its own empty cpu_ram/disks above.
+            node_services = [ir.ServiceRow(display_name, "RUNNING" if running else "DOWN")
+                             for key, display_name in _HCI_SERVICES
+                             for running in [hci_svc_states.get(target, {}).get(key)]
+                             if running is not None]
+            # Rolled up onto the parent "HCI Cluster Host" row too, named per node (same
+            # "{service} ({host})" shape the Active Directory group's own services use above)
+            # -- the parent's CPU/RAM/Disk tables are already an aggregate-across-nodes view,
+            # so its services shouldn't sit empty just because the per-node detail lives below.
+            parent_services += [ir.ServiceRow(f"{row.name} ({label})", row.status)
+                                for row in node_services]
             if len(node_order) > 1:
                 child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
                                else [ir.NoteRow(f"{label} is not answering")])
-                # A node not yet reporting (see _hci_node_metrics) has nothing in
-                # hci_svc_states[target] at all -- an empty services list, not a table full of
-                # "unknown", same as its own empty cpu_ram/disks above.
-                node_services = [ir.ServiceRow(display_name, "RUNNING" if running else "DOWN")
-                                 for key, display_name in _HCI_SERVICES
-                                 for running in [hci_svc_states.get(target, {}).get(key)]
-                                 if running is not None]
                 children.append(ir.DeviceGroup(
                     title=full_label, services=node_services, cpu_ram=[cr] if cr else [], disks=dk,
                     notes=child_notes, critical=0 if n.get("reachable") else 1, count=1,
                     count_label="node", signed_by=author))
         groups.append(ir.DeviceGroup(
-            title="HCI Cluster Host", cpu_ram=cpu_ram, disks=disks, notes=notes, children=children,
+            title="HCI Cluster Host", services=parent_services, cpu_ram=cpu_ram, disks=disks,
+            notes=notes, children=children,
             critical=critical, warning=warning, count=max(1, len(node_order)),
             count_label="node" if len(node_order) == 1 else "nodes", signed_by=author))
 

@@ -404,12 +404,19 @@ def _parse_total(sublabel: str) -> tuple[str, str]:
 
 
 def _glance_tile(sh, row, c1, c2, label, value):
+    # Thick accent-coloured left border, same divider generate_report.py's own card()/panel()
+    # use between adjacent AT A GLANCE tiles -- without it, every tile here shares the same
+    # background (TABLE_HEADER_BG) with no state colour to tell them apart by, so the whole
+    # band reads as one undifferentiated block instead of six distinct readings.
+    bar = Border(left=Side(style="thick", color=ACCENT))
     sh.merge(row, c1, row, c2, bg=TABLE_HEADER_BG)
     sh.put(row, c1, label, sz=8, bold=True, color=TEXT_MUTED, bg=TABLE_HEADER_BG,
            halign="center")
     sh.merge(row + 1, c1, row + 1, c2, bg=TABLE_HEADER_BG)
     sh.put(row + 1, c1, value, sz=22, bold=True, color=ACCENT, bg=TABLE_HEADER_BG,
            halign="center")
+    for r in (row, row + 1):
+        sh.ws.cell(r, c1).border = bar
 
 
 def _frac_tile(sh, lbl_row, c1, c2, label, sub_l, sub_r, val_l, val_r, tint,
