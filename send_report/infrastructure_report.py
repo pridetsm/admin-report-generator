@@ -134,14 +134,6 @@ SUBTITLE_DASHBOARD = "Infrastructure Analyses Dashboard"
 ROW3_TEXT = ("Static snapshot. Device telemetry captured via host agents and "
              "hypervisor API.   For LIVE, auto-refreshing monitoring, click  →")
 LIVE_LINK = "▸  OPEN LIVE INFRASTRUCTURE DASHBOARD"
-ADD_GROUP_TITLE = "+ ADD A DEVICE GROUP"
-ADD_GROUP_BLURB = (
-    "Every host or node tracks the same core columns — Services, CPU/RAM, "
-    "Disk, Notes (cluster hosts also carry Cluster Storage). A cluster host "
-    "or node gets its own physically-indented section, one step right per "
-    "nesting level, same style as every other system. Onboard a new host, "
-    "cluster, or device family by duplicating the closest section and "
-    "dropping in its inventory.")
 FOOTER_LINES = [
     ("chip key:  green under 75%   ·   amber 75-90%   ·   red 90% and over"
      "      |      device status UP / DOWN      |      live from host agents / "
@@ -820,14 +812,7 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
 # ---------------------------------------------------------------------------
 
 def write_footer(sh: Sheet, row: int) -> None:
-    sh.merge(row, 2, row, RIGHT_EDGE, bg=TABLE_HEADER_BG)
-    sh.put(row, 2, ADD_GROUP_TITLE, sz=10, bold=True, color=ACCENT,
-           bg=TABLE_HEADER_BG, halign="center")
-    sh.merge(row + 1, 2, row + 1, RIGHT_EDGE, bg=TABLE_HEADER_BG)
-    sh.put(row + 1, 2, ADD_GROUP_BLURB, sz=8, color=TEXT_MUTED,
-           bg=TABLE_HEADER_BG, halign="center", valign="top", wrap=True)
-    sh.rowh(row + 1, 30.0)
-    r = row + 3
+    r = row
     for line in FOOTER_LINES:
         sh.put(r, 2, line, sz=8, color=TEXT_MUTED, bg=BG, halign="left")
         r += 1
