@@ -1177,7 +1177,7 @@ def infra_report(request):
     if snapshot is None:
         token = uuid.uuid4().hex
         try:
-            snapshot = network.capture_snapshot(token, only=set(keys))
+            snapshot = network.capture_snapshot(token, only=set(keys), infra=True)
         except network.NetworkUnavailable as exc:
             return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
         if not snapshot.systems:

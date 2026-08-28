@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import generate_report as gr
 
@@ -1478,7 +1478,104 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
     }
 
 
-def capture_snapshot(token: str, only: Optional[set] = None):
+def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
+                    hci_nodes: Dict[str, dict]) -> dict:
+    """Infrastructure Admin's OWN dashboard tiles -- deliberately a separate function from
+    _network_overview (which stays exactly as it is, switch-oriented, Network Admin's own
+    screen) rather than one function branching on estate: the two estates share almost no
+    data shape (PSU/OSPF/optics/discards mean nothing here, and this needs per-host CPU/RAM/
+    Disk in a way the switch-first function never tracks). Mirrors
+    build_infrastructure_report's own needs_attention/watch_list tile set EXACTLY -- same
+    labels' meaning, same thresholds, same formulas -- so the web review screen the admin
+    signs off on and the xlsx they download never disagree about what counts as a problem.
+    See that function's own comments for why each threshold is what it is; changes there
+    should come here too.
+
+    HCI Cluster is excluded from the flat per-device pass below and re-added via hci_nodes
+    instead (same substitution build_infrastructure_report's own group-building does): its
+    wm entry is one flat reading for a single target, not the real per-node breakdown, so
+    counting both would double-count the cluster and undercount its actual node failures.
+    """
+    all_cpu_ram: List[Tuple[float, float]] = []
+    all_disks: List[float] = []
+    components_total = components_down = 0
+    for dev in win_devices:
+        if dev["key"] == "hci-cluster":
+            continue
+        m = wm.get(dev["target"], {"known": False, "reachable": False})
+        components_total += 1
+        if not m.get("reachable"):
+            components_down += 1
+        elif m.get("cpu_pct") is not None or m.get("mem_pct") is not None:
+            all_cpu_ram.append((m.get("cpu_pct") or 0.0, m.get("mem_pct") or 0.0))
+        for d in m.get("disks", []) or []:
+            if d.get("used") is not None:
+                all_disks.append(d["used"])
+
+    cluster_nodes = len(hci_nodes)
+    cluster_nodes_down = sum(1 for n in hci_nodes.values() if not n.get("reachable"))
+    if hci_nodes or any(d["key"] == "hci-cluster" for d in win_devices):
+        components_total += cluster_nodes if cluster_nodes else 1
+        components_down += cluster_nodes_down
+    for n in hci_nodes.values():
+        if not n.get("reachable"):
+            continue
+        if n.get("cpu_pct") is not None or n.get("mem_pct") is not None:
+            all_cpu_ram.append((n.get("cpu_pct") or 0.0, n.get("mem_pct") or 0.0))
+        for d in n.get("disks", []) or []:
+            if d.get("used") is not None:
+                all_disks.append(d["used"])
+
+    cres = {"online": 0, "offline": 0, "failed": 0, "other": 0}
+    for w in wc.values():
+        res = w.get("resources") or {}
+        for k in cres:
+            cres[k] += res.get(k, 0)
+
+    storage_critical = sum(1 for u in all_disks if u >= 95)
+    storage_amber = sum(1 for u in all_disks if 85 <= u < 95)
+    mem_critical = sum(1 for _, r in all_cpu_ram if r >= 95)
+    mem_amber = sum(1 for _, r in all_cpu_ram if 80 <= r < 95)
+    cpu_amber = sum(1 for c, _ in all_cpu_ram if c >= 80)
+    cpu_red = sum(1 for c, _ in all_cpu_ram if c >= 90)
+
+    def _tone(n):
+        return "bad" if n else "good"
+
+    def _watch_tone(n, red_n):
+        return "bad" if red_n else ("warn" if n else "good")
+
+    return {
+        "glance": [],
+        "immediate": [
+            {"label": "Components down", "value": f"{components_down} | {components_total}",
+             "sub": "down | total", "state": _tone(components_down)},
+            {"label": "Nodes down", "value": f"{cluster_nodes_down} | {cluster_nodes}",
+             "sub": "down | total", "state": _tone(cluster_nodes_down)},
+            {"label": "Storage critical", "value": f"{storage_critical} | {len(all_disks)}",
+             "sub": "disks >=95% | total", "state": _tone(storage_critical)},
+            {"label": "Memory critical", "value": f"{mem_critical} | {len(all_cpu_ram)}",
+             "sub": "nodes >=95% | total", "state": _tone(mem_critical)},
+        ],
+        "watch": [
+            {"label": "High CPU", "value": f"{cpu_amber + cpu_red} | {len(all_cpu_ram)}",
+             "sub": "nodes | total", "state": _watch_tone(cpu_amber + cpu_red, cpu_red)},
+            {"label": "High memory", "value": f"{mem_amber} | {len(all_cpu_ram)}",
+             "sub": "nodes | total", "state": _watch_tone(mem_amber, 0)},
+            {"label": "Storage at capacity", "value": f"{storage_amber + storage_critical} | {len(all_disks)}",
+             "sub": "disks >=85% | total",
+             "state": _watch_tone(storage_amber + storage_critical, storage_critical)},
+            # Offline deliberately not tracked -- see _CLUSTER_RESOURCE_STATE's own comment
+            # (mostly powered-off test/UAT/DR VMs, informational not a fault). Same reasoning
+            # as the xlsx's own CLUSTER RESOURCES FAILED tile, kept in sync with it here.
+            {"label": "Cluster resources failed", "value": f"{cres['failed']} | {sum(cres.values())}",
+             "sub": "resources | total", "state": _tone(cres["failed"])},
+        ],
+        "banners": [],
+    }
+
+
+def capture_snapshot(token: str, only: Optional[set] = None, infra: bool = False):
     """A Snapshot of the selected network devices, interchangeable with the systems one.
 
     SNMP devices (the switch) go through collect()'s machinery, which is SNMP-shaped
@@ -1486,6 +1583,12 @@ def capture_snapshot(token: str, only: Optional[set] = None):
     device — those (kind="windows", e.g. HCI Cluster) are gathered separately by
     _windows_metrics()/_windows_device_flags() and merged into the same systems list, so the
     report reads as one estate regardless of which mechanism actually measured each row.
+
+    `infra=True` swaps the dashboard tiles for _infra_overview's own set (matching the xlsx
+    Infrastructure Admin's report renders) instead of _network_overview's switch-oriented
+    ones -- Infrastructure Admin's own picker only ever offers windows-kind devices, so this
+    is always safe to pass from there; Network Admin's own call sites never pass it, so their
+    screen is completely unaffected.
 
     Raises NetworkUnavailable when Prometheus cannot be reached, mirroring
     services.capture_snapshot raising PrometheusUnavailable — the view handles them the same.
@@ -1523,13 +1626,15 @@ def capture_snapshot(token: str, only: Optional[set] = None):
         svms.append(SystemVM(name=dev["name"], hosts=(len(nodes) if nodes else 1),
                              flags=_windows_device_flags(dev, m, wc.get(dev["target"]), nodes)))
 
+    overview = (_infra_overview(wm, win_devices, wc, hci_nodes) if infra else
+               _network_overview(data, list(inv.values()), win_metrics=list(wm.values()),
+                                 win_cluster=list(wc.values()), hci_nodes=hci_nodes))
     snap = Snapshot(
         token=token,
         captured_at=datetime.datetime.now(),
         prom_url=data["prom_url"],
         systems=svms,
-        overview=_network_overview(data, list(inv.values()), win_metrics=list(wm.values()),
-                                   win_cluster=list(wc.values()), hci_nodes=hci_nodes),
+        overview=overview,
     )
     # carried for the report screen and for generation; the systems flow parks its engine
     # objects on the same attributes. _hci_nodes/_wc are network-specific additions: the web
