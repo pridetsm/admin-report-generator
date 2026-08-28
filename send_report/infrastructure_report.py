@@ -28,7 +28,8 @@ Groups written into the workbook
 * named range ``dashboard`` -> AT A GLANCE + NEEDS IMMEDIATE ATTENTION +
   NEEDS ATTENTION
 * named range ``banners``   -> the CRITICAL / WARNING banner block
-* named range ``RHS_Edge``  -> column W
+* named range ``RHS_Edge``  -> RIGHT_EDGE (column Z today; tracks the constant, not a
+  hardcoded letter, since RIGHT_EDGE has shifted more than once)
 """
 
 from __future__ import annotations
@@ -105,7 +106,11 @@ DASH_LEFT = 2          # B   dashboard tiles / banners left edge
 DASH_RIGHT = 9         # I   dashboard tiles / banners right edge
 NOTES_CARD_RIGHT = RIGHT_EDGE
 
-MAX_COL = 26           # Z
+# 3 columns past RIGHT_EDGE (Z), on request: the "paint every unfilled cell BG" pass below
+# only reaches MAX_COL, so content ending flush at RIGHT_EDGE had raw white Excel showing
+# immediately past it with no margin -- these three don't hold content, they're a dark buffer
+# so the report doesn't look cut off at its own right edge.
+MAX_COL = 29           # AC (RIGHT_EDGE=Z + 3 margin columns)
 MAX_ROW = 260
 
 TITLE_WIDTH = 6
