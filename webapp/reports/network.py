@@ -2172,12 +2172,16 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         # Each Root DC gets its OWN section (child), not one Services table combining both --
         # today's two domain controllers were the only ones onboarded so far, more are coming,
         # and a shared table only ever distinguished rows by suffixing the hostname onto every
-        # service name. Same parent+children shape as HCI Cluster Host/its nodes below: the
-        # parent still carries an aggregate CPU/RAM/Disk/Services view across every DC (same
+        # service name. Same parent+children shape as HCI Cluster Host/its nodes below, except
+        # the parent's OWN Services table is deliberately left empty -- unlike HCI (one cluster,
+        # services genuinely describe the shared resource), each DC's services are entirely its
+        # own; a rolled-up copy at the parent said nothing an admin couldn't already read on
+        # that DC's own section, just repeated once more with its name pasted onto every row.
+        # The parent still carries an aggregate CPU/RAM/Disk view across every DC (same
         # aggregate-across-hosts pattern every multi-host system card in this app uses), and
         # each DC's own comment/flag answers land on ITS OWN section (annotations are already
         # keyed per host, sysvm.name) instead of being merged into one shared notes list.
-        cpu_ram, disks, children, parent_services = [], [], [], []
+        cpu_ram, disks, children = [], [], []
         critical = warning = 0
         ad_svc_states = _ad_service_states([by_name[s.name]["target"] for s in ad_hosts])
         for sysvm in ad_hosts:
@@ -2191,8 +2195,6 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                              for key, display_name in _AD_SERVICES
                              for running in [ad_svc_states.get(dev["target"], {}).get(key)]
                              if running is not None]
-            parent_services += [ir.ServiceRow(f"{row.name} ({sysvm.name})", row.status)
-                                for row in host_services]
             ann = annotations.get(sysvm.name, {})
             rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
             if cr is None and m.get("reachable"):
@@ -2217,7 +2219,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 notes=rows, critical=c, warning=w, count=1, count_label="host",
                 signed_by=author))
         groups.append(ir.DeviceGroup(
-            title="Active Directory", services=parent_services, cpu_ram=cpu_ram, disks=disks,
+            title="Active Directory", cpu_ram=cpu_ram, disks=disks,
             notes=[], children=children, critical=critical, warning=warning, count=len(ad_hosts),
             count_label="devices", signed_by=author))
 
