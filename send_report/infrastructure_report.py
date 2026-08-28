@@ -843,16 +843,23 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
     else:
         row = top
 
-    # Pad every child to the tallest sibling's own natural span, so the gap between child
-    # sections reads the same no matter which one currently has more content (see
-    # _section_span's own docstring for why that happens at all -- e.g. HCI cluster nodes not
-    # yet reporting have no Services table, making a currently-reporting node's own section
-    # taller than its siblings').
-    sibling_span = max((_section_span(c) for c in group.children), default=0)
+    # Pad every child with real content to the tallest SUCH sibling's own natural span, so the
+    # gap between child sections reads the same no matter which one currently has more content
+    # (see _section_span's own docstring for why that happens at all -- e.g. HCI cluster nodes
+    # not yet reporting have no Services table, making a currently-reporting node's own section
+    # taller than its siblings'). A label-only child (a plain divider like "Root Domain
+    # Controllers", no tables of its own -- _section_span returns exactly `top`=2 for these,
+    # never more) is excluded on BOTH sides of that: it doesn't count toward the tallest-
+    # sibling span (nothing to equalize against), and it never gets padded up to match its
+    # real siblings either -- a divider should sit snug above the sections it labels, not
+    # carry a tall dead gap sized for content it doesn't have.
+    real_spans = [s for c in group.children if (s := _section_span(c)) > 2]
+    sibling_span = max(real_spans, default=0)
     for child in group.children:
         child_start = row
         row = write_section(sh, row, indent + 1, child)
-        row = max(row, child_start + sibling_span)
+        if _section_span(child) > 2:
+            row = max(row, child_start + sibling_span)
 
     # nesting bracket: a group with children gets a gutter spine spanning its
     # whole subtree; children have already painted their (deeper) portions.
