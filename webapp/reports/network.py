@@ -2069,7 +2069,18 @@ def _ad_service_states(targets: list) -> Dict[str, dict]:
     """{target: {service_key: running_bool}} for _AD_SERVICES, one query across every target
     and service name. A service absent from the result (host unreachable, or genuinely not
     installed) is left out of the inner dict entirely -- not the same claim as "confirmed
-    stopped", so the caller can skip it rather than guess."""
+    stopped", so the caller can skip it rather than guess.
+
+    state="running" MUST be in the query: windows_exporter's windows_service_state emits one
+    series per (instance, name, state) -- continue pending/pause pending/paused/running/start
+    pending/stop pending/stopped -- with value 1 on whichever state is currently active and 0
+    on every other, so exactly one of those seven is always 1 for any service that exists at
+    all. `max by (instance, name)` alone (an earlier version of this query) therefore always
+    returns 1 regardless of which state that is -- it can tell "installed" from "not
+    installed" but never "running" from "stopped", silently reporting stopped services as
+    running (confirmed live 2026-08-28: SmbWitness genuinely stopped on the HCI cluster host,
+    state="stopped" value 1 / state="running" value 0, yet the old query still returned 1).
+    Pinning state="running" makes the value itself mean what running_bool claims."""
     if not targets:
         return {}
     prom, _ = _prometheus()
@@ -2081,11 +2092,60 @@ def _ad_service_states(targets: list) -> Dict[str, dict]:
     targets_re = "|".join(targets)
     try:
         rows = prom.query(
-            f'max by (instance, name) (windows_service_state{{'
-            f'name=~"(?i)^({names_re})$", instance=~"{targets_re}"}})')
+            f'windows_service_state{{state="running", '
+            f'name=~"(?i)^({names_re})$", instance=~"{targets_re}"}}')
     except Exception:                       # noqa: BLE001
         rows = []
     by_lower = {k.lower(): k for k, _ in _AD_SERVICES}
+    out: Dict[str, dict] = {t: {} for t in targets}
+    for r in rows:
+        inst = r["labels"].get("instance")
+        key = by_lower.get(r["labels"].get("name", "").lower())
+        if inst in out and key:
+            out[inst][key] = r["value"] >= 1
+    return out
+
+
+# Failover Clustering + Hyper-V core services -- the same "role's own core services"
+# curation _AD_SERVICES applies to the domain controllers, sized to what a hyper-converged
+# node actually needs to keep VMs available: cluster membership (ClusSvc) and the two
+# Hyper-V services that own a VM's lifecycle (vmms) and its actual compute (vmcompute), plus
+# the newer cloud-managed control-plane service (HvHost) Azure Stack HCI/Azure Local nodes
+# run alongside them. All four confirmed RUNNING live on the one HCI node currently reporting
+# (HRE-HCIHOST-01, 2026-08-28) -- the cluster's other 3 configured nodes are not yet up (see
+# _hci_node_metrics), so nothing to confirm against there yet; their rows simply come back
+# empty until they start reporting, same as CPU/RAM/disk already do for them.
+#
+# Two more candidates -- SmbWitness (SMB Witness, transparent failover for clustered file
+# shares) and TieringEngineService (Storage Spaces tiering) -- were checked on the same node
+# and found STOPPED. Left out rather than guessed into "expected running": unlike the four
+# above, there is no confirmation yet from the infrastructure admins that this cluster
+# actually uses CSV/S2D tiering, so a stopped state here could be either a real fault or a
+# feature this cluster was never configured to use -- see _ad_service_states' own docstring
+# for why state="running" (not a bare max-by) is what makes any of this trustworthy at all.
+_HCI_SERVICES = [
+    ("ClusSvc", "Cluster Service"),
+    ("vmms", "Hyper-V Virtual Machine Management"),
+    ("vmcompute", "Hyper-V Host Compute Service"),
+    ("HvHost", "Hyper-V Host Service"),
+]
+
+
+def _hci_service_states(targets: list) -> Dict[str, dict]:
+    """{target: {service_key: running_bool}} for _HCI_SERVICES -- same query shape (and same
+    state="running" requirement) as _ad_service_states, see its own docstring."""
+    if not targets:
+        return {}
+    prom, _ = _prometheus()
+    names_re = "|".join(k for k, _ in _HCI_SERVICES)
+    targets_re = "|".join(targets)
+    try:
+        rows = prom.query(
+            f'windows_service_state{{state="running", '
+            f'name=~"(?i)^({names_re})$", instance=~"{targets_re}"}}')
+    except Exception:                       # noqa: BLE001
+        rows = []
+    by_lower = {k.lower(): k for k, _ in _HCI_SERVICES}
     out: Dict[str, dict] = {t: {} for t in targets}
     for r in rows:
         inst = r["labels"].get("instance")
@@ -2163,6 +2223,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         # data AND children. Per-node children are additionally built once there's more than
         # one node, giving the reachability/critical breakdown a flat host list can't carry.
         cpu_ram, disks, children = [], [], []
+        hci_svc_states = _hci_service_states([target for target, _ in node_order])
         for target, n in node_order:
             # Section title: the full "HCI Cluster Node N (...)" display string, unchanged.
             # Row entries (CPU/RAM, disk, notes, banners): bare hostname/IP -- repeating the
@@ -2177,10 +2238,17 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             if len(node_order) > 1:
                 child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
                                else [ir.NoteRow(f"{label} is not answering")])
+                # A node not yet reporting (see _hci_node_metrics) has nothing in
+                # hci_svc_states[target] at all -- an empty services list, not a table full of
+                # "unknown", same as its own empty cpu_ram/disks above.
+                node_services = [ir.ServiceRow(display_name, "RUNNING" if running else "DOWN")
+                                 for key, display_name in _HCI_SERVICES
+                                 for running in [hci_svc_states.get(target, {}).get(key)]
+                                 if running is not None]
                 children.append(ir.DeviceGroup(
-                    title=full_label, cpu_ram=[cr] if cr else [], disks=dk, notes=child_notes,
-                    critical=0 if n.get("reachable") else 1, count=1, count_label="node",
-                    signed_by=author))
+                    title=full_label, services=node_services, cpu_ram=[cr] if cr else [], disks=dk,
+                    notes=child_notes, critical=0 if n.get("reachable") else 1, count=1,
+                    count_label="node", signed_by=author))
         groups.append(ir.DeviceGroup(
             title="HCI Cluster Host", cpu_ram=cpu_ram, disks=disks, notes=notes, children=children,
             critical=critical, warning=warning, count=max(1, len(node_order)),
