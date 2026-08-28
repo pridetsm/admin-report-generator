@@ -772,7 +772,8 @@ def system_comment_text(store: "Store", sysm: "System", flagged: list,
         return comment
     if flagged:
         return ""
-    notes = backup_policy_notes_for_system(store, sysm, now) + cob_policy_notes_for_system(sysm, now)
+    notes = (backup_policy_notes_for_system(store, sysm, now) + cob_policy_notes_for_system(sysm, now)
+             + ram_policy_notes_for_system(sysm))
     # single newline between a system's OWN multiple notes (keeps them visually grouped as
     # one block), reserving the blank-line (\n\n) separator for BETWEEN different systems --
     # see _overview's Summary Notes, which would otherwise read a multi-note system as two
@@ -1382,6 +1383,26 @@ def ram_threshold_comment(instance: str, v: float) -> str:
     amber, red = bounds
     return (f"T24 admins confirm this database routinely runs at {amber}-{red}% RAM "
             f"utilisation by design — expected, not a fault, unless it climbs past {red}%.")
+
+
+def ram_policy_notes_for_system(sysm: "System") -> List[str]:
+    """Standing, unconditional note for any component with a RAM_THRESHOLD_OVERRIDES entry —
+    explains WHY that host's amber/red boundary is set higher than the estate default,
+    regardless of its CURRENT reading. Deliberately separate from ram_threshold_comment (which
+    only speaks once usage is actually in the elevated band, attached to that flagged row): a
+    reader landing on T24's card on a day RAM sits comfortably under 90% would otherwise have
+    no way to know the threshold itself is unusual, only ever finding out the day it spikes.
+    Never a Flag — mirrors backup_policy_notes_for_system/cob_policy_notes_for_system's own
+    non-actionable shape, fed into system_comment_text alongside them."""
+    notes = []
+    for c in sysm.components:
+        bounds = RAM_THRESHOLD_OVERRIDES.get(c.instance)
+        if bounds:
+            amber, red = bounds
+            notes.append(f"{c.label} — RAM threshold raised to {amber}%/{red}% (amber/red), "
+                         f"above the estate standard: T24 admins confirm this database's "
+                         f"buffer cache runs at {amber}-{red}% RAM by design.")
+    return notes
 
 
 def _usage_pressure(values: Dict[str, float], systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
