@@ -186,6 +186,13 @@ SENTINEL_NOTE = "No critical or warning metrics this run."
 
 
 def chip_colors(pct: float) -> tuple[str, str]:
+    # A real percentage can never fall outside [0, 100] -- anything that does (e.g. a
+    # negative CPU reading from a textfile counter that isn't actually monotonic, so rate()
+    # goes negative) is bad DATA, not a low reading. Falling through to the plain `< 75 ->
+    # green` case would then render it as the single most reassuring color available, exactly
+    # backwards from what it means. Band it amber instead -- "look at this", not "all clear".
+    if pct < 0 or pct > 100:
+        return CHIP_AMBER_BG, CHIP_AMBER_TXT
     if pct >= 90:
         return CHIP_RED_BG, CHIP_RED_TXT
     if pct >= 75:

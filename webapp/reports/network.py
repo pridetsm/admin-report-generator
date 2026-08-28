@@ -2178,7 +2178,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                if by_name.get(s.name, {}).get("system") in
                ("Root Domain Controllers", "Child Domain Controllers")]
     if ad_hosts:
-        ad_cpu_ram, ad_disks, ad_children = [], [], []
+        ad_children = []
         ad_critical = ad_warning = 0
         ad_svc_states = _ad_service_states([by_name[s.name]["target"] for s in ad_hosts])
         for tier_label, tier_system in (("Root Domain Controllers", "Root Domain Controllers"),
@@ -2234,8 +2234,6 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                     title=sysvm.name, services=host_services, cpu_ram=[cr] if cr else [],
                     disks=dk, notes=rows, critical=c, warning=w, count=1, count_label="host",
                     signed_by=author))
-            ad_cpu_ram += tier_cpu_ram
-            ad_disks += tier_disks
             ad_critical += tier_critical
             ad_warning += tier_warning
             ad_children.append(ir.DeviceGroup(
@@ -2243,9 +2241,13 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 notes=[], children=tier_children, critical=tier_critical, warning=tier_warning,
                 count=len(tier_hosts), count_label="host" if len(tier_hosts) == 1 else "hosts",
                 signed_by=author))
+        # No cpu_ram/disks here (unlike the tier level above) -- with 3 real levels now, an
+        # aggregate at EVERY level (Active Directory, tier, AND host) was one rollup too many;
+        # the top level is now a pure label, same reasoning as its already-empty Services
+        # table (see the tier loop's own comment above) extended one level further up.
         groups.append(ir.DeviceGroup(
-            title="Active Directory", cpu_ram=ad_cpu_ram, disks=ad_disks,
-            notes=[], children=ad_children, critical=ad_critical, warning=ad_warning,
+            title="Active Directory", notes=[], children=ad_children,
+            critical=ad_critical, warning=ad_warning,
             count=len(ad_hosts), count_label="devices", signed_by=author))
 
     hci_sysvm = next((s for s in snapshot.systems if by_name.get(s.name, {}).get("key") == "hci-cluster"), None)
