@@ -126,14 +126,24 @@ CHIP_GREEN_BG, CHIP_GREEN_TXT = "FF14322B", "FF4CC9A4"
 CHIP_AMBER_BG, CHIP_AMBER_TXT = "FF3A2F14", "FFE8B04B"
 CHIP_RED_BG, CHIP_RED_TXT = "FF3A1A16", "FFEF6A5A"
 
-# nesting cues -- neutral, on-theme.  Section title brightness steps down per
-# nesting level; a spine in the gutter column brackets a host with its nodes.
+# nesting cues -- neutral, on-theme.  Section title brightness AND size step down per
+# nesting level (color alone read as too subtle a cue once a 3rd level -- Active Directory >
+# Root/Child Domain Controllers > each DC -- put same-size titles at three different depths
+# with nothing else to tell them apart at a glance); a spine in the gutter column brackets a
+# host with its nodes. Floor stays comfortably above the sz=9 bold panel titles (Services,
+# CPU · RAM, ...) a section's own tables use, so even the deepest title still reads as a
+# section header, not just another panel inside it.
 NEST_TITLE = {0: ACCENT, 1: "FF6F9DB0", 2: "FF5E7686"}
+NEST_TITLE_SIZE = {0: 13, 1: 11, 2: 10}
 SPINE = {0: "FF17242E", 1: "FF243B4E"}
 
 
 def title_color(indent: int) -> str:
     return NEST_TITLE.get(indent, NEST_TITLE[max(NEST_TITLE)])
+
+
+def title_size(indent: int) -> float:
+    return NEST_TITLE_SIZE.get(indent, NEST_TITLE_SIZE[max(NEST_TITLE_SIZE)])
 
 
 def spine_color(indent: int) -> str:
@@ -602,7 +612,7 @@ def write_title_bar(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> Non
     left = services_col(indent)
     sh.fill(row, left, row, RIGHT_EDGE, CARD)
     sh.merge(row, left, row, left + TITLE_WIDTH - 1, bg=CARD)
-    sh.put(row, left, f"▌  {group.title}", sz=13, bold=True,
+    sh.put(row, left, f"▌  {group.title}", sz=title_size(indent), bold=True,
            color=title_color(indent), bg=CARD, halign="left")
     badge_col = left + TITLE_WIDTH + 1
     tone = badge_tone(group.critical, group.warning)
