@@ -2214,6 +2214,32 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
     if hci_sysvm is not None:
         ann = annotations.get(hci_sysvm.name, {})
         notes, critical, warning = _infra_notes(hci_sysvm, ann.get("comment", ""), ann.get("flags", {}))
+        # Cluster-level facts from _windows_cluster_metrics (snapshot._wc) -- fetched into this
+        # function already but never rendered anywhere until now. Keyed by whichever node's own
+        # exporter actually answered the mscluster WMI query (only node 1 is reachable today),
+        # so this is the CLUSTER's own view of every member, not just the one node Prometheus
+        # can scrape directly -- e.g. it can say nodes 2-4 are still healthy cluster members
+        # even while Prometheus itself reports them unreachable. Attached to the PARENT group,
+        # not a per-node child, because there is no reliable way to match an mscluster node's
+        # hostname (HRE-HCIHOST-02, ...) back to a specific node's own IP-only display label
+        # (10.100.246.4, ...) without a confirmed hostname/IP mapping -- guessing that
+        # correspondence would risk naming the WRONG node as up/down, worse than not showing it.
+        # Failed cluster resources and down cluster nodes are ALREADY in hci_sysvm.flags (see
+        # _windows_device_flags' own cluster_node_down/cluster_resource_failed) and so already
+        # have their own NoteRow via _infra_notes above -- nothing to add for those. What's
+        # missing is the positive case: flags only ever fire on a PROBLEM, so a fully healthy
+        # cluster (today: all 4 members up) leaves no mention of node membership anywhere. Add
+        # that proactively, queried via whichever node's own exporter actually answered the
+        # mscluster WMI call (only node 1 is reachable today) -- the CLUSTER's own view of
+        # every member, not just the one node Prometheus can scrape directly.
+        wc_target, wc_data = next(iter(wc.items()), (None, None))
+        members = (wc_data or {}).get("nodes") or []
+        if members:
+            queried_via = hci_nodes.get(wc_target, {}).get("display", wc_target)
+            parts = ", ".join(f"{name} ({state.upper()})"
+                              for name, state, _up in sorted(members))
+            notes = [ir.NoteRow(f"Cluster's own view of node membership (queried via "
+                                f"{_infra_short_node(queried_via)}): {parts}.")] + notes
         node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
         # The parent "HCI Cluster" row always carries its own CPU/RAM/Disk table -- the same
         # aggregate-across-hosts pattern generate_report.py uses for every multi-host system
