@@ -367,9 +367,13 @@ def render(category: str, *, system: str, band: str, group_name: str, min_severi
                  for_browser=for_browser)
 
 
-def _fired_item_card(system: str, category: str, band: str, text: str, action: str) -> str:
+_REMINDER_TAGS = {1: "FIRST REMINDER", 2: "SECOND REMINDER", 3: "FINAL REMINDER"}
+
+
+def _fired_item_card(system: str, category: str, band: str, text: str, action: str,
+                     reminder_number=None) -> str:
     c = _band_colors(band)
-    tag = "NEW" if action == "new" else "STILL OPEN"
+    tag = "NEW" if action == "new" else _REMINDER_TAGS.get(reminder_number, "REMINDER")
     tag_chip = (f'<span style="display:inline-block;font-family:{MONO};font-size:11px;font-weight:bold;'
                f'color:{c["fg"]};background:{c["soft"]};border:1px solid {c["line"]};padding:4px 9px;'
                f'margin:0 6px 6px 0;">{tag}</span>')
@@ -386,30 +390,34 @@ def _fired_item_card(system: str, category: str, band: str, text: str, action: s
 
 def render_fired(items: list, *, group_name: str, min_severity: str,
                  for_browser: bool = False) -> tuple:
-    """Renders one or more NEW/STILL-OPEN findings for ONE group -- the REAL production digest
+    """Renders one or more NEW/reminder findings for ONE group -- the REAL production digest
     (reports.alerting.run_alert_cycle / send_test_alert's "Run live check now"), which can
     carry several different categories/systems in one poll, unlike the single-category
     synthetic test in render(). Same title/header/footer shell as render() and
     render_resolved() (title "Alert notification", matching every other alert e-mail this
     feature sends), red banner if anything here is red, amber otherwise, one card per finding
     instead of a per-category hero visual, for the same reason render_resolved() uses cards --
-    no one hero shape fits an arbitrary mix of categories at once.
+    no one hero shape fits an arbitrary mix of categories at once. Each card is tagged NEW,
+    FIRST/SECOND/FINAL REMINDER (see _REMINDER_TAGS) so a recipient can tell at a glance how
+    many times they've already been told about this exact finding -- reports.alerting's own
+    fixed 3-reminder schedule (10/40/60 minutes after first notification, then silence).
 
-    `items`: [(system, Flag, action), ...] where action is "new" or "remind" (see
-    reports.alerting's own action vocabulary) -- escaped here, same reasoning as render()'s own
-    docstring: Flag.text/category/system aren't user free text, but are escaped anyway since
-    nothing downstream should assume that."""
+    `items`: [(system, Flag, action, reminder_number), ...] where action is "new" or "remind"
+    and reminder_number is 1/2/3 when action is "remind", else None (see reports.alerting's
+    own action vocabulary) -- escaped here, same reasoning as render()'s own docstring:
+    Flag.text/category/system aren't user free text, but are escaped anyway since nothing
+    downstream should assume that."""
     group_name = html.escape(group_name)
     min_severity = html.escape(min_severity)
-    new_items = [(s, f) for s, f, a in items if a == "new"]
-    reminders = [(s, f) for s, f, a in items if a == "remind"]
-    any_red = any(f.band == "red" for _, f in new_items + reminders)
+    new_items = [(s, f) for s, f, a, _n in items if a == "new"]
+    reminders = [(s, f, n) for s, f, a, n in items if a == "remind"]
+    any_red = any(f.band == "red" for s, f in new_items) or any(f.band == "red" for s, f, n in reminders)
     banner = _band_colors("red" if any_red else "amber")
     banner_text = f"{len(new_items)} new finding(s), {len(reminders)} still open"
     cards = ("".join(_fired_item_card(html.escape(s), html.escape(f.category), f.band,
                                       html.escape(f.text), "new") for s, f in new_items)
             + "".join(_fired_item_card(html.escape(s), html.escape(f.category), f.band,
-                                       html.escape(f.text), "remind") for s, f in reminders))
+                                       html.escape(f.text), "remind", n) for s, f, n in reminders))
 
     return _shell(title="Alert notification", banner_bg=banner["soft"], banner_fg=banner["fg"],
                  banner_text=banner_text, body_html=cards, group_name=group_name,

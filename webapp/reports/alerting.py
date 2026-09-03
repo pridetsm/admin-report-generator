@@ -23,6 +23,19 @@ import generate_report as gr   # send_report/ is on sys.path, same mechanism ser
 from . import alert_email_templates
 from . import folders
 
+# The reminder schedule (2026-09-04, on request): exactly 3 reminders per finding, then
+# silence until it resolves or escalates -- 10, 40 and 60 minutes after the finding's FIRST
+# successful notification (AlertFinding.first_notified_at), not a repeating interval off the
+# LAST one, so a poller running late never compounds into ever-later-drifting reminders.
+# Front-loaded (fast first nudge, further-spaced later ones) rather than evenly spaced,
+# matching how real incident-alerting tools stage reminders: urgent soon after the incident,
+# progressively less urgent as it stays open, then stop rather than nag forever. Not
+# per-group configurable -- see AlertFinding's own docstring for the schedule's full mechanics
+# (reset on reopen/escalation, "at least" timing).
+REMINDER_SCHEDULE_MINUTES = [10, 40, 60]
+MAX_REMINDERS = len(REMINDER_SCHEDULE_MINUTES)
+
+
 @dataclass
 class AlertRunResult:
     """What one run_alert_cycle() call did, for the management command to report and for
@@ -110,27 +123,31 @@ def _undrained_folder_flags_by_system(cfg, covered_systems: set) -> Dict[str, li
     return out
 
 
-def _decide(existing, band: str, group, now) -> str:
-    """'new' | 'remind' | 'skip' -- a pure function of the existing AlertFinding row (or None),
-    the flag's CURRENT band, and the group's own renotify_interval_minutes.
+def _decide(existing, band: str, now) -> tuple:
+    """('new'|'remind'|'skip', reminder_number) -- reminder_number is the ordinal (1..3) this
+    would be if it fires as 'remind', else None. A pure function of the existing AlertFinding
+    row (or None) and the flag's CURRENT band; the schedule (REMINDER_SCHEDULE_MINUTES) is
+    fixed, not per-group, so this no longer needs the group itself.
 
     Reopening (resolved_at was set) and a first-ever sighting both read as 'new'. An
-    escalation (existing.band was amber, current band is red) also always reads as 'new',
-    regardless of the interval -- see AlertFinding's own docstring for why. Otherwise a group
-    with no interval set (None/0) stays silent once notified; one WITH an interval fires again
-    once at least that many minutes have passed since it last did -- a rolling window since
-    last_notified_at, not a fixed wall-clock time, so it's immune to the poller's own cadence
-    drifting. "At least", not "exactly": resolution and re-notification are both only ever
-    checked when the poller actually runs, so an interval shorter than the poller's own
-    schedule can't fire any faster than the poller itself does."""
+    escalation (existing.band was amber, current band is red) also always reads as 'new' --
+    see AlertFinding's own docstring for why this resets the schedule rather than continuing
+    it. Otherwise: once MAX_REMINDERS have already gone out, stays silent regardless of how
+    long it's been open (a cap, not a repeating interval); before the cap, fires 'remind' once
+    at least REMINDER_SCHEDULE_MINUTES[reminder_count] minutes have passed since
+    first_notified_at -- "at least", because resolution and re-notification are both only ever
+    checked when the poller actually runs, so the schedule can't fire any faster than the
+    poller's own cadence."""
     if existing is None or existing.resolved_at is not None or existing.last_notified_at is None:
-        return "new"
+        return "new", None
     if existing.band == "amber" and band == "red":
-        return "new"
-    interval = group.renotify_interval_minutes
-    if interval and now - existing.last_notified_at >= datetime.timedelta(minutes=interval):
-        return "remind"
-    return "skip"
+        return "new", None
+    if existing.reminder_count >= MAX_REMINDERS or existing.first_notified_at is None:
+        return "skip", None
+    due_after = REMINDER_SCHEDULE_MINUTES[existing.reminder_count]
+    if now - existing.first_notified_at >= datetime.timedelta(minutes=due_after):
+        return "remind", existing.reminder_count + 1
+    return "skip", None
 
 
 def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
@@ -231,10 +248,10 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
             for f in eligible:
                 existing = None if dry_run else AlertFinding.objects.filter(
                     group=g, system=sysm.name, flag_key=f.key).first()
-                action = _decide(existing, f.band, g, now)
+                action, reminder_number = _decide(existing, f.band, now)
                 if action == "skip":
                     continue
-                per_group_items[g.pk].append((sysm.name, f, action))
+                per_group_items[g.pk].append((sysm.name, f, action, reminder_number))
                 if action == "new":
                     result.new_count += 1
                 else:
@@ -246,10 +263,15 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
                                   "first_seen_at": now, "last_seen_at": now})
                     if not created and action == "new":
                         row.first_seen_at = now
+                        # A fresh incident (reopen or amber->red escalation) restarts the
+                        # reminder schedule from zero -- see AlertFinding's own docstring.
+                        # first_notified_at is set below only once THIS send succeeds.
+                        row.first_notified_at = None
+                        row.reminder_count = 0
                     row.band, row.text, row.last_seen_at = f.band, f.text, now
                     row.resolved_at = None
                     row.save()
-                    per_group_rows[g.pk].append(row)
+                    per_group_rows[g.pk].append((row, action))
 
     import mail_report as mr
     mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
@@ -274,8 +296,18 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
                     mr.send_email(mailcfg, recipients, subject, html_body, text_body,
                                   inline_images=inline_images)
                     result.emails_sent += 1
-                    AlertFinding.objects.filter(pk__in=[r.pk for r in per_group_rows[g.pk]]) \
-                                        .update(last_notified_at=now)
+                    # Per-row, not a bulk .update(): a "new" row gets its schedule anchor set
+                    # for the first time, a "remind" row advances its count by exactly one --
+                    # two different field changes on the same batch, only ever applied once
+                    # THIS send has actually succeeded (see the loop above's own comment on
+                    # why first_notified_at/reminder_count aren't touched any earlier).
+                    for row, action in per_group_rows[g.pk]:
+                        if action == "new":
+                            row.first_notified_at = now
+                        else:
+                            row.reminder_count += 1
+                        row.last_notified_at = now
+                        row.save(update_fields=["first_notified_at", "reminder_count", "last_notified_at"])
                 except Exception:  # noqa: BLE001 -- one group's SMTP failure must not stop the rest
                     pass
 
@@ -335,7 +367,7 @@ def send_test_alert(group, *, to: str | None = None) -> tuple[bool, str]:
         eligible = [f for f in flags
                    if severity_meets(f.band, group.min_severity)
                    and group.category_matches(sysm.name, f.category)]
-        items += [(sysm.name, f, "new") for f in eligible]
+        items += [(sysm.name, f, "new", None) for f in eligible]
 
     subject, text_body, html_body, inline_images = _render_fired_email(group, items)
     subject = f"[TEST] {subject}"
@@ -371,17 +403,24 @@ def _duration_str(start, end) -> str:
     return f"{d}d {h}h"
 
 
+_REMINDER_LABELS = {1: "first reminder", 2: "second reminder", 3: "final reminder"}
+
+
 def _render_fired_email(group, items, *, for_browser: bool = False) -> tuple:
-    """items: [(system, Flag, action), ...] for ONE group ('new' or 'remind').
+    """items: [(system, Flag, action, reminder_number), ...] for ONE group -- action is 'new'
+    or 'remind', reminder_number is 1/2/3 (which of the 3 scheduled reminders this is) when
+    action is 'remind', else None.
 
     Uses alert_email_templates.render_fired for the HTML -- the same branded shell every other
     alert e-mail this feature sends (navy gradient header, white "Alert notification" title,
-    card per finding), not the older mail_report-styled "SYSTEM ALERT" digest this used to
-    build via _email_shell, which is what a real recipient's screenshot showed was still going
-    out for real production alerts even after render_resolved was migrated (2026-09-04) --
-    only the fired path had been missed."""
-    new_items = [(s, f) for s, f, a in items if a == "new"]
-    reminders = [(s, f) for s, f, a in items if a == "remind"]
+    card per finding, each tagged NEW / FIRST REMINDER / SECOND REMINDER / FINAL REMINDER so a
+    recipient can tell at a glance how many times they've already been told about this exact
+    finding), not the older mail_report-styled "SYSTEM ALERT" digest this used to build via
+    _email_shell, which is what a real recipient's screenshot showed was still going out for
+    real production alerts even after render_resolved was migrated (2026-09-04) -- only the
+    fired path had been missed."""
+    new_items = [(s, f) for s, f, a, _n in items if a == "new"]
+    reminders = [(s, f, n) for s, f, a, n in items if a == "remind"]
     subject = f"[Alerts] {group.name} — {len(new_items)} new, {len(reminders)} reminder(s)"
 
     lines = []
@@ -389,8 +428,9 @@ def _render_fired_email(group, items, *, for_browser: bool = False) -> tuple:
         lines.append("NEW:")
         lines += [f"  [{f.band.upper()}] {s} — {f.text}" for s, f in new_items]
     if reminders:
-        lines.append("STILL OPEN (reminder):")
-        lines += [f"  [{f.band.upper()}] {s} — {f.text}" for s, f in reminders]
+        lines.append("STILL OPEN:")
+        lines += [f"  [{f.band.upper()}] {s} — {f.text} ({_REMINDER_LABELS.get(n, 'reminder')})"
+                 for s, f, n in reminders]
     text_body = "\n".join(lines)
 
     html_body, inline_images = alert_email_templates.render_fired(
@@ -455,13 +495,13 @@ def render_test_email(group, *, kind: str, system: str, category: str, band: str
             group, [(system, band, flag.text, opened_at)], timezone.now(), for_browser=for_browser)
     elif category in alert_email_templates.SHAPE_BY_CATEGORY:
         subject, text_body, _old_html, _old_images = _render_fired_email(
-            group, [(system, flag, "new")], for_browser=for_browser)
+            group, [(system, flag, "new", None)], for_browser=for_browser)
         html_body, inline_images = alert_email_templates.render(
             category, system=system, band=band, group_name=group.name,
             min_severity=group.min_severity, for_browser=for_browser)
     else:
         subject, text_body, html_body, inline_images = _render_fired_email(
-            group, [(system, flag, "new")], for_browser=for_browser)
+            group, [(system, flag, "new", None)], for_browser=for_browser)
     return f"[SYNTHETIC TEST] {subject}", text_body, html_body, inline_images
 
 

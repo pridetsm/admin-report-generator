@@ -433,16 +433,16 @@ class AlertGroup(models.Model):
         ("red", "Red only"),
         ("amber", "Red + Amber"),
     ]
-    # A typical setup (2026-09-03): fire once on the incident, then keep firing every X
-    # minutes for as long as it's still open, going silent the moment a poll finds it
-    # resolved. `renotify_interval_minutes` IS that X, directly -- not a "once vs daily"
-    # choice between two fixed cadences (what this field replaced): blank/0 means "once, then
-    # silent until resolved" (no repeat at all), any positive number of minutes means "repeat
-    # at least that often" -- "at least", because resolution and re-notification are BOTH only
-    # ever checked when the alert poller actually runs (see reports.alerting.run_alert_cycle,
-    # invoked on its own schedule), so an interval shorter than the poller's own cadence can't
-    # fire any faster than the poller itself does.
-    DEFAULT_RENOTIFY_MINUTES = 60
+    # How a still-open finding gets re-notified (2026-09-04): a FIXED schedule of exactly 3
+    # reminders per finding -- 10, 40 and 60 minutes after the finding's first successful
+    # notification -- then silence until it either resolves or escalates. Replaces the earlier
+    # configurable-single-interval design (renotify_interval_minutes, repeating indefinitely):
+    # a capped, front-loaded schedule (fast first nudge, then progressively later ones) reads
+    # a genuine incident-alerting pattern back at the group rather than an open-ended repeat
+    # someone has to remember to silence. Not per-group configurable -- see
+    # reports.alerting.REMINDER_SCHEDULE_MINUTES, the engine's own policy constant, for the
+    # actual numbers and the "at least" timing caveat (both resolution and reminders are only
+    # ever checked when the poller runs).
     # The same category strings generate_report.Flag.category already carries on every
     # finding (disk/ram/cpu/service/backup/unreachable/untracked) -- reused as-is rather than
     # inventing a second taxonomy, so a group's filter always means exactly what the report's
@@ -509,10 +509,6 @@ class AlertGroup(models.Model):
         default=list, blank=True,
         help_text="Plain e-mail addresses for stakeholders with no account.")
     min_severity = models.CharField(max_length=10, choices=MIN_SEVERITY_CHOICES, default="red")
-    renotify_interval_minutes = models.PositiveIntegerField(
-        null=True, blank=True, default=DEFAULT_RENOTIFY_MINUTES,
-        help_text="Re-notify at least this often while a finding stays open. Blank or 0 = "
-                   "fire once, then stay silent until resolved.")
     active = models.BooleanField(default=True, help_text="Untick to pause without deleting.")
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
@@ -566,17 +562,28 @@ class AlertFinding(models.Model):
     was last seen/notified, it never re-derives whether it's actually wrong (that stays exactly
     generate_report.flagged_for_system's job, called fresh every poll).
 
-    Both renotify behaviours read off the same three timestamps:
-      "once"  -> notify only when last_notified_at is NULL or the row was just reopened.
-      "daily" -> notify when last_notified_at is NULL, OR >=24h have passed since it.
+    The reminder schedule (2026-09-04, see reports.alerting.REMINDER_SCHEDULE_MINUTES) is
+    fixed and capped -- exactly 3 reminders per finding, at 10/40/60 minutes after
+    `first_notified_at`, then silence -- driven by `reminder_count` (how many have gone out
+    so far, 0..3) rather than a repeating interval off `last_notified_at`: the SCHEDULE is
+    anchored to when the finding was first told about, not to whenever the last reminder
+    happened to land, so a poll cycle running late never pushes every later reminder back too.
+    `first_notified_at` is set once, the first time notification succeeds, and never touched
+    again until the row resets (below) -- it is deliberately NOT the same field as
+    `last_notified_at`, which keeps moving with each successful send and drives the e-mail's
+    own "how manieth reminder" tag (reminder_count at send time + 1).
+
     An escalation (band worsens amber -> red on an already-notified, still-open row) always
-    forces a fresh notification regardless of renotify_mode -- a stakeholder told "amber" needs
-    to hear when it becomes "red", not stay silent because they were "already told" something
-    less severe.
+    forces a fresh notification regardless of where the schedule was up to -- a stakeholder
+    told "amber" needs to hear when it becomes "red", not stay silent because they were
+    "already told" something less severe. This RESETS the schedule (reminder_count -> 0,
+    first_notified_at -> None until the escalation's own notification succeeds), the same
+    reasoning as reopening a resolved finding below: it reads as a fresh incident, not a
+    continuation of the old one's countdown.
 
     A resolved row (resolved_at set) that reappears is treated as brand-new: its timestamps
-    reset on the SAME row rather than a second row being created, so history for one
-    (group, system, flag) triple always lives in exactly one place."""
+    AND its reminder schedule reset on the SAME row rather than a second row being created, so
+    history for one (group, system, flag) triple always lives in exactly one place."""
 
     group = models.ForeignKey(AlertGroup, on_delete=models.CASCADE, related_name="findings")
     system = models.CharField(max_length=120)            # System.name from prometheus.yml
@@ -585,7 +592,13 @@ class AlertFinding(models.Model):
     text = models.CharField(max_length=500, blank=True)   # last-seen Flag.text, for the e-mail
     first_seen_at = models.DateTimeField()
     last_seen_at = models.DateTimeField()
+    first_notified_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="When this finding's notification FIRST succeeded — the schedule's own "
+                   "anchor point. Reset alongside reminder_count on reopen/escalation.")
     last_notified_at = models.DateTimeField(null=True, blank=True)
+    reminder_count = models.PositiveSmallIntegerField(
+        default=0, help_text="How many of the 3 scheduled reminders have gone out so far.")
     resolved_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

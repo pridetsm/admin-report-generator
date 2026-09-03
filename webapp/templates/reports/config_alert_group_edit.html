@@ -55,16 +55,15 @@
             {% endfor %}
           </select>
         </label>
-        <label class="field">
-          <span>Re-notify every (minutes)</span>
-          <input type="number" name="renotify_interval_minutes" min="0" step="1"
-                 value="{{ group.renotify_interval_minutes|default:'' }}" placeholder="e.g. 60">
-          <small class="cfg-hint">
-            Fires once on a new finding, then again at least this often while it's still open
-            (checked every time the alert poller runs). Blank or 0 = fire once, then stay
-            silent until resolved.
-          </small>
-        </label>
+        <div class="field">
+          <span>Reminders</span>
+          <div class="cfg-hint" style="margin-top:6px">
+            Exactly 3 per finding, then silence until it resolves or escalates: the
+            <b>first</b> 10 minutes after the original notification, the <b>second</b> at 40
+            minutes, and the <b>final</b> at 60 minutes (checked every time the alert poller
+            runs). Not configurable per group — every open finding follows this same schedule.
+          </div>
+        </div>
         <label class="field" style="justify-content:flex-end">
           <span style="display:flex;align-items:center;gap:6px">
             <input type="checkbox" name="active" {% if group.active %}checked{% endif %} style="width:auto">

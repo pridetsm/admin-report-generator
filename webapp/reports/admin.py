@@ -150,7 +150,7 @@ class RoleScopeAdmin(admin.ModelAdmin):
 class AlertGroupAdmin(admin.ModelAdmin):
     """Normally edited in-app (Configuration › Alert groups); here for completeness."""
     list_display = ("name", "system_count", "stakeholder_count", "min_severity",
-                     "renotify_interval_minutes", "active", "updated_at", "updated_by")
+                     "active", "updated_at", "updated_by")
     list_filter = ("active", "min_severity")
     readonly_fields = ("updated_at", "updated_by")
     search_fields = ("name",)
@@ -170,11 +170,13 @@ class AlertFindingAdmin(admin.ModelAdmin):
     """Read-only dedup ledger, written only by the alert poller (reports.alerting). Deleting a
     row makes that one (group, system, flag) look brand-new to the next poll."""
     list_display = ("group", "system", "flag_key", "band", "first_seen_at",
-                     "last_seen_at", "last_notified_at", "resolved_at")
+                     "last_seen_at", "first_notified_at", "last_notified_at",
+                     "reminder_count", "resolved_at")
     list_filter = ("group", "band")
     search_fields = ("system", "flag_key")
     readonly_fields = ("group", "system", "flag_key", "band", "text",
-                       "first_seen_at", "last_seen_at", "last_notified_at", "resolved_at")
+                       "first_seen_at", "last_seen_at", "first_notified_at",
+                       "last_notified_at", "reminder_count", "resolved_at")
 
 
 @admin.register(EmailRecipient)

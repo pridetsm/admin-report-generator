@@ -10,7 +10,7 @@
   <div class="card"><div class="body" style="padding:14px 18px">
     {% if groups %}
     <table class="hist">
-      <thead><tr><th>Name</th><th>Systems</th><th>Stakeholders</th><th>Severity</th><th>Re-notify</th><th></th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Systems</th><th>Stakeholders</th><th>Severity</th><th></th><th></th></tr></thead>
       <tbody>
       {% for g in groups %}
         <tr class="rowlink" data-href="{% url 'config_alert_group_edit' g.pk %}">
@@ -20,9 +20,6 @@
           </td>
           <td style="color:var(--muted)">{{ g.stakeholder_count }}</td>
           <td style="color:var(--muted)">{{ g.get_min_severity_display }}</td>
-          <td style="color:var(--muted)">
-            {% if g.renotify_interval_minutes %}every {{ g.renotify_interval_minutes }} min{% else %}once{% endif %}
-          </td>
           <td>{% if not g.active %}<span class="chip amber">paused</span>{% endif %}</td>
           <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
                href="{% url 'config_alert_group_edit' g.pk %}">Open</a></td>
