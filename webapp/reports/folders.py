@@ -108,6 +108,17 @@ RED_SECONDS = 120       # 2 minutes — a fault
 #     "ALLIANCE.OUT_MX": (1800, 7200),
 THRESHOLDS: Dict[str, Tuple[int, int]] = {}
 
+# Folder-exporter TARGETS (not individual folders) known to hold BACKUP-type folders -- a
+# whole host dedicated to backup/log storage, not a per-folder name list, so a new folder
+# added under an already-classified target (e.g. a second archive) is backup-type
+# automatically, with no edit needed here. Manually maintained, same spirit as THRESHOLDS
+# above: folder_exporter.yml's `folders:` entries support an arbitrary `labels:` block (the
+# admin-report-generator instance already uses one, `role: configuration` / `role: reports`)
+# which is where an explicit `role: backup` label would belong if the REMOTE T24
+# folder_exporter.yml ever grows one -- until then this is the closest honest signal
+# available from here, since this app has no file access to the hosts that config lives on.
+BACKUP_HOST_INSTANCES = {"10.0.212.4:9847"}   # "Temenos/T24 Backup & Log Folders" -- confirmed live
+
 # One instant query for the whole screen. Named explicitly rather than folder_.+ so the
 # exporter's own self-metrics (folder_exporter_*) are not dragged in, and so adding a
 # metric here is a deliberate act.
@@ -175,9 +186,65 @@ def _prometheus():
     return gr.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls), cfg.prom
 
 
-def limits_for(name: str) -> Tuple[int, int]:
-    """The (amber, red) limits this folder is judged against."""
-    return THRESHOLDS.get(name, (AMBER_SECONDS, RED_SECONDS))
+def limits_for(name: str, *, instance: str = "", system: str = "") -> Tuple[int, int]:
+    """The (amber, red) limits this folder is judged against.
+
+    A per-folder THRESHOLDS override wins outright if one exists (an explicit, named
+    exception for one folder). Otherwise, if this folder's exporter TARGET is a known
+    backup-type host (BACKUP_HOST_INSTANCES), its window is intuited from `system`'s own
+    backup policy rather than the generic payment-queue AMBER_SECONDS/RED_SECONDS -- see
+    _backup_drain_limits' own docstring for why. Everything else keeps the original
+    payment-queue defaults unchanged."""
+    if name in THRESHOLDS:
+        return THRESHOLDS[name]
+    if instance in BACKUP_HOST_INSTANCES:
+        return _backup_drain_limits(system)
+    return AMBER_SECONDS, RED_SECONDS
+
+
+def _backup_drain_limits(system_name: str) -> Tuple[int, int]:
+    """(amber, red) seconds for a backup-type folder belonging to `system_name`, intuited
+    from that system's OWN backup policy (reports/backup_policy_admin.py) rather than the
+    generic payment-queue limits -- a daily backup's file is expected to still be sitting
+    there right up until tomorrow's lands, so 60s/120s would flag every healthy backup as
+    stuck the moment it landed.
+
+    A watched folder isn't tied to one specific backed-up HOST -- folder_exporter has no such
+    label, since the folder is a shared drop location, not one host's own metrics -- only to
+    a SYSTEM, via the exporter target's own `system:` label (see limits_for's caller). When
+    every instance in that system agrees on the same drain window, that's an honest,
+    unambiguous answer; when they disagree (a system mixing daily and every-3rd-day hosts
+    sharing one backup folder), or the system has no instances/policy at all, the documented
+    fallback -- DEFAULT_FOLDER_DRAIN_HOURS, 24h, "where ambiguous assume the files must be
+    cleared within 24 hrs" -- applies rather than guessing which host's cadence the shared
+    folder actually follows.
+
+    Amber is 75% of the red deadline -- an early-warning band that scales with the window
+    itself (an hour's warning suits a 24h window; it's noise on a week-long one)."""
+    from . import backup_policy_admin
+    from .models import BackupPolicyRevision
+
+    try:
+        cfg = gr.load_config()
+        topo_systems = gr.load_topology(cfg.prometheus_yml, scope="all")
+    except Exception:      # noqa: BLE001 -- topology/config errors already surface on their
+        topo_systems = []  # own screens; this degrades to the documented 24h fallback below.
+
+    sysm = next((s for s in topo_systems if s.name == system_name), None)
+    if sysm is None or not sysm.components:
+        red = backup_policy_admin.DEFAULT_FOLDER_DRAIN_HOURS * 3600
+    else:
+        rev = BackupPolicyRevision.current()
+        policy = rev.policy if rev is not None else backup_policy_admin.parse_live_policy()
+        hours = set()
+        for c in sysm.components:
+            entry = policy.get(c.instance, {})
+            days = entry.get(backup_policy_admin.FREQUENCY_FIELD,
+                             backup_policy_admin.DEFAULT_FREQUENCY_DAYS)
+            hours.add(entry.get(backup_policy_admin.FOLDER_DRAIN_HOURS_FIELD,
+                                backup_policy_admin.intuited_drain_hours(days)))
+        red = (hours.pop() * 3600) if len(hours) == 1 else backup_policy_admin.DEFAULT_FOLDER_DRAIN_HOURS * 3600
+    return round(red * 0.75), red
 
 
 def _fmt_age(seconds: Optional[float]) -> str:
@@ -283,11 +350,14 @@ def _processed_of(processed: Dict[tuple, float], instance: str, name: str):
 
 
 def _collect(series: List[dict]) -> tuple:
-    """Fold the flat series list into {(instance, target): {...}}, plus {instance: up}
-    and {instance: display name}."""
+    """Fold the flat series list into {(instance, target): {...}}, plus {instance: up},
+    {instance: display name}, and {instance: system} -- the exporter TARGET's own `system:`
+    static label (same mechanism as `display`), used to intuit a backup-type folder's drain
+    window from that system's own backup policy (see _backup_drain_limits)."""
     folders: Dict[tuple, dict] = {}
     exporter_up: Dict[str, bool] = {}
     hosts: Dict[str, str] = {}
+    systems_by_instance: Dict[str, str] = {}
 
     def row(instance: str, name: str) -> dict:
         return folders.setdefault((instance, name), {
@@ -307,6 +377,8 @@ def _collect(series: List[dict]) -> tuple:
 
         if lbl.get("display"):
             hosts.setdefault(instance, lbl["display"])
+        if lbl.get("system"):
+            systems_by_instance.setdefault(instance, lbl["system"])
 
         if metric == "up":
             exporter_up[instance] = value >= 1
@@ -355,7 +427,7 @@ def _collect(series: List[dict]) -> tuple:
                 except ValueError:
                     pass
 
-    return folders, exporter_up, hosts
+    return folders, exporter_up, hosts, systems_by_instance
 
 
 def snapshot() -> dict:
@@ -383,11 +455,12 @@ def snapshot() -> dict:
         pass
 
     now = time.time()
-    raw, exporter_up, host_names = _collect(series)
+    raw, exporter_up, host_names, systems_by_instance = _collect(series)
 
     out: List[dict] = []
     for (instance, name), r in raw.items():
-        amber_s, red_s = limits_for(name)
+        amber_s, red_s = limits_for(name, instance=instance,
+                                    system=systems_by_instance.get(instance, ""))
 
         last_scan = r["last_scan"]
         reachable = exporter_up.get(instance, True)

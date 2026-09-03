@@ -1596,24 +1596,43 @@ def config_snmp(request):
 
 
 def _parse_backup_policy_post(post, all_instances) -> dict:
-    """{instance: {"frequency_days": N, "off_weekdays": [...]}, ...} — sparse: an instance is
-    only kept if it has a non-default frequency AND/OR at least one off-weekday checked,
-    matching the engine's own sparse-override design (a host absent from the dict just gets
-    DEFAULT_BACKUP_MAX_AGE_DAYS and no off-days)."""
+    """{instance: {"frequency_days": N, "off_weekdays": [...], "folder_drain_hours": N}, ...}
+    — sparse: an instance is only kept if it has a non-default frequency, at least one
+    off-weekday checked, AND/OR an explicit drain-hours override, matching the engine's own
+    sparse-override design (a host absent from the dict just gets DEFAULT_BACKUP_MAX_AGE_DAYS,
+    no off-days, and its drain window intuited fresh from whatever frequency applies).
+
+    Drain hours is compared against intuited_drain_hours(days) using THIS SAME submission's
+    frequency (not the previously-stored one), so changing a host's frequency and leaving
+    drain untouched keeps drain un-overridden even though the intuited number just moved —
+    the field the admin didn't touch should keep following the frequency, not freeze at
+    whatever it happened to compute to before this save."""
     policy: dict = {}
     for inst in all_instances:
         entry: dict = {}
         raw = (post.get(f"freq__{inst}") or "").strip()
+        days = backup_policy_admin.DEFAULT_FREQUENCY_DAYS
         if raw:
             try:
-                days = int(raw)
+                parsed_days = int(raw)
             except ValueError:
-                days = None
-            if days is not None and days > 0 and days != backup_policy_admin.DEFAULT_FREQUENCY_DAYS:
-                entry[backup_policy_admin.FREQUENCY_FIELD] = days
+                parsed_days = None
+            if parsed_days is not None and parsed_days > 0:
+                days = parsed_days
+                if days != backup_policy_admin.DEFAULT_FREQUENCY_DAYS:
+                    entry[backup_policy_admin.FREQUENCY_FIELD] = days
         off_days = sorted({int(d) for d in post.getlist(f"off__{inst}") if d.isdigit() and 0 <= int(d) <= 6})
         if off_days:
             entry[backup_policy_admin.OFF_WEEKDAYS_FIELD] = off_days
+        drain_raw = (post.get(f"drain__{inst}") or "").strip()
+        if drain_raw:
+            try:
+                drain_hours = int(drain_raw)
+            except ValueError:
+                drain_hours = None
+            if (drain_hours is not None and drain_hours > 0
+                    and drain_hours != backup_policy_admin.intuited_drain_hours(days)):
+                entry[backup_policy_admin.FOLDER_DRAIN_HOURS_FIELD] = drain_hours
         if entry:
             policy[inst] = entry
     return policy
@@ -1675,14 +1694,19 @@ def config_backup_policy(request):
         for c in s.components:
             entry = view_policy.get(c.instance, {})
             off_days = set(entry.get(backup_policy_admin.OFF_WEEKDAYS_FIELD, []))
+            days = entry.get(backup_policy_admin.FREQUENCY_FIELD, default_days)
+            intuited_drain = backup_policy_admin.intuited_drain_hours(days)
             hosts.append({
                 "label": c.label, "instance": c.instance,
-                "days": entry.get(backup_policy_admin.FREQUENCY_FIELD, default_days),
+                "days": days,
                 "off_weekdays": [{"value": i, "label": lbl, "checked": i in off_days}
                                  for i, lbl in enumerate(backup_policy_admin.WEEKDAY_LABELS)],
+                "drain_hours": entry.get(backup_policy_admin.FOLDER_DRAIN_HOURS_FIELD, intuited_drain),
+                "drain_intuited": intuited_drain,
+                "drain_overridden": backup_policy_admin.FOLDER_DRAIN_HOURS_FIELD in entry,
             })
         groups.append({"name": s.name, "hosts": hosts,
-                       "overridden": any(h["days"] != default_days or
+                       "overridden": any(h["days"] != default_days or h["drain_overridden"] or
                                         any(d["checked"] for d in h["off_weekdays"])
                                         for h in hosts)})
 

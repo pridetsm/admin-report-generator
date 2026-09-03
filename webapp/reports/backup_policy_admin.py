@@ -43,6 +43,28 @@ OFF_WEEKDAYS_FIELD = "off_weekdays"
 # compares against) — the order this module and the config screen always present them in.
 WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+# How long a BACKUP-TYPE watched folder (reports.folders — a drop location a backup job
+# writes into, not a payment/message queue) may hold a file before Drainage Monitoring calls
+# it stuck, in HOURS. A third, sparse field alongside frequency_days/off_weekdays, on the same
+# host entry: a backup folder's own natural "how long can a file sit here" IS this host's
+# backup cadence -- a daily backup's file is expected to still be sitting there right up until
+# tomorrow's backup lands, so a drain window shorter than the cadence itself would flag every
+# single healthy backup as stuck. intuited_drain_hours() below is the default so nobody has to
+# type this out for the common case (2026-09-04, on request); an explicit entry here overrides it.
+FOLDER_DRAIN_HOURS_FIELD = "folder_drain_hours"
+DEFAULT_FOLDER_DRAIN_HOURS = 24    # "where ambiguous assume the files must be cleared within 24 hrs"
+
+
+def intuited_drain_hours(frequency_days: int) -> int:
+    """The DEFAULT folder-drain window for a host backing up every `frequency_days` days --
+    read directly off the SAME frequency already configured above, so filling in a host's
+    backup cadence is also enough to give its backup folder a sane drain window with no
+    second number to type. A host backing up every N days needs up to N days for a file to
+    still be legitimately waiting its turn, so this is a straight day-to-hour conversion, not
+    a fraction of it -- an early-warning buffer belongs in the amber/red split (see
+    reports.folders' own use of this), not in shrinking the deadline itself."""
+    return max(1, int(frequency_days)) * 24
+
 
 def parse_live_policy() -> Dict[str, dict]:
     """{instance: {"frequency_days": N, "off_weekdays": [...]}, ...} — the live file if this

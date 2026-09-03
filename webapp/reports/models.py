@@ -467,6 +467,14 @@ class AlertGroup(models.Model):
     # folders.py's "idle") is healthy and never flags; this is specifically the folder that
     # ISN'T draining. Same T24-only applicability as "folder" -- both read the identical
     # folder_exporter job in prometheus.yml, see folders.folder_watch_systems.
+    #
+    # LABELS (2026-09-04): "folder" and "undrained_folders" are the two folder-monitoring
+    # categories -- named "Size monitoring" and "Drainage monitoring" respectively so the two
+    # failure modes read as a pair: a folder that has grown too big (Size) vs. a folder that
+    # isn't being emptied in time (Drainage). The stored KEYS are unchanged ("folder" /
+    # "undrained_folders") -- only the display label moved -- since the key is also what a
+    # saved AlertGroup.categories JSON blob already has written into real rows; renaming the
+    # key would need a data migration for no behavioural gain.
     CATEGORY_CHOICES = [
         ("disk", "Disk usage"),
         ("ram", "RAM usage"),
@@ -475,9 +483,9 @@ class AlertGroup(models.Model):
         ("backup", "Backup missing"),
         ("unreachable", "Component unreachable"),
         ("untracked", "Backup untracked"),
-        ("folder", "Folder over expected size"),
+        ("folder", "Size monitoring"),
         ("backup_uncleared", "Uncleared backups"),
-        ("undrained_folders", "Undrained folders"),
+        ("undrained_folders", "Drainage monitoring"),
     ]
 
     name = models.CharField(max_length=120, unique=True)

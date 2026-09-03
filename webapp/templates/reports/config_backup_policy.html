@@ -25,7 +25,12 @@
       missing backup. <b>Off days</b> are a separate setting, for a host that simply doesn't
       run a backup on a given day of the week at all (not a slower fixed cycle like the
       3-day example above) — tick a day and a check run the morning after it will not treat
-      that gap as a missing backup. Every Save creates a new, permanent revision below —
+      that gap as a missing backup. <b>Backup folder drain (hours)</b> is a third, separate
+      setting: how long a watched backup folder (Drainage Monitoring) may hold a file before
+      it's flagged as stuck — defaulted from this same host's own frequency (a daily backup's
+      file may legitimately sit until tomorrow's lands) so it never needs setting by hand
+      unless a host's backup folder genuinely clears on a different schedule than the backup
+      itself. Every Save creates a new, permanent revision below —
       nothing is ever edited or deleted. <b>Save</b> only records the revision.
       <b>Save &amp; Apply</b> also rewrites the live policy file — no service to restart, so
       it takes effect on the very next report.
@@ -65,6 +70,12 @@
                     </label>
                     {% endfor %}
                   </div>
+                  <label style="margin-top:8px;display:block">
+                    <span>Backup folder drain <b class="cfg-hint" style="display:inline;text-transform:none;letter-spacing:0">— hours{% if not h.drain_overridden %} (intuited from days above){% endif %}</b></span>
+                    <input type="number" min="1" step="1"
+                           name="drain__{{ h.instance }}" value="{{ h.drain_hours }}"
+                           autocomplete="off">
+                  </label>
                 </div>
                 {% endfor %}
               </div>
