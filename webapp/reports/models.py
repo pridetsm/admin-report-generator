@@ -458,6 +458,15 @@ class AlertGroup(models.Model):
     # built, but views._category_grid_rows marks it inapplicable for every system
     # unconditionally, same visual treatment "folder" gets for a system with no watched
     # folder -- never a live, tickable checkbox anywhere until real detection backs it.
+    #
+    # "undrained_folders" (2026-09-04) is REAL, not a placeholder -- same shape as "folder":
+    # generate_report.flagged_for_system never emits it either, so reports.alerting
+    # synthesizes it, this time from reports.folders.snapshot() (the Folder Watch screen's own
+    # live verdict per payment-queue folder: files waiting whose oldest has aged past its
+    # amber/red limit -- see folders.verdict's own docstring). A DRAINED folder (files<=0,
+    # folders.py's "idle") is healthy and never flags; this is specifically the folder that
+    # ISN'T draining. Same T24-only applicability as "folder" -- both read the identical
+    # folder_exporter job in prometheus.yml, see folders.folder_watch_systems.
     CATEGORY_CHOICES = [
         ("disk", "Disk usage"),
         ("ram", "RAM usage"),
@@ -468,6 +477,7 @@ class AlertGroup(models.Model):
         ("untracked", "Backup untracked"),
         ("folder", "Folder over expected size"),
         ("backup_uncleared", "Uncleared backups"),
+        ("undrained_folders", "Undrained folders"),
     ]
 
     name = models.CharField(max_length=120, unique=True)

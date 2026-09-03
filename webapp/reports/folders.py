@@ -538,3 +538,37 @@ def snapshot() -> dict:
         "run_ok": all(f["scan_ok"] for f in out) if out else True,
         "exporter_up": all(exporter_up.values()) if exporter_up else True,
     }
+
+
+def folder_watch_systems(prometheus_yml: str) -> set:
+    """System names with at least one folder_exporter target -- i.e. systems this screen
+    (and reports.alerting's "folder"/"undrained_folders" categories, which read the identical
+    job) can actually say anything about at all (today: just Temenos, confirmed live -- the
+    folder_exporter job's only two targets are both `system: Temenos`).
+
+    A static, local-file read of prometheus.yml's OWN folder_exporter job, not a live
+    Prometheus call: this job's `system:` label is a real, declared fact about the topology
+    (unlike a backup check, which has no config-side declaration at all and is only ever
+    visible from a live capture) -- it just lives under a job type gr.load_topology's own
+    System/Component grouping deliberately excludes (a folder watch isn't a "component"), so
+    it needs this small, targeted parse instead of reusing that function.
+
+    Shared by reports.views (per-system category-grid applicability) and reports.alerting
+    (which systems an undrained-folder Flag should be attributed to) -- moved here from
+    views.py (2026-09-04) so alerting.py isn't reaching into a view module for it.
+    """
+    import yaml
+    try:
+        with open(prometheus_yml, encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+    except Exception:      # noqa: BLE001 -- same degrade-to-"can't tell" stance as callers;
+        return set()       # a broken topology file already surfaces on Configuration > Topology.
+    out = set()
+    for job in doc.get("scrape_configs", []) or []:
+        if job.get("job_name") != "folder_exporter":
+            continue
+        for sc in job.get("static_configs", []) or []:
+            system = (sc.get("labels", {}) or {}).get("system")
+            if system:
+                out.add(str(system).strip())
+    return out

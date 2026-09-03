@@ -22,6 +22,7 @@ from django.utils import timezone
 import generate_report as gr   # send_report/ is on sys.path, same mechanism services.py uses
 
 from . import alert_email_templates
+from . import folders
 
 @dataclass
 class AlertRunResult:
@@ -75,6 +76,38 @@ def _folder_flags_by_system(store, systems) -> Dict[str, list]:
             key=f"folder:{fname}",
             text=f"{fname} over expected size: {actual:.1f}GB (expected {expected:.1f}GB)",
             band="amber", category="folder"))
+    return out
+
+
+def _undrained_folder_flags_by_system(cfg, covered_systems: set) -> Dict[str, list]:
+    """Synthetic Flag objects for every payment-queue folder currently NOT draining --
+    files waiting whose oldest has aged past its amber/red limit, per reports.folders'
+    own live verdict (folders.verdict: red/amber both imply files>0 and an aged-out oldest
+    file; "idle" -- files<=0 -- is the healthy drained state and never flags here).
+
+    A SEPARATE live Prometheus query from _capture's own store (reports.folders.snapshot()
+    calls generate_report.Prometheus itself, independently) -- same reasoning as
+    _folder_flags_by_system's own comment on why this lives here rather than in
+    generate_report.py, just a different underlying screen/exporter reading. Skipped entirely
+    (no extra query at all) when no covered system is even eligible to produce this category,
+    same T24-only gating as "folder" -- see folders.folder_watch_systems."""
+    eligible = folders.folder_watch_systems(cfg.prometheus_yml) & covered_systems
+    if not eligible:
+        return {}
+    try:
+        data = folders.snapshot()
+    except folders.FolderWatchUnavailable:
+        return {}
+    out: Dict[str, list] = {}
+    for f in data["folders"]:
+        if f["state"] not in ("red", "amber"):
+            continue
+        flag = gr.Flag(
+            key=f"undrained:{f['key']}",
+            text=f"{f['name']} on {f['host']} not draining: {f['files']} file(s) waiting, oldest {f['age_text']} old",
+            band=f["state"], category="undrained_folders")
+        for sysname in eligible:
+            out.setdefault(sysname, []).append(flag)
     return out
 
 
@@ -163,6 +196,11 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     # far over expected a folder grows), category "folder" (see AlertGroup.CATEGORY_CHOICES'
     # own comment on why this category exists only here, not in generate_report.py itself).
     folder_flags_by_system = _folder_flags_by_system(store, systems)
+    # A SEPARATE live check (see _undrained_folder_flags_by_system's own docstring on why it
+    # queries independently of `store`) for payment-queue folders that have files waiting past
+    # their drain-time limit -- category "undrained_folders", distinct from "folder" above
+    # (that one is disk-size overflow; this one is a queue backlog, different exporter).
+    undrained_flags_by_system = _undrained_folder_flags_by_system(cfg, covered)
 
     # [(system, Flag, action)] per group -- collected in the capture pass below, then either
     # previewed (dry_run) or turned into one digest e-mail per group afterward. The rows this
@@ -175,7 +213,8 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     per_group_rows: Dict[int, list] = {g.pk: [] for g in groups}   # AlertFinding rows to stamp
 
     for sysm in systems:
-        flags = gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
+        flags = (gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
+                 + undrained_flags_by_system.get(sysm.name, []))
         for g in groups:
             if sysm.name not in (g.systems or []):
                 continue
@@ -288,9 +327,11 @@ def send_test_alert(group, *, to: str | None = None) -> tuple[bool, str]:
         return False, f"Could not capture live data: {exc}"
 
     folder_flags_by_system = _folder_flags_by_system(store, systems)
+    undrained_flags_by_system = _undrained_folder_flags_by_system(cfg, set(group.systems))
     items = []
     for sysm in systems:
-        flags = gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
+        flags = (gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
+                 + undrained_flags_by_system.get(sysm.name, []))
         eligible = [f for f in flags
                    if severity_meets(f.band, group.min_severity)
                    and group.category_matches(sysm.name, f.category)]

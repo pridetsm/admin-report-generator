@@ -2142,35 +2142,6 @@ def config_alert_template_preview(request, category):
     return HttpResponse((alert_email_templates.SAMPLES_DIR / filename).read_text(encoding="utf-8"))
 
 
-def _folder_watch_systems(prometheus_yml: str) -> set:
-    """System names with at least one folder_exporter target -- i.e. systems that can
-    actually produce a "Folder over expected size" finding at all (today: just Temenos,
-    confirmed live -- the folder_exporter job's only two targets are both `system: Temenos`).
-
-    A static, local-file read of prometheus.yml's OWN folder_exporter job, not a live
-    Prometheus call: a watched folder genuinely IS declared in the topology (unlike a backup
-    check, which has no config-side declaration at all and is only ever visible from a live
-    capture) -- it just lives under a job type gr.load_topology's own System/Component
-    grouping deliberately excludes (a folder watch isn't a "component"), so it needs this
-    small, targeted parse instead of reusing that function.
-    """
-    import yaml
-    try:
-        with open(prometheus_yml, encoding="utf-8") as fh:
-            doc = yaml.safe_load(fh) or {}
-    except Exception:      # noqa: BLE001 -- same degrade-to-"can't tell" stance as the caller;
-        return set()       # a broken topology file already surfaces on Configuration > Topology.
-    out = set()
-    for job in doc.get("scrape_configs", []) or []:
-        if job.get("job_name") != "folder_exporter":
-            continue
-        for sc in job.get("static_configs", []) or []:
-            system = (sc.get("labels", {}) or {}).get("system")
-            if system:
-                out.add(str(system).strip())
-    return out
-
-
 def _category_grid_rows(group) -> list:
     """[{"system":, "cells": [{"category":, "label":, "checked":, "applicable":}, ...]}, ...]
     for the per-system, per-category "Metrics to alert on" table -- one row per system the
@@ -2181,10 +2152,11 @@ def _category_grid_rows(group) -> list:
     still just a topology-derived HINT, not a stored restriction: a system added to this group
     later, or a metric that starts reporting later, can make a cell applicable on a future
     visit with no data lost, since `applicable` is recomputed fresh every render rather than
-    saved. Two categories carry a genuine static signal, both pure local-file topology reads
+    saved. Three categories carry a genuine static signal, all pure local-file topology reads
     with no live Prometheus call: `service` from generate_report's own SERVICE_CHECKS
-    (surfaced on the System.services topology object), and `folder` from
-    _folder_watch_systems above. `backup_uncleared` is unconditionally inapplicable
+    (surfaced on the System.services topology object), and `folder`/`undrained_folders` from
+    folders.folder_watch_systems (same folder_exporter job, same T24-only applicability, two
+    different live verdicts). `backup_uncleared` is unconditionally inapplicable
     everywhere -- a placeholder category with no detection built yet (see its own comment on
     AlertGroup.CATEGORY_CHOICES). Every other category (disk/ram/cpu/unreachable, always
     structurally available; backup/untracked, which have no config-side declaration at all --
@@ -2196,7 +2168,7 @@ def _category_grid_rows(group) -> list:
     except Exception:      # noqa: BLE001 -- topology load errors already surface properly on
         all_systems = {}   # the Topology config screen itself; this grid degrades to
                             # "everything applicable" rather than failing to render at all.
-    folder_systems = _folder_watch_systems(cfg.prometheus_yml)
+    folder_systems = folders.folder_watch_systems(cfg.prometheus_yml)
 
     chosen_by_system = group.categories or {}
     rows = []
@@ -2207,7 +2179,7 @@ def _category_grid_rows(group) -> list:
         def _applicable(value):
             if value == "service":
                 return bool(sysm.services) if sysm else True
-            if value == "folder":
+            if value in ("folder", "undrained_folders"):
                 return sys_name in folder_systems
             if value == "backup_uncleared":
                 return False   # placeholder category, no detection built anywhere yet
