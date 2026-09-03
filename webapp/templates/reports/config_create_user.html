@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Add stakeholder{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:640px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">A bare local account — for someone who needs to be addressable as a stakeholder but has no login of their own yet.</span>
+  </div>
+
+  <form method="post">{% csrf_token %}
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <div class="cfg-grid2">
+        <label class="field">
+          <span>Username</span>
+          <input type="text" name="username" value="{{ username }}" required autofocus>
+        </label>
+        <label class="field">
+          <span>E-mail</span>
+          <input type="email" name="email" value="{{ email }}">
+          <small class="cfg-hint">Where alerts naming them as a stakeholder are sent.</small>
+        </label>
+        <label class="field">
+          <span>First name</span>
+          <input type="text" name="first_name" value="{{ first_name }}">
+        </label>
+        <label class="field">
+          <span>Last name</span>
+          <input type="text" name="last_name" value="{{ last_name }}">
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" name="password1" autocomplete="new-password">
+        </label>
+        <label class="field">
+          <span>Confirm password</span>
+          <input type="password" name="password2" autocomplete="new-password">
+        </label>
+      </div>
+    </div></div>
+
+    <div class="actionbar">
+      <div class="container-inner">
+        <button class="btn primary" type="submit">Create</button>
+        <a class="btn ghost" href="{{ next }}">Cancel</a>
+      </div>
+    </div>
+  </form>
+</div>
+{% endblock %}

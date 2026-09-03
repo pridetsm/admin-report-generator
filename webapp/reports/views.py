@@ -29,6 +29,7 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_POST
 
@@ -2012,6 +2013,73 @@ def config_alert_group_edit(request, pk):
         "chosen_users": set(group.users.values_list("pk", flat=True)),
         "email_list": "\n".join(group.emails or []),
     })
+
+
+def _safe_next(request, default="roles_console"):
+    """A redirect target from a `next` GET/POST param, validated against open-redirect abuse
+    (the param is attacker-controllable input, never trusted as-is)."""
+    next_url = request.POST.get("next") or request.GET.get("next") or ""
+    if next_url and url_has_allowed_host_and_scheme(
+            next_url, allowed_hosts={request.get_host()}, require_https=request.is_secure()):
+        return next_url
+    return default
+
+
+@login_required
+def config_create_user(request):
+    """Create a bare local account for a stakeholder who has none yet (reached from Alert
+    groups' "Add stakeholder" button, or anywhere else that needs one) — then returns to
+    wherever the caller came from via `next`.
+
+    Superuser-gated, same as reset_password/delete_user on the Roles console: creating an
+    account is an ACCOUNT-level action, not a role-level one, so it follows that existing
+    precedent rather than the plain Administrator gate every Configuration screen otherwise
+    uses. Real staff logins are normally provisioned by the org auth endpoint on first sign-in
+    (see deployment.txt) — this is for the other case, someone who needs to be addressable as
+    a stakeholder but may never sign in at all.
+    """
+    next_url = _safe_next(request)
+    if not is_superuser(request.user):
+        messages.error(request, "Only a superuser may create accounts.")
+        return redirect(next_url)
+
+    if request.method == "POST":
+        next_url = _safe_next(request)
+        username = (request.POST.get("username") or "").strip()
+        email = (request.POST.get("email") or "").strip()
+        first_name = (request.POST.get("first_name") or "").strip()
+        last_name = (request.POST.get("last_name") or "").strip()
+        password1 = request.POST.get("password1") or ""
+        password2 = request.POST.get("password2") or ""
+
+        errors = []
+        if not username:
+            errors.append("Username is required.")
+        elif get_user_model().objects.filter(username=username).exists():
+            errors.append(f"“{username}” is already taken.")
+        if password1 != password2:
+            errors.append("Passwords do not match.")
+        else:
+            try:
+                validate_password(password1)
+            except ValidationError as exc:
+                errors.extend(exc.messages)
+
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+            return render(request, "reports/config_create_user.html", {
+                "next": next_url, "username": username, "email": email,
+                "first_name": first_name, "last_name": last_name,
+            })
+
+        get_user_model().objects.create_user(
+            username=username, email=email, password=password1,
+            first_name=first_name, last_name=last_name)
+        messages.success(request, f"Created “{username}”.")
+        return redirect(next_url)
+
+    return render(request, "reports/config_create_user.html", {"next": next_url})
 
 
 @login_required

@@ -56,6 +56,7 @@ urlpatterns = [
     path("configuration/role-scopes/", views.config_role_scopes, name="config_role_scopes"),
     path("configuration/alert-groups/", views.config_alert_groups, name="config_alert_groups"),
     path("configuration/alert-groups/<int:pk>/", views.config_alert_group_edit, name="config_alert_group_edit"),
+    path("users/create/", views.config_create_user, name="config_create_user"),
     path("settings/report-theme/", views.set_report_theme, name="set_report_theme"),
     path("notifications/seen/", views.mark_notifications_seen, name="mark_notifications_seen"),
 ]
