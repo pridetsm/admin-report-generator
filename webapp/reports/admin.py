@@ -150,8 +150,8 @@ class RoleScopeAdmin(admin.ModelAdmin):
 class AlertGroupAdmin(admin.ModelAdmin):
     """Normally edited in-app (Configuration › Alert groups); here for completeness."""
     list_display = ("name", "system_count", "stakeholder_count", "min_severity",
-                     "renotify_mode", "active", "updated_at", "updated_by")
-    list_filter = ("active", "min_severity", "renotify_mode")
+                     "renotify_interval_minutes", "active", "updated_at", "updated_by")
+    list_filter = ("active", "min_severity")
     readonly_fields = ("updated_at", "updated_by")
     search_fields = ("name",)
     filter_horizontal = ("users",)

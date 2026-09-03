@@ -2011,7 +2011,11 @@ def config_alert_group_edit(request, pk):
         group.categories = chosen_categories
         group.emails = sorted(set(valid))
         group.min_severity = request.POST.get("min_severity") or group.min_severity
-        group.renotify_mode = request.POST.get("renotify_mode") or group.renotify_mode
+        raw_interval = (request.POST.get("renotify_interval_minutes") or "").strip()
+        if raw_interval.isdigit():
+            group.renotify_interval_minutes = int(raw_interval) or None   # 0 -> None ("once")
+        else:
+            group.renotify_interval_minutes = None
         group.active = request.POST.get("active") == "on"
         group.updated_by = request.user
         group.save()

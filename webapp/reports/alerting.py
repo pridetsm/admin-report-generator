@@ -20,11 +20,6 @@ from django.utils import timezone
 
 import generate_report as gr   # send_report/ is on sys.path, same mechanism services.py uses
 
-# "daily" re-notify reads as a ROLLING 24h window since last_notified_at, not a fixed
-# wall-clock time -- simpler to reason about and immune to the poller's own cadence drifting.
-REMINDER_INTERVAL = datetime.timedelta(hours=24)
-
-
 @dataclass
 class AlertRunResult:
     """What one run_alert_cycle() call did, for the management command to report and for
@@ -67,17 +62,23 @@ def _capture(system_names: set):
 
 def _decide(existing, band: str, group, now) -> str:
     """'new' | 'remind' | 'skip' -- a pure function of the existing AlertFinding row (or None),
-    the flag's CURRENT band, and the group's own renotify policy.
+    the flag's CURRENT band, and the group's own renotify_interval_minutes.
 
     Reopening (resolved_at was set) and a first-ever sighting both read as 'new'. An
     escalation (existing.band was amber, current band is red) also always reads as 'new',
-    regardless of renotify_mode -- see AlertFinding's own docstring for why. Otherwise "once"
-    groups stay silent once notified; "daily" groups notify again after REMINDER_INTERVAL."""
+    regardless of the interval -- see AlertFinding's own docstring for why. Otherwise a group
+    with no interval set (None/0) stays silent once notified; one WITH an interval fires again
+    once at least that many minutes have passed since it last did -- a rolling window since
+    last_notified_at, not a fixed wall-clock time, so it's immune to the poller's own cadence
+    drifting. "At least", not "exactly": resolution and re-notification are both only ever
+    checked when the poller actually runs, so an interval shorter than the poller's own
+    schedule can't fire any faster than the poller itself does."""
     if existing is None or existing.resolved_at is not None or existing.last_notified_at is None:
         return "new"
     if existing.band == "amber" and band == "red":
         return "new"
-    if group.renotify_mode == "daily" and now - existing.last_notified_at >= REMINDER_INTERVAL:
+    interval = group.renotify_interval_minutes
+    if interval and now - existing.last_notified_at >= datetime.timedelta(minutes=interval):
         return "remind"
     return "skip"
 

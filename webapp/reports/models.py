@@ -433,10 +433,16 @@ class AlertGroup(models.Model):
         ("red", "Red only"),
         ("amber", "Red + Amber"),
     ]
-    RENOTIFY_CHOICES = [
-        ("once", "Once per finding, then silent until resolved"),
-        ("daily", "Once, then a daily reminder while still open"),
-    ]
+    # A typical setup (2026-09-03): fire once on the incident, then keep firing every X
+    # minutes for as long as it's still open, going silent the moment a poll finds it
+    # resolved. `renotify_interval_minutes` IS that X, directly -- not a "once vs daily"
+    # choice between two fixed cadences (what this field replaced): blank/0 means "once, then
+    # silent until resolved" (no repeat at all), any positive number of minutes means "repeat
+    # at least that often" -- "at least", because resolution and re-notification are BOTH only
+    # ever checked when the alert poller actually runs (see reports.alerting.run_alert_cycle,
+    # invoked on its own schedule), so an interval shorter than the poller's own cadence can't
+    # fire any faster than the poller itself does.
+    DEFAULT_RENOTIFY_MINUTES = 60
     # The same category strings generate_report.Flag.category already carries on every
     # finding (disk/ram/cpu/service/backup/unreachable/untracked) -- reused as-is rather than
     # inventing a second taxonomy, so a group's filter always means exactly what the report's
@@ -485,7 +491,10 @@ class AlertGroup(models.Model):
         default=list, blank=True,
         help_text="Plain e-mail addresses for stakeholders with no account.")
     min_severity = models.CharField(max_length=10, choices=MIN_SEVERITY_CHOICES, default="red")
-    renotify_mode = models.CharField(max_length=10, choices=RENOTIFY_CHOICES, default="once")
+    renotify_interval_minutes = models.PositiveIntegerField(
+        null=True, blank=True, default=DEFAULT_RENOTIFY_MINUTES,
+        help_text="Re-notify at least this often while a finding stays open. Blank or 0 = "
+                   "fire once, then stay silent until resolved.")
     active = models.BooleanField(default=True, help_text="Untick to pause without deleting.")
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
