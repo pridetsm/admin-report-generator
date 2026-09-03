@@ -174,7 +174,16 @@
     </div>
     {% endif %}
     {% endif %}
+    {% comment %}
+      Connect and History are common to every estate role but NOT Administrator, which
+      configures the app rather than running reports or connecting to monitored hosts (see
+      reports.roles.ROLE_PAGES' own comment, 2026-09-04) -- gated on the same page_in_scope
+      test RoleScopeMiddleware itself applies, so this link and the redirect a bookmark hits
+      can never disagree.
+    {% endcomment %}
+    {% if connect_in_scope %}
     <a href="{% url 'connect' %}"{% if current_page == 'connect' %} class="is-current" aria-current="page"{% elif 'connect' in current_ancestors %} class="is-ancestor"{% endif %}>Connect</a>
+    {% endif %}
     {% comment %}
       Folder Watch is a parent: one child today (Temenos), more as other hosts start
       publishing folder metrics. System Admin only — the view enforces it too.
@@ -185,15 +194,18 @@
       <a href="{% url 'folder_watch_temenos' %}" class="drawer-child{% if current_page == 'folder_watch_temenos' %} is-current{% endif %}"{% if current_page == 'folder_watch_temenos' %} aria-current="page"{% endif %}>Temenos</a>
     </div>
     {% endif %}
+    {% if history_in_scope %}
     <a href="{% url 'history' %}"{% if current_page == 'history' %} class="is-current" aria-current="page"{% elif 'history' in current_ancestors %} class="is-ancestor"{% endif %}>History</a>
+    {% endif %}
     {% comment %}
       The Administrator's own screens. Configuration also appears under the ☰ Settings menu,
       which is where it lived before roles scoped the drawer — but the drawer is what now
       answers "what does this role open", and a role screen missing from it reads as a page
-      that does not exist.
+      that does not exist. Configuration is Administrator's LANDING page (2026-09-04) -- Roles
+      moved inside it as an ordinary child, the same shape Folder Watch nests Temenos in,
+      rather than standing beside it the way it used to.
     {% endcomment %}
     {% if is_role_admin %}
-    <a href="{% url 'roles_console' %}"{% if current_page == 'roles_console' %} class="is-current" aria-current="page"{% elif 'roles_console' in current_ancestors %} class="is-ancestor"{% endif %}>Roles</a>
     {% comment %}
       Configuration nests its screens the way Folder Watch nests Temenos: the parent lights as
       the branch you are inside, each child marks itself when you are on it. Prometheus and
@@ -202,6 +214,7 @@
     {% endcomment %}
     <a href="{% url 'configuration' %}"{% if current_page == 'configuration' %} class="is-current" aria-current="page"{% elif 'configuration' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
     <div class="drawer-children">
+      <a href="{% url 'roles_console' %}" class="drawer-child{% if current_page == 'roles_console' %} is-current{% elif 'roles_console' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'roles_console' %} aria-current="page"{% endif %}>Roles</a>
       <a href="{% url 'config_prometheus' %}" class="drawer-child{% if current_page == 'config_prometheus' %} is-current{% elif 'config_prometheus' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_prometheus' %} aria-current="page"{% endif %}>Prometheus</a>
       <a href="{% url 'grafana_config' %}" class="drawer-child{% if current_page == 'grafana_config' %} is-current{% endif %}"{% if current_page == 'grafana_config' %} aria-current="page"{% endif %}>Grafana</a>
       <a href="{% url 'config_snmp' %}" class="drawer-child{% if current_page == 'config_snmp' %} is-current{% endif %}"{% if current_page == 'config_snmp' %} aria-current="page"{% endif %}>SNMP</a>

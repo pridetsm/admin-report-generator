@@ -12,7 +12,7 @@ from django.urls import NoReverseMatch, reverse
 from .models import RoleRequest
 from .roles import (ROLE_HOME, ROLE_PAGES, active_role, effective_roles, held_roles,
                     is_infra_admin, is_network_admin, is_role_admin, is_system_admin,
-                    reports_for)
+                    page_in_scope, reports_for)
 
 
 def _asset_version() -> str:
@@ -64,23 +64,25 @@ _NAV_PARENT = {
     "network_sod": "network_sod_select",
     "history": "report_form",
     "submission_detail": "history",
-    # Administrator's home page — the same role a picker plays for every other estate
-    # (report_form / network_dashboard / infra_form), just without a Reports screen in
-    # front of it. It has to lead straight to Role Select for the same reason those do:
-    # otherwise the ROLE_HOME fallback below resolves "Administrator's home" to this very
-    # page and Back points at the screen you're already standing on.
-    "roles_console": "role_select",
     "profile": "report_form",
     # Every Configuration screen nests under the hub (see views._CONFIG_TABS) so the drawer's
     # single "Configuration" entry lights up on all of them and Back always steps up to the hub,
-    # not straight to the dashboard.
-    "configuration": "report_form",
+    # not straight to the dashboard. Configuration itself is Administrator's HOME page (see
+    # ROLE_HOME) — the same role a picker plays for every other estate (report_form /
+    # network_dashboard / infra_form), just without a Reports screen in front of it. It has to
+    # lead straight to Role Select for the same reason those do: otherwise the ROLE_HOME
+    # fallback below resolves "Administrator's home" to this very page and Back points at the
+    # screen you're already standing on.
+    "configuration": "role_select",
     "config_prometheus": "configuration",
     "grafana_config": "configuration",
     "config_snmp": "configuration",
     "config_topology": "configuration",
     "config_backup_policy": "configuration",
     "config_scripts": "configuration",
+    # Roles moved here from being its own home page (2026-09-04) -- now a normal Configuration
+    # child, same shape as config_role_scopes/config_alert_groups below.
+    "roles_console": "configuration",
     # a definition and its preview hang off the catalogue, so Back walks
     # preview -> definition -> catalogue -> hub one step at a time
     "config_script_edit": "config_scripts",
@@ -291,6 +293,12 @@ def role_flags(request):
         "is_system_admin": is_system_admin(user) and in_scope("System Admin"),
         "is_network_admin": is_network_admin(user) and in_scope("Network Admin"),
         "is_infra_admin": is_infra_admin(user) and in_scope("Infrastructure Admin"),
+        # History/Connect are common to every estate role but NOT Administrator (see
+        # ROLE_PAGES' own comment) -- reuses page_in_scope, the exact same test
+        # RoleScopeMiddleware applies, so the drawer link and the redirect a bookmark hits can
+        # never disagree about whether the current scope may see either page.
+        "history_in_scope": page_in_scope(request, "history") if user is not None else True,
+        "connect_in_scope": page_in_scope(request, "connect") if user is not None else True,
         "active_role": active_role(request) if user is not None else "",
         # Only offer "switch role" to someone who has somewhere to switch to. The canvas
         # Back button is the one-role holder's route to the picker (see _back_nav).

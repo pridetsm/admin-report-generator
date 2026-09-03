@@ -336,7 +336,7 @@ def reports(request):
     if not available:
         # Administrator configures the app rather than reporting on it; a role with no estate
         # yet has its own screen that says so. Neither should meet an empty grid.
-        return redirect("roles_console" if is_role_admin(request.user) else "role_empty")
+        return redirect("configuration" if is_role_admin(request.user) else "role_empty")
     return render(request, "reports/reports.html", {
         "options": [{"key": r.key, "label": r.label, "blurb": r.blurb,
                      "url": reverse(r.url_name), "icon": r.icon, "initial": r.label[:1]}
@@ -1319,7 +1319,9 @@ def set_report_theme(request):
 #  hang off the child whose settings they hold, not off the hub, so "edit the raw YAML" is an
 #  option ON the Prometheus screen rather than a sibling of it.
 #
-#      Configuration
+#      Configuration                                 (Administrator's landing page)
+#        ├─ Roles          who holds which role, and pending requests -- this app's
+#        │                 own former landing page, now a child of this one (2026-09-04)
 #        ├─ Prometheus     global/storage/rules   → Edit raw YAML → rule files
 #        ├─ Grafana        custom.ini
 #        ├─ SNMP           (awaiting the server-side update)
@@ -1328,6 +1330,7 @@ def set_report_theme(request):
 #        ├─ Data sources   which Prometheus/Grafana to read
 #        └─ Role scopes    which systems each role sees
 _CONFIG_CHILDREN = [
+    ("roles_console", "Roles", "Who holds which role, and pending requests"),
     ("config_prometheus", "Prometheus", "Scrape intervals, storage and rule files"),
     ("grafana_config", "Grafana", "custom.ini, versioned and applied"),
     ("config_snmp", "SNMP", "Network device polling"),

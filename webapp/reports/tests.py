@@ -2109,8 +2109,13 @@ class RoleScopedMenu(TestCase):
             self.u.groups.add(Group.objects.get(name=r))
         self.client.login(username="multi", password="pw12345!")
 
-    def _menu(self):
-        return self.client.get(reverse("history")).content.decode()
+    def _menu(self, page="history"):
+        """`page` must be one this session's CURRENT scope can actually reach -- History is
+        common to every estate role but not Administrator (2026-09-04), so a call made while
+        scoped to Administrator must pass "configuration" (its own landing page) instead, or
+        this would silently return the Role Select bounce page's HTML rather than the drawer
+        being asked about."""
+        return self.client.get(reverse(page)).content.decode()
 
     def test_with_no_role_chosen_the_menu_is_the_union_as_before(self):
         """Unscoped is a real state, not an unfinished one — a bookmark or a deep link must
@@ -2127,7 +2132,7 @@ class RoleScopedMenu(TestCase):
 
     def test_choosing_administrator_hides_folder_watch(self):
         self.client.post(reverse("role_select"), {"role": "Administrator"})
-        body = self._menu()
+        body = self._menu("configuration")
         self.assertNotIn("Folder Watch", body)
         self.assertIn("Roles", body)
 
@@ -2136,19 +2141,25 @@ class RoleScopedMenu(TestCase):
         read as a bug — and worse, train people to ignore it."""
         RoleRequest.objects.create(user=self.u, role="System Admin", status="pending")
         self.client.post(reverse("role_select"), {"role": "Administrator"})
-        self.assertContains(self.client.get(reverse("history")), "reddot")
+        self.assertContains(self.client.get(reverse("configuration")), "reddot")
         self.client.post(reverse("role_select"), {"role": "System Admin"})
         self.assertNotContains(self.client.get(reverse("history")), "reddot")
 
-    def test_common_screens_stay_in_every_role(self):
-        """Connect and History belong to everyone. The DASHBOARDS do not — systems and
-        network each have their own, which is the whole point of the separation, so the
-        systems dashboard is deliberately absent from this list."""
-        for role in ("System Admin", "Network Admin", "Administrator"):
+    def test_common_screens_stay_in_every_estate_role_but_not_administrator(self):
+        """Connect and History belong to every ESTATE role. Administrator configures the app
+        rather than running reports or connecting to a monitored host, so it does not get
+        either (2026-09-04, see reports.roles.ROLE_PAGES' own comment) -- the DASHBOARDS do
+        not either, which is unrelated and covered by the roles-differ tests below."""
+        for role in ("System Admin", "Network Admin"):
             self.client.post(reverse("role_select"), {"role": role})
             body = self._menu()
             for link in ("Connect", "History"):
                 self.assertIn(link, body, f"{link} vanished under {role}")
+
+        self.client.post(reverse("role_select"), {"role": "Administrator"})
+        body = self._menu("configuration")
+        for link in ("Connect", "History"):
+            self.assertNotIn(f">{link}<", body, f"{link} leaked into Administrator")
 
     def test_each_role_sees_only_its_own_report(self):
         """The counterpart to the test above: the estates are exactly what is NOT common.
@@ -2174,11 +2185,14 @@ class RoleScopedMenu(TestCase):
 
         Driven from ROLE_PAGES so a new screen cannot be added without a way in.
         """
-        from reports.roles import ROLE_PAGES, role_screens
+        from reports.roles import ROLE_HOME, ROLE_PAGES, role_screens
 
         for role in ("System Admin", "Network Admin", "Administrator"):
             self.client.post(reverse("role_select"), {"role": role})
-            body = self._menu()
+            # Each role's OWN home page -- History no longer works for Administrator (it does
+            # not own that page any more), so this can't hardcode one page for every role the
+            # way it used to when History was common to all of them.
+            body = self._menu(ROLE_HOME[role])
             drawer = body[body.find('id="drawer"'):body.find("</nav>")]
             for page in role_screens(role):
                 self.assertIn(reverse(page), drawer,
@@ -4032,12 +4046,15 @@ class ConfigurationNesting(PrometheusConfigBase):
             self.assertEqual(resp.context["back_url"], reverse("configuration"), name)
             self.assertEqual(resp.context["back_label"], "Configuration", name)
 
-    def test_the_hub_has_no_back_for_an_administrator(self):
-        """The tree is rooted at the systems dashboard, which an Administrator's menu does not
-        show — so _back_nav offers nothing rather than a button into another role's estate.
-        The children still step up to the hub, which is what the nesting is for."""
+    def test_the_hub_leads_back_to_role_select(self):
+        """Configuration is Administrator's own home page (2026-09-04, moved from Roles) — the
+        same role a picker plays for every other estate (report_form / network_dashboard /
+        infra_form), just without a Reports screen in front of it, so Back goes straight to
+        Role Select rather than into another role's estate. The children still step up to the
+        hub itself, which is what the nesting is for (see test_back_walks_one_level_up_to_the_hub)."""
         resp = self.client.get(reverse("configuration"))
-        self.assertIsNone(resp.context["back_url"])
+        self.assertEqual(resp.context["back_url"], reverse("role_select"))
+        self.assertEqual(resp.context["back_label"], "Role Select")
 
     def test_the_raw_editors_hang_off_prometheus_not_the_hub(self):
         """Editing the raw YAML is an option ON the Prometheus screen, so Back returns there
@@ -4555,8 +4572,8 @@ class ReportsScreen(TestCase):
         self._user("adm", "Administrator")
         self._as("adm", "Administrator")
         resp = self.client.get(reverse("reports"))
-        self.assertRedirects(resp, reverse("roles_console"), fetch_redirect_response=False)
-        drawer = self.client.get(reverse("history")).content.decode()
+        self.assertRedirects(resp, reverse("configuration"), fetch_redirect_response=False)
+        drawer = self.client.get(reverse("configuration")).content.decode()
         self.assertNotIn(reverse("reports"), drawer)
 
     def test_a_role_with_no_estate_is_sent_to_its_own_screen(self):

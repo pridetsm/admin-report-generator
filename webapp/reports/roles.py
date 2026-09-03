@@ -16,9 +16,19 @@ NETWORK_ADMIN_ROLE = "Network Admin"
 INFRA_ADMIN_ROLE = "Infrastructure Admin"
 SECURITY_ADMIN_ROLE = "Security Admin"
 
-# Which pages each role unlocks. Anything not listed here is COMMON — the report builder,
-# history, connect and the personal pages belong to every role, because they are the job
-# everyone signed in to do.
+# Which pages each role unlocks. Anything not listed here is COMMON — the report builder and
+# the personal pages belong to every role, because they are the job everyone signed in to do.
+#
+# History and Connect are the one exception to "not listed = common": they are listed,
+# explicitly, on every estate role (System Admin/Network Admin/Infrastructure Admin/Security
+# Admin) rather than left common, so they can be witheld from exactly one role without
+# touching the others. Administrator configures the app rather than running reports against
+# real systems, so a report-history screen and a "connect to a host" screen are both actions
+# for an estate it does not have (2026-09-04) — this is the mechanism, not a security boundary
+# of its own (see the next paragraph): scoped to Administrator, neither page appears in the
+# drawer and a bookmark to either bounces to Role Select via RoleScopeMiddleware, the same as
+# any other role-owned page. Gov Systems Admin also does not carry them, unrelated to this
+# change: that role owns nothing at all, deliberately (see its own comment below).
 #
 # This map drives the menu only. It is NOT the security boundary: the per-view checks
 # (is_system_admin and friends) remain exactly as they were, and a role you do not hold
@@ -37,21 +47,23 @@ ROLE_PAGES = {
     # Common is also the honest description: the view is purely snapshot-driven, and a
     # snapshot can only exist because a role-gated screen captured it. Nothing is widened by
     # letting the download itself belong to everyone.
-    SYSTEM_ADMIN_ROLE:   {"reports", "report_form", "report",
-                          "folder_watch", "folder_watch_temenos", "folder_watch_data"},
+    SYSTEM_ADMIN_ROLE:   {"reports", "report_form", "report", "history", "submission_detail",
+                          "connect", "folder_watch", "folder_watch_temenos", "folder_watch_data"},
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.
     # `network_sod_generate` sits alongside its screen for the same reason `generate` is
     # common to the systems estates: the download is a step INSIDE the SOD screen, not a
     # destination of its own, so it is listed in NON_SCREEN_PAGES below and never counted
     # as a screen the role "adds".
-    NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report",
+    NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report", "history",
+                          "submission_detail", "connect",
                           "network_sod_select", "network_sod", "network_sod_generate"},
     # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
     # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
     # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
     # so that one page belongs to every estate rather than needing an infra_generate twin.
-    INFRA_ADMIN_ROLE:    {"reports", "infra_form", "infra_report"},
+    INFRA_ADMIN_ROLE:    {"reports", "infra_form", "infra_report", "history",
+                          "submission_detail", "connect"},
     ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
                           "prometheus_config", "prometheus_rule_file",
                           "configuration", "config_yaml", "config_role_scopes",
@@ -63,7 +75,8 @@ ROLE_PAGES = {
     # screens — plus its own OS Inventory. Sharing report_form/report between two roles is why
     # PAGE_OWNER became a set: as a single owner, whichever role lost the tie was bounced off
     # a screen that is genuinely theirs.
-    SECURITY_ADMIN_ROLE: {"reports", "report_form", "report", "os_inventory"},
+    SECURITY_ADMIN_ROLE: {"reports", "report_form", "report", "os_inventory",
+                          "history", "submission_detail", "connect"},
     # One role still has no estate. Deliberately empty rather than borrowing another role's
     # dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),
@@ -81,8 +94,10 @@ ROLE_HOME = {
     INFRA_ADMIN_ROLE:    "reports",
     SECURITY_ADMIN_ROLE: "reports",
     # Administrator configures the app rather than reporting on it, so it has no Reports
-    # screen at all and still lands on its own console.
-    ADMIN_ROLE:          "roles_console",
+    # screen at all and lands on Configuration -- the console it manages the app FROM.
+    # Roles moved to live as a Configuration child (2026-09-04); it is one of the things
+    # Configuration now leads to rather than the landing page itself.
+    ADMIN_ROLE:          "configuration",
     # The role with no estate yet lands on a screen that says so, rather than on History or
     # on another role's dashboard.
     "Gov Systems Admin": "role_empty",
@@ -104,7 +119,14 @@ for _role, _pages in ROLE_PAGES.items():
 # but must not be counted when the picker offers "adds N screens", which would otherwise
 # promise a screen that does not exist.
 # "report"/"generate" are steps INSIDE the dashboard, not separate destinations.
-NON_SCREEN_PAGES = {"folder_watch_data", "report", "generate", "network_sod_generate"}
+#
+# "history"/"connect"/"submission_detail" are here for a different reason: they are genuinely
+# common utility screens, listed explicitly on four roles' ROLE_PAGES only so Administrator
+# (and Gov Systems Admin, which owns nothing at all) can be excluded from them -- see
+# ROLE_PAGES' own comment. Counting them as screens "added" by System Admin (or Network/
+# Infrastructure/Security Admin) would misrepresent a shared utility as that role's own estate.
+NON_SCREEN_PAGES = {"folder_watch_data", "report", "generate", "network_sod_generate",
+                    "history", "connect", "submission_detail"}
 
 
 def role_screens(role) -> list:
