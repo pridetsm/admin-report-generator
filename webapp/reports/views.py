@@ -2062,15 +2062,19 @@ def _category_grid_rows(group) -> list:
     for the per-system, per-category "Metrics to alert on" table -- one row per system the
     group covers, one column per AlertGroup.CATEGORY_CHOICES entry.
 
-    `applicable` is a topology-derived HINT only, never a hard filter (an inapplicable cell
-    still renders a real, tickable checkbox, just visually muted) -- a system added to this
-    group later, or a metric that starts reporting later, might make it apply after all.
-    Two categories carry a genuine static signal, both pure local-file topology reads with no
-    live Prometheus call: `service` from generate_report's own SERVICE_CHECKS (surfaced on the
-    System.services topology object), and `folder` from _folder_watch_systems above. Every
-    other category (disk/ram/cpu/unreachable, always structurally available; backup/
-    untracked, which have no config-side declaration at all -- entirely metric-driven, only
-    ever visible from a live capture) is always treated as applicable.
+    `applicable` gates whether the template renders a real checkbox at all for that cell (an
+    inapplicable one shows a muted em-dash instead, see config_alert_group_edit.html) --
+    still just a topology-derived HINT, not a stored restriction: a system added to this group
+    later, or a metric that starts reporting later, can make a cell applicable on a future
+    visit with no data lost, since `applicable` is recomputed fresh every render rather than
+    saved. Two categories carry a genuine static signal, both pure local-file topology reads
+    with no live Prometheus call: `service` from generate_report's own SERVICE_CHECKS
+    (surfaced on the System.services topology object), and `folder` from
+    _folder_watch_systems above. `backup_uncleared` is unconditionally inapplicable
+    everywhere -- a placeholder category with no detection built yet (see its own comment on
+    AlertGroup.CATEGORY_CHOICES). Every other category (disk/ram/cpu/unreachable, always
+    structurally available; backup/untracked, which have no config-side declaration at all --
+    entirely metric-driven, only ever visible from a live capture) is always applicable.
     """
     cfg = gr.load_config()
     try:
@@ -2091,6 +2095,8 @@ def _category_grid_rows(group) -> list:
                 return bool(sysm.services) if sysm else True
             if value == "folder":
                 return sys_name in folder_systems
+            if value == "backup_uncleared":
+                return False   # placeholder category, no detection built anywhere yet
             return True
 
         cells = [{"category": value, "label": label, "checked": value in allowed,

@@ -440,11 +440,18 @@ class AlertGroup(models.Model):
     # The same category strings generate_report.Flag.category already carries on every
     # finding (disk/ram/cpu/service/backup/unreachable/untracked) -- reused as-is rather than
     # inventing a second taxonomy, so a group's filter always means exactly what the report's
-    # own flags mean. "folder" is the one exception: generate_report.flagged_for_system never
-    # emits it (folder-over-expected-size is only ever a report-level banner there, see
+    # own flags mean. "folder" is a documented exception: generate_report.flagged_for_system
+    # never emits it (folder-over-expected-size is only ever a report-level banner there, see
     # folder_over_expected_detail) -- reports.alerting synthesizes a matching Flag itself,
     # entirely within the alerting engine, rather than touching the shared report-engine file
     # (which exists in 3 kept-in-sync copies) just to add one more category.
+    #
+    # "backup_uncleared" is a PLACEHOLDER, on request (2026-09-03) -- no detection exists for
+    # it anywhere yet (not in generate_report.py, not synthesized in alerting.py the way
+    # "folder" is). Listed here so it has a stable key/label ready for whenever that check IS
+    # built, but views._category_grid_rows marks it inapplicable for every system
+    # unconditionally, same visual treatment "folder" gets for a system with no watched
+    # folder -- never a live, tickable checkbox anywhere until real detection backs it.
     CATEGORY_CHOICES = [
         ("disk", "Disk usage"),
         ("ram", "RAM usage"),
@@ -454,6 +461,7 @@ class AlertGroup(models.Model):
         ("unreachable", "Component unreachable"),
         ("untracked", "Backup untracked"),
         ("folder", "Folder over expected size"),
+        ("backup_uncleared", "Uncleared backups"),
     ]
 
     name = models.CharField(max_length=120, unique=True)
