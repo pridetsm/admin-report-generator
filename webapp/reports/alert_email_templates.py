@@ -18,8 +18,13 @@ category, matching what the original hand-designed samples said.
 """
 from __future__ import annotations
 
+import base64
 import html
 from pathlib import Path
+
+from email.utils import make_msgid
+
+from . import alert_email_images
 
 # Kept for reports/views.py's config_alert_templates gallery, which serves these RAW files
 # unmodified (browser-viewed design reference, not sent) -- unrelated to render() below.
@@ -131,19 +136,13 @@ def _gauge_hero(category: str, *, system: str, band: str) -> tuple:
     noun = {"disk": "Disk usage", "ram": "RAM usage", "cpu": "CPU usage"}[category]
     word = {"disk": "disk", "ram": "memory", "cpu": "CPU"}[category]
     pct = 97 if band == "red" else 88
-    fill_px = round(120 * pct / 100)
-    c = _band_colors(band)
     threshold_phrase = "well past the critical" if band == "red" else "above the warning"
     headline = f"{noun} on {system} is reading {pct}%, {threshold_phrase} threshold."
     notice = (f"The {pct}% reading is a synthetic test value used to demonstrate this alert "
              f"layout — no real {word} metric triggered it.")
+    image_bytes = alert_email_images.render_gauge(pct, band, label)
     gauge = f"""<td width="150" valign="top" align="center">
-      <div style="font-family:{MONO};font-size:32px;font-weight:bold;color:{TEXT};line-height:1;">{pct}%</div>
-      <div style="font-family:{MONO};font-size:10px;color:{MUTED};letter-spacing:1px;margin-top:4px;">{label}</div>
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="120" style="margin:12px auto 0;"><tr>
-        <td width="{fill_px}" height="10" bgcolor="{c['fg']}" style="background:{c['fg']};font-size:1px;line-height:1px;">&nbsp;</td>
-        <td width="{120 - fill_px}" height="10" bgcolor="{TRACK}" style="background:{TRACK};font-size:1px;line-height:1px;">&nbsp;</td>
-      </tr></table>
+      <img src="__IMG_hero__" width="148" height="148" alt="{pct}% {label}" style="display:block;border:0;">
       <div style="font-family:{MONO};font-size:10px;color:{MUTED};margin-top:8px;">warn 70 &middot; crit 90</div>
     </td>"""
     detail = _hero_detail(chips=_chip_row(system, category, band), headline=headline,
@@ -153,7 +152,7 @@ def _gauge_hero(category: str, *, system: str, band: str) -> tuple:
            f'<td width="20" style="font-size:1px;line-height:1px;">&nbsp;</td>{detail}</tr></table>')
     flow = _flow_table(system=system, metric_label="Metric", metric_value=_METRIC_KEY[category],
                        finding_value=f"{pct}% &middot; {band.upper()}", band=band)
-    return hero, flow, notice
+    return hero, flow, notice, {"hero": image_bytes}
 
 
 def _ring_hero(category: str, *, system: str, band: str) -> tuple:
@@ -170,12 +169,9 @@ def _ring_hero(category: str, *, system: str, band: str) -> tuple:
         notice = ("The connectivity loss shown here is a synthetic test event used to "
                  "demonstrate this alert layout — nothing real is unreachable.")
         metric_label, metric_value = "Component", "auth-gateway"
+    image_bytes = alert_email_images.render_ring(state, f"{elapsed}m elapsed", band)
     ring = f"""<td width="150" valign="top" align="center">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="130"><tr>
-      <td align="center" valign="middle" width="130" height="130" bgcolor="{c['soft']}" style="background:{c['soft']};border:2px dashed {c['line']};">
-        <div style="font-family:{MONO};font-size:18px;font-weight:bold;color:{c['fg']};">{state}</div>
-        <div style="font-family:{MONO};font-size:10px;color:{MUTED};margin-top:6px;">{elapsed}m elapsed</div>
-      </td></tr></table>
+      <img src="__IMG_hero__" width="148" height="148" alt="{state} {elapsed}m elapsed" style="display:block;border:0;">
       <div style="font-family:{MONO};font-size:10px;color:{MUTED};margin-top:8px;"><span style="color:{c['fg']};">&#9679;</span> no signal since drop</div>
     </td>"""
     detail = _hero_detail(chips=_chip_row(system, category, band), headline=headline, note=_KIND_NOTE["ring"])
@@ -184,7 +180,7 @@ def _ring_hero(category: str, *, system: str, band: str) -> tuple:
            f'<td width="20" style="font-size:1px;line-height:1px;">&nbsp;</td>{detail}</tr></table>')
     flow = _flow_table(system=system, metric_label=metric_label, metric_value=metric_value,
                        finding_value=f"{state} &middot; {band.upper()}", band=band)
-    return hero, flow, notice
+    return hero, flow, notice, {"hero": image_bytes}
 
 
 def _grid_hero(category: str, *, system: str, band: str) -> tuple:
@@ -227,7 +223,7 @@ def _grid_hero(category: str, *, system: str, band: str) -> tuple:
            f'<td width="20" style="font-size:1px;line-height:1px;">&nbsp;</td>{detail}</tr></table>')
     flow = _flow_table(system=system, metric_label="Metric", metric_value=_METRIC_KEY[category],
                        finding_value=f"{aff}/{total} &middot; {band.upper()}", band=band)
-    return hero, flow, notice
+    return hero, flow, notice, {}
 
 
 def _bar_hero(category: str, *, system: str, band: str) -> tuple:
@@ -262,15 +258,25 @@ def _bar_hero(category: str, *, system: str, band: str) -> tuple:
            f'</td></tr></table>')
     flow = _flow_table(system=system, metric_label="Folder", metric_value="/data/exports",
                        finding_value=f"{actual} GB &middot; {band.upper()}", band=band)
-    return hero, flow, notice
+    return hero, flow, notice, {}
 
 
 _HERO_BUILDERS = {"gauge": _gauge_hero, "ring": _ring_hero, "grid": _grid_hero, "bar": _bar_hero}
 
 
-def render(category: str, *, system: str, band: str, group_name: str, min_severity: str) -> str:
-    """Full Outlook-safe HTML for one category's synthetic test finding. Raises KeyError for a
-    category with no shape mapping yet (see SHAPE_BY_CATEGORY).
+def render(category: str, *, system: str, band: str, group_name: str, min_severity: str,
+          for_browser: bool = False) -> tuple:
+    """Renders one category's synthetic test finding. Raises KeyError for a category with no
+    shape mapping yet (see SHAPE_BY_CATEGORY).
+
+    Returns (html, inline_images): for a REAL send (for_browser=False, the default), the hero
+    image and header gradient are referenced via `cid:...` and returned in `inline_images`
+    ({cid: png_bytes}) for the caller to hand to mail_report.send_email's own `inline_images`
+    parameter -- the standard MIME shape for an inline (not attached-as-a-file) image. For the
+    in-browser preview endpoint (for_browser=True), there is no MIME envelope for a `cid:` to
+    resolve against, so the SAME images are embedded directly as base64 data: URIs instead, and
+    `inline_images` comes back empty. Preview and a real send always show pixel-identical
+    images either way -- only how the browser/mail-client fetches the bytes differs.
 
     `system` and `group_name` are escaped once, here, before anything downstream interpolates
     them raw -- system comes from an admin-picked dropdown (topology names), but group_name is
@@ -279,10 +285,26 @@ def render(category: str, *, system: str, band: str, group_name: str, min_severi
     group_name = html.escape(group_name)
     min_severity = html.escape(min_severity)
     shape = SHAPE_BY_CATEGORY[category]
-    hero, flow, notice_text = _HERO_BUILDERS[shape](category, system=system, band=band)
+    hero, flow, notice_text, hero_images = _HERO_BUILDERS[shape](category, system=system, band=band)
     banner = _band_colors(band)
 
-    return f"""<!doctype html>
+    images = {"header": alert_email_images.header_gradient_png()}
+    images.update(hero_images)
+
+    inline_images: dict = {}
+    src = {}
+    for name, png_bytes in images.items():
+        if for_browser:
+            src[name] = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        else:
+            cid = make_msgid()[1:-1]      # strip the <...> -- re-added by mail_report.send_email
+            src[name] = f"cid:{cid}"
+            inline_images[cid] = png_bytes
+
+    hero = hero.replace("__IMG_hero__", src.get("hero", ""))
+    header_attr = f'background="{src["header"]}" bgcolor="{INK}"'
+
+    html_out = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -295,7 +317,7 @@ def render(category: str, *, system: str, band: str, group_name: str, min_severi
 <tr><td align="center" style="padding:24px 12px;">
 <table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;width:100%;background:{CARD};border:1px solid {LINE};">
 
-  <tr><td style="background:{INK};padding:24px 28px;" bgcolor="{INK}">
+  <tr><td style="background:{INK};padding:24px 28px;" {header_attr}>
     <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
       <td width="38" valign="top">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
@@ -330,3 +352,4 @@ def render(category: str, *, system: str, band: str, group_name: str, min_severi
 </table>
 </body>
 </html>"""
+    return html_out, inline_images

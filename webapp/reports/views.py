@@ -2107,8 +2107,8 @@ def config_alert_group_preview(request, pk):
     tband = request.GET.get("tband") if request.GET.get("tband") in ("red", "amber") else "red"
     if not tsys or not tcat:
         return HttpResponse("Add at least one system before previewing.", content_type="text/plain")
-    _subject, _text, html_body = alerting.render_test_email(group, kind=kind, system=tsys,
-                                                             category=tcat, band=tband)
+    _subject, _text, html_body, _images = alerting.render_test_email(
+        group, kind=kind, system=tsys, category=tcat, band=tband, for_browser=True)
     return HttpResponse(html_body)
 
 

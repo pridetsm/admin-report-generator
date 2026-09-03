@@ -805,9 +805,16 @@ _SMTP_TIMEOUT = 45                    # was 30s; the observed slow-but-working l
 
 
 def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
-               text_body: str, attachment: Optional[Path] = None) -> None:
+               text_body: str, attachment: Optional[Path] = None,
+               inline_images: Optional[dict] = None) -> None:
     """Send the multipart/alternative e-mail, optionally with the XLSX report attached.
        `attachment` is a path — its file NAME becomes the attachment name.
+
+       `inline_images`, if given, is {cid: png_bytes} for images the HTML references via
+       `<img src="cid:...">` or a table `background="cid:..."` attribute (reports/
+       alert_email_templates.py's Outlook-safe gauge/ring/header visuals) — attached as
+       multipart/related parts scoped to the HTML alternative specifically, the standard MIME
+       shape mail clients expect for an inline (not attached-as-a-file) image.
 
        Retries the whole SMTP conversation (fresh connection each time -- a half-open one
        from a failed attempt is not reused) on a transient network/timeout error, since this
@@ -821,6 +828,10 @@ def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
     msg["To"] = ", ".join(recipients)
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
+    if inline_images:
+        html_part = msg.get_payload()[-1]
+        for cid, png_bytes in inline_images.items():
+            html_part.add_related(png_bytes, maintype="image", subtype="png", cid=f"<{cid}>")
     if attachment is not None:
         path = Path(attachment)
         maintype, subtype = XLSX_MIME if path.suffix.lower() == ".xlsx" else ("application", "octet-stream")

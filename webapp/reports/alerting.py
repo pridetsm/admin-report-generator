@@ -452,30 +452,34 @@ def _synthetic_flag(category: str, band: str):
     return gr.Flag(key=f"synthetic:{category}", text=text, band=band, category=category)
 
 
-def render_test_email(group, *, kind: str, system: str, category: str, band: str) -> tuple:
-    """Builds (subject, text_body, html_body) from a FABRICATED example -- 'positive' (a fired
-    finding) or 'resolved' (that finding clearing). Used by both the in-browser preview endpoint
-    and send_test_email, so preview and send can never disagree about what a recipient would
-    actually see.
+def render_test_email(group, *, kind: str, system: str, category: str, band: str,
+                      for_browser: bool = False) -> tuple:
+    """Builds (subject, text_body, html_body, inline_images) from a FABRICATED example --
+    'positive' (a fired finding) or 'resolved' (that finding clearing). Used by both the
+    in-browser preview endpoint and send_test_email, so preview and send can never disagree
+    about what a recipient would actually see -- the SAME png bytes either way, just addressed
+    differently (see alert_email_templates.render's own docstring on for_browser).
 
     'positive' uses the Outlook-safe per-category rendering (reports/alert_email_templates.py
-    -- table-based layout, no CSS vars/flexbox/SVG, see that module's own docstring for why)
-    when a shape exists for this category -- today, all nine do -- falling back to the plain
-    multi-item digest for any future category added without one yet. 'resolved' has no
-    per-category rendering at all (no design exists for a "cleared" version of these hero
-    layouts), so it always uses the plain digest."""
+    -- table-based layout, embedded images instead of inline SVG, no CSS vars/flexbox, see that
+    module's own docstring for why) when a shape exists for this category -- today, all nine
+    do -- falling back to the plain multi-item digest (inline_images always {}) for any future
+    category added without one yet. 'resolved' has no per-category rendering at all (no design
+    exists for a "cleared" version of these hero layouts), so it always uses the plain digest."""
     flag = _synthetic_flag(category, band)
+    inline_images: dict = {}
     if kind == "resolved":
         opened_at = timezone.now() - datetime.timedelta(hours=3, minutes=17)
         subject, text_body, html_body = _render_resolved_email(
             group, [(system, band, flag.text, opened_at)], timezone.now())
     elif category in alert_email_templates.SHAPE_BY_CATEGORY:
         subject, text_body, _old_html = _render_fired_email(group, [(system, flag, "new")])
-        html_body = alert_email_templates.render(category, system=system, band=band,
-                                                  group_name=group.name, min_severity=group.min_severity)
+        html_body, inline_images = alert_email_templates.render(
+            category, system=system, band=band, group_name=group.name,
+            min_severity=group.min_severity, for_browser=for_browser)
     else:
         subject, text_body, html_body = _render_fired_email(group, [(system, flag, "new")])
-    return f"[SYNTHETIC TEST] {subject}", text_body, html_body
+    return f"[SYNTHETIC TEST] {subject}", text_body, html_body, inline_images
 
 
 def send_test_email(group, *, kind: str, system: str, category: str, band: str,
@@ -491,15 +495,15 @@ def send_test_email(group, *, kind: str, system: str, category: str, band: str,
     if not recipients:
         return False, "This group has no stakeholders yet — add at least one before testing."
 
-    subject, text_body, html_body = render_test_email(group, kind=kind, system=system,
-                                                       category=category, band=band)
+    subject, text_body, html_body, inline_images = render_test_email(
+        group, kind=kind, system=system, category=category, band=band, for_browser=False)
     import mail_report as mr
     mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
     if not mailcfg.get("host"):
         return False, "No SMTP host configured (send_report/config.ini [smtp])."
     mailcfg["from_name"] = "System Alerts (test)"
     try:
-        mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body, inline_images=inline_images)
     except Exception as exc:      # noqa: BLE001 -- shown to the admin, that's the point of testing
         return False, f"Send failed: {exc}"
     return True, f"Synthetic {kind} test sent to {', '.join(recipients)}."
