@@ -21,6 +21,8 @@ from django.utils import timezone
 
 import generate_report as gr   # send_report/ is on sys.path, same mechanism services.py uses
 
+from . import alert_email_templates
+
 @dataclass
 class AlertRunResult:
     """What one run_alert_cycle() call did, for the management command to report and for
@@ -454,12 +456,22 @@ def render_test_email(group, *, kind: str, system: str, category: str, band: str
     """Builds (subject, text_body, html_body) from a FABRICATED example -- 'positive' (a fired
     finding) or 'resolved' (that finding clearing). Used by both the in-browser preview endpoint
     and send_test_email, so preview and send can never disagree about what a recipient would
-    actually see."""
+    actually see.
+
+    'positive' uses the designed per-category template (reports/alert_email_templates.py) when
+    one exists for this category -- today, all nine do -- falling back to the plain multi-item
+    digest for any future category added without a design yet. 'resolved' has no designed
+    template at all (see that module's own docstring on why), so it always uses the plain
+    digest."""
     flag = _synthetic_flag(category, band)
     if kind == "resolved":
         opened_at = timezone.now() - datetime.timedelta(hours=3, minutes=17)
         subject, text_body, html_body = _render_resolved_email(
             group, [(system, band, flag.text, opened_at)], timezone.now())
+    elif category in alert_email_templates.FILE_BY_CATEGORY:
+        subject, text_body, _old_html = _render_fired_email(group, [(system, flag, "new")])
+        html_body = alert_email_templates.render(category, system=system, band=band,
+                                                  group_name=group.name, min_severity=group.min_severity)
     else:
         subject, text_body, html_body = _render_fired_email(group, [(system, flag, "new")])
     return f"[SYNTHETIC TEST] {subject}", text_body, html_body

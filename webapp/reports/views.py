@@ -37,8 +37,9 @@ import generate_report as gr   # to show the config.ini defaults on the settings
 
 from pathlib import Path
 
-from . import (alerting, backup_policy_admin, connect, crypto, folders, grafana_admin, network,
-               network_sod, promconfig, prometheus_admin, scripts, snmp_admin)
+from . import (alert_email_templates, alerting, backup_policy_admin, connect, crypto, folders,
+               grafana_admin, network, network_sod, promconfig, prometheus_admin, scripts,
+               snmp_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
@@ -2111,33 +2112,14 @@ def config_alert_group_preview(request, pk):
     return HttpResponse(html_body)
 
 
-# One designed sample e-mail per AlertGroup category (see reports/alert_email_samples/ —
-# static, self-contained HTML, hardcoded sample data, no Django templating: dropped in as
-# finished designs, not rendered from live values). Every AlertGroup.CATEGORY_CHOICES key has
-# exactly one file here; a category added to CATEGORY_CHOICES without a matching sample here
-# just won't show a preview link, it won't error.
-_ALERT_TEMPLATE_FILES = {
-    "disk": "disk-usage.html",
-    "ram": "ram-usage.html",
-    "cpu": "cpu-usage.html",
-    "service": "service-down.html",
-    "backup": "backup-missing.html",
-    "unreachable": "component-unreachable.html",
-    "untracked": "backup-untracked.html",
-    "folder": "folder-over-size.html",
-    "backup_uncleared": "uncleared-backups.html",
-}
-_ALERT_TEMPLATE_DIR = Path(__file__).resolve().parent / "alert_email_samples"
-
-
 def config_alert_templates(request):
     """Gallery of the designed sample e-mail for every alert category — a design reference,
-    not a live send: each file is fixed sample data (see _ALERT_TEMPLATE_FILES' own comment),
-    so this page never touches Prometheus, AlertGroup, or AlertFinding at all."""
+    not a live send: each file is fixed sample data (see alert_email_templates.py's own
+    comment), so this page never touches Prometheus, AlertGroup, or AlertFinding at all."""
     denied = _require_admin(request)
     if denied:
         return denied
-    rows = [{"category": cat, "label": lbl, "available": cat in _ALERT_TEMPLATE_FILES}
+    rows = [{"category": cat, "label": lbl, "available": cat in alert_email_templates.FILE_BY_CATEGORY}
            for cat, lbl in AlertGroup.CATEGORY_CHOICES]
     return render(request, "reports/config_alert_templates.html", {
         **_config_context("config_alert_templates"),
@@ -2146,16 +2128,18 @@ def config_alert_templates(request):
 
 
 def config_alert_template_preview(request, category):
-    """Serves one sample e-mail's raw HTML for in-browser viewing (opened in a new tab from
-    the gallery) — a direct file read, not run through Django's template engine, since these
-    are finished designs to look at, not templates to fill in."""
+    """Serves one sample e-mail's raw, UNsubstituted HTML for in-browser viewing (opened in a
+    new tab from the gallery) — a direct file read, not run through Django's template engine.
+    A group's own Test tools page previews the SUBSTITUTED version instead (system/severity/
+    group filled in — see alert_email_templates.render), which this gallery deliberately
+    doesn't do: it has no group or system in scope, only a category."""
     denied = _require_admin(request)
     if denied:
         return denied
-    filename = _ALERT_TEMPLATE_FILES.get(category)
+    filename = alert_email_templates.FILE_BY_CATEGORY.get(category)
     if not filename:
         raise Http404
-    return HttpResponse((_ALERT_TEMPLATE_DIR / filename).read_text(encoding="utf-8"))
+    return HttpResponse((alert_email_templates.SAMPLES_DIR / filename).read_text(encoding="utf-8"))
 
 
 def _folder_watch_systems(prometheus_yml: str) -> set:
