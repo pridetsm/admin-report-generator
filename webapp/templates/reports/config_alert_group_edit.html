@@ -24,6 +24,26 @@
       </label>
     </div></div>
 
+    <div class="section-label sub">Systems this group covers</div>
+    <div class="card"><div class="body" style="padding:14px 18px">
+      {% if not systems %}
+        <p class="cfg-note" style="margin:0">No systems found — nothing to map yet.</p>
+      {% else %}
+      <div class="scope-grid" data-scope-group>
+        {% for s in systems %}
+        <label class="scope-opt">
+          <input type="checkbox" name="systems" value="{{ s }}" {% if s in group.systems %}checked{% endif %}>
+          <span>{{ s }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
+        <button type="button" class="btn ghost cfg-add" data-scope-none>Clear</button>
+      </div>
+      {% endif %}
+    </div></div>
+
     <div class="section-label sub">When to fire</div>
     <div class="card"><div class="body" style="padding:16px 18px">
       <div class="cfg-grid4">
@@ -51,26 +71,26 @@
           <small class="cfg-hint">Untick to pause without deleting — nothing fires while paused.</small>
         </label>
       </div>
-    </div></div>
 
-    <div class="section-label sub">Systems this group covers</div>
-    <div class="card"><div class="body" style="padding:14px 18px">
-      {% if not systems %}
-        <p class="cfg-note" style="margin:0">No systems found — nothing to map yet.</p>
-      {% else %}
-      <div class="scope-grid" data-scope-group>
-        {% for s in systems %}
-        <label class="scope-opt">
-          <input type="checkbox" name="systems" value="{{ s }}" {% if s in group.systems %}checked{% endif %}>
-          <span>{{ s }}</span>
-        </label>
-        {% endfor %}
+      <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+        <div class="field" style="margin-bottom:10px">
+          <span>Metrics to alert on <small style="color:var(--muted);font-weight:400">— topology-aware: hints below reflect the systems picked above</small></span>
+        </div>
+        <div class="scope-grid" data-scope-group>
+          {% for row in category_rows %}
+          <label class="scope-opt">
+            <input type="checkbox" name="categories" value="{{ row.value }}" {% if row.checked %}checked{% endif %}>
+            <span>{{ row.label }}
+              {% if row.hint %}<small style="display:block;color:var(--muted);font-weight:400">{{ row.hint }}</small>{% endif %}
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button type="button" class="btn ghost cfg-add" data-scope-all>All metrics</button>
+          <button type="button" class="btn ghost cfg-add" data-scope-none>None</button>
+        </div>
       </div>
-      <div style="margin-top:12px;display:flex;gap:8px">
-        <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
-        <button type="button" class="btn ghost cfg-add" data-scope-none>Clear</button>
-      </div>
-      {% endif %}
     </div></div>
 
     <div class="section-label sub">App-user stakeholders</div>

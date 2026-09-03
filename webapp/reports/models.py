@@ -437,12 +437,33 @@ class AlertGroup(models.Model):
         ("once", "Once per finding, then silent until resolved"),
         ("daily", "Once, then a daily reminder while still open"),
     ]
+    # The same category strings generate_report.Flag.category already carries on every
+    # finding (disk/ram/cpu/service/backup/unreachable/untracked) -- reused as-is rather than
+    # inventing a second taxonomy, so a group's filter always means exactly what the report's
+    # own flags mean.
+    CATEGORY_CHOICES = [
+        ("disk", "Disk usage"),
+        ("ram", "RAM usage"),
+        ("cpu", "CPU usage"),
+        ("service", "Service down"),
+        ("backup", "Backup missing"),
+        ("unreachable", "Component unreachable"),
+        ("untracked", "Backup untracked"),
+    ]
 
     name = models.CharField(max_length=120, unique=True)
     systems = models.JSONField(
         default=list, blank=True,
         help_text="System names from prometheus.yml this group covers. Empty = covers "
                    "nothing yet (unlike Role scopes, empty here is not ‘all systems’).")
+    categories = models.JSONField(
+        default=list, blank=True,
+        help_text="Flag categories (disk/ram/cpu/...) this group alerts on. UNLIKE `systems` "
+                   "above, empty here means ALL categories, not none -- this field was added "
+                   "after groups already existed in the wild, and an empty-means-nothing "
+                   "default would have silently gone quiet for every one of them the moment "
+                   "the field appeared. Narrow it explicitly if you only want e.g. backup "
+                   "alerts for this group.")
     users = models.ManyToManyField(
         settings.AUTH_USER_MODEL, blank=True, related_name="alert_groups",
         help_text="App users notified via their account e-mail.")
@@ -470,6 +491,12 @@ class AlertGroup(models.Model):
         addrs = {e.strip() for e in (self.emails or []) if e.strip()}
         addrs |= {u.email.strip() for u in self.users.filter(is_active=True) if u.email}
         return sorted(addrs)
+
+    def category_matches(self, category: str) -> bool:
+        """Whether a Flag of this category clears the group's own filter -- an empty
+        `categories` list means every category qualifies (see that field's own help_text for
+        why that default differs from `systems`/`emails`)."""
+        return not self.categories or category in self.categories
 
     @property
     def stakeholder_count(self) -> int:

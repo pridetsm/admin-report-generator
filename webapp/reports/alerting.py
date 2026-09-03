@@ -132,7 +132,8 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
         for g in groups:
             if sysm.name not in (g.systems or []):
                 continue
-            eligible = [f for f in flags if severity_meets(f.band, g.min_severity)]
+            eligible = [f for f in flags
+                       if severity_meets(f.band, g.min_severity) and g.category_matches(f.category)]
             eligible_keys = {f.key for f in eligible}
 
             if not dry_run:
