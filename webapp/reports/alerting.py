@@ -13,7 +13,6 @@ imports this module.
 from __future__ import annotations
 
 import datetime
-import html
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -266,13 +265,14 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
             continue   # misconfigured group: no stakeholders -- skip, don't crash the run
 
         if items:
-            subject, text_body, html_body = _render_fired_email(g, items)
+            subject, text_body, html_body, inline_images = _render_fired_email(g, items)
             if dry_run:
                 result.emails_preview.append({"group": g.name, "kind": "fired", "to": recipients,
                                               "subject": subject, "text_body": text_body})
             elif mailcfg.get("host"):
                 try:
-                    mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+                    mr.send_email(mailcfg, recipients, subject, html_body, text_body,
+                                  inline_images=inline_images)
                     result.emails_sent += 1
                     AlertFinding.objects.filter(pk__in=[r.pk for r in per_group_rows[g.pk]]) \
                                         .update(last_notified_at=now)
@@ -337,7 +337,7 @@ def send_test_alert(group, *, to: str | None = None) -> tuple[bool, str]:
                    and group.category_matches(sysm.name, f.category)]
         items += [(sysm.name, f, "new") for f in eligible]
 
-    subject, text_body, html_body = _render_fired_email(group, items)
+    subject, text_body, html_body, inline_images = _render_fired_email(group, items)
     subject = f"[TEST] {subject}"
     if items:
         preamble = "This is a manually triggered TEST alert — not a real notification cycle.\n\n"
@@ -353,7 +353,7 @@ def send_test_alert(group, *, to: str | None = None) -> tuple[bool, str]:
         return False, "No SMTP host configured (send_report/config.ini [smtp])."
     mailcfg["from_name"] = "System Alerts (test)"
     try:
-        mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body, inline_images=inline_images)
     except Exception as exc:      # noqa: BLE001 -- shown to the admin, that's the point of testing
         return False, f"Send failed: {exc}"
     return True, f"Test alert sent to {', '.join(recipients)}."
@@ -371,57 +371,15 @@ def _duration_str(start, end) -> str:
     return f"{d}d {h}h"
 
 
-def _email_shell(*, kicker: str, banner_bg: str, banner_fg: str, headline: str,
-                 col_headers: list, rows_html: str, footer_note: str) -> str:
-    """The branded wrapper (navy/gold header, coloured status banner, a table) shared by every
-    alert e-mail this module sends -- built from mail_report's own NAVY/GOLD/RED/AMBER/GREEN
-    palette so an alert e-mail reads as the same product as the daily report, not a different
-    tool with its own look. mail_report's render_html itself is NOT reused (it's shaped for the
-    full daily KPI dashboard, not a one-group flag digest) -- only its constants are."""
-    import mail_report as mr
-    ths = "".join(
-        f'<th style="text-align:left;padding:9px 12px;font-size:10px;letter-spacing:.4px;'
-        f'color:{mr.MUTED};text-transform:uppercase;background:#f7f8fa;border-bottom:1px solid #e6e8ec;">{html.escape(h)}</th>'
-        for h in col_headers)
-    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#eef0f3;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#eef0f3;font-family:'Segoe UI',Arial,sans-serif;">
-<tr><td align="center" style="padding:24px 12px;">
-<table width="660" cellpadding="0" cellspacing="0" style="max-width:660px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12);">
-  <tr><td style="background:{mr.NAVY};padding:20px 24px;">
-    <div style="font-size:18px;font-weight:700;color:{mr.GOLD};letter-spacing:.5px;">{html.escape(kicker)}</div>
-    <div style="font-size:12px;color:#aebfd1;margin-top:3px;">Reserve Bank of Zimbabwe &nbsp;&middot;&nbsp; RBZ Monitoring Console</div>
-  </td></tr>
-  <tr><td style="background:{banner_bg};border-bottom:1px solid #e6e8ec;padding:12px 24px;">
-    <span style="color:{banner_fg};font-weight:700;font-size:14px;">&#9679; {html.escape(headline)}</span>
-  </td></tr>
-  <tr><td>
-    <table width="100%" cellpadding="0" cellspacing="0">
-      <tr>{ths}</tr>
-      {rows_html}
-    </table>
-  </td></tr>
-  <tr><td style="background:#f7f8fa;border-top:1px solid #e6e8ec;padding:14px 24px;">
-    <div style="font-size:11px;color:{mr.MUTED};line-height:1.6;">{footer_note}</div>
-  </td></tr>
-</table></td></tr></table></body></html>"""
+def _render_fired_email(group, items, *, for_browser: bool = False) -> tuple:
+    """items: [(system, Flag, action), ...] for ONE group ('new' or 'remind').
 
-
-def _fired_row(system: str, f) -> str:
-    import mail_report as mr
-    color = mr.RED if f.band == "red" else mr.AMBER
-    return (
-        f'<tr><td style="padding:7px 12px;border-bottom:1px solid #eef0f2;font-weight:600;color:{mr.NAVY};">{html.escape(system)}</td>'
-        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(f.category)}</td>'
-        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(f.text)}</td>'
-        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:{color};font-weight:700;'
-        f'text-transform:uppercase;font-size:11px;white-space:nowrap;">{f.band}</td></tr>')
-
-
-def _render_fired_email(group, items) -> tuple:
-    """items: [(system, Flag, action), ...] for ONE group ('new' or 'remind'). Branded HTML
-    (see _email_shell) plus a plain-text alternative; only send_email (SMTP) is reused from
-    mail_report, never reimplemented."""
-    import mail_report as mr
+    Uses alert_email_templates.render_fired for the HTML -- the same branded shell every other
+    alert e-mail this feature sends (navy gradient header, white "Alert notification" title,
+    card per finding), not the older mail_report-styled "SYSTEM ALERT" digest this used to
+    build via _email_shell, which is what a real recipient's screenshot showed was still going
+    out for real production alerts even after render_resolved was migrated (2026-09-04) --
+    only the fired path had been missed."""
     new_items = [(s, f) for s, f, a in items if a == "new"]
     reminders = [(s, f) for s, f, a in items if a == "remind"]
     subject = f"[Alerts] {group.name} — {len(new_items)} new, {len(reminders)} reminder(s)"
@@ -435,18 +393,9 @@ def _render_fired_email(group, items) -> tuple:
         lines += [f"  [{f.band.upper()}] {s} — {f.text}" for s, f in reminders]
     text_body = "\n".join(lines)
 
-    any_red = any(f.band == "red" for _, f in new_items + reminders)
-    banner_bg, banner_fg = (mr.RED_T, mr.RED) if any_red else (mr.AMBER_T, mr.AMBER)
-    headline = f"{len(new_items)} new finding(s), {len(reminders)} still open"
-    rows_html = "".join(_fired_row(s, f) for s, f in new_items) \
-              + "".join(_fired_row(s, f) for s, f in reminders)
-    footer = (f'Automated alert from the RBZ Monitoring Console for the &ldquo;{html.escape(group.name)}&rdquo; '
-             f'group &mdash; minimum severity: {group.min_severity}. Manage this group\'s systems, metrics '
-             f'and stakeholders at {mr.REPORT_GENERATOR_URL}.')
-    html_body = _email_shell(kicker="SYSTEM ALERT", banner_bg=banner_bg, banner_fg=banner_fg,
-                             headline=headline, col_headers=["System", "Metric", "Finding", "Severity"],
-                             rows_html=rows_html, footer_note=footer)
-    return subject, text_body, html_body
+    html_body, inline_images = alert_email_templates.render_fired(
+        items, group_name=group.name, min_severity=group.min_severity, for_browser=for_browser)
+    return subject, text_body, html_body, inline_images
 
 
 def _render_resolved_email(group, resolved_items, now, *, for_browser: bool = False) -> tuple:
@@ -505,12 +454,14 @@ def render_test_email(group, *, kind: str, system: str, category: str, band: str
         subject, text_body, html_body, inline_images = _render_resolved_email(
             group, [(system, band, flag.text, opened_at)], timezone.now(), for_browser=for_browser)
     elif category in alert_email_templates.SHAPE_BY_CATEGORY:
-        subject, text_body, _old_html = _render_fired_email(group, [(system, flag, "new")])
+        subject, text_body, _old_html, _old_images = _render_fired_email(
+            group, [(system, flag, "new")], for_browser=for_browser)
         html_body, inline_images = alert_email_templates.render(
             category, system=system, band=band, group_name=group.name,
             min_severity=group.min_severity, for_browser=for_browser)
     else:
-        subject, text_body, html_body = _render_fired_email(group, [(system, flag, "new")])
+        subject, text_body, html_body, inline_images = _render_fired_email(
+            group, [(system, flag, "new")], for_browser=for_browser)
     return f"[SYNTHETIC TEST] {subject}", text_body, html_body, inline_images
 
 

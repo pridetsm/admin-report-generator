@@ -367,6 +367,55 @@ def render(category: str, *, system: str, band: str, group_name: str, min_severi
                  for_browser=for_browser)
 
 
+def _fired_item_card(system: str, category: str, band: str, text: str, action: str) -> str:
+    c = _band_colors(band)
+    tag = "NEW" if action == "new" else "STILL OPEN"
+    tag_chip = (f'<span style="display:inline-block;font-family:{MONO};font-size:11px;font-weight:bold;'
+               f'color:{c["fg"]};background:{c["soft"]};border:1px solid {c["line"]};padding:4px 9px;'
+               f'margin:0 6px 6px 0;">{tag}</span>')
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+           f'style="margin-bottom:10px;border:1px solid {LINE};border-radius:10px;"><tr>'
+           f'<td style="padding:14px 16px;">'
+           f'<div style="margin-bottom:8px;line-height:0;">'
+           f'{_chip("system", system)}{_chip("metric", category)}{tag_chip}</div>'
+           f'<div style="font-family:{FONT};font-size:14.5px;font-weight:600;color:{TEXT};">{text}</div>'
+           f'<div style="font-family:{MONO};font-size:11px;color:{MUTED};margin-top:4px;">severity '
+           f'<span style="color:{c["fg"]};font-weight:bold;">{band.upper()}</span></div>'
+           f'</td></tr></table>')
+
+
+def render_fired(items: list, *, group_name: str, min_severity: str,
+                 for_browser: bool = False) -> tuple:
+    """Renders one or more NEW/STILL-OPEN findings for ONE group -- the REAL production digest
+    (reports.alerting.run_alert_cycle / send_test_alert's "Run live check now"), which can
+    carry several different categories/systems in one poll, unlike the single-category
+    synthetic test in render(). Same title/header/footer shell as render() and
+    render_resolved() (title "Alert notification", matching every other alert e-mail this
+    feature sends), red banner if anything here is red, amber otherwise, one card per finding
+    instead of a per-category hero visual, for the same reason render_resolved() uses cards --
+    no one hero shape fits an arbitrary mix of categories at once.
+
+    `items`: [(system, Flag, action), ...] where action is "new" or "remind" (see
+    reports.alerting's own action vocabulary) -- escaped here, same reasoning as render()'s own
+    docstring: Flag.text/category/system aren't user free text, but are escaped anyway since
+    nothing downstream should assume that."""
+    group_name = html.escape(group_name)
+    min_severity = html.escape(min_severity)
+    new_items = [(s, f) for s, f, a in items if a == "new"]
+    reminders = [(s, f) for s, f, a in items if a == "remind"]
+    any_red = any(f.band == "red" for _, f in new_items + reminders)
+    banner = _band_colors("red" if any_red else "amber")
+    banner_text = f"{len(new_items)} new finding(s), {len(reminders)} still open"
+    cards = ("".join(_fired_item_card(html.escape(s), html.escape(f.category), f.band,
+                                      html.escape(f.text), "new") for s, f in new_items)
+            + "".join(_fired_item_card(html.escape(s), html.escape(f.category), f.band,
+                                       html.escape(f.text), "remind") for s, f in reminders))
+
+    return _shell(title="Alert notification", banner_bg=banner["soft"], banner_fg=banner["fg"],
+                 banner_text=banner_text, body_html=cards, group_name=group_name,
+                 min_severity=min_severity, hero_images={}, for_browser=for_browser)
+
+
 def _resolved_item_card(system: str, band: str, text: str, duration: str) -> str:
     c = _band_colors(band)
     return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
