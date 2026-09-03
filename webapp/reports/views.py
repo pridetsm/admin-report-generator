@@ -1984,7 +1984,15 @@ def config_alert_group_edit(request, pk):
             return redirect("config_alert_group_edit", pk=group.pk)
 
         chosen_systems = [s for s in request.POST.getlist("systems") if s in systems]
-        chosen_categories = [c for c in request.POST.getlist("categories") if c in valid_categories]
+        # Per-system, not global (see AlertGroup.categories' own help_text): a system left
+        # absent from the saved dict -- whether nothing was ticked for it, or everything was
+        # ticked -- means ALL categories for it, so both those cases collapse to simply not
+        # writing a key, keeping the stored shape as small as what it actually restricts.
+        chosen_categories = {}
+        for sys_name in chosen_systems:
+            picked = {c for c in request.POST.getlist(f"categories__{sys_name}") if c in valid_categories}
+            if picked and picked != valid_categories:
+                chosen_categories[sys_name] = sorted(picked)
         chosen_user_ids = [int(i) for i in request.POST.getlist("users") if i.isdigit()]
         raw = request.POST.get("emails", "")
         candidates = [e.strip() for e in re.split(r"[,\n]", raw) if e.strip()]
@@ -2000,11 +2008,7 @@ def config_alert_group_edit(request, pk):
 
         group.name = name
         group.systems = chosen_systems
-        # All boxes ticked reads identically to none ticked (both mean "every category") --
-        # collapse the all-ticked case back to [] so the stored value always matches the
-        # simpler of the two equivalent states, and a category added to CATEGORY_CHOICES
-        # later doesn't silently exclude this group from it.
-        group.categories = [] if set(chosen_categories) == valid_categories else chosen_categories
+        group.categories = chosen_categories
         group.emails = sorted(set(valid))
         group.min_severity = request.POST.get("min_severity") or group.min_severity
         group.renotify_mode = request.POST.get("renotify_mode") or group.renotify_mode
@@ -2015,46 +2019,50 @@ def config_alert_group_edit(request, pk):
         messages.success(request, "Saved.")
         return redirect("config_alert_group_edit", pk=group.pk)
 
-    chosen_categories = set(group.categories) if group.categories else valid_categories
-    category_hints = _category_topology_hints(group.systems)
-    category_rows = [{"value": v, "label": l, "checked": v in chosen_categories,
-                      "hint": category_hints.get(v)} for v, l in AlertGroup.CATEGORY_CHOICES]
-
     return render(request, "reports/config_alert_group_edit.html", {
         **_config_context("config_alert_groups"),
         "group": group, "systems": systems, "users": users,
         "chosen_users": set(group.users.values_list("pk", flat=True)),
-        "category_rows": category_rows,
+        "category_grid": _category_grid_rows(group),
         "email_list": "\n".join(group.emails or []),
     })
 
 
-def _category_topology_hints(system_names: list) -> dict:
-    """{category_key: hint string} for the categories where topology actually says something
-    useful -- a HINT only, never a hard filter (even a category with 0 applicable systems
-    today can still be ticked; a system added to the group later might support it).
+def _category_grid_rows(group) -> list:
+    """[{"system":, "cells": [{"category":, "label":, "checked":, "applicable":}, ...]}, ...]
+    for the per-system, per-category "Metrics to alert on" table -- one row per system the
+    group covers, one column per AlertGroup.CATEGORY_CHOICES entry.
 
-    disk/ram/cpu/unreachable are structurally universal for any component-bearing system, so
-    they're never annotated. `service` is counted from generate_report's own SERVICE_CHECKS
-    registry -- pure topology, no live Prometheus call, matching every other Configuration
-    screen's read-only-file cost. backup/untracked have no static topology signal at all
-    (a backup check is entirely metric-driven, only visible from a live capture) so they stay
-    unannotated too, rather than this screen depending on Prometheus being reachable just to
-    load a config form.
+    `applicable` is a topology-derived HINT only, never a hard filter (an inapplicable cell
+    still renders a real, tickable checkbox, just visually muted) -- a system added to this
+    group later, or a metric that starts reporting later, might make it apply after all.
+    `service` is the only category with a genuine static signal: generate_report's own
+    per-system Service list (SERVICE_CHECKS, surfaced on the System.services topology object)
+    -- pure local-file topology, no live Prometheus call, matching every other Configuration
+    screen's read cost. Every other category (including the two structurally-universal ones,
+    disk/ram/cpu/unreachable, and the two with no static signal at all, backup/untracked/
+    folder -- a backup check and a watched folder are both entirely metric-driven, only
+    visible from a live capture) is always treated as applicable rather than depending on
+    Prometheus being reachable just to load a config form.
     """
-    if not system_names:
-        return {}
     cfg = gr.load_config()
     try:
         all_systems = {s.name: s for s in gr.load_topology(cfg.prometheus_yml, scope="business")}
-    except Exception:      # noqa: BLE001 -- a hint is a nicety; a broken topology file must
-        return {}          # not take down the whole edit screen (promconfig's own load errors
-                            # already surface properly on the Topology config screen itself).
-    chosen = [all_systems[n] for n in system_names if n in all_systems]
-    if not chosen:
-        return {}
-    with_services = sum(1 for s in chosen if s.services)
-    return {"service": f"{with_services} of {len(chosen)} system(s) have service checks configured"}
+    except Exception:      # noqa: BLE001 -- topology load errors already surface properly on
+        all_systems = {}   # the Topology config screen itself; this grid degrades to
+                            # "everything applicable" rather than failing to render at all.
+
+    chosen_by_system = group.categories or {}
+    rows = []
+    for sys_name in sorted(group.systems or []):
+        sysm = all_systems.get(sys_name)
+        allowed = set(chosen_by_system.get(sys_name) or []) or {k for k, _ in AlertGroup.CATEGORY_CHOICES}
+        cells = [{
+            "category": value, "label": label, "checked": value in allowed,
+            "applicable": bool(sysm.services) if (value == "service" and sysm) else True,
+        } for value, label in AlertGroup.CATEGORY_CHOICES]
+        rows.append({"system": sys_name, "cells": cells})
+    return rows
 
 
 def _safe_next(request, default="roles_console"):

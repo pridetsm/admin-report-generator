@@ -440,7 +440,11 @@ class AlertGroup(models.Model):
     # The same category strings generate_report.Flag.category already carries on every
     # finding (disk/ram/cpu/service/backup/unreachable/untracked) -- reused as-is rather than
     # inventing a second taxonomy, so a group's filter always means exactly what the report's
-    # own flags mean.
+    # own flags mean. "folder" is the one exception: generate_report.flagged_for_system never
+    # emits it (folder-over-expected-size is only ever a report-level banner there, see
+    # folder_over_expected_detail) -- reports.alerting synthesizes a matching Flag itself,
+    # entirely within the alerting engine, rather than touching the shared report-engine file
+    # (which exists in 3 kept-in-sync copies) just to add one more category.
     CATEGORY_CHOICES = [
         ("disk", "Disk usage"),
         ("ram", "RAM usage"),
@@ -449,6 +453,7 @@ class AlertGroup(models.Model):
         ("backup", "Backup missing"),
         ("unreachable", "Component unreachable"),
         ("untracked", "Backup untracked"),
+        ("folder", "Folder over expected size"),
     ]
 
     name = models.CharField(max_length=120, unique=True)
@@ -457,13 +462,14 @@ class AlertGroup(models.Model):
         help_text="System names from prometheus.yml this group covers. Empty = covers "
                    "nothing yet (unlike Role scopes, empty here is not ‘all systems’).")
     categories = models.JSONField(
-        default=list, blank=True,
-        help_text="Flag categories (disk/ram/cpu/...) this group alerts on. UNLIKE `systems` "
-                   "above, empty here means ALL categories, not none -- this field was added "
-                   "after groups already existed in the wild, and an empty-means-nothing "
-                   "default would have silently gone quiet for every one of them the moment "
-                   "the field appeared. Narrow it explicitly if you only want e.g. backup "
-                   "alerts for this group.")
+        default=dict, blank=True,
+        help_text="{system name: [category, ...]} -- per-system, not global, since not every "
+                   "system tracks the same things (e.g. only some have named service checks). "
+                   "A system ABSENT from this dict, or present with an empty list, means ALL "
+                   "categories for THAT system -- unlike `systems` above, missing/empty here "
+                   "means everything, not nothing, because this field was added after groups "
+                   "already existed in the wild and an empty-means-nothing default would have "
+                   "silently gone quiet for every one of them the moment it appeared.")
     users = models.ManyToManyField(
         settings.AUTH_USER_MODEL, blank=True, related_name="alert_groups",
         help_text="App users notified via their account e-mail.")
@@ -492,11 +498,13 @@ class AlertGroup(models.Model):
         addrs |= {u.email.strip() for u in self.users.filter(is_active=True) if u.email}
         return sorted(addrs)
 
-    def category_matches(self, category: str) -> bool:
-        """Whether a Flag of this category clears the group's own filter -- an empty
-        `categories` list means every category qualifies (see that field's own help_text for
-        why that default differs from `systems`/`emails`)."""
-        return not self.categories or category in self.categories
+    def category_matches(self, system: str, category: str) -> bool:
+        """Whether a Flag of this category, on THIS system, clears the group's own per-system
+        filter -- a system absent from `categories`, or present with an empty list, means
+        every category qualifies for it (see that field's own help_text for why that default
+        differs from `systems`/`emails`)."""
+        allowed = (self.categories or {}).get(system) or []
+        return not allowed or category in allowed
 
     @property
     def stakeholder_count(self) -> int:

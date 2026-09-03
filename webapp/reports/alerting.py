@@ -117,6 +117,23 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     store, systems, cfg = _capture(covered)
     result.systems_captured = len(systems)
 
+    # Folder-over-expected-size is a real generate_report finding (see
+    # folder_over_expected_detail's own docstring), just never routed through
+    # flagged_for_system -- it's a report-level banner there, not a per-system Flag. Reused
+    # exactly as-is (not reimplemented) and re-packaged into genuine Flag namedtuples here,
+    # entirely inside this module, so the rest of this function (severity_meets,
+    # category_matches, _decide, the AlertFinding bookkeeping, the digest e-mail) treats a
+    # folder finding identically to any other -- no separate code path to keep in sync.
+    # Always "amber" (folder_over_expected_detail's own docstring: never escalated, however
+    # far over expected a folder grows), category "folder" (see AlertGroup.CATEGORY_CHOICES'
+    # own comment on why this category exists only here, not in generate_report.py itself).
+    folder_flags_by_system: Dict[str, list] = {}
+    for sysname, fname, expected, actual in gr.folder_over_expected_detail(store, systems):
+        folder_flags_by_system.setdefault(sysname, []).append(gr.Flag(
+            key=f"folder:{fname}",
+            text=f"{fname} over expected size: {actual:.1f}GB (expected {expected:.1f}GB)",
+            band="amber", category="folder"))
+
     # [(system, Flag, action)] per group -- collected in the capture pass below, then either
     # previewed (dry_run) or turned into one digest e-mail per group afterward. The rows this
     # loop writes track CURRENT TRUTH (band/text/first_seen_at/last_seen_at) unconditionally,
@@ -128,12 +145,13 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     per_group_rows: Dict[int, list] = {g.pk: [] for g in groups}   # AlertFinding rows to stamp
 
     for sysm in systems:
-        flags = gr.flagged_for_system(store, sysm, cfg)
+        flags = gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
         for g in groups:
             if sysm.name not in (g.systems or []):
                 continue
             eligible = [f for f in flags
-                       if severity_meets(f.band, g.min_severity) and g.category_matches(f.category)]
+                       if severity_meets(f.band, g.min_severity)
+                       and g.category_matches(sysm.name, f.category)]
             eligible_keys = {f.key for f in eligible}
 
             if not dry_run:
