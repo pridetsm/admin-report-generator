@@ -510,10 +510,22 @@ class AlertGroup(models.Model):
 
     def recipient_emails(self) -> list:
         """De-duplicated stakeholder addresses: plain emails + active users' own account
-        e-mail (blank addresses silently dropped rather than erroring the whole group)."""
+        e-mail (blank OR malformed addresses silently dropped rather than erroring the whole
+        group -- some legacy User rows carry the literal string "None" as their .email, which
+        is non-blank so a truthiness check alone lets it through)."""
+        from django.core.exceptions import ValidationError as _VE
+        from django.core.validators import validate_email as _validate_email
+
+        def _valid(addr: str) -> bool:
+            try:
+                _validate_email(addr)
+                return True
+            except _VE:
+                return False
+
         addrs = {e.strip() for e in (self.emails or []) if e.strip()}
         addrs |= {u.email.strip() for u in self.users.filter(is_active=True) if u.email}
-        return sorted(addrs)
+        return sorted(a for a in addrs if _valid(a))
 
     def category_matches(self, system: str, category: str) -> bool:
         """Whether a Flag of this category, on THIS system, clears the group's own per-system

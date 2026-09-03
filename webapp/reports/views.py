@@ -37,7 +37,7 @@ import generate_report as gr   # to show the config.ini defaults on the settings
 
 from pathlib import Path
 
-from . import (backup_policy_admin, connect, crypto, folders, grafana_admin, network,
+from . import (alerting, backup_policy_admin, connect, crypto, folders, grafana_admin, network,
                network_sod, promconfig, prometheus_admin, scripts, snmp_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
@@ -1977,6 +1977,13 @@ def config_alert_group_edit(request, pk):
             group.delete()
             messages.success(request, f"Removed “{name}” and its notification history.")
             return redirect("config_alert_groups")
+
+        if request.POST.get("action") == "test_fire":
+            # Tests the group AS CURRENTLY SAVED, not whatever's sitting unsaved in the form —
+            # save first if you want to test your edits.
+            ok, msg = alerting.send_test_alert(group)
+            (messages.success if ok else messages.error)(request, msg)
+            return redirect("config_alert_group_edit", pk=group.pk)
 
         name = (request.POST.get("name") or group.name).strip()
         if AlertGroup.objects.exclude(pk=group.pk).filter(name=name).exists():

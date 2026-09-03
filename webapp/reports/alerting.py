@@ -60,6 +60,20 @@ def _capture(system_names: set):
     return store, systems, cfg
 
 
+def _folder_flags_by_system(store, systems) -> Dict[str, list]:
+    """Synthetic Flag objects for every currently-over-expected watched folder, grouped by
+    owning system. Shared by run_alert_cycle and send_test_alert so the "repackage
+    folder_over_expected_detail as a Flag" logic (see run_alert_cycle's own comment on why it
+    lives here rather than in generate_report.py) exists in exactly one place."""
+    out: Dict[str, list] = {}
+    for sysname, fname, expected, actual in gr.folder_over_expected_detail(store, systems):
+        out.setdefault(sysname, []).append(gr.Flag(
+            key=f"folder:{fname}",
+            text=f"{fname} over expected size: {actual:.1f}GB (expected {expected:.1f}GB)",
+            band="amber", category="folder"))
+    return out
+
+
 def _decide(existing, band: str, group, now) -> str:
     """'new' | 'remind' | 'skip' -- a pure function of the existing AlertFinding row (or None),
     the flag's CURRENT band, and the group's own renotify_interval_minutes.
@@ -128,12 +142,7 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     # Always "amber" (folder_over_expected_detail's own docstring: never escalated, however
     # far over expected a folder grows), category "folder" (see AlertGroup.CATEGORY_CHOICES'
     # own comment on why this category exists only here, not in generate_report.py itself).
-    folder_flags_by_system: Dict[str, list] = {}
-    for sysname, fname, expected, actual in gr.folder_over_expected_detail(store, systems):
-        folder_flags_by_system.setdefault(sysname, []).append(gr.Flag(
-            key=f"folder:{fname}",
-            text=f"{fname} over expected size: {actual:.1f}GB (expected {expected:.1f}GB)",
-            band="amber", category="folder"))
+    folder_flags_by_system = _folder_flags_by_system(store, systems)
 
     # [(system, Flag, action)] per group -- collected in the capture pass below, then either
     # previewed (dry_run) or turned into one digest e-mail per group afterward. The rows this
@@ -209,6 +218,64 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
         AlertFinding.objects.filter(pk__in=[r.pk for r in per_group_rows[g.pk]]) \
                             .update(last_notified_at=now)
     return result
+
+
+def send_test_alert(group) -> tuple[bool, str]:
+    """Manually triggered from the group's own edit screen -- always a REAL send, never a dry
+    run, because the whole point is to answer "does this actually reach my stakeholders right
+    now" (SMTP config, recipient addresses) which a preview can't tell you.
+
+    Deliberately never touches AlertFinding: a test firing must not consume a group's real
+    once-only notify slot or shift its renotify clock, or running one could cause a genuine
+    finding to go silently unreported later because the test already "used up" that finding's
+    turn. It reads the group's CURRENT saved systems/categories/severity (whatever's actually
+    in the database), not any unsaved edits sitting in the form.
+
+    If the group has real eligible findings right now they're included (still marked [TEST]
+    throughout) so this doubles as a live check that detection still works; if there are none,
+    the e-mail says so explicitly rather than going out empty and unexplained. Exceptions are
+    surfaced to the caller as the failure message, not swallowed, since seeing the actual SMTP
+    error is the point of clicking this button."""
+    recipients = group.recipient_emails()
+    if not recipients:
+        return False, "This group has no stakeholders yet — add at least one before testing."
+    if not group.systems:
+        return False, "This group covers no systems yet — add at least one before testing."
+
+    try:
+        store, systems, cfg = _capture(set(group.systems))
+    except Exception as exc:      # noqa: BLE001 -- shown to the admin, not swallowed
+        return False, f"Could not capture live data: {exc}"
+
+    folder_flags_by_system = _folder_flags_by_system(store, systems)
+    items = []
+    for sysm in systems:
+        flags = gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
+        eligible = [f for f in flags
+                   if severity_meets(f.band, group.min_severity)
+                   and group.category_matches(sysm.name, f.category)]
+        items += [(sysm.name, f, "new") for f in eligible]
+
+    subject, text_body, html_body = _render_alert_email(group, items)
+    subject = f"[TEST] {subject}"
+    if items:
+        preamble = "This is a manually triggered TEST alert — not a real notification cycle.\n\n"
+    else:
+        preamble = ("This is a manually triggered TEST alert — not a real notification cycle.\n"
+                   "No current findings for this group; sent purely to confirm delivery.\n\n")
+    text_body = preamble + text_body
+    html_body = "<pre>" + preamble.replace("\n", "<br>") + "</pre>" + html_body
+
+    import mail_report as mr
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    if not mailcfg.get("host"):
+        return False, "No SMTP host configured (send_report/config.ini [smtp])."
+    mailcfg["from_name"] = "System Alerts (test)"
+    try:
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+    except Exception as exc:      # noqa: BLE001 -- shown to the admin, that's the point of testing
+        return False, f"Send failed: {exc}"
+    return True, f"Test alert sent to {', '.join(recipients)}."
 
 
 def _render_alert_email(group, items) -> tuple:
