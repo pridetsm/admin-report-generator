@@ -2028,6 +2028,35 @@ def config_alert_group_edit(request, pk):
     })
 
 
+def _folder_watch_systems(prometheus_yml: str) -> set:
+    """System names with at least one folder_exporter target -- i.e. systems that can
+    actually produce a "Folder over expected size" finding at all (today: just Temenos,
+    confirmed live -- the folder_exporter job's only two targets are both `system: Temenos`).
+
+    A static, local-file read of prometheus.yml's OWN folder_exporter job, not a live
+    Prometheus call: a watched folder genuinely IS declared in the topology (unlike a backup
+    check, which has no config-side declaration at all and is only ever visible from a live
+    capture) -- it just lives under a job type gr.load_topology's own System/Component
+    grouping deliberately excludes (a folder watch isn't a "component"), so it needs this
+    small, targeted parse instead of reusing that function.
+    """
+    import yaml
+    try:
+        with open(prometheus_yml, encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+    except Exception:      # noqa: BLE001 -- same degrade-to-"can't tell" stance as the caller;
+        return set()       # a broken topology file already surfaces on Configuration > Topology.
+    out = set()
+    for job in doc.get("scrape_configs", []) or []:
+        if job.get("job_name") != "folder_exporter":
+            continue
+        for sc in job.get("static_configs", []) or []:
+            system = (sc.get("labels", {}) or {}).get("system")
+            if system:
+                out.add(str(system).strip())
+    return out
+
+
 def _category_grid_rows(group) -> list:
     """[{"system":, "cells": [{"category":, "label":, "checked":, "applicable":}, ...]}, ...]
     for the per-system, per-category "Metrics to alert on" table -- one row per system the
@@ -2036,14 +2065,12 @@ def _category_grid_rows(group) -> list:
     `applicable` is a topology-derived HINT only, never a hard filter (an inapplicable cell
     still renders a real, tickable checkbox, just visually muted) -- a system added to this
     group later, or a metric that starts reporting later, might make it apply after all.
-    `service` is the only category with a genuine static signal: generate_report's own
-    per-system Service list (SERVICE_CHECKS, surfaced on the System.services topology object)
-    -- pure local-file topology, no live Prometheus call, matching every other Configuration
-    screen's read cost. Every other category (including the two structurally-universal ones,
-    disk/ram/cpu/unreachable, and the two with no static signal at all, backup/untracked/
-    folder -- a backup check and a watched folder are both entirely metric-driven, only
-    visible from a live capture) is always treated as applicable rather than depending on
-    Prometheus being reachable just to load a config form.
+    Two categories carry a genuine static signal, both pure local-file topology reads with no
+    live Prometheus call: `service` from generate_report's own SERVICE_CHECKS (surfaced on the
+    System.services topology object), and `folder` from _folder_watch_systems above. Every
+    other category (disk/ram/cpu/unreachable, always structurally available; backup/
+    untracked, which have no config-side declaration at all -- entirely metric-driven, only
+    ever visible from a live capture) is always treated as applicable.
     """
     cfg = gr.load_config()
     try:
@@ -2051,16 +2078,23 @@ def _category_grid_rows(group) -> list:
     except Exception:      # noqa: BLE001 -- topology load errors already surface properly on
         all_systems = {}   # the Topology config screen itself; this grid degrades to
                             # "everything applicable" rather than failing to render at all.
+    folder_systems = _folder_watch_systems(cfg.prometheus_yml)
 
     chosen_by_system = group.categories or {}
     rows = []
     for sys_name in sorted(group.systems or []):
         sysm = all_systems.get(sys_name)
         allowed = set(chosen_by_system.get(sys_name) or []) or {k for k, _ in AlertGroup.CATEGORY_CHOICES}
-        cells = [{
-            "category": value, "label": label, "checked": value in allowed,
-            "applicable": bool(sysm.services) if (value == "service" and sysm) else True,
-        } for value, label in AlertGroup.CATEGORY_CHOICES]
+
+        def _applicable(value):
+            if value == "service":
+                return bool(sysm.services) if sysm else True
+            if value == "folder":
+                return sys_name in folder_systems
+            return True
+
+        cells = [{"category": value, "label": label, "checked": value in allowed,
+                 "applicable": _applicable(value)} for value, label in AlertGroup.CATEGORY_CHOICES]
         rows.append({"system": sys_name, "cells": cells})
     return rows
 
