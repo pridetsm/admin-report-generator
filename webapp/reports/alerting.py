@@ -241,13 +241,14 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
                     pass
 
         if resolved:
-            subject, text_body, html_body = _render_resolved_email(g, resolved, now)
+            subject, text_body, html_body, inline_images = _render_resolved_email(g, resolved, now)
             if dry_run:
                 result.emails_preview.append({"group": g.name, "kind": "resolved", "to": recipients,
                                               "subject": subject, "text_body": text_body})
             elif mailcfg.get("host"):
                 try:
-                    mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+                    mr.send_email(mailcfg, recipients, subject, html_body, text_body,
+                                  inline_images=inline_images)
                     result.resolved_emails_sent += 1
                 except Exception:  # noqa: BLE001 -- one group's SMTP failure must not stop the rest
                     pass
@@ -375,16 +376,6 @@ def _fired_row(system: str, f) -> str:
         f'text-transform:uppercase;font-size:11px;white-space:nowrap;">{f.band}</td></tr>')
 
 
-def _resolved_row(system: str, band: str, text: str, opened_for: str) -> str:
-    import mail_report as mr
-    return (
-        f'<tr><td style="padding:7px 12px;border-bottom:1px solid #eef0f2;font-weight:600;color:{mr.NAVY};">{html.escape(system)}</td>'
-        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(text)}</td>'
-        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:{mr.MUTED};font-weight:700;'
-        f'text-transform:uppercase;font-size:11px;white-space:nowrap;">was {band}</td>'
-        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:{mr.GREEN};font-weight:600;white-space:nowrap;">{opened_for}</td></tr>')
-
-
 def _render_fired_email(group, items) -> tuple:
     """items: [(system, Flag, action), ...] for ONE group ('new' or 'remind'). Branded HTML
     (see _email_shell) plus a plain-text alternative; only send_email (SMTP) is reused from
@@ -417,26 +408,24 @@ def _render_fired_email(group, items) -> tuple:
     return subject, text_body, html_body
 
 
-def _render_resolved_email(group, resolved_items, now) -> tuple:
+def _render_resolved_email(group, resolved_items, now, *, for_browser: bool = False) -> tuple:
     """resolved_items: [(system, band, text, first_seen_at), ...] for ONE group -- findings that
     WERE notified and have now cleared (see run_alert_cycle's own filtering: a finding never
-    successfully notified never reaches here)."""
-    import mail_report as mr
+    successfully notified never reaches here).
+
+    Uses alert_email_templates.render_resolved for the HTML -- the same branded shell every
+    other alert e-mail this feature sends now uses (navy gradient header, white "Alert
+    resolved" title matching "Alert notification"'s own styling, green banner) -- not the
+    older mail_report-styled digest this used to build via _email_shell, which is what a real
+    recipient flagged as visibly mismatched from the rest of the feature (2026-09-04)."""
     subject = f"[Resolved] {group.name} — {len(resolved_items)} finding(s) cleared"
     lines = [f"  {s} — {text} (was {band.upper()}, open for {_duration_str(first_seen, now)})"
             for s, band, text, first_seen in resolved_items]
     text_body = "RESOLVED:\n" + "\n".join(lines)
-    rows_html = "".join(
-        _resolved_row(s, band, text, _duration_str(first_seen, now))
-        for s, band, text, first_seen in resolved_items)
-    headline = f"{len(resolved_items)} finding(s) cleared"
-    footer = (f'Automated alert from the RBZ Monitoring Console for the &ldquo;{html.escape(group.name)}&rdquo; '
-             f'group &mdash; these were previously notified and no longer match this group\'s alerting '
-             f'policy. Manage this group at {mr.REPORT_GENERATOR_URL}.')
-    html_body = _email_shell(kicker="ALERT RESOLVED", banner_bg=mr.GREEN_T, banner_fg=mr.GREEN,
-                             headline=headline, col_headers=["System", "Finding", "Was", "Open for"],
-                             rows_html=rows_html, footer_note=footer)
-    return subject, text_body, html_body
+    items = [(s, band, text, _duration_str(first_seen, now)) for s, band, text, first_seen in resolved_items]
+    html_body, inline_images = alert_email_templates.render_resolved(
+        items, group_name=group.name, min_severity=group.min_severity, for_browser=for_browser)
+    return subject, text_body, html_body, inline_images
 
 
 def _synthetic_flag(category: str, band: str):
@@ -464,14 +453,16 @@ def render_test_email(group, *, kind: str, system: str, category: str, band: str
     -- table-based layout, embedded images instead of inline SVG, no CSS vars/flexbox, see that
     module's own docstring for why) when a shape exists for this category -- today, all nine
     do -- falling back to the plain multi-item digest (inline_images always {}) for any future
-    category added without one yet. 'resolved' has no per-category rendering at all (no design
-    exists for a "cleared" version of these hero layouts), so it always uses the plain digest."""
+    category added without one yet. 'resolved' uses the same module's render_resolved -- the
+    same branded shell as 'positive' (white "Alert resolved" title, matching "Alert
+    notification"'s own styling), just a green banner and one card per item instead of a
+    per-category hero image."""
     flag = _synthetic_flag(category, band)
     inline_images: dict = {}
     if kind == "resolved":
         opened_at = timezone.now() - datetime.timedelta(hours=3, minutes=17)
-        subject, text_body, html_body = _render_resolved_email(
-            group, [(system, band, flag.text, opened_at)], timezone.now())
+        subject, text_body, html_body, inline_images = _render_resolved_email(
+            group, [(system, band, flag.text, opened_at)], timezone.now(), for_browser=for_browser)
     elif category in alert_email_templates.SHAPE_BY_CATEGORY:
         subject, text_body, _old_html = _render_fired_email(group, [(system, flag, "new")])
         html_body, inline_images = alert_email_templates.render(

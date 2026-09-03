@@ -58,6 +58,7 @@ GOLD = "#B9873E"
 RED, RED_SOFT, RED_LINE = "#B23A32", "#F8E6E3", "#E3B3AC"
 AMBER_SOFT, AMBER_LINE = "#FBF1DE", "#E7CE99"
 TEXT, MUTED, LINE, TRACK = "#1B2430", "#64707D", "#DDE3EA", "#E4E8EE"
+GREEN, GREEN_SOFT, GREEN_LINE = "#1E7D4F", "#E8F5EE", "#BFE5D1"
 FONT = "Arial, 'Segoe UI', sans-serif"
 MONO = "'Courier New', monospace"
 
@@ -260,6 +261,81 @@ def _bar_hero(category: str, *, system: str, band: str) -> tuple:
 _HERO_BUILDERS = {"gauge": _gauge_hero, "ring": _ring_hero, "grid": _grid_hero, "bar": _bar_hero}
 
 
+def _shell(*, title: str, banner_bg: str, banner_fg: str, banner_text: str, body_html: str,
+          group_name: str, min_severity: str, hero_images: dict, for_browser: bool) -> tuple:
+    """The header/banner/footer wrapper shared by EVERY alert e-mail this module renders --
+    fired (title "Alert notification") and resolved (title "Alert resolved") alike -- so a
+    resolved e-mail is visually the same product as a fired one: same navy gradient header,
+    same white bold title treatment (just different words), same footer, only the banner color
+    and the body content differ.
+
+    Returns (html, inline_images) -- see render()'s own docstring for the for_browser/cid
+    split, unchanged here."""
+    images = {"header": alert_email_images.header_gradient_png()}
+    images.update(hero_images)
+
+    inline_images: dict = {}
+    src = {}
+    for name, png_bytes in images.items():
+        if for_browser:
+            src[name] = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
+        else:
+            cid = make_msgid()[1:-1]      # strip the <...> -- re-added by mail_report.send_email
+            src[name] = f"cid:{cid}"
+            inline_images[cid] = png_bytes
+
+    body_html = body_html.replace("__IMG_hero__", src.get("hero", ""))
+    header_attr = f'background="{src["header"]}" bgcolor="{INK}"'
+
+    html_out = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<title>{title}</title>
+</head>
+<body style="margin:0;padding:0;background:{PAPER};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:{PAPER};">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;width:100%;background:{CARD};border:1px solid {LINE};">
+
+  <tr><td style="background:{INK};padding:24px 28px;" {header_attr}>
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+      <td width="38" valign="top">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+          <td width="38" height="38" align="center" valign="middle" bgcolor="{INK_SOFT}" style="background:{INK_SOFT};border:1px solid #3a5878;font-size:18px;">&#128276;</td>
+        </tr></table>
+      </td>
+      <td width="14" style="font-size:1px;line-height:1px;">&nbsp;</td>
+      <td valign="top" style="font-family:{FONT};">
+        <span style="font-size:20px;font-weight:bold;color:#FFFFFF;">{title}</span><br>
+        <span style="font-size:12px;color:#9FB3C8;">Reserve Bank of Zimbabwe &middot; <span style="color:#D9C79A;">RBZ Monitoring Console</span></span>
+      </td>
+    </tr></table>
+  </td></tr>
+
+  <tr><td style="background:{banner_bg};padding:12px 28px;border-bottom:1px solid #E6E8EC;" bgcolor="{banner_bg}">
+    <span style="font-family:{FONT};color:{banner_fg};font-weight:bold;font-size:14px;">&#9679; {banner_text}</span>
+  </td></tr>
+
+  <tr><td style="padding:28px;">
+    {body_html}
+  </td></tr>
+
+  <tr><td style="padding:18px 28px;border-top:1px solid {LINE};background:#F7F8FA;" bgcolor="#F7F8FA">
+    <div style="font-family:{FONT};font-size:12px;color:{MUTED};line-height:1.6;">Automated alert from the RBZ Monitoring Console for the <b style="color:{TEXT};">{group_name}</b> group &middot; minimum severity: {min_severity}.</div>
+    <div style="margin-top:6px;font-family:{FONT};font-size:12px;"><a href="https://monitoring.rbz.co.zw" style="color:{GOLD};font-weight:bold;text-decoration:none;">Manage this group's systems, metrics and stakeholders &rarr;</a></div>
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>"""
+    return html_out, inline_images
+
+
 def render(category: str, *, system: str, band: str, group_name: str, min_severity: str,
           for_browser: bool = False) -> tuple:
     """Renders one category's synthetic test finding. Raises KeyError for a category with no
@@ -283,69 +359,47 @@ def render(category: str, *, system: str, band: str, group_name: str, min_severi
     shape = SHAPE_BY_CATEGORY[category]
     hero, flow, notice_text, hero_images = _HERO_BUILDERS[shape](category, system=system, band=band)
     banner = _band_colors(band)
+    body_html = f"{hero}\n    {flow}\n    {_notice(notice_text)}"
 
-    images = {"header": alert_email_images.header_gradient_png()}
-    images.update(hero_images)
+    return _shell(title="Alert notification", banner_bg=banner["soft"], banner_fg=banner["fg"],
+                 banner_text="1 new finding &middot; 0 still open", body_html=body_html,
+                 group_name=group_name, min_severity=min_severity, hero_images=hero_images,
+                 for_browser=for_browser)
 
-    inline_images: dict = {}
-    src = {}
-    for name, png_bytes in images.items():
-        if for_browser:
-            src[name] = "data:image/png;base64," + base64.b64encode(png_bytes).decode("ascii")
-        else:
-            cid = make_msgid()[1:-1]      # strip the <...> -- re-added by mail_report.send_email
-            src[name] = f"cid:{cid}"
-            inline_images[cid] = png_bytes
 
-    hero = hero.replace("__IMG_hero__", src.get("hero", ""))
-    header_attr = f'background="{src["header"]}" bgcolor="{INK}"'
+def _resolved_item_card(system: str, band: str, text: str, duration: str) -> str:
+    c = _band_colors(band)
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+           f'style="margin-bottom:10px;border:1px solid {LINE};border-radius:10px;"><tr>'
+           f'<td style="padding:14px 16px;">'
+           f'{_chip("system", system)}'
+           f'<div style="font-family:{FONT};font-size:14.5px;font-weight:600;color:{TEXT};margin:8px 0 4px;">{text}</div>'
+           f'<div style="font-family:{MONO};font-size:11px;color:{MUTED};">was '
+           f'<span style="color:{c["fg"]};font-weight:bold;">{band.upper()}</span>'
+           f' &middot; open for {duration}</div></td></tr></table>')
 
-    html_out = f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="x-apple-disable-message-reformatting">
-<title>Alert notification</title>
-</head>
-<body style="margin:0;padding:0;background:{PAPER};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:{PAPER};">
-<tr><td align="center" style="padding:24px 12px;">
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" border="0" style="max-width:640px;width:100%;background:{CARD};border:1px solid {LINE};">
 
-  <tr><td style="background:{INK};padding:24px 28px;" {header_attr}>
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
-      <td width="38" valign="top">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
-          <td width="38" height="38" align="center" valign="middle" bgcolor="{INK_SOFT}" style="background:{INK_SOFT};border:1px solid #3a5878;font-size:18px;">&#128276;</td>
-        </tr></table>
-      </td>
-      <td width="14" style="font-size:1px;line-height:1px;">&nbsp;</td>
-      <td valign="top" style="font-family:{FONT};">
-        <span style="font-size:20px;font-weight:bold;color:#FFFFFF;">Alert notification</span><br>
-        <span style="font-size:12px;color:#9FB3C8;">Reserve Bank of Zimbabwe &middot; <span style="color:#D9C79A;">RBZ Monitoring Console</span></span>
-      </td>
-    </tr></table>
-  </td></tr>
+def render_resolved(items: list, *, group_name: str, min_severity: str,
+                    for_browser: bool = False) -> tuple:
+    """Renders one or more cleared findings for ONE group -- the same title/header/footer
+    shell as render() (title "Alert resolved", matching "Alert notification"'s own white bold
+    styling and sentence-case convention), a green banner instead of red/amber, and one card
+    per item instead of a single category's hero visual, since a resolved digest can carry
+    several DIFFERENT categories/systems at once (unlike a single synthetic test) and no one
+    hero shape fits an arbitrary mix.
 
-  <tr><td style="background:{banner['soft']};padding:12px 28px;border-bottom:1px solid #E6E8EC;" bgcolor="{banner['soft']}">
-    <span style="font-family:{FONT};color:{banner['fg']};font-weight:bold;font-size:14px;">&#9679; 1 new finding &middot; 0 still open</span>
-  </td></tr>
+    `items`: [(system, band, text, duration_label), ...] -- band is what it USED TO be (never
+    escalates/de-escalates after the fact), duration_label a pre-formatted string like "2h 14m"
+    (see alerting._duration_str). Escaped here, same reasoning as render()'s own system/
+    group_name escaping -- `text` comes from a live generate_report.Flag, not user free text,
+    but is escaped anyway since nothing downstream should ever assume otherwise."""
+    group_name = html.escape(group_name)
+    min_severity = html.escape(min_severity)
+    cards = "".join(_resolved_item_card(html.escape(s), band, html.escape(text), duration)
+                    for s, band, text, duration in items)
+    body_html = cards
+    banner_text = f"{len(items)} finding(s) cleared"
 
-  <tr><td style="padding:28px;">
-    {hero}
-    {flow}
-    {_notice(notice_text)}
-  </td></tr>
-
-  <tr><td style="padding:18px 28px;border-top:1px solid {LINE};background:#F7F8FA;" bgcolor="#F7F8FA">
-    <div style="font-family:{FONT};font-size:12px;color:{MUTED};line-height:1.6;">Automated alert from the RBZ Monitoring Console for the <b style="color:{TEXT};">{group_name}</b> group &middot; minimum severity: {min_severity}.</div>
-    <div style="margin-top:6px;font-family:{FONT};font-size:12px;"><a href="https://monitoring.rbz.co.zw" style="color:{GOLD};font-weight:bold;text-decoration:none;">Manage this group's systems, metrics and stakeholders &rarr;</a></div>
-  </td></tr>
-
-</table>
-</td></tr>
-</table>
-</body>
-</html>"""
-    return html_out, inline_images
+    return _shell(title="Alert resolved", banner_bg=GREEN_SOFT, banner_fg=GREEN,
+                 banner_text=banner_text, body_html=body_html, group_name=group_name,
+                 min_severity=min_severity, hero_images={}, for_browser=for_browser)
