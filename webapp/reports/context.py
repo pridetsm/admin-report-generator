@@ -87,6 +87,8 @@ _NAV_PARENT = {
     "config_script_preview": "config_script_edit",
     "system_settings": "configuration",
     "config_role_scopes": "configuration",
+    "config_alert_groups": "configuration",
+    "config_alert_group_edit": "config_alert_groups",
     # The raw editors are how you edit the SAME file the screen above them presents as fields,
     # so they hang off that screen rather than off the hub — Back from raw YAML returns to
     # Prometheus, the way Temenos returns to Folder Watch.
@@ -128,6 +130,8 @@ _NAV_LABEL = {
     "grafana_config": "Grafana",
     "system_settings": "Data sources",
     "config_role_scopes": "Role scopes",
+    "config_alert_groups": "Alert groups",
+    "config_alert_group_edit": "Alert group",
     "profile": "Profile",
 }
 

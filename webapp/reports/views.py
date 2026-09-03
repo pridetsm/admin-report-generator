@@ -12,6 +12,7 @@ exact numbers they reviewed (Prometheus could drift in the seconds between form 
 from __future__ import annotations
 
 import datetime
+import re
 import time
 import uuid
 
@@ -22,6 +23,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import Group
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.core.cache import cache
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -40,7 +42,7 @@ from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
-from .models import (BackupPolicyRevision, GeneratedScript, GrafanaConfigRevision,
+from .models import (AlertGroup, BackupPolicyRevision, GeneratedScript, GrafanaConfigRevision,
                      PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
                      SnmpConfigRevision, SystemConfig, UserProfile)
@@ -1332,6 +1334,7 @@ _CONFIG_CHILDREN = [
     ("config_scripts", "Scripts", "Generate the checker scripts hosts run"),
     ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
     ("config_role_scopes", "Role scopes", "Which systems each role sees"),
+    ("config_alert_groups", "Alert groups", "Who gets notified, and when, per system group"),
 ]
 
 
@@ -1918,6 +1921,96 @@ def config_role_scopes(request):
     return render(request, "reports/config_role_scopes.html", {
         **_config_context("config_role_scopes"),
         "rows": rows, "systems": systems,
+    })
+
+
+@never_cache
+@login_required
+def config_alert_groups(request):
+    """The catalogue of alert groups, and the bare-name form that creates one.
+
+    A group starts covering NO systems and no stakeholders (see AlertGroup's own docstring for
+    why that's the opposite default from Role scopes) — creating one only ever opens its own
+    edit screen next, it never itself starts sending anything.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    if request.method == "POST":
+        name = (request.POST.get("name") or "").strip()
+        if not name:
+            messages.error(request, "Give the group a name.")
+            return redirect("config_alert_groups")
+        if AlertGroup.objects.filter(name=name).exists():
+            messages.error(request, f"A group called “{name}” already exists.")
+            return redirect("config_alert_groups")
+        group = AlertGroup.objects.create(name=name, updated_by=request.user)
+        messages.success(request, f"Created “{name}”. Add its systems and stakeholders below.")
+        return redirect("config_alert_group_edit", pk=group.pk)
+
+    groups = AlertGroup.objects.all()
+    return render(request, "reports/config_alert_groups.html", {
+        **_config_context("config_alert_groups"),
+        "groups": groups,
+    })
+
+
+@never_cache
+@login_required
+def config_alert_group_edit(request, pk):
+    """One group: which systems it covers, who its stakeholders are, and its own alerting
+    policy (minimum severity, re-notify behaviour) — all admin-configurable, on purpose, so
+    the organization's own idea of "who owns what" is never hardcoded here."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    group = get_object_or_404(AlertGroup, pk=pk)
+    systems = _topology_systems()
+    users = get_user_model().objects.filter(is_active=True).order_by("username")
+
+    if request.method == "POST":
+        if request.POST.get("action") == "delete":
+            name = group.name
+            group.delete()
+            messages.success(request, f"Removed “{name}” and its notification history.")
+            return redirect("config_alert_groups")
+
+        name = (request.POST.get("name") or group.name).strip()
+        if AlertGroup.objects.exclude(pk=group.pk).filter(name=name).exists():
+            messages.error(request, f"A group called “{name}” already exists.")
+            return redirect("config_alert_group_edit", pk=group.pk)
+
+        chosen_systems = [s for s in request.POST.getlist("systems") if s in systems]
+        chosen_user_ids = [int(i) for i in request.POST.getlist("users") if i.isdigit()]
+        raw = request.POST.get("emails", "")
+        candidates = [e.strip() for e in re.split(r"[,\n]", raw) if e.strip()]
+        valid, bad = [], []
+        for e in candidates:
+            try:
+                validate_email(e)
+                valid.append(e)
+            except ValidationError:
+                bad.append(e)
+        if bad:
+            messages.error(request, "Dropped invalid address(es): " + ", ".join(bad))
+
+        group.name = name
+        group.systems = chosen_systems
+        group.emails = sorted(set(valid))
+        group.min_severity = request.POST.get("min_severity") or group.min_severity
+        group.renotify_mode = request.POST.get("renotify_mode") or group.renotify_mode
+        group.active = request.POST.get("active") == "on"
+        group.updated_by = request.user
+        group.save()
+        group.users.set(get_user_model().objects.filter(pk__in=chosen_user_ids))
+        messages.success(request, "Saved.")
+        return redirect("config_alert_group_edit", pk=group.pk)
+
+    return render(request, "reports/config_alert_group_edit.html", {
+        **_config_context("config_alert_groups"),
+        "group": group, "systems": systems, "users": users,
+        "chosen_users": set(group.users.values_list("pk", flat=True)),
+        "email_list": "\n".join(group.emails or []),
     })
 
 

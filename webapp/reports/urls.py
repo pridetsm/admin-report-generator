@@ -54,6 +54,8 @@ urlpatterns = [
     path("configuration/scripts/<int:pk>/", views.config_script_edit, name="config_script_edit"),
     path("configuration/scripts/<int:pk>/preview/", views.config_script_preview, name="config_script_preview"),
     path("configuration/role-scopes/", views.config_role_scopes, name="config_role_scopes"),
+    path("configuration/alert-groups/", views.config_alert_groups, name="config_alert_groups"),
+    path("configuration/alert-groups/<int:pk>/", views.config_alert_group_edit, name="config_alert_group_edit"),
     path("settings/report-theme/", views.set_report_theme, name="set_report_theme"),
     path("notifications/seen/", views.mark_notifications_seen, name="mark_notifications_seen"),
 ]

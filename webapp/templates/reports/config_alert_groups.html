@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Alert groups · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <p class="cfg-note">A group with no systems yet covers nothing — it never sends anything until you add systems and stakeholders to it.</p>
+
+  <div class="section-label sub">Groups</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if groups %}
+    <table class="hist">
+      <thead><tr><th>Name</th><th>Systems</th><th>Stakeholders</th><th>Severity</th><th>Re-notify</th><th></th><th></th></tr></thead>
+      <tbody>
+      {% for g in groups %}
+        <tr class="rowlink" data-href="{% url 'config_alert_group_edit' g.pk %}">
+          <td><b>{{ g.name }}</b></td>
+          <td style="color:var(--muted)">
+            {% if g.systems %}{{ g.systems|length }}{% else %}<span class="chip amber">none yet</span>{% endif %}
+          </td>
+          <td style="color:var(--muted)">{{ g.stakeholder_count }}</td>
+          <td style="color:var(--muted)">{{ g.get_min_severity_display }}</td>
+          <td style="color:var(--muted)">{{ g.get_renotify_mode_display }}</td>
+          <td>{% if not g.active %}<span class="chip amber">paused</span>{% endif %}</td>
+          <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+               href="{% url 'config_alert_group_edit' g.pk %}">Open</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="margin:0;color:var(--muted);font-size:13px">No alert groups defined yet.</p>
+    {% endif %}
+  </div></div>
+
+  <div class="section-label sub">Add a group</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <form method="post">{% csrf_token %}
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" name="name" placeholder="Payments Team" required>
+        </label>
+      </div>
+      <button class="btn primary cfg-add" type="submit">＋ Create</button>
+    </form>
+  </div></div>
+</div>
+{% endblock %}

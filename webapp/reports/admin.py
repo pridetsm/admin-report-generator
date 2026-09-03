@@ -2,9 +2,10 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import (BackupPolicyRevision, EmailRecipient, GrafanaConfigRevision,
-                     PrometheusConfigRevision, PrometheusRuleFileRevision, ReportSubmission,
-                     RoleRequest, RoleScope, SnmpConfigRevision, SystemConfig, UserProfile)
+from .models import (AlertFinding, AlertGroup, BackupPolicyRevision, EmailRecipient,
+                     GrafanaConfigRevision, PrometheusConfigRevision, PrometheusRuleFileRevision,
+                     ReportSubmission, RoleRequest, RoleScope, SnmpConfigRevision, SystemConfig,
+                     UserProfile)
 
 
 @admin.register(SystemConfig)
@@ -143,6 +144,37 @@ class RoleScopeAdmin(admin.ModelAdmin):
     @admin.display(description="Systems")
     def system_count(self, obj):
         return len(obj.systems or []) or "all (unrestricted)"
+
+
+@admin.register(AlertGroup)
+class AlertGroupAdmin(admin.ModelAdmin):
+    """Normally edited in-app (Configuration › Alert groups); here for completeness."""
+    list_display = ("name", "system_count", "stakeholder_count", "min_severity",
+                     "renotify_mode", "active", "updated_at", "updated_by")
+    list_filter = ("active", "min_severity", "renotify_mode")
+    readonly_fields = ("updated_at", "updated_by")
+    search_fields = ("name",)
+    filter_horizontal = ("users",)
+
+    @admin.display(description="Systems")
+    def system_count(self, obj):
+        return len(obj.systems or []) or "none yet"
+
+    @admin.display(description="Stakeholders")
+    def stakeholder_count(self, obj):
+        return obj.users.count() + len(obj.emails or [])
+
+
+@admin.register(AlertFinding)
+class AlertFindingAdmin(admin.ModelAdmin):
+    """Read-only dedup ledger, written only by the alert poller (reports.alerting). Deleting a
+    row makes that one (group, system, flag) look brand-new to the next poll."""
+    list_display = ("group", "system", "flag_key", "band", "first_seen_at",
+                     "last_seen_at", "last_notified_at", "resolved_at")
+    list_filter = ("group", "band")
+    search_fields = ("system", "flag_key")
+    readonly_fields = ("group", "system", "flag_key", "band", "text",
+                       "first_seen_at", "last_seen_at", "last_notified_at", "resolved_at")
 
 
 @admin.register(EmailRecipient)

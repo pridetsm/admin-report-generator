@@ -418,6 +418,104 @@ class EmailRecipient(models.Model):
         return f"{self.name} · {self.email}" if self.name else self.email
 
 
+class AlertGroup(models.Model):
+    """A named group of stakeholders who want to hear about problems on a set of systems —
+    deliberately freeform (the admin names it however their organization actually thinks about
+    it, e.g. "Payments Team" — no fixed taxonomy underneath).
+
+    UNLIKE RoleScope, an EMPTY `systems` list here means the group covers NOTHING, not "the
+    whole estate" — a freshly created group must not silently start alerting on everything
+    before anyone has picked systems for it. Silence, not everything, is the safe default for
+    an alerting feature (the opposite of the safe default for a dashboard-visibility scope).
+    """
+
+    MIN_SEVERITY_CHOICES = [
+        ("red", "Red only"),
+        ("amber", "Red + Amber"),
+    ]
+    RENOTIFY_CHOICES = [
+        ("once", "Once per finding, then silent until resolved"),
+        ("daily", "Once, then a daily reminder while still open"),
+    ]
+
+    name = models.CharField(max_length=120, unique=True)
+    systems = models.JSONField(
+        default=list, blank=True,
+        help_text="System names from prometheus.yml this group covers. Empty = covers "
+                   "nothing yet (unlike Role scopes, empty here is not ‘all systems’).")
+    users = models.ManyToManyField(
+        settings.AUTH_USER_MODEL, blank=True, related_name="alert_groups",
+        help_text="App users notified via their account e-mail.")
+    emails = models.JSONField(
+        default=list, blank=True,
+        help_text="Plain e-mail addresses for stakeholders with no account.")
+    min_severity = models.CharField(max_length=10, choices=MIN_SEVERITY_CHOICES, default="red")
+    renotify_mode = models.CharField(max_length=10, choices=RENOTIFY_CHOICES, default="once")
+    active = models.BooleanField(default=True, help_text="Untick to pause without deleting.")
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "alert group"
+
+    def __str__(self):
+        n = len(self.systems or [])
+        return f"{self.name} → {n} system(s)" if n else f"{self.name} → no systems yet"
+
+    def recipient_emails(self) -> list:
+        """De-duplicated stakeholder addresses: plain emails + active users' own account
+        e-mail (blank addresses silently dropped rather than erroring the whole group)."""
+        addrs = {e.strip() for e in (self.emails or []) if e.strip()}
+        addrs |= {u.email.strip() for u in self.users.filter(is_active=True) if u.email}
+        return sorted(addrs)
+
+    @property
+    def stakeholder_count(self) -> int:
+        return self.users.count() + len(self.emails or [])
+
+
+class AlertFinding(models.Model):
+    """One (group, system, flag) row's notification state — the dedup ledger the alert poller
+    (see reports.alerting) consults every cycle to decide new / reminder / skip / resolved.
+    `flag_key` is generate_report.Flag.key, the SAME stable key the report itself uses to marry
+    an admin's Yes/No answer back to a flagged row — this table only remembers WHEN something
+    was last seen/notified, it never re-derives whether it's actually wrong (that stays exactly
+    generate_report.flagged_for_system's job, called fresh every poll).
+
+    Both renotify behaviours read off the same three timestamps:
+      "once"  -> notify only when last_notified_at is NULL or the row was just reopened.
+      "daily" -> notify when last_notified_at is NULL, OR >=24h have passed since it.
+    An escalation (band worsens amber -> red on an already-notified, still-open row) always
+    forces a fresh notification regardless of renotify_mode -- a stakeholder told "amber" needs
+    to hear when it becomes "red", not stay silent because they were "already told" something
+    less severe.
+
+    A resolved row (resolved_at set) that reappears is treated as brand-new: its timestamps
+    reset on the SAME row rather than a second row being created, so history for one
+    (group, system, flag) triple always lives in exactly one place."""
+
+    group = models.ForeignKey(AlertGroup, on_delete=models.CASCADE, related_name="findings")
+    system = models.CharField(max_length=120)            # System.name from prometheus.yml
+    flag_key = models.CharField(max_length=255)           # generate_report.Flag.key
+    band = models.CharField(max_length=10)                # last-seen "red" / "amber"
+    text = models.CharField(max_length=500, blank=True)   # last-seen Flag.text, for the e-mail
+    first_seen_at = models.DateTimeField()
+    last_seen_at = models.DateTimeField()
+    last_notified_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("group", "system", "flag_key")
+        ordering = ["-last_seen_at"]
+        verbose_name = "alert finding state"
+
+    def __str__(self):
+        state = "resolved" if self.resolved_at else "open"
+        return f"{self.group.name} · {self.system} · {self.flag_key} ({state})"
+
+
 class GeneratedScript(models.Model):   # noqa: E303 — appended after EmailRecipient
     """The definition of one agent-side checker script — the thing the script is generated FROM.
 
