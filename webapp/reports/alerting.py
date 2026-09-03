@@ -13,6 +13,7 @@ imports this module.
 from __future__ import annotations
 
 import datetime
+import html
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -30,6 +31,7 @@ class AlertRunResult:
     reminder_count: int = 0
     resolved_count: int = 0
     emails_sent: int = 0
+    resolved_emails_sent: int = 0
     emails_preview: List[dict] = field(default_factory=list)   # populated only when dry_run
 
 
@@ -113,6 +115,22 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     groups = list(AlertGroup.objects.filter(active=True).prefetch_related("users"))
     result.groups_evaluated = len(groups)
 
+    # (system, band, text, first_seen_at) per group, for the "Resolved" digest below --
+    # populated ONLY for rows that were actually notified (last_notified_at is not None): a
+    # finding that appeared and cleared between two polls, without anyone ever being told it
+    # existed, must not generate a "resolved" e-mail about something nobody knew was wrong.
+    per_group_resolved: Dict[int, list] = {g.pk: [] for g in groups}
+
+    def _collect_and_resolve(qs):
+        rows = list(qs)
+        for row in rows:
+            if row.last_notified_at is not None:
+                per_group_resolved[row.group_id].append(
+                    (row.system, row.band, row.text, row.first_seen_at))
+        if rows:
+            AlertFinding.objects.filter(pk__in=[r.pk for r in rows]).update(resolved_at=now)
+        return len(rows)
+
     # A system dropped from a group's OWN scope (edited in Configuration, not just missing
     # from this poll's capture) is resolved here unconditionally, before the capture-scoped
     # loop below even runs -- that loop only ever sees systems that are STILL covered by some
@@ -123,7 +141,7 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
             stale = (AlertFinding.objects
                     .filter(group=g, resolved_at__isnull=True)
                     .exclude(system__in=(g.systems or [])))
-            result.resolved_count += stale.update(resolved_at=now)
+            result.resolved_count += _collect_and_resolve(stale)
 
     covered = {s for g in groups for s in (g.systems or [])}
     if not covered:
@@ -168,7 +186,7 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
                 stale = (AlertFinding.objects
                         .filter(group=g, system=sysm.name, resolved_at__isnull=True)
                         .exclude(flag_key__in=eligible_keys))
-                result.resolved_count += stale.update(resolved_at=now)
+                result.resolved_count += _collect_and_resolve(stale)
 
             for f in eligible:
                 existing = None if dry_run else AlertFinding.objects.filter(
@@ -193,30 +211,44 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
                     row.save()
                     per_group_rows[g.pk].append(row)
 
+    import mail_report as mr
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    mailcfg["from_name"] = "System Alerts"
+
     for g in groups:
         items = per_group_items[g.pk]
-        if not items:
+        resolved = per_group_resolved[g.pk]
+        if not items and not resolved:
             continue
-        subject, text_body, html_body = _render_alert_email(g, items)
         recipients = g.recipient_emails()
         if not recipients:
             continue   # misconfigured group: no stakeholders -- skip, don't crash the run
-        if dry_run:
-            result.emails_preview.append({"group": g.name, "to": recipients,
-                                          "subject": subject, "text_body": text_body})
-            continue
-        import mail_report as mr
-        mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
-        if not mailcfg.get("host"):
-            continue
-        mailcfg["from_name"] = "System Alerts"
-        try:
-            mr.send_email(mailcfg, recipients, subject, html_body, text_body)
-            result.emails_sent += 1
-        except Exception:      # noqa: BLE001 -- one group's SMTP failure must not stop the rest
-            continue
-        AlertFinding.objects.filter(pk__in=[r.pk for r in per_group_rows[g.pk]]) \
-                            .update(last_notified_at=now)
+
+        if items:
+            subject, text_body, html_body = _render_fired_email(g, items)
+            if dry_run:
+                result.emails_preview.append({"group": g.name, "kind": "fired", "to": recipients,
+                                              "subject": subject, "text_body": text_body})
+            elif mailcfg.get("host"):
+                try:
+                    mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+                    result.emails_sent += 1
+                    AlertFinding.objects.filter(pk__in=[r.pk for r in per_group_rows[g.pk]]) \
+                                        .update(last_notified_at=now)
+                except Exception:  # noqa: BLE001 -- one group's SMTP failure must not stop the rest
+                    pass
+
+        if resolved:
+            subject, text_body, html_body = _render_resolved_email(g, resolved, now)
+            if dry_run:
+                result.emails_preview.append({"group": g.name, "kind": "resolved", "to": recipients,
+                                              "subject": subject, "text_body": text_body})
+            elif mailcfg.get("host"):
+                try:
+                    mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+                    result.resolved_emails_sent += 1
+                except Exception:  # noqa: BLE001 -- one group's SMTP failure must not stop the rest
+                    pass
     return result
 
 
@@ -256,7 +288,7 @@ def send_test_alert(group) -> tuple[bool, str]:
                    and group.category_matches(sysm.name, f.category)]
         items += [(sysm.name, f, "new") for f in eligible]
 
-    subject, text_body, html_body = _render_alert_email(group, items)
+    subject, text_body, html_body = _render_fired_email(group, items)
     subject = f"[TEST] {subject}"
     if items:
         preamble = "This is a manually triggered TEST alert — not a real notification cycle.\n\n"
@@ -278,14 +310,83 @@ def send_test_alert(group) -> tuple[bool, str]:
     return True, f"Test alert sent to {', '.join(recipients)}."
 
 
-def _render_alert_email(group, items) -> tuple:
-    """items: [(system, Flag, action), ...] for ONE group. Purpose-built digest -- mail_report's
-    render_html/analyse/plain_summary are shaped for the full daily report (unreachable/crit/
-    warn/nodata buckets + attachment CTA), not a per-group flag digest, so this is new, small
-    presentation code; only send_email (SMTP) is reused, never reimplemented."""
+def _duration_str(start, end) -> str:
+    """Human-readable elapsed time for a resolved digest's "open for" column."""
+    total_min = max(0, int((end - start).total_seconds() // 60))
+    if total_min < 60:
+        return f"{total_min}m"
+    h, m = divmod(total_min, 60)
+    if h < 24:
+        return f"{h}h {m}m"
+    d, h = divmod(h, 24)
+    return f"{d}d {h}h"
+
+
+def _email_shell(*, kicker: str, banner_bg: str, banner_fg: str, headline: str,
+                 col_headers: list, rows_html: str, footer_note: str) -> str:
+    """The branded wrapper (navy/gold header, coloured status banner, a table) shared by every
+    alert e-mail this module sends -- built from mail_report's own NAVY/GOLD/RED/AMBER/GREEN
+    palette so an alert e-mail reads as the same product as the daily report, not a different
+    tool with its own look. mail_report's render_html itself is NOT reused (it's shaped for the
+    full daily KPI dashboard, not a one-group flag digest) -- only its constants are."""
+    import mail_report as mr
+    ths = "".join(
+        f'<th style="text-align:left;padding:9px 12px;font-size:10px;letter-spacing:.4px;'
+        f'color:{mr.MUTED};text-transform:uppercase;background:#f7f8fa;border-bottom:1px solid #e6e8ec;">{html.escape(h)}</th>'
+        for h in col_headers)
+    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#eef0f3;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#eef0f3;font-family:'Segoe UI',Arial,sans-serif;">
+<tr><td align="center" style="padding:24px 12px;">
+<table width="660" cellpadding="0" cellspacing="0" style="max-width:660px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12);">
+  <tr><td style="background:{mr.NAVY};padding:20px 24px;">
+    <div style="font-size:18px;font-weight:700;color:{mr.GOLD};letter-spacing:.5px;">{html.escape(kicker)}</div>
+    <div style="font-size:12px;color:#aebfd1;margin-top:3px;">Reserve Bank of Zimbabwe &nbsp;&middot;&nbsp; RBZ Monitoring Console</div>
+  </td></tr>
+  <tr><td style="background:{banner_bg};border-bottom:1px solid #e6e8ec;padding:12px 24px;">
+    <span style="color:{banner_fg};font-weight:700;font-size:14px;">&#9679; {html.escape(headline)}</span>
+  </td></tr>
+  <tr><td>
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>{ths}</tr>
+      {rows_html}
+    </table>
+  </td></tr>
+  <tr><td style="background:#f7f8fa;border-top:1px solid #e6e8ec;padding:14px 24px;">
+    <div style="font-size:11px;color:{mr.MUTED};line-height:1.6;">{footer_note}</div>
+  </td></tr>
+</table></td></tr></table></body></html>"""
+
+
+def _fired_row(system: str, f) -> str:
+    import mail_report as mr
+    color = mr.RED if f.band == "red" else mr.AMBER
+    return (
+        f'<tr><td style="padding:7px 12px;border-bottom:1px solid #eef0f2;font-weight:600;color:{mr.NAVY};">{html.escape(system)}</td>'
+        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(f.category)}</td>'
+        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(f.text)}</td>'
+        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:{color};font-weight:700;'
+        f'text-transform:uppercase;font-size:11px;white-space:nowrap;">{f.band}</td></tr>')
+
+
+def _resolved_row(system: str, band: str, text: str, opened_for: str) -> str:
+    import mail_report as mr
+    return (
+        f'<tr><td style="padding:7px 12px;border-bottom:1px solid #eef0f2;font-weight:600;color:{mr.NAVY};">{html.escape(system)}</td>'
+        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(text)}</td>'
+        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:{mr.MUTED};font-weight:700;'
+        f'text-transform:uppercase;font-size:11px;white-space:nowrap;">was {band}</td>'
+        f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:{mr.GREEN};font-weight:600;white-space:nowrap;">{opened_for}</td></tr>')
+
+
+def _render_fired_email(group, items) -> tuple:
+    """items: [(system, Flag, action), ...] for ONE group ('new' or 'remind'). Branded HTML
+    (see _email_shell) plus a plain-text alternative; only send_email (SMTP) is reused from
+    mail_report, never reimplemented."""
+    import mail_report as mr
     new_items = [(s, f) for s, f, a in items if a == "new"]
     reminders = [(s, f) for s, f, a in items if a == "remind"]
     subject = f"[Alerts] {group.name} — {len(new_items)} new, {len(reminders)} reminder(s)"
+
     lines = []
     if new_items:
         lines.append("NEW:")
@@ -294,5 +395,88 @@ def _render_alert_email(group, items) -> tuple:
         lines.append("STILL OPEN (reminder):")
         lines += [f"  [{f.band.upper()}] {s} — {f.text}" for s, f in reminders]
     text_body = "\n".join(lines)
-    html_body = "<pre>" + text_body.replace("&", "&amp;").replace("<", "&lt;") + "</pre>"
+
+    any_red = any(f.band == "red" for _, f in new_items + reminders)
+    banner_bg, banner_fg = (mr.RED_T, mr.RED) if any_red else (mr.AMBER_T, mr.AMBER)
+    headline = f"{len(new_items)} new finding(s), {len(reminders)} still open"
+    rows_html = "".join(_fired_row(s, f) for s, f in new_items) \
+              + "".join(_fired_row(s, f) for s, f in reminders)
+    footer = (f'Automated alert from the RBZ Monitoring Console for the &ldquo;{html.escape(group.name)}&rdquo; '
+             f'group &mdash; minimum severity: {group.min_severity}. Manage this group\'s systems, metrics '
+             f'and stakeholders at {mr.REPORT_GENERATOR_URL}.')
+    html_body = _email_shell(kicker="SYSTEM ALERT", banner_bg=banner_bg, banner_fg=banner_fg,
+                             headline=headline, col_headers=["System", "Metric", "Finding", "Severity"],
+                             rows_html=rows_html, footer_note=footer)
     return subject, text_body, html_body
+
+
+def _render_resolved_email(group, resolved_items, now) -> tuple:
+    """resolved_items: [(system, band, text, first_seen_at), ...] for ONE group -- findings that
+    WERE notified and have now cleared (see run_alert_cycle's own filtering: a finding never
+    successfully notified never reaches here)."""
+    import mail_report as mr
+    subject = f"[Resolved] {group.name} — {len(resolved_items)} finding(s) cleared"
+    lines = [f"  {s} — {text} (was {band.upper()}, open for {_duration_str(first_seen, now)})"
+            for s, band, text, first_seen in resolved_items]
+    text_body = "RESOLVED:\n" + "\n".join(lines)
+    rows_html = "".join(
+        _resolved_row(s, band, text, _duration_str(first_seen, now))
+        for s, band, text, first_seen in resolved_items)
+    headline = f"{len(resolved_items)} finding(s) cleared"
+    footer = (f'Automated alert from the RBZ Monitoring Console for the &ldquo;{html.escape(group.name)}&rdquo; '
+             f'group &mdash; these were previously notified and no longer match this group\'s alerting '
+             f'policy. Manage this group at {mr.REPORT_GENERATOR_URL}.')
+    html_body = _email_shell(kicker="ALERT RESOLVED", banner_bg=mr.GREEN_T, banner_fg=mr.GREEN,
+                             headline=headline, col_headers=["System", "Finding", "Was", "Open for"],
+                             rows_html=rows_html, footer_note=footer)
+    return subject, text_body, html_body
+
+
+def _synthetic_flag(category: str, band: str):
+    """A fabricated Flag for test/preview purposes only -- never derived from a live capture,
+    so these buttons always produce the same example regardless of what Prometheus actually
+    reports right now. Text says so explicitly, so nobody mistakes a test e-mail for a real
+    incident or a real resolution."""
+    from .models import AlertGroup
+
+    label = dict(AlertGroup.CATEGORY_CHOICES).get(category, category)
+    sample = "97%" if band == "red" else "88%"
+    text = f"{label} — synthetic test reading {sample} (fabricated for preview, not a real measurement)"
+    return gr.Flag(key=f"synthetic:{category}", text=text, band=band, category=category)
+
+
+def render_test_email(group, *, kind: str, system: str, category: str, band: str) -> tuple:
+    """Builds (subject, text_body, html_body) from a FABRICATED example -- 'positive' (a fired
+    finding) or 'resolved' (that finding clearing). Used by both the in-browser preview endpoint
+    and send_test_email, so preview and send can never disagree about what a recipient would
+    actually see."""
+    flag = _synthetic_flag(category, band)
+    if kind == "resolved":
+        opened_at = timezone.now() - datetime.timedelta(hours=3, minutes=17)
+        subject, text_body, html_body = _render_resolved_email(
+            group, [(system, band, flag.text, opened_at)], timezone.now())
+    else:
+        subject, text_body, html_body = _render_fired_email(group, [(system, flag, "new")])
+    return f"[SYNTHETIC TEST] {subject}", text_body, html_body
+
+
+def send_test_email(group, *, kind: str, system: str, category: str, band: str) -> tuple[bool, str]:
+    """Sends the fabricated preview e-mail (see render_test_email) to the group's current
+    stakeholders -- a real send, clearly marked [SYNTHETIC TEST] throughout so nobody mistakes
+    it for a real incident. Never touches AlertFinding, same reasoning as send_test_alert."""
+    recipients = group.recipient_emails()
+    if not recipients:
+        return False, "This group has no stakeholders yet — add at least one before testing."
+
+    subject, text_body, html_body = render_test_email(group, kind=kind, system=system,
+                                                       category=category, band=band)
+    import mail_report as mr
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    if not mailcfg.get("host"):
+        return False, "No SMTP host configured (send_report/config.ini [smtp])."
+    mailcfg["from_name"] = "System Alerts (test)"
+    try:
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body)
+    except Exception as exc:      # noqa: BLE001 -- shown to the admin, that's the point of testing
+        return False, f"Send failed: {exc}"
+    return True, f"Synthetic {kind} test sent to {', '.join(recipients)}."

@@ -1978,13 +1978,6 @@ def config_alert_group_edit(request, pk):
             messages.success(request, f"Removed “{name}” and its notification history.")
             return redirect("config_alert_groups")
 
-        if request.POST.get("action") == "test_fire":
-            # Tests the group AS CURRENTLY SAVED, not whatever's sitting unsaved in the form —
-            # save first if you want to test your edits.
-            ok, msg = alerting.send_test_alert(group)
-            (messages.success if ok else messages.error)(request, msg)
-            return redirect("config_alert_group_edit", pk=group.pk)
-
         name = (request.POST.get("name") or group.name).strip()
         if AlertGroup.objects.exclude(pk=group.pk).filter(name=name).exists():
             messages.error(request, f"A group called “{name}” already exists.")
@@ -2037,6 +2030,71 @@ def config_alert_group_edit(request, pk):
         "category_grid": _category_grid_rows(group),
         "email_list": "\n".join(group.emails or []),
     })
+
+
+@require_POST
+def config_alert_group_test(request, pk):
+    """Three ways to exercise a group without waiting for a real incident, all tested against
+    the group AS CURRENTLY SAVED (not unsaved form edits — save first to test your changes):
+
+    fire_positive / fire_resolved — a FABRICATED, clearly [SYNTHETIC TEST]-marked finding for
+    an admin-picked system/metric/severity, sent for real to the group's own stakeholders, so
+    "what would recipients actually see" never depends on there being a live incident right now.
+
+    fire_live — actually checks Prometheus for this group's real systems and sends only if
+    something genuinely qualifies right now (reuses alerting.send_test_alert, unchanged).
+
+    None of the three ever touch AlertFinding — see send_test_alert's own docstring for why."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    group = get_object_or_404(AlertGroup, pk=pk)
+    taction = request.POST.get("taction")
+
+    if taction == "fire_live":
+        ok, msg = alerting.send_test_alert(group)
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect("config_alert_group_edit", pk=group.pk)
+
+    if taction in ("fire_positive", "fire_resolved"):
+        tsys = request.POST.get("tsys", "")
+        tcat = request.POST.get("tcat", "")
+        tband = request.POST.get("tband", "red")
+        valid_categories = {k for k, _ in AlertGroup.CATEGORY_CHOICES}
+        if tsys not in (group.systems or []):
+            messages.error(request, "Pick one of this group's own systems to test with.")
+        elif tcat not in valid_categories:
+            messages.error(request, "Pick a metric to test with.")
+        elif tband not in ("red", "amber"):
+            messages.error(request, "Pick a severity to test with.")
+        else:
+            kind = "positive" if taction == "fire_positive" else "resolved"
+            ok, msg = alerting.send_test_email(group, kind=kind, system=tsys, category=tcat, band=tband)
+            (messages.success if ok else messages.error)(request, msg)
+        return redirect("config_alert_group_edit", pk=group.pk)
+
+    raise Http404
+
+
+def config_alert_group_preview(request, pk):
+    """Renders the actual HTML e-mail body in-browser (no send, no AlertFinding) for the
+    admin-picked system/metric/severity/kind — opened in a new tab from the Test tools
+    section, so the SAME render_test_email() a real synthetic test would send can be eyeballed
+    first without generating any e-mail traffic at all."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    group = get_object_or_404(AlertGroup, pk=pk)
+    valid_categories = {k for k, _ in AlertGroup.CATEGORY_CHOICES}
+    kind = request.GET.get("kind") if request.GET.get("kind") in ("positive", "resolved") else "positive"
+    tsys = request.GET.get("tsys") or (group.systems or [""])[0]
+    tcat = request.GET.get("tcat") if request.GET.get("tcat") in valid_categories else next(iter(valid_categories), "")
+    tband = request.GET.get("tband") if request.GET.get("tband") in ("red", "amber") else "red"
+    if not tsys or not tcat:
+        return HttpResponse("Add at least one system before previewing.", content_type="text/plain")
+    _subject, _text, html_body = alerting.render_test_email(group, kind=kind, system=tsys,
+                                                             category=tcat, band=tband)
+    return HttpResponse(html_body)
 
 
 def _folder_watch_systems(prometheus_yml: str) -> set:

@@ -164,10 +164,6 @@
     <div class="actionbar">
       <div class="container-inner">
         <button class="btn primary" type="submit">Save</button>
-        <button class="btn ghost" type="submit" name="action" value="test_fire"
-                title="Sends a real e-mail to this group's saved stakeholders right now — marked [TEST], and never affects real notification history. Tests the group as last saved, not unsaved edits.">
-          Test fire
-        </button>
         <span class="spacer" style="flex:1"></span>
         <button class="btn ghost" type="submit" name="action" value="delete"
                 style="color:var(--red)"
@@ -177,5 +173,65 @@
       </div>
     </div>
   </form>
+
+  <div class="section-label sub">Test tools</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    {% if not group.systems %}
+    <p class="cfg-note" style="margin:0">Save at least one system above before testing this group.</p>
+    {% else %}
+    <p style="margin:0 0 14px;color:var(--muted);font-size:13px">
+      Every button here tests the group AS LAST SAVED, not unsaved edits above — save first to
+      test your changes. The two synthetic buttons send a real e-mail built from a made-up
+      finding, clearly marked <b>[SYNTHETIC TEST]</b> throughout so recipients are never alarmed
+      by what looks like a real incident. “Run live check” checks Prometheus for real, right
+      now, and only sends if something on this group's own systems genuinely qualifies. None of
+      the three ever touch this group's real notification history.
+    </p>
+    <form method="post" action="{% url 'config_alert_group_test' group.pk %}">
+      {% csrf_token %}
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>System</span>
+          <select name="tsys">
+            {% for s in group.systems %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Metric</span>
+          <select name="tcat">
+            {% for value, label in group.CATEGORY_CHOICES %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Severity</span>
+          <select name="tband">
+            <option value="red">Red</option>
+            <option value="amber">Amber</option>
+          </select>
+        </label>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn ghost" type="submit" name="taction" value="fire_positive">
+          Fire synthetic alert
+        </button>
+        <button class="btn ghost" type="submit" name="taction" value="fire_resolved">
+          Fire synthetic resolved
+        </button>
+        <button class="btn ghost" type="submit" name="taction" value="fire_live">
+          Run live check now
+        </button>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn ghost" type="submit" name="kind" value="positive"
+                formmethod="get" formaction="{% url 'config_alert_group_preview' group.pk %}" formtarget="_blank">
+          Preview alert e-mail ↗
+        </button>
+        <button class="btn ghost" type="submit" name="kind" value="resolved"
+                formmethod="get" formaction="{% url 'config_alert_group_preview' group.pk %}" formtarget="_blank">
+          Preview resolved e-mail ↗
+        </button>
+      </div>
+    </form>
+    {% endif %}
+  </div></div>
 </div>
 {% endblock %}
