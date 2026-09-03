@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import html
+import math
 from pathlib import Path
 
 from email.utils import make_msgid
@@ -143,7 +144,7 @@ def _gauge_hero(category: str, *, system: str, band: str) -> tuple:
     image_bytes = alert_email_images.render_gauge(pct, band, label)
     gauge = f"""<td width="150" valign="top" align="center">
       <img src="__IMG_hero__" width="148" height="148" alt="{pct}% {label}" style="display:block;border:0;">
-      <div style="font-family:{MONO};font-size:10px;color:{MUTED};margin-top:8px;">warn 70 &middot; crit 90</div>
+      <div style="font-family:{MONO};font-size:11px;color:{MUTED};margin-top:8px;"><span style="color:{GOLD};">&#9679;</span> warn 70% &nbsp; <span style="color:{RED};">&#9679;</span> critical 90%</div>
     </td>"""
     detail = _hero_detail(chips=_chip_row(system, category, band), headline=headline,
                           note=_KIND_NOTE["gauge"])
@@ -200,20 +201,10 @@ def _grid_hero(category: str, *, system: str, band: str) -> tuple:
         "backup_uncleared": "The uncleared-backup count shown here is a synthetic test value used to demonstrate this alert layout — no real backups were affected.",
     }[category]
 
-    cols = 6
-    rows_html = []
-    for start in range(0, total, cols):
-        cells = []
-        for i in range(start, min(start + cols, total)):
-            flagged = i < aff
-            bg = c["fg"] if flagged else TRACK
-            cells.append(f'<td width="18" height="18" bgcolor="{bg}" style="background:{bg};font-size:1px;line-height:1px;">&nbsp;</td>')
-        rows_html.append("<tr>" + "".join(cells) + "</tr>")
-    grid = (f'<table role="presentation" cellpadding="0" cellspacing="4" border="0">'
-           + "".join(rows_html) + "</table>")
-
+    image_bytes = alert_email_images.render_grid(total, aff, band)
+    img_w, img_h = _grid_display_size(total)
     visual = f"""<td width="150" valign="top" align="center">
-      {grid}
+      <img src="__IMG_hero__" width="{img_w}" height="{img_h}" alt="Grid of {total} backups, {aff} flagged" style="display:block;border:0;">
       <div style="font-family:{MONO};font-size:20px;font-weight:bold;color:{TEXT};margin-top:10px;">{aff}/{total}</div>
       <div style="font-family:{MONO};font-size:11px;color:{MUTED};margin-top:2px;">{sub}</div>
     </td>"""
@@ -223,7 +214,17 @@ def _grid_hero(category: str, *, system: str, band: str) -> tuple:
            f'<td width="20" style="font-size:1px;line-height:1px;">&nbsp;</td>{detail}</tr></table>')
     flow = _flow_table(system=system, metric_label="Metric", metric_value=_METRIC_KEY[category],
                        finding_value=f"{aff}/{total} &middot; {band.upper()}", band=band)
-    return hero, flow, notice, {}
+    return hero, flow, notice, {"hero": image_bytes}
+
+
+def _grid_display_size(total: int, cols: int = 6) -> tuple:
+    """The rendered image is native-resolution (41px cells, 9px gaps -- see
+    alert_email_images.render_grid's own docstring); displayed at roughly half that, matching
+    the reference images' own display-width convention (e.g. 290px native shown at 132px)."""
+    rows = math.ceil(total / cols)
+    native_w = cols * 41 + (cols - 1) * 9
+    native_h = rows * 41 + (rows - 1) * 9
+    return round(native_w / 2.2), round(native_h / 2.16)
 
 
 def _bar_hero(category: str, *, system: str, band: str) -> tuple:
@@ -231,34 +232,29 @@ def _bar_hero(category: str, *, system: str, band: str) -> tuple:
     expected = 32.0
     actual = 48.2 if band == "red" else 34.5
     delta = actual - expected
-    fill = 87
-    marker = round(min(99, (expected / actual) * fill), 1)
     headline = f"/data/exports on {system} has grown to {actual} GB, above its {expected:.0f} GB expected size."
     notice = (f"The {actual} GB reading is a synthetic test value used to demonstrate this "
              f"alert layout — no real folder on disk was measured.")
 
+    image_bytes = alert_email_images.render_bar(actual, expected, band)
     bar = f"""<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
       <td style="font-family:{MONO};font-size:26px;font-weight:bold;color:{c['fg']};">{actual} GB</td>
       <td align="right" style="font-family:{MONO};font-size:12.5px;font-weight:bold;color:{c['fg']};background:{c['soft']};border:1px solid {c['line']};padding:3px 8px;">+{delta:.1f} GB over</td>
     </tr></table>
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:8px;"><tr>
-      <td width="{fill}%" height="14" bgcolor="{c['fg']}" style="background:{c['fg']};font-size:1px;line-height:1px;">&nbsp;</td>
-      <td width="{100 - fill}%" height="14" bgcolor="{TRACK}" style="background:{TRACK};font-size:1px;line-height:1px;">&nbsp;</td>
-    </tr></table>
-    <div style="font-family:{MONO};font-size:10.5px;color:{MUTED};margin-top:6px;">expected {expected:.0f}GB marker at {marker}% of this bar</div>"""
+    <img src="__IMG_hero__" width="584" height="40" alt="Bar showing {actual} GB actual against {expected:.0f} GB expected" style="display:block;border:0;width:100%;height:auto;margin-top:6px;">"""
 
     chips = _chip_row(system, category, band)
     hero = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
            f'style="padding-bottom:20px;border-bottom:1px solid {LINE};">'
-           f'<tr><td>{bar}</td></tr>'
-           f'<tr><td style="padding-top:16px;">'
+           f'<tr><td style="padding-bottom:20px;">{bar}</td></tr>'
+           f'<tr><td>'
            f'<div style="margin-bottom:10px;line-height:0;">{chips}</div>'
            f'<div style="font-family:{FONT};font-size:17px;font-weight:bold;color:{TEXT};line-height:1.35;margin-bottom:6px;">{headline}</div>'
            f'<div style="font-family:{FONT};font-size:13.5px;color:{MUTED};line-height:1.5;">{_KIND_NOTE["bar"]}</div>'
            f'</td></tr></table>')
     flow = _flow_table(system=system, metric_label="Folder", metric_value="/data/exports",
                        finding_value=f"{actual} GB &middot; {band.upper()}", band=band)
-    return hero, flow, notice, {}
+    return hero, flow, notice, {"hero": image_bytes}
 
 
 _HERO_BUILDERS = {"gauge": _gauge_hero, "ring": _ring_hero, "grid": _grid_hero, "bar": _bar_hero}
