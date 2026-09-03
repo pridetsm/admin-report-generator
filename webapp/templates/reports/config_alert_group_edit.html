@@ -209,6 +209,14 @@
             <option value="amber">Amber</option>
           </select>
         </label>
+        <label class="field">
+          <span>Send test to</span>
+          <select name="tto">
+            <option value="">All stakeholders ({{ test_recipients|length }})</option>
+            {% for addr in test_recipients %}<option value="{{ addr }}">{{ addr }}</option>{% endfor %}
+          </select>
+          <small class="cfg-hint">Narrows a test send to just this one — the real alert still goes to everyone.</small>
+        </label>
       </div>
       <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn ghost" type="submit" name="taction" value="fire_positive">

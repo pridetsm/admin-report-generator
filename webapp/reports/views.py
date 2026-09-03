@@ -2030,6 +2030,7 @@ def config_alert_group_edit(request, pk):
         "chosen_users": set(group.users.values_list("pk", flat=True)),
         "category_grid": _category_grid_rows(group),
         "email_list": "\n".join(group.emails or []),
+        "test_recipients": group.recipient_emails(),
     })
 
 
@@ -2045,6 +2046,11 @@ def config_alert_group_test(request, pk):
     fire_live — actually checks Prometheus for this group's real systems and sends only if
     something genuinely qualifies right now (reuses alerting.send_test_alert, unchanged).
 
+    All three also take an optional `tto` -- one address, which MUST already be one of this
+    group's own current recipient_emails() -- narrowing delivery to just that one stakeholder
+    instead of the whole group, so iterating on a test doesn't re-notify everyone every time.
+    Blank means "all current stakeholders", same as before this existed.
+
     None of the three ever touch AlertFinding — see send_test_alert's own docstring for why."""
     denied = _require_admin(request)
     if denied:
@@ -2052,8 +2058,14 @@ def config_alert_group_test(request, pk):
     group = get_object_or_404(AlertGroup, pk=pk)
     taction = request.POST.get("taction")
 
+    tto = request.POST.get("tto", "").strip()
+    if tto and tto not in group.recipient_emails():
+        messages.error(request, "Pick one of this group's own current stakeholders to narrow to.")
+        return redirect("config_alert_group_edit", pk=group.pk)
+    to = tto or None
+
     if taction == "fire_live":
-        ok, msg = alerting.send_test_alert(group)
+        ok, msg = alerting.send_test_alert(group, to=to)
         (messages.success if ok else messages.error)(request, msg)
         return redirect("config_alert_group_edit", pk=group.pk)
 
@@ -2070,7 +2082,8 @@ def config_alert_group_test(request, pk):
             messages.error(request, "Pick a severity to test with.")
         else:
             kind = "positive" if taction == "fire_positive" else "resolved"
-            ok, msg = alerting.send_test_email(group, kind=kind, system=tsys, category=tcat, band=tband)
+            ok, msg = alerting.send_test_email(group, kind=kind, system=tsys, category=tcat,
+                                               band=tband, to=to)
             (messages.success if ok else messages.error)(request, msg)
         return redirect("config_alert_group_edit", pk=group.pk)
 

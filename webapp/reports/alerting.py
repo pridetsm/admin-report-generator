@@ -252,10 +252,15 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     return result
 
 
-def send_test_alert(group) -> tuple[bool, str]:
+def send_test_alert(group, *, to: str | None = None) -> tuple[bool, str]:
     """Manually triggered from the group's own edit screen -- always a REAL send, never a dry
     run, because the whole point is to answer "does this actually reach my stakeholders right
     now" (SMTP config, recipient addresses) which a preview can't tell you.
+
+    `to`, if given, MUST already be one of group.recipient_emails() (the caller validates --
+    see config_alert_group_test) -- narrows delivery to that one stakeholder instead of the
+    whole group, so iterating on a test doesn't re-notify everyone every time. None sends to
+    every current stakeholder, same as before this parameter existed.
 
     Deliberately never touches AlertFinding: a test firing must not consume a group's real
     once-only notify slot or shift its renotify clock, or running one could cause a genuine
@@ -268,7 +273,7 @@ def send_test_alert(group) -> tuple[bool, str]:
     the e-mail says so explicitly rather than going out empty and unexplained. Exceptions are
     surfaced to the caller as the failure message, not swallowed, since seeing the actual SMTP
     error is the point of clicking this button."""
-    recipients = group.recipient_emails()
+    recipients = [to] if to else group.recipient_emails()
     if not recipients:
         return False, "This group has no stakeholders yet — add at least one before testing."
     if not group.systems:
@@ -460,11 +465,16 @@ def render_test_email(group, *, kind: str, system: str, category: str, band: str
     return f"[SYNTHETIC TEST] {subject}", text_body, html_body
 
 
-def send_test_email(group, *, kind: str, system: str, category: str, band: str) -> tuple[bool, str]:
+def send_test_email(group, *, kind: str, system: str, category: str, band: str,
+                    to: str | None = None) -> tuple[bool, str]:
     """Sends the fabricated preview e-mail (see render_test_email) to the group's current
     stakeholders -- a real send, clearly marked [SYNTHETIC TEST] throughout so nobody mistakes
-    it for a real incident. Never touches AlertFinding, same reasoning as send_test_alert."""
-    recipients = group.recipient_emails()
+    it for a real incident. Never touches AlertFinding, same reasoning as send_test_alert.
+
+    `to`, if given, MUST already be one of group.recipient_emails() (the caller validates --
+    see config_alert_group_test) -- narrows delivery to that one stakeholder instead of the
+    whole group. None sends to every current stakeholder."""
+    recipients = [to] if to else group.recipient_emails()
     if not recipients:
         return False, "This group has no stakeholders yet — add at least one before testing."
 
