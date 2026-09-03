@@ -89,6 +89,7 @@ _NAV_PARENT = {
     "config_role_scopes": "configuration",
     "config_alert_groups": "configuration",
     "config_alert_group_edit": "config_alert_groups",
+    "config_alert_templates": "configuration",
     # Account creation is an ACCOUNT action (superuser-gated, same as password reset/delete),
     # not a Configuration screen -- it hangs off Roles the same way those two already do,
     # regardless of which page's "Add stakeholder" link happened to reach it.
@@ -136,6 +137,7 @@ _NAV_LABEL = {
     "config_role_scopes": "Role scopes",
     "config_alert_groups": "Alert groups",
     "config_alert_group_edit": "Alert group",
+    "config_alert_templates": "Alert templates",
     "config_create_user": "Add stakeholder",
     "profile": "Profile",
 }

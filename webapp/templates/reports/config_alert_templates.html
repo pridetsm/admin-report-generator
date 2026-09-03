@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Alert templates · Configuration{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <p class="cfg-note">
+    One designed sample e-mail per metric — fixed sample data for review, not a live send.
+    To test a real group's own systems/stakeholders instead, open that group under
+    <a href="{% url 'config_alert_groups' %}">Alert groups</a> and use its Test tools.
+  </p>
+
+  <div class="section-label sub">Templates</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if rows %}
+    <table class="hist">
+      <thead><tr><th>Metric</th><th></th></tr></thead>
+      <tbody>
+      {% for row in rows %}
+        <tr>
+          <td><b>{{ row.label }}</b></td>
+          <td style="text-align:right">
+            {% if row.available %}
+            <a class="btn ghost" style="padding:5px 11px"
+               href="{% url 'config_alert_template_preview' row.category %}" target="_blank">
+              Preview ↗
+            </a>
+            {% else %}
+            <span class="chip amber">no design yet</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="margin:0;color:var(--muted);font-size:13px">No categories defined.</p>
+    {% endif %}
+  </div></div>
+</div>
+{% endblock %}

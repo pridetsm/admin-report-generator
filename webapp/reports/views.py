@@ -1336,6 +1336,7 @@ _CONFIG_CHILDREN = [
     ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
     ("config_role_scopes", "Role scopes", "Which systems each role sees"),
     ("config_alert_groups", "Alert groups", "Who gets notified, and when, per system group"),
+    ("config_alert_templates", "Alert templates", "The branded e-mail design for each metric"),
 ]
 
 
@@ -2095,6 +2096,53 @@ def config_alert_group_preview(request, pk):
     _subject, _text, html_body = alerting.render_test_email(group, kind=kind, system=tsys,
                                                              category=tcat, band=tband)
     return HttpResponse(html_body)
+
+
+# One designed sample e-mail per AlertGroup category (see reports/alert_email_samples/ —
+# static, self-contained HTML, hardcoded sample data, no Django templating: dropped in as
+# finished designs, not rendered from live values). Every AlertGroup.CATEGORY_CHOICES key has
+# exactly one file here; a category added to CATEGORY_CHOICES without a matching sample here
+# just won't show a preview link, it won't error.
+_ALERT_TEMPLATE_FILES = {
+    "disk": "disk-usage.html",
+    "ram": "ram-usage.html",
+    "cpu": "cpu-usage.html",
+    "service": "service-down.html",
+    "backup": "backup-missing.html",
+    "unreachable": "component-unreachable.html",
+    "untracked": "backup-untracked.html",
+    "folder": "folder-over-size.html",
+    "backup_uncleared": "uncleared-backups.html",
+}
+_ALERT_TEMPLATE_DIR = Path(__file__).resolve().parent / "alert_email_samples"
+
+
+def config_alert_templates(request):
+    """Gallery of the designed sample e-mail for every alert category — a design reference,
+    not a live send: each file is fixed sample data (see _ALERT_TEMPLATE_FILES' own comment),
+    so this page never touches Prometheus, AlertGroup, or AlertFinding at all."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    rows = [{"category": cat, "label": lbl, "available": cat in _ALERT_TEMPLATE_FILES}
+           for cat, lbl in AlertGroup.CATEGORY_CHOICES]
+    return render(request, "reports/config_alert_templates.html", {
+        **_config_context("config_alert_templates"),
+        "rows": rows,
+    })
+
+
+def config_alert_template_preview(request, category):
+    """Serves one sample e-mail's raw HTML for in-browser viewing (opened in a new tab from
+    the gallery) — a direct file read, not run through Django's template engine, since these
+    are finished designs to look at, not templates to fill in."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    filename = _ALERT_TEMPLATE_FILES.get(category)
+    if not filename:
+        raise Http404
+    return HttpResponse((_ALERT_TEMPLATE_DIR / filename).read_text(encoding="utf-8"))
 
 
 def _folder_watch_systems(prometheus_yml: str) -> set:
