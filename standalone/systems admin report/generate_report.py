@@ -1304,6 +1304,16 @@ def disk_pressure(store: "Store", systems: List["System"], thr: int) -> Tuple[in
     return hosts, disks
 
 
+#  This summary TILE lives in the "NEEDS ATTENTION" (watch) band, not "NEEDS IMMEDIATE
+#  ATTENTION" — it exists to say how WIDESPREAD elevated usage is across the estate, not to
+#  re-flag a single severe host (that's what the DISK NEAR-FULL banner and each system's own
+#  card-level flag are for, both untouched by this). One host at 98% out of 40 monitored used
+#  to turn this tile red on its own; on request, red now requires the elevated group to be a
+#  real chunk of the estate. 45% chosen directly on request (2026-09-03) as the line between
+#  "worth a glance" (amber) and "this is a widespread problem" (red).
+USAGE_TILE_RED_FRACTION = 0.45
+
+
 def disk_high(store: "Store", systems: List["System"], amber: int, red: int
               ) -> Tuple[int, int, str]:
     """The honest 'high disk usage' total for the summary tile: EVERY disk over the
@@ -1313,9 +1323,14 @@ def disk_high(store: "Store", systems: List["System"], amber: int, red: int
        a near-full disk is a high disk, so it is counted here too (they are the same disks).
        Returns (hosts, disks, state):
          state good -> no high disk (so 0 is always green — the colour rule holds)
-               bad  -> at least one disk is near-full (>= red)
-               warn -> disks are high but none near-full yet."""
-    hosts = disks = worst = 0
+               bad  -> high disks are USAGE_TILE_RED_FRACTION or more of every monitored disk
+               warn -> some disks are high, but not (yet) a widespread share of the estate
+       `red` (the per-disk near-full threshold) no longer drives this tile's colour at all —
+       a near-full disk is still counted into `disks` same as before, and still exactly what
+       the DISK NEAR-FULL banner lists by name; see USAGE_TILE_RED_FRACTION's own comment for
+       why this tile's colour now answers a different question (how widespread) than the
+       banner does (how severe)."""
+    hosts = disks = 0
     for s in systems:
         for c in s.components:
             high = [u for u in (d.get("used", 0)
@@ -1323,8 +1338,14 @@ def disk_high(store: "Store", systems: List["System"], amber: int, red: int
             if high:
                 hosts += 1
                 disks += len(high)
-                worst = max(worst, max(high))
-    return hosts, disks, ("good" if disks == 0 else ("bad" if worst >= red else "warn"))
+    total = total_disks(store, systems)
+    if disks == 0:
+        state = "good"
+    elif total and disks / total >= USAGE_TILE_RED_FRACTION:
+        state = "bad"
+    else:
+        state = "warn"
+    return hosts, disks, state
 
 
 def total_disks(store: "Store", systems: List["System"]) -> int:
@@ -1407,25 +1428,33 @@ def ram_policy_notes_for_system(sysm: "System") -> List[str]:
 
 def _usage_pressure(values: Dict[str, float], systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
     """For a summary usage tile (RAM / CPU): the hosts carrying a warning-or-worse
-       marker (>= amber%) and the colour BAND OF THEIR AVERAGE usage. Returns (count, state):
+       marker (>= amber%), and the colour band of how WIDESPREAD that is across the estate
+       (see USAGE_TILE_RED_FRACTION's own comment on disk_high for why "widespread", not "how
+       severe the worst one is", is what this tile's colour answers). `red` is accepted only
+       to keep this function's signature interchangeable with every other caller in this
+       module (band()/panel() pass the same (amber, red) pair everywhere) — it plays no part
+       in the colour decision here; a host's own severity still drives its INDIVIDUAL card
+       flag (see flagged_for_system), just not this aggregate tile. Returns (count, state):
          good -> no host at/over amber
-         warn -> the average of those hosts is in [amber, red)
-         bad  -> the average is >= red  (critical)"""
+         warn -> some hosts are elevated, but under USAGE_TILE_RED_FRACTION of the estate
+         bad  -> elevated hosts are USAGE_TILE_RED_FRACTION or more of the estate"""
+    total = sum(len(s.components) for s in systems)
     vals = [values[c.instance] for s in systems for c in s.components
             if values.get(c.instance, 0) >= amber]
     if not vals:
         return 0, "good"
-    return len(vals), ("bad" if (sum(vals) / len(vals)) >= red else "warn")
+    return len(vals), ("bad" if total and len(vals) / total >= USAGE_TILE_RED_FRACTION else "warn")
 
 
 def ram_pressure(store: "Store", systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
-    """Hosts at/over amber% RAM + the band of their average (see _usage_pressure)."""
+    """Hosts at/over amber% RAM + how widespread that is across the estate (see
+       _usage_pressure)."""
     return _usage_pressure(store.ram, systems, amber, red)
 
 
 def cpu_pressure(store: "Store", systems: List["System"], amber: int, red: int) -> Tuple[int, str]:
-    """Hosts at/over amber% CPU + the band of their average — a pegged host is an early
-       warning just like high RAM (see _usage_pressure)."""
+    """Hosts at/over amber% CPU + how widespread that is across the estate — same reasoning
+       as HIGH RAM USAGE (see _usage_pressure)."""
     return _usage_pressure(store.cpu, systems, amber, red)
 
 
