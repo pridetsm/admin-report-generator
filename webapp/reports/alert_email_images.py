@@ -25,24 +25,18 @@ from PIL import Image, ImageDraw, ImageFont
 
 _FONTS = "C:/Windows/Fonts"
 
-# Literal hex, matching alert_email_templates.py's own palette (kept independent -- no
-# cross-import between these two small modules).
+# Literal hex, matching alert_email_templates.py's own palette (mail_report.py's colors --
+# kept independent, no cross-import between these two small modules, but sourced from the
+# SAME numbers so an image never looks like a slightly different red to its own HTML).
 TRACK = (228, 232, 238)         # #E4E8EE
 TEXT = (27, 36, 48)             # #1B2430
-MUTED = (100, 112, 125)         # #64707D
-INK_SOFT = (22, 52, 85)         # #163455
-GOLD = (185, 135, 62)           # #B9873E
-RED = (178, 58, 50)             # #B23A32
-RED_LINE = (227, 179, 172)      # #E3B3AC
-AMBER_LINE = (231, 206, 153)    # #E7CE99
+MUTED = (107, 119, 133)         # #6B7785 -- mail_report.MUTED
+INK, INK_SOFT = (14, 42, 71), (28, 63, 102)     # #0E2A47 / #1C3F66 -- mail_report.NAVY + a tint
 
 
-def _band_rgb(band: str):
-    return RED if band == "red" else GOLD
-
-
-def _band_line_rgb(band: str):
-    return RED_LINE if band == "red" else AMBER_LINE
+def _hex_to_rgb(h: str):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
 
 
 @lru_cache(maxsize=4)
@@ -57,13 +51,18 @@ def _text_center(draw, xy, text, font, fill):
     draw.text((x - w / 2 - bbox[0], y - h / 2 - bbox[1]), text, font=font, fill=fill)
 
 
-def render_gauge(pct: int, band: str, label: str) -> bytes:
+def render_gauge(pct: int, color_hex: str, label: str) -> bytes:
     """148x148 @2x = 296x296. Measured off gauge-disk-usage.png (97%, red): outer radius
     touches the canvas edge exactly (r=148, no margin), stroke width 20px (ring spans x=0-19
     and x=277-295 along the horizontal centerline of a 296px-wide canvas), colors RED/TRACK.
     No tick marks are baked into the image at all -- the reference's "warn 70 / crit 90"
     legend is plain HTML text below the image, reproduced as such in alert_email_templates.py,
-    not drawn here."""
+    not drawn here.
+
+    `color_hex` is the caller's already-resolved SEVERITY color (IMMINENT/CRITICAL/WARNING --
+    see alert_email_templates._severity), not a raw red/amber band: severity classification
+    lives in exactly one place (that function), not duplicated here as a second band->color
+    mapping that could drift from it."""
     size = 296
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -71,7 +70,7 @@ def render_gauge(pct: int, band: str, label: str) -> bytes:
     stroke = 20
     r = size / 2 - stroke / 2
     bbox = (cx - r, cy - r, cx + r, cy + r)
-    color = _band_rgb(band)
+    color = _hex_to_rgb(color_hex)
 
     draw.arc(bbox, 0, 359.9, fill=TRACK, width=stroke)
     sweep = 360 * max(0, min(100, pct)) / 100
@@ -86,12 +85,15 @@ def render_gauge(pct: int, band: str, label: str) -> bytes:
     return buf.getvalue()
 
 
-def render_ring(state_word: str, elapsed_label: str, band: str) -> bytes:
+def render_ring(state_word: str, elapsed_label: str, line_hex: str) -> bytes:
     """148x148 @2x = 296x296. Measured off ring-service-down.png (DOWN, red): outer radius
     also touches the canvas edge (r=148), stroke width ~16px (15-16px measured), a dash
     pattern of 24 evenly-spaced ~7deg-on/8deg-off segments (not the sparse "mostly gap" pattern
-    used in the original CSS/SVG design) in the band's LINE tint color (RED_LINE/AMBER_LINE,
-    not the solid band color) -- and NO center dot marker; the reference has none."""
+    used in the original CSS/SVG design) in the severity's LINE tint color (not the solid
+    color) -- and NO center dot marker; the reference has none.
+
+    `line_hex` is the caller's already-resolved severity LINE tint (see render_gauge's own
+    docstring on why severity classification isn't duplicated here)."""
     size = 296
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -99,7 +101,7 @@ def render_ring(state_word: str, elapsed_label: str, band: str) -> bytes:
     stroke = 16
     r = size / 2 - stroke / 2
     bbox = (cx - r, cy - r, cx + r, cy + r)
-    line_color = _band_line_rgb(band)
+    line_color = _hex_to_rgb(line_hex)
 
     dash_deg, gap_deg = 7, 8
     a = 0.0
@@ -115,18 +117,21 @@ def render_ring(state_word: str, elapsed_label: str, band: str) -> bytes:
     return buf.getvalue()
 
 
-def render_grid(total: int, affected: int, band: str, cols: int = 6) -> bytes:
+def render_grid(total: int, affected: int, color_hex: str, cols: int = 6) -> bytes:
     """Measured off grid-backup-missing.png (5/24, red): 41x41 rounded-rect cells (corner
     radius ~5px), 9px gaps, colors RED/TRACK. Canvas size grows with `total`'s row count
     (ceil(total/cols) rows) -- the reference's own 4 files (24, 18 and 20 total) are 4, 3 and 4
-    rows respectively, all built off this exact cell/gap/radius geometry."""
+    rows respectively, all built off this exact cell/gap/radius geometry.
+
+    `color_hex` is the caller's already-resolved severity color (see render_gauge's own
+    docstring)."""
     cell, gap, radius = 41, 9, 5
     rows = math.ceil(total / cols)
     w = cols * cell + (cols - 1) * gap
     h = rows * cell + (rows - 1) * gap
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    color = _band_rgb(band)
+    color = _hex_to_rgb(color_hex)
 
     for i in range(total):
         row, col = divmod(i, cols)
@@ -139,7 +144,7 @@ def render_grid(total: int, affected: int, band: str, cols: int = 6) -> bytes:
     return buf.getvalue()
 
 
-def render_bar(actual: float, expected: float, band: str) -> bytes:
+def render_bar(actual: float, expected: float, color_hex: str) -> bytes:
     """1168x80 (fixed canvas, matching the reference exactly). Measured off
     bar-folder-over-size.png (48.2GB actual / 32GB expected, red): a fully-rounded ("pill")
     bar spanning the full canvas width, height 28px (y=44-72 of an 80px-tall canvas, corner
@@ -158,7 +163,7 @@ def render_bar(actual: float, expected: float, band: str) -> bytes:
 
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    color = _band_rgb(band)
+    color = _hex_to_rgb(color_hex)
     fill_x = round(w * fill_pct / 100)
 
     # The pill's rounded silhouette is defined ONCE, as a mask -- both the track and the fill
@@ -187,12 +192,13 @@ def render_bar(actual: float, expected: float, band: str) -> bytes:
 
 @lru_cache(maxsize=1)
 def header_gradient_png() -> bytes:
-    """The header's 165deg navy gradient (#0E2238 -> #163455), baked once (fixed colors/size,
-    never changes between sends) and reused via lru_cache -- referenced through the legacy
-    HTML `background=` attribute on the header <td> in alert_email_templates.py, which
-    Outlook's Word engine DOES honour for table cells, unlike a CSS background-image."""
+    """The header's 165deg navy gradient (mail_report.NAVY #0E2A47 -> a lighter tint), baked
+    once (fixed colors/size, never changes between sends) and reused via lru_cache --
+    referenced through the legacy HTML `background=` attribute on the header <td> in
+    alert_email_templates.py, which Outlook's Word engine DOES honour for table cells, unlike
+    a CSS background-image."""
     w, h = 640, 100
-    top, bottom = (14, 34, 56), (22, 52, 85)
+    top, bottom = INK, INK_SOFT
     img = Image.new("RGB", (w, h))
     px = img.load()
     diag = w * math.cos(math.radians(165 - 90))
@@ -201,6 +207,135 @@ def header_gradient_png() -> bytes:
         color = tuple(round(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
         for y in range(h):
             px[x, y] = color
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# --------------------------------------------------------------------------------- category icons
+# Drawn locally with Pillow's own line primitives, not fetched from anywhere -- a card's category
+# glyph needs to be exactly as Outlook-safe and dependency-free as everything else this module
+# produces (2026-09-04, on request for stronger at-a-glance visual identity per finding: "System
+# in question, Folder icon to show that this is a folder issue"). One simple, consistent line-icon
+# language across all 8 categories rather than hunting down a matching external icon per one --
+# same stroke weight, same badge treatment, so the set reads as one family.
+def _icon_disk(draw, box, fg, stroke):
+    x0, y0, x1, y1 = box
+    draw.rounded_rectangle(box, radius=(x1 - x0) * 0.12, outline=fg, width=stroke)
+    midy = (y0 + y1) / 2
+    draw.line((x0 + stroke, midy, x1 - stroke, midy), fill=fg, width=stroke)
+    r = (x1 - x0) * 0.07
+    cx, cy = x1 - (x1 - x0) * 0.22, midy
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fg)
+
+
+def _icon_ram(draw, box, fg, stroke):
+    x0, y0, x1, y1 = box
+    draw.rounded_rectangle(box, radius=(x1 - x0) * 0.08, outline=fg, width=stroke)
+    w, h = x1 - x0, y1 - y0
+    for i in range(1, 4):
+        x = x0 + w * i / 4
+        draw.line((x, y1, x, y1 + h * 0.14), fill=fg, width=stroke)
+
+
+def _icon_cpu(draw, box, fg, stroke):
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    pad = w * 0.16
+    inner = (x0 + pad, y0 + pad, x1 - pad, y1 - pad)
+    draw.rectangle(inner, outline=fg, width=stroke)
+    for frac in (0.32, 0.68):
+        x, y = x0 + w * frac, y0 + h * frac
+        draw.line((x, y0, x, y0 - pad * 0.7), fill=fg, width=stroke)
+        draw.line((x, y1, x, y1 + pad * 0.7), fill=fg, width=stroke)
+        draw.line((x0, y, x0 - pad * 0.7, y), fill=fg, width=stroke)
+        draw.line((x1, y, x1 + pad * 0.7, y), fill=fg, width=stroke)
+
+
+def _icon_service(draw, box, fg, stroke):
+    x0, y0, x1, y1 = box
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    r = (x1 - x0) * 0.26
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=fg, width=stroke)
+    ir = r * 0.42
+    draw.ellipse((cx - ir, cy - ir, cx + ir, cy + ir), outline=fg, width=stroke)
+    tooth = r * 0.4
+    for i in range(8):
+        ang = math.radians(i * 45)
+        tx0, ty0 = cx + math.cos(ang) * r, cy + math.sin(ang) * r
+        tx1, ty1 = cx + math.cos(ang) * (r + tooth), cy + math.sin(ang) * (r + tooth)
+        draw.line((tx0, ty0, tx1, ty1), fill=fg, width=round(stroke * 1.5))
+
+
+def _icon_unreachable(draw, box, fg, stroke):
+    x0, y0, x1, y1 = box
+    draw.ellipse(box, outline=fg, width=stroke)
+    inset = (x1 - x0) * 0.24
+    draw.line((x0 + inset, y1 - inset, x1 - inset, y0 + inset), fill=fg, width=stroke)
+
+
+def _icon_backup(draw, box, fg, stroke):
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    draw.rounded_rectangle(box, radius=w * 0.08, outline=fg, width=stroke)
+    draw.line((x1 - w * 0.3, y0, x1, y0 + h * 0.3), fill=fg, width=stroke)
+    label = (x0 + w * 0.22, y0 + stroke, x1 - w * 0.22, y0 + h * 0.4)
+    draw.rectangle(label, outline=fg, width=max(1, round(stroke * 0.75)))
+    slot = (x0 + w * 0.3, y1 - h * 0.24, x1 - w * 0.3, y1 - h * 0.12)
+    draw.rectangle(slot, fill=fg)
+
+
+def _icon_folder(draw, box, fg, stroke, *, mark: str = "") -> None:
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    tabw, tabh = w * 0.42, h * 0.16
+    draw.rounded_rectangle((x0, y0, x0 + tabw, y0 + tabh * 1.6), radius=tabh * 0.5, outline=fg, width=stroke)
+    draw.rounded_rectangle((x0, y0 + tabh, x1, y1), radius=h * 0.08, outline=fg, width=stroke)
+    if mark == "clock":
+        cx, cy, r = x1 - w * 0.22, y1 - h * 0.24, w * 0.17
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(255, 255, 255, 255), outline=fg,
+                    width=max(1, round(stroke * 0.8)))
+        draw.line((cx, cy, cx, cy - r * 0.6), fill=fg, width=max(1, round(stroke * 0.7)))
+        draw.line((cx, cy, cx + r * 0.5, cy), fill=fg, width=max(1, round(stroke * 0.7)))
+    elif mark == "grow":
+        cx, cy = x1 - w * 0.22, y1 - h * 0.3
+        draw.line((cx, cy + h * 0.12, cx, cy - h * 0.12), fill=fg, width=stroke)
+        draw.line((cx, cy - h * 0.12, cx - w * 0.09, cy - h * 0.02), fill=fg, width=stroke)
+        draw.line((cx, cy - h * 0.12, cx + w * 0.09, cy - h * 0.02), fill=fg, width=stroke)
+
+
+_ICON_DRAWERS = {
+    "disk": _icon_disk,
+    "ram": _icon_ram,
+    "cpu": _icon_cpu,
+    "service": _icon_service,
+    "unreachable": _icon_unreachable,
+    "backup": _icon_backup,
+    "untracked": _icon_backup,
+    "backup_uncleared": _icon_backup,
+    "folder": lambda d, b, f, s: _icon_folder(d, b, f, s, mark="grow"),
+    "undrained_folders": lambda d, b, f, s: _icon_folder(d, b, f, s, mark="clock"),
+}
+
+
+def render_category_icon(category: str, fg_hex: str, soft_hex: str, size: int = 64) -> bytes:
+    """A small square badge: a soft-tinted rounded background in the finding's own severity
+    color, with a simple line glyph naming the CATEGORY on top -- system/metric/severity are
+    already chips text on the card; this is the one thing a reader has to notice before
+    reading anything, which is why it exists at all ("Folder icon to show that this is a
+    folder issue... these shouldn't be things I have to look for")."""
+    scale = 4
+    s = size * scale
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((0, 0, s - 1, s - 1), radius=round(s * 0.22), fill=_hex_to_rgb(soft_hex))
+    pad = round(s * 0.26)
+    stroke = max(2, round(s * 0.045))
+    box = (pad, pad, s - pad, s - pad)
+    drawer = _ICON_DRAWERS.get(category)
+    if drawer:
+        drawer(draw, box, _hex_to_rgb(fg_hex), stroke)
+    img = img.resize((size, size), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

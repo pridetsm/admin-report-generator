@@ -1,0 +1,23 @@
+{% comment %}
+  Shared partial for report_charts.heatmap_grid's output -- included twice per automated report
+  page (Persistent, Recurring), each with its own `grid` variable. Kept as one file rather than
+  duplicating this markup twice so the two grids can never visually drift apart.
+{% endcomment %}
+<table class="heatgrid">
+  <thead>
+    <tr>
+      <th class="row-label"></th>
+      {% for col in grid.columns %}<th>{{ col }}</th>{% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in grid.rows %}
+    <tr>
+      <td class="row-label">{{ row.system }}</td>
+      {% for cell in row.cells %}
+      <td><div class="cell" style="background:{{ cell.bg }};color:{{ cell.color }}" data-tooltip="{{ cell.tooltip }}">{{ cell.value }}</div></td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

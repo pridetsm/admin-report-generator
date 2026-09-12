@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Roles · Configuration{% endblock %}
+
+{% comment %}
+  Everything to do with roles, ONE PAGE with a properly labelled, collapsible section per
+  concern (on request, 2026-09-04: "consolidate everything... on one screen... do this for
+  roles as well") -- replaces the earlier hub-of-cards version of this page, which itself
+  replaced two separate screens (Roles, Role scopes) before that. Reachable via three URLs
+  (config_roles / roles_console / config_role_scopes) that all render this identical page --
+  see views.config_roles' own docstring for why.
+
+  Which section starts open is remembered client-side (sessionStorage), the same pattern
+  Folder Watch's own "How to read this" disclosure already uses, so saving one section's form
+  (a full page reload) doesn't collapse the very section you were just looking at.
+{% endcomment %}
+
+{% block body %}
+<style>
+  .cfg-section { border:1px solid var(--line-strong); border-radius:10px; margin-bottom:16px; overflow:hidden; }
+  .cfg-section > summary {
+    cursor:pointer; list-style:none; padding:14px 18px; display:flex; align-items:center; gap:10px;
+    font-weight:700; font-size:13px; letter-spacing:.03em; text-transform:uppercase; color:var(--ink);
+    background:var(--panel); user-select:none;
+  }
+  .cfg-section > summary::-webkit-details-marker { display:none; }
+  .cfg-section > summary::before {
+    content:"›"; font-size:18px; line-height:1; transition:transform .15s ease; color:var(--muted); flex:none;
+  }
+  .cfg-section[open] > summary::before { transform:rotate(90deg); }
+  .cfg-section > summary:hover { color:var(--accent); }
+  .cfg-section-hint { font-weight:400; text-transform:none; letter-spacing:0; color:var(--muted); font-size:12px; }
+  .cfg-section-body { padding:18px; border-top:1px solid var(--line-strong); }
+  @media (prefers-reduced-motion: reduce) { .cfg-section > summary::before { transition:none; } }
+</style>
+<div class="container" style="max-width:1040px">
+
+  <div class="section-label">Roles</div>
+
+  <details class="cfg-section" id="sec-assignments">
+    <summary>Role assignments
+      {% if pending %}<span class="cfg-section-hint"><span class="chip amber">{{ pending|length }} pending</span></span>{% endif %}
+    </summary>
+    <div class="cfg-section-body">
+
+      {# ---- pending role requests ---- #}
+      <div class="section-label sub">Pending role requests {% if pending %}<span class="chip amber">{{ pending|length }}</span>{% endif %}</div>
+      <div class="card"><div class="body" style="padding:6px 18px">
+        {% if pending %}
+        <table class="hist">
+          <thead><tr><th>User</th><th>Requested role</th><th>When</th><th style="text-align:right">Decision</th></tr></thead>
+          <tbody>
+          {% for req in pending %}
+            <tr>
+              <td><b>{{ req.user.get_full_name|default:req.user.get_username }}</b> <span style="color:var(--muted)">({{ req.user.get_username }})</span></td>
+              <td><span class="chip green">{{ req.role }}</span></td>
+              <td>{{ req.created_at|date:"d M Y, H:i" }}</td>
+              <td style="text-align:right;white-space:nowrap">
+                <form method="post" action="{% url 'roles_console' %}" style="display:inline">{% csrf_token %}
+                  <input type="hidden" name="action" value="decide">
+                  <input type="hidden" name="request_id" value="{{ req.id }}">
+                  <button class="btn ghost" name="decision" value="reject" style="padding:6px 12px">Reject</button>
+                  <button class="btn primary" name="decision" value="approve" style="padding:6px 12px">Approve</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <p style="color:var(--muted)">No pending requests.</p>
+        {% endif %}
+      </div></div>
+
+      {# ---- all users + their roles -- role assignment ONLY; account actions (profile,
+      password, delete) moved to their own screen, see Configuration > Users (2026-09-04:
+      "make user management a screen on its own, separate it from roles") ---- #}
+      <div class="section-label sub" style="margin-top:20px">All users &amp; roles</div>
+      <div class="card"><div class="body" style="padding:6px 18px 14px">
+        <table class="hist">
+          <thead><tr><th>User</th><th>Email</th>{% for r in role_names %}<th style="text-align:center">{{ r }}</th>{% endfor %}<th></th></tr></thead>
+          <tbody>
+          {% for row in user_rows %}
+            <tr>
+              <td><b>{{ row.u.get_full_name|default:row.u.get_username }}</b><br><span style="color:var(--muted);font-size:12px">{{ row.u.get_username }}{% if row.u.is_superuser %} · superuser{% endif %}</span></td>
+              <td style="color:var(--muted)">{{ row.u.email|default:"—" }}</td>
+              {% for r in role_names %}
+              <td style="text-align:center"><input type="checkbox" name="roles" value="{{ r }}" form="uf-{{ row.u.id }}" {% if r in row.roles %}checked{% endif %}></td>
+              {% endfor %}
+              <td style="text-align:right">
+                <form method="post" action="{% url 'roles_console' %}" id="uf-{{ row.u.id }}" style="margin:0">{% csrf_token %}
+                  <input type="hidden" name="action" value="set_roles">
+                  <input type="hidden" name="user_id" value="{{ row.u.id }}">
+                  <button class="btn ghost" type="submit" style="padding:6px 12px">Save</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div></div>
+
+    </div>
+  </details>
+
+  <details class="cfg-section" id="sec-scopes">
+    <summary>Role scopes</summary>
+    <div class="cfg-section-body">
+      <p class="cfg-note" style="margin-top:0">Tick nothing to leave a role unrestricted — it sees every system.</p>
+
+      {% if not systems %}
+        <div class="card"><div class="body" style="padding:18px;color:var(--muted)">
+          No systems found in <code>{{ yaml_source.path }}</code> — nothing to map yet.
+        </div></div>
+      {% else %}
+      <form method="post" action="{% url 'config_role_scopes' %}">{% csrf_token %}
+        {% for row in rows %}
+        <div class="section-label sub" style="display:flex;align-items:center;gap:8px">
+          {% if row.icon %}<img src="{% static row.icon %}" alt="" style="height:20px;width:20px;object-fit:contain">{% endif %}
+          {{ row.role }}
+          {% if row.unscoped %}<span class="chip amber" style="text-transform:none;letter-spacing:0">Unrestricted — sees all {{ systems|length }}</span>
+          {% else %}<span class="chip green" style="text-transform:none;letter-spacing:0">{{ row.chosen|length }} of {{ systems|length }}</span>{% endif %}
+        </div>
+        <div class="card"><div class="body" style="padding:14px 18px">
+          <div class="scope-grid" data-scope-group>
+            {% for s in systems %}
+            <label class="scope-opt">
+              <input type="checkbox" name="systems__{{ row.role }}" value="{{ s }}" {% if s in row.chosen %}checked{% endif %}>
+              <span>{{ s }}</span>
+            </label>
+            {% endfor %}
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px">
+            <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
+            <button type="button" class="btn ghost cfg-add" data-scope-none>Clear (unrestricted)</button>
+          </div>
+        </div></div>
+        {% endfor %}
+
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+          <button class="btn primary" type="submit">Save role scopes</button>
+          <span style="color:var(--muted);font-size:12.5px">
+            Applies the next time a role is selected — users already signed in keep their current scope
+            until they switch roles.
+          </span>
+        </div>
+      </form>
+      {% endif %}
+    </div>
+  </details>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var STORE = "cfgRolesOpen";
+  var ids = ["sec-assignments", "sec-scopes"];
+  var saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(STORE) || "null"); } catch (e) { saved = null; }
+
+  ids.forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) { return; }
+    if (saved) {
+      el.open = !!saved[id];
+    } else {
+      el.open = (id === "sec-{{ default_open|default:'assignments' }}");
+    }
+    el.addEventListener("toggle", function () {
+      var state = {};
+      ids.forEach(function (i) {
+        var e = document.getElementById(i);
+        if (e) { state[i] = e.open; }
+      });
+      try { sessionStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {}
+    });
+  });
+})();
+</script>
+{% endblock %}

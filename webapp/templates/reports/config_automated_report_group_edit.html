@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}{{ group.name }} · Reporting{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {{ group.stakeholder_count }} stakeholder{{ group.stakeholder_count|pluralize }} ·
+      {{ group.report_types|length }} report type{{ group.report_types|length|pluralize }} ·
+      {% if not group.active %}<span class="chip amber">paused</span>{% else %}<span class="chip green">active</span>{% endif %}
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_automated_reports' %}">All groups</a>
+  </div>
+
+  <form method="post">{% csrf_token %}
+    <div class="section-label sub">Name</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span>Name</span>
+        <input type="text" name="name" value="{{ group.name }}" required>
+      </label>
+    </div></div>
+
+    <div class="section-label sub">Report types this group receives</div>
+    <div class="card"><div class="body" style="padding:14px 18px">
+      {% if not report_type_choices %}
+        <p class="cfg-note" style="margin:0">No report types found.</p>
+      {% else %}
+      <div class="scope-grid" data-scope-group>
+        {% for value, label in report_type_choices %}
+        <label class="scope-opt">
+          <input type="checkbox" name="report_types" value="{{ value }}" {% if value in group.report_types %}checked{% endif %}>
+          <span>{{ label }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
+        <button type="button" class="btn ghost cfg-add" data-scope-none>Clear</button>
+      </div>
+      {% endif %}
+    </div></div>
+
+    <div class="section-label sub">Active</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" name="active" {% if group.active %}checked{% endif %} style="width:auto">
+          Active
+        </span>
+        <small class="cfg-hint">Untick to pause without deleting — nothing sends while paused.</small>
+      </label>
+    </div></div>
+
+    <div class="section-label sub">App-user stakeholders</div>
+    <div class="card"><div class="body" style="padding:14px 18px">
+      <p class="cfg-note" style="margin:0 0 10px">Notified at their account e-mail.</p>
+      {% if not users %}
+        <p class="cfg-note" style="margin:0 0 10px">No active users found.</p>
+      {% else %}
+      <input type="text" class="cfg-search" data-scope-search placeholder="Search stakeholders…" autocomplete="off" aria-label="Search stakeholders">
+      <div class="scope-grid" data-scope-group>
+        {% for u in users %}
+        <label class="scope-opt">
+          <input type="checkbox" name="users" value="{{ u.pk }}" {% if u.pk in chosen_users %}checked{% endif %}>
+          <span>{{ u.username }}{% if u.email %} · {{ u.email }}{% endif %}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
+        <button type="button" class="btn ghost cfg-add" data-scope-none>Clear</button>
+      </div>
+      {% endif %}
+    </div></div>
+
+    <div class="section-label sub">Plain-e-mail stakeholders</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span>One address per line (commas or semicolons also accepted)</span>
+        <textarea name="emails" rows="4" placeholder="ceo@rbz.co.zw&#10;secretariat@rbz.co.zw">{{ email_list }}</textarea>
+        <small class="cfg-hint">For stakeholders with no app account.</small>
+      </label>
+    </div></div>
+
+    <div class="actionbar">
+      <div class="container-inner">
+        <button class="btn primary" type="submit">Save</button>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn ghost" type="submit" name="action" value="delete"
+                style="color:var(--red)"
+                onclick="return confirm('Remove “{{ group.name }}”?\n\nThis cannot be undone.');">
+          Remove group
+        </button>
+      </div>
+    </div>
+  </form>
+
+  <div class="section-label sub">Test tools</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    {% if not group.report_types %}
+    <p class="cfg-note" style="margin:0">Tick at least one report type above before testing this group.</p>
+    {% else %}
+    <p class="cfg-note" style="margin:0">Tests the group as last saved — save first to test edits above.</p>
+    <details class="cfg-learn-more"><summary>Learn more</summary>
+      <div class="cfg-learn-more-body">
+        Generates the REAL, current content for the report type you pick — right now, the
+        same way its own schedule would — and sends it clearly marked <b>[SYNTHETIC TEST]</b>
+        throughout so recipients are never confused about whether it's the real scheduled
+        send. Nothing here is fabricated (there's no cheap single-fake-finding equivalent for
+        a whole report the way an alert has one flag to fake), and nothing is saved to report
+        history.
+      </div>
+    </details>
+    <form method="post" action="{% url 'config_automated_report_group_test' group.pk %}">
+      {% csrf_token %}
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Report type</span>
+          <select name="ttype">
+            {% for value, label in report_type_choices %}
+              {% if value in group.report_types %}<option value="{{ value }}">{{ label }}</option>{% endif %}
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Send test to</span>
+          <select name="tto">
+            <option value="">All stakeholders ({{ test_recipients|length }})</option>
+            {% for addr in test_recipients %}<option value="{{ addr }}">{{ addr }}</option>{% endfor %}
+          </select>
+          <small class="cfg-hint">Narrows a test send to just this one — the real report still goes to everyone.</small>
+        </label>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn ghost" type="submit">Send test</button>
+      </div>
+    </form>
+    {% endif %}
+  </div></div>
+
+</div>
+{% endblock %}

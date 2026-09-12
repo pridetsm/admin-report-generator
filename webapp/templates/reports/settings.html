@@ -24,6 +24,38 @@
         {% if form.grafana_url.errors %}<div class="errornote">{{ form.grafana_url.errors|striptags }}</div>{% endif %}
         <small style="color:var(--muted)">config.ini default: {{ config_grafana|truncatechars:70 }}</small>
       </label>
+      <div style="margin:20px 0 16px;padding-top:16px;border-top:1px solid var(--border)">
+        <div class="field" style="margin-bottom:4px"><span>Automated Reports — AI narrative provider</span></div>
+        <p style="margin:0 0 12px;color:var(--muted);font-size:13px">
+          Which AI provider writes the "so what" analysis in trend reports. A report always
+          generates even if this is off, unreachable, or misconfigured — the deterministic
+          offline sections (Pareto concentration, root-cause fan-in, alert-hygiene checks)
+          run either way.
+        </p>
+        <p style="margin:0 0 16px;color:var(--muted);font-size:12.5px">
+          The master "Enable AI-assisted reporting" switch lives on the
+          <a href="{% url 'automated_reports' %}">Automated Reports</a> screen itself, next to
+          the reports it controls. This provider/key config only affects manually generated
+          reference reports until that switch is turned on.
+        </p>
+        <label class="field" style="margin-bottom:14px">
+          <span>Provider</span>
+          <select name="narrative_provider">
+            {% for value, label in narrative_provider_choices %}
+            <option value="{{ value }}" {% if value == sc.narrative_provider %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="field" style="margin-bottom:14px">
+          <span>Anthropic API key{% if anthropic_key_set %} <small style="color:var(--muted);font-weight:400">(set — leave blank to keep it)</small>{% endif %}</span>
+          <input type="password" name="anthropic_api_key" placeholder="{% if anthropic_key_set %}••••••••••••••••{% else %}sk-ant-…{% endif %}" autocomplete="off">
+        </label>
+        <label class="field" style="margin-bottom:0">
+          <span>Microsoft 365 Copilot API key{% if copilot_key_set %} <small style="color:var(--muted);font-weight:400">(set — leave blank to keep it)</small>{% endif %}</span>
+          <input type="password" name="copilot_api_key" placeholder="{% if copilot_key_set %}••••••••••••••••{% else %}reserved — no working integration yet{% endif %}" autocomplete="off">
+          <small style="color:var(--muted)">Stored for when it's available — selecting this provider currently always falls back to the offline narrative.</small>
+        </label>
+      </div>
       <div style="display:flex;gap:10px;align-items:center">
         <button class="btn primary" type="submit">Save settings</button>
         <a class="btn ghost" href="{% url 'report_form' %}">Back</a>

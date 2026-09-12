@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}{{ check.name }} · Freshness checks{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {{ check.system }} ·
+      {% if not check.active %}<span class="chip amber">paused</span>{% else %}<span class="chip green">active</span>{% endif %}
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_alerts' %}">All checks</a>
+  </div>
+
+  <form method="post">{% csrf_token %}
+    <div class="section-label sub">What this checks</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" name="name" value="{{ check.name }}" required>
+        </label>
+        <label class="field">
+          <span>System</span>
+          <select name="system" required>
+            {% for s in systems %}<option value="{{ s }}" {% if s == check.system %}selected{% endif %}>{{ s }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="field">
+          <span>Kind</span>
+          <select name="kind" required>
+            <option value="textfile_mtime" {% if check.kind == "textfile_mtime" %}selected{% endif %}>Textfile mtime (needs a file)</option>
+            <option value="backup_check" {% if check.kind == "backup_check" %}selected{% endif %}>Backup checker timestamp (no file needed)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Instance</span>
+          <input type="text" name="instance" value="{{ check.instance }}" required>
+        </label>
+        <label class="field">
+          <span>File <span style="color:var(--muted);font-weight:normal">(textfile mtime only)</span></span>
+          <input type="text" name="file" value="{{ check.file }}">
+        </label>
+      </div>
+      {% if check.kind == "backup_check" %}
+      <p class="cfg-note" style="margin:10px 0 0">Reads <code>backup_check_timestamp_seconds{ instance="{{ check.instance }}" }</code> — the backup checker script's own last-run time, not whether the backup itself looks fresh (that's the separate NO BACKUP alert).</p>
+      {% else %}
+      <p class="cfg-note" style="margin:10px 0 0">Reads <code>windows_textfile_mtime_seconds{ instance="{{ check.instance }}", file="{{ check.file }}" }</code> — how old THIS file's own last write is, not whether its values look healthy.</p>
+      {% endif %}
+    </div></div>
+
+    <div class="section-label sub">Max age</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span>How stale before this counts as broken</span>
+        <input type="text" name="max_age" value="{{ max_age_str }}" style="max-width:160px" required>
+        <small class="cfg-hint">Set comfortably above the checker's real run interval, or every normal gap between runs will falsely alert — s/m/h suffixes accepted.</small>
+      </label>
+    </div></div>
+
+    <div class="section-label sub">Correlate with a folder_exporter job <span style="color:var(--muted);font-weight:normal">(optional)</span></div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <p class="cfg-note" style="margin:0 0 10px">A job scheduler can report a job as 100% healthy (exit 0, "ok") while it silently never reaches the step that writes this file — naming the job here shows its own last-success time next to the file's staleness in the alert e-mail, so that mismatch is visible without a manual cross-query.</p>
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Scheduler instance</span>
+          <input type="text" name="scheduler_instance" value="{{ check.scheduler_instance }}" placeholder="10.0.212.3:9847">
+        </label>
+        <label class="field">
+          <span>Scheduler job name</span>
+          <input type="text" name="scheduler_job" value="{{ check.scheduler_job }}" placeholder="t24_service_checker">
+        </label>
+      </div>
+    </div></div>
+
+    <div class="section-label sub">Active</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" name="active" {% if check.active %}checked{% endif %} style="width:auto">
+          Active
+        </span>
+        <small class="cfg-hint">Untick to stop watching without deleting.</small>
+      </label>
+    </div></div>
+
+    <div class="actionbar">
+      <div class="container-inner">
+        <button class="btn primary" type="submit">Save</button>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn ghost" type="submit" name="action" value="delete"
+                style="color:var(--red)"
+                onclick="return confirm('Remove “{{ check.name }}”?\n\nThis cannot be undone.');">
+          Remove check
+        </button>
+      </div>
+    </div>
+  </form>
+
+</div>
+{% endblock %}

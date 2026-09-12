@@ -6,3 +6,6 @@ Pillow>=10          # lets openpyxl embed the company logo in the report
 psycopg[binary]>=3.1  # PostgreSQL driver (production DB; SQLite used only as a dev fallback)
 whitenoise>=6         # serves /static/ directly when no reverse proxy is in front
 cryptography>=42      # encrypts secrets stored in DB config revisions (see reports/crypto.py)
+anthropic>=0.40        # optional AI narrative provider for Automated Reports (reports/ai_narrative.py) — falls back to offline mode if unreachable or unconfigured
+xhtml2pdf>=0.2.16      # renders Automated Reports as downloadable PDF (reports/views.py's automated_report_download) — pure-Python/reportlab, no native binary deps, so it installs cleanly on Windows unlike WeasyPrint
+matplotlib>=3.8        # renders the Automated Reports charts as static PNGs for the PDF (reports/report_charts.py) — the PDF has no JS engine to run Chart.js, which the browser view uses instead; prebuilt Windows wheels, no compiler needed

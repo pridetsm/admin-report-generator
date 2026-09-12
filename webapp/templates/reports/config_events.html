@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Events · Configuration{% endblock %}
+
+{% comment %}
+  Event notifications -- deliberately SEPARATE from Alerts (2026-09-04: "decouple
+  notifications from alerts... notification types, alert notification and event
+  notification"). An EventGroup has no severity/categories/reminders at all, since an event
+  (something happened, once) has none of those either -- see reports.models.EventGroup and
+  reports.events' own docstrings. Blue accent throughout, matching the notification e-mails
+  themselves, so the UI and the inbox agree on what "event" looks like.
+{% endcomment %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="section-label">Events</div>
+  <p class="cfg-note" style="margin-top:0">Who hears about a system event — no severity, no reminders, just "this happened."</p>
+
+  <div class="section-label sub">Groups</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if groups %}
+    <table class="hist">
+      <thead><tr><th>Name</th><th>Systems</th><th>Stakeholders</th><th></th><th></th></tr></thead>
+      <tbody>
+      {% for g in groups %}
+        <tr class="rowlink" data-href="{% url 'config_event_group_edit' g.pk %}">
+          <td><b>{{ g.name }}</b></td>
+          <td style="color:var(--muted)">
+            {% if g.systems %}{{ g.systems|length }}{% else %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">none yet</span>{% endif %}
+          </td>
+          <td style="color:var(--muted)">{{ g.stakeholder_count }}</td>
+          <td>{% if not g.active %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">paused</span>{% endif %}</td>
+          <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+               href="{% url 'config_event_group_edit' g.pk %}">Open</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="margin:0;color:var(--muted);font-size:13px">No event groups defined yet.</p>
+    {% endif %}
+  </div></div>
+
+  <div class="section-label sub" style="margin-top:16px">Add a group</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <form method="post">{% csrf_token %}
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" name="name" placeholder="Backup Ops Team" required>
+        </label>
+      </div>
+      <button class="btn primary cfg-add" type="submit">＋ Create</button>
+    </form>
+  </div></div>
+
+  <div class="section-label sub" style="margin-top:22px">Event types</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <table class="hist">
+      <thead><tr><th>Event</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td><b>Backup file dropped</b></td>
+          <td style="text-align:right;color:var(--muted);font-size:12px">Live</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="cfg-note" style="margin:10px 0 0">
+      Fires the moment a system's own backup-check reports a filename it hasn't reported before.
+    </p>
+  </div></div>
+
+</div>
+{% endblock %}

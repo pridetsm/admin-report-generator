@@ -206,13 +206,67 @@
   }
 
 
-  // ---- role scopes: select-all / clear per role ----
+  // ---- role scopes: select-all / clear per role (search-filtered rows only, if any are hidden) ----
   document.querySelectorAll("[data-scope-all], [data-scope-none]").forEach(function (btn) {
     btn.addEventListener("click", function () {
       var on = btn.hasAttribute("data-scope-all");
       var card = btn.closest(".card");
       card.querySelectorAll('[data-scope-group] input[type="checkbox"]').forEach(function (cb) {
+        var opt = cb.closest(".scope-opt");
+        if (opt && opt.style.display === "none") return;
         cb.checked = on;
+      });
+    });
+  });
+
+  // ---- scope-grid search: filter .scope-opt rows by typed text ----
+  document.querySelectorAll("[data-scope-search]").forEach(function (input) {
+    var card = input.closest(".card") || input.parentElement;
+    var opts = Array.prototype.slice.call(card.querySelectorAll('[data-scope-group] .scope-opt'));
+    input.addEventListener("input", function () {
+      var q = input.value.trim().toLowerCase();
+      opts.forEach(function (opt) {
+        opt.style.display = (!q || opt.textContent.toLowerCase().indexOf(q) > -1) ? "" : "none";
+      });
+    });
+  });
+
+  // ---- grouped-table search: filter data-search-row rows (and hide a group's own
+  // data-search-group header when every row under it is hidden) by typed text. Generic --
+  // any table grouped into sections can opt in with these two data attributes, same idea as
+  // the scope-grid search above but for a plain <table> instead of a checkbox grid (added
+  // 2026-09-05 for Configuration > System Alerts' freshness-checks table, grouped by system).
+  //
+  // data-search-group-prefix (added same day for the Alert groups table's own two-level
+  // Type > Sub type hierarchy: "make the system hierarchy more readable... following the
+  // already established structure") lets a PARENT header (e.g. "System Alert") stay visible
+  // if ANY row whose own data-search-group starts with that prefix (e.g. "system:staleness")
+  // is still visible, without needing every row to repeat the parent's own group name.
+  document.querySelectorAll("[data-table-search]").forEach(function (input) {
+    var table = document.querySelector(input.getAttribute("data-table-search"));
+    if (!table) return;
+    var rows = Array.prototype.slice.call(table.querySelectorAll("tr[data-search-row]"));
+    var groups = Array.prototype.slice.call(table.querySelectorAll("tr[data-search-group]"));
+    var prefixGroups = Array.prototype.slice.call(table.querySelectorAll("tr[data-search-group-prefix]"));
+    input.addEventListener("input", function () {
+      var q = input.value.trim().toLowerCase();
+      rows.forEach(function (row) {
+        row.style.display = (!q || row.textContent.toLowerCase().indexOf(q) > -1) ? "" : "none";
+      });
+      groups.forEach(function (g) {
+        var name = g.getAttribute("data-search-group");
+        var anyVisible = rows.some(function (row) {
+          return row.getAttribute("data-search-group") === name && row.style.display !== "none";
+        });
+        g.style.display = anyVisible ? "" : "none";
+      });
+      prefixGroups.forEach(function (g) {
+        var prefix = g.getAttribute("data-search-group-prefix");
+        var anyVisible = rows.some(function (row) {
+          var rg = row.getAttribute("data-search-group") || "";
+          return rg.indexOf(prefix) === 0 && row.style.display !== "none";
+        });
+        g.style.display = anyVisible ? "" : "none";
       });
     });
   });

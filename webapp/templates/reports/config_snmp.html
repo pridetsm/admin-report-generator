@@ -20,18 +20,22 @@
   {% endif %}
 
   <div class="card"><div class="body" style="padding:18px">
-    <p style="margin:0 0 16px;color:var(--muted)">
-      The credential profiles under <code>auths:</code> in the snmp_exporter's
-      <code>snmp.yml</code> — what <code>prometheus.yml</code>'s SNMP jobs reference by name
-      (<code>auth: [RBZ_v2]</code>). Not the rest of that file: <code>modules:</code> is ~2MB of
-      generator output ("manual changes will be lost" per its own header) and is never touched
-      here. <code>community</code> / <code>password</code> / <code>priv_password</code> always
-      show a placeholder — leave one untouched to keep the current value, or type a new value
-      over it to change it; the real value never round-trips to this screen. Every Save creates
-      a new, permanent revision below — nothing is ever edited or deleted. <b>Save</b> only
-      records the revision. <b>Save &amp; Apply</b> also rewrites <code>snmp.yml</code> (with
-      the real secrets spliced back in) and restarts the exporter service.
+    <p class="cfg-note" style="margin:0 0 10px">
+      The credential profiles under <code>auths:</code> in the snmp_exporter's <code>snmp.yml</code>
+      — referenced by name from <code>prometheus.yml</code>'s SNMP jobs.
     </p>
+    <details class="cfg-learn-more"><summary>Learn more</summary>
+      <div class="cfg-learn-more-body">
+        Not the rest of that file: <code>modules:</code> is ~2MB of generator output ("manual
+        changes will be lost" per its own header) and is never touched here.
+        <code>community</code> / <code>password</code> / <code>priv_password</code> always show a
+        placeholder — leave one untouched to keep the current value, or type over it to change it;
+        the real value never round-trips to this screen. Every Save creates a new, permanent
+        revision below — nothing is edited or deleted. <b>Save</b> only records the revision;
+        <b>Save &amp; Apply</b> also rewrites <code>snmp.yml</code> (with the real secrets spliced
+        back in) and restarts the exporter service.
+      </div>
+    </details>
 
     <form method="post" id="snmpConfigForm">
       {% csrf_token %}

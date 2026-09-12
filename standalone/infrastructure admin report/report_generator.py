@@ -208,6 +208,13 @@ class NoteRow:
     fix_needed: str = ""
     resolved: str = ""
     comment: str = ""
+    # This row's OWN severity ("red"/"amber"/"" for informational) -- 2026-09-04, on request:
+    # "by system admin report convention comments are never red". A group-level "is this
+    # group critical at all" check coloured EVERY row in a group red the moment ANY of its
+    # flags was critical, including a purely informational row that isn't itself describing a
+    # problem. Matches the Systems Admin Report's own generate_report.py convention: a
+    # flagged row is coloured by ITS OWN flag.band, never by another row's.
+    band: str = ""
 
 
 @dataclass
@@ -529,12 +536,14 @@ def _notes_title(title: str, indent: int) -> str:
     return title.split(" (")[0] + " Notes"
 
 
-def _flagged_style(text: str, group: DeviceGroup) -> tuple[str, bool]:
-    if text.strip() == SENTINEL_NOTE:
+def _flagged_style(note: "NoteRow") -> tuple[str, bool]:
+    """Per-ROW, not per-group (2026-09-04: "comments are never red" -- a group merely
+    CONTAINING a critical flag must not turn every other, unrelated row in it red too)."""
+    if note.flagged_metric.strip() == SENTINEL_NOTE:
         return TEXT_MUTED, True
-    if group.critical > 0:
+    if note.band == "red":
         return CHIP_RED_TXT, False
-    if group.warning > 0:
+    if note.band == "amber":
         return CHIP_AMBER_TXT, False
     return TEXT_MUTED, False
 
@@ -681,7 +690,7 @@ def write_notes(sh, top, indent, title, notes, group, by_row) -> None:
 
     r = hdr + 1
     for n in notes:
-        color, italic = _flagged_style(n.flagged_metric, group)
+        color, italic = _flagged_style(n)
         sh.merge(r, nc, r, NOTES_FLAG_LAST, bg=CARD)
         sh.put(r, nc, f"  {n.flagged_metric}", sz=8, italic=italic, color=color,
                bg=CARD, halign="left")

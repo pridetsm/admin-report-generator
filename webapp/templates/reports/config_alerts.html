@@ -1,0 +1,528 @@
+{% extends "base.html" %}
+{% block title %}Alerting · Configuration{% endblock %}
+
+{% comment %}
+  Everything to do with alerts, ONE PAGE with a properly labelled, collapsible section per
+  concern (on request, 2026-09-04: "consolidate everything to do with alerts on one screen
+  have properly labelled and collapsible sections with clear and clean separation of
+  concerns this is better than multiple screens") -- replaces the earlier hub-of-cards
+  version of this page, which itself replaced four separate screens before that.
+
+  Which section starts open is remembered client-side (sessionStorage), the same pattern
+  Folder Watch's own "How to read this" disclosure already uses, so saving one section's
+  form (a full page reload) doesn't collapse the very section you were just looking at.
+
+  Renamed "Alerts" -> "Alerting" and gained a "System Alerting" section (2026-09-05, on
+  request: "rename the main alerts screen to alerting and add system alerting as a section
+  of alerting") -- System Alerts used to be its own sibling Configuration hub tile; only the
+  PAGE it lives on moved here, SystemAlertGroup/FreshnessCheck stay separate models from
+  AlertGroup/AlertFinding (see FreshnessCheck's own docstring on why: a checker going stale
+  is a structurally different kind of finding from a monitored value crossing a threshold).
+{% endcomment %}
+
+{% block body %}
+<style>
+  .cfg-section { border:1px solid var(--line-strong); border-radius:10px; margin-bottom:16px; overflow:hidden; }
+  .cfg-section > summary {
+    cursor:pointer; list-style:none; padding:14px 18px; display:flex; align-items:center; gap:10px;
+    font-weight:700; font-size:13px; letter-spacing:.03em; text-transform:uppercase; color:var(--ink);
+    background:var(--panel); user-select:none;
+  }
+  .cfg-section > summary::-webkit-details-marker { display:none; }
+  .cfg-section > summary::before {
+    content:"›"; font-size:18px; line-height:1; transition:transform .15s ease; color:var(--muted); flex:none;
+  }
+  .cfg-section[open] > summary::before { transform:rotate(90deg); }
+  .cfg-section > summary:hover { color:var(--accent); }
+  .cfg-section-hint { font-weight:400; text-transform:none; letter-spacing:0; color:var(--muted); font-size:12px; }
+  .cfg-section-body { padding:18px; border-top:1px solid var(--line-strong); }
+  @media (prefers-reduced-motion: reduce) { .cfg-section > summary::before { transition:none; } }
+  /* System Alerting's freshness-checks table, grouped by system (2026-09-05) */
+  .staleness-group-row td { background:var(--panel-2); font-weight:700; padding:8px 10px; }
+
+  /* Alert groups' own Type > Sub type hierarchy (2026-09-05, on request: "make the system
+     hierarchy more readable, different font sizes and opacity for children" -- Type is the
+     parent (full size, full opacity, same treatment as the Freshness checks table's own
+     group header), Sub type is the child, one step down in both size and opacity, indented
+     to read as nested rather than a sibling of Type). */
+  .ag-type-row td { background:var(--panel-2); font-weight:700; font-size:13px; padding:8px 10px; }
+  .ag-subtype-row td { font-weight:600; font-size:11.5px; opacity:.7; padding:6px 10px 6px 22px; }
+
+  /* Scrollable list containers (2026-09-05, on request: "make the list scrollable there by
+     making the page shorter") -- the table's own header scrolls WITH its rows rather than
+     staying pinned, kept simple on purpose; a long list no longer stretches the page, it
+     scrolls inside its own fixed-height box instead. */
+  .cfg-scroll-list { max-height: 360px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+  .cfg-scroll-list table { margin: 0; }
+</style>
+<div class="container" style="max-width:1040px">
+
+  <div class="section-label">Alerting</div>
+
+  <details class="cfg-section" id="sec-groups">
+    <summary>Alert groups</summary>
+    <div class="cfg-section-body">
+      <p class="cfg-note" style="margin-top:0">A group with no systems covers nothing until you add some.</p>
+
+      {% if health_rows %}
+      <div class="section-label sub">Live status</div>
+      <div class="card"><div class="body" style="padding:14px 18px">
+        <div style="display:flex;flex-wrap:wrap;gap:10px">
+          {% for row in health_rows %}
+          <button type="button" class="live-chip {% if row.is_live %}is-live{% else %}is-broken{% endif %}"
+                  data-detail="live-detail-{{ forloop.counter }}">
+            {{ row.group.name }}
+          </button>
+          {% endfor %}
+        </div>
+        <div id="liveDetailBox" class="cfg-note" style="margin:12px 0 0;display:none"></div>
+        {% for row in health_rows %}
+        <template id="live-detail-{{ forloop.counter }}">{% if row.is_live %}This alert is live — it's fully configured and will fire.{% else %}Not live yet:{% for p in row.problems %} {{ p }}{% endfor %}{% endif %}</template>
+        {% endfor %}
+        <small class="cfg-hint" style="display:block;margin-top:10px">Green = fully configured and will fire. Red = click it to see exactly what's missing.</small>
+      </div></div>
+      {% endif %}
+
+      <div class="section-label sub" style="margin-top:16px">Groups</div>
+      <p class="cfg-note" style="margin-top:0">Every alert group, whatever it's for — grouped by Type, then Sub type where one exists.</p>
+      <div class="card"><div class="body" style="padding:14px 18px">
+        {% if groups %}
+        <input type="text" class="cfg-search" data-table-search="#alertgroups-table" placeholder="Search groups, systems…" autocomplete="off" aria-label="Search alert groups">
+        <div class="cfg-scroll-list" style="margin-top:10px">
+        <table class="hist" id="alertgroups-table">
+          <thead><tr><th>Name</th><th>Systems</th><th>Stakeholders</th><th></th><th></th></tr></thead>
+          <tbody>
+          {% for type_block in grouped_alert_groups %}
+            <tr class="ag-type-row" data-search-group-prefix="{{ type_block.key }}:"><td colspan="5">{{ type_block.label }}</td></tr>
+            {% for sub in type_block.subtypes %}
+              {% if sub.label %}
+              <tr class="ag-subtype-row" data-search-group="{{ sub.key }}"><td colspan="5">{{ sub.label }}</td></tr>
+              {% endif %}
+              {% for g in sub.groups %}
+              <tr class="rowlink" data-search-row data-search-group="{{ sub.key }}" data-href="{% url 'config_alert_group_edit' g.pk %}">
+                <td><b>{{ g.name }}</b></td>
+                <td style="color:var(--muted)">
+                  {% if g.systems %}{{ g.systems|length }}{% else %}<span class="chip amber">none yet</span>{% endif %}
+                </td>
+                <td style="color:var(--muted)">{{ g.stakeholder_count }}</td>
+                <td>{% if not g.active %}<span class="chip amber">paused</span>{% endif %}</td>
+                <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+                     href="{% url 'config_alert_group_edit' g.pk %}">Open</a></td>
+              </tr>
+              {% endfor %}
+            {% endfor %}
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+        {% else %}
+          <p style="margin:0;color:var(--muted);font-size:13px">No alert groups defined yet.</p>
+        {% endif %}
+      </div></div>
+
+      <div class="section-label sub" style="margin-top:16px">Add a group</div>
+      <div class="card"><div class="body" style="padding:16px 18px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="groups">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>Name</span>
+              <input type="text" name="name" placeholder="Payments Team" required>
+            </label>
+            <label class="field">
+              <span>Alert type</span>
+              <select name="alert_type" id="newGroupAlertType">
+                <option value="monitoring">Monitoring Alert</option>
+                <option value="system">System Alert</option>
+              </select>
+              <small class="cfg-hint">Set once at creation — not changed afterward.</small>
+            </label>
+            <label class="field" id="newGroupSubtypeField" style="display:none">
+              <span>Sub type</span>
+              <select name="alert_subtype">
+                <option value="staleness">Staleness Alert</option>
+              </select>
+            </label>
+          </div>
+          <button class="btn primary cfg-add" type="submit">＋ Create</button>
+        </form>
+      </div></div>
+    </div>
+  </details>
+
+  <details class="cfg-section" id="sec-templates">
+    <summary>Alert templates</summary>
+    <div class="cfg-section-body">
+      <p class="cfg-note" style="margin-top:0">Sample e-mails for review, not live sends — to test a real group, use its Test tools above.</p>
+
+      <div class="section-label sub">Templates</div>
+      <div class="card"><div class="body" style="padding:14px 18px">
+        {% if template_rows %}
+        <table class="hist">
+          <thead><tr><th>Metric</th><th></th></tr></thead>
+          <tbody>
+          {% for row in template_rows %}
+            <tr>
+              <td><b>{{ row.label }}</b></td>
+              <td style="text-align:right">
+                {% if row.available %}
+                <a class="btn ghost" style="padding:5px 11px"
+                   href="{% url 'config_alert_template_preview' row.category %}" target="_blank">
+                  Preview ↗
+                </a>
+                {% else %}
+                <span class="chip amber">no design yet</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+          <p style="margin:0;color:var(--muted);font-size:13px">No categories defined.</p>
+        {% endif %}
+      </div></div>
+    </div>
+  </details>
+
+  <details class="cfg-section" id="sec-peralert">
+    <summary>Per Alert Config</summary>
+    <div class="cfg-section-body">
+
+      <div class="section-label sub">Payment &amp; interface queues</div>
+      <p class="cfg-note" style="margin-top:0">How long a queue folder's oldest file may wait before Critical.</p>
+      <div class="card"><div class="body" style="padding:16px 18px;margin-top:10px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="drainage_critical">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>Critical</span>
+              <input type="text" name="red_minutes" value="{{ drainage_red_minutes }}" placeholder="10m" required>
+              <small class="cfg-hint">e.g. 30s, 10m, 2h — a plain number means minutes.</small>
+            </label>
+          </div>
+          <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+            <button class="btn primary" type="submit">Save</button>
+            <button class="btn ghost" type="submit" name="action" value="reset">
+              Reset to default (10 minutes)
+            </button>
+          </div>
+        </form>
+      </div></div>
+
+      <div class="section-label sub" style="margin-top:22px">Backup drainage monitoring</div>
+      <p class="cfg-note" style="margin-top:0">A different cadence from queues, sized per system — normally automatic, from each system's own backup frequency.</p>
+      <details class="cfg-learn-more"><summary>Learn more</summary>
+        <div class="cfg-learn-more-body">
+          "Automatic" is intuited from each system's own cadence at
+          <a href="{% url 'config_backup_policy' %}">Backup policy</a>. Override a system to
+          replace that calculation with a fixed number just for it — every other system keeps
+          using its own automatic value. Greyed-out systems have no confirmed live backup
+          folder yet; an override still applies the moment one shows up.
+        </div>
+      </details>
+      <div class="card"><div class="body" style="padding:14px 18px;margin-top:10px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="backup_drainage">
+          {% if not backup_drainage_rows %}
+            <p style="margin:0;color:var(--muted);font-size:13px">No systems found.</p>
+          {% else %}
+          <div style="overflow-x:auto">
+            <table class="hist" style="min-width:520px">
+              <thead><tr><th>System</th><th>Automatic</th><th>Override</th></tr></thead>
+              <tbody>
+              {% for row in backup_drainage_rows %}
+                <tr{% if not row.live %} style="opacity:.5"{% endif %}>
+                  <td><b>{{ row.system }}</b>{% if not row.live %} <span class="cfg-hint" style="display:inline;text-transform:none;letter-spacing:0">no live folder yet</span>{% endif %}</td>
+                  <td style="color:var(--muted)">{{ row.auto }}</td>
+                  <td><input type="text" name="backup_override__{{ row.system }}" value="{{ row.override_value }}" placeholder="automatic" style="width:110px"></td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <small class="cfg-hint" style="display:block;margin-top:10px">e.g. 30s, 10m, 2h — a plain number means minutes. Leave a system blank to keep it automatic.</small>
+          {% endif %}
+          <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+            <button class="btn primary" type="submit">Save</button>
+            <button class="btn ghost" type="submit" name="action" value="reset">
+              Clear every override
+            </button>
+          </div>
+        </form>
+      </div></div>
+
+      <div class="section-label sub" style="margin-top:22px">Disk, RAM &amp; CPU usage</div>
+      <p class="cfg-note" style="margin-top:0">One shared usage limit for Disk, RAM and CPU — the same numbers the daily report uses.</p>
+      <details class="cfg-learn-more"><summary>Learn more</summary>
+        <div class="cfg-learn-more-body">
+          Individual hosts can still carry their own RAM exception in code (e.g. a database
+          server expected to run hot) — this sets the shared default everything else follows.
+        </div>
+      </details>
+      <div class="card"><div class="body" style="padding:16px 18px;margin-top:10px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="usage_critical">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>Critical (%)</span>
+              <input type="number" name="red_pct" value="{{ usage_red_pct }}" min="1" max="99" step="1" required>
+            </label>
+          </div>
+          <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+            <button class="btn primary" type="submit">Save</button>
+            <button class="btn ghost" type="submit" name="action" value="reset">
+              Reset to default (90%)
+            </button>
+          </div>
+        </form>
+      </div></div>
+
+      <div class="section-label sub" style="margin-top:22px">Size monitoring</div>
+      <p class="cfg-note" style="margin-top:0">How much of {{ size_mount }} this folder may fill — always Critical.</p>
+      <details class="cfg-learn-more"><summary>Learn more</summary>
+        <div class="cfg-learn-more-body">
+          Scales with the volume — if {{ size_mount }} is ever resized, the limit moves with it.
+          Never escalates further; reported at Critical outright rather than a Warning that
+          would go unnoticed (2026-09-04).
+        </div>
+      </details>
+      <div class="card"><div class="body" style="padding:16px 18px;margin-top:10px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="size">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>{{ size_folder_name }} ({{ size_mount }}) — expected (%)</span>
+              <input type="number" name="size_pct" value="{{ size_pct }}" min="1" max="99" step="any" required>
+            </label>
+          </div>
+          <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+            <button class="btn primary" type="submit">Save</button>
+            <button class="btn ghost" type="submit" name="action" value="reset">
+              Reset to default (80%)
+            </button>
+          </div>
+        </form>
+      </div></div>
+
+    </div>
+  </details>
+
+  <details class="cfg-section" id="sec-display">
+    <summary>Display Thresholds</summary>
+    <div class="cfg-section-body">
+
+      <div class="section-label sub">Payment &amp; interface queues</div>
+      <p class="cfg-note" style="margin-top:0">When a queue folder's tile turns amber on Folder Watch.</p>
+      <div class="card"><div class="body" style="padding:16px 18px;margin-top:10px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="drainage_warning">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>Warning</span>
+              <input type="text" name="amber_minutes" value="{{ drainage_amber_minutes }}" placeholder="5m" required>
+              <small class="cfg-hint">e.g. 30s, 5m, 1h. Must be less than Critical (Per Alert Config).</small>
+            </label>
+          </div>
+          <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+            <button class="btn primary" type="submit">Save</button>
+            <button class="btn ghost" type="submit" name="action" value="reset">
+              Reset to default (5 minutes)
+            </button>
+          </div>
+        </form>
+      </div></div>
+
+      <div class="section-label sub" style="margin-top:22px">Disk, RAM &amp; CPU usage</div>
+      <p class="cfg-note" style="margin-top:0">The amber chip threshold on the daily report.</p>
+      <div class="card"><div class="body" style="padding:16px 18px;margin-top:10px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="usage_warning">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>Warning (%)</span>
+              <input type="number" name="amber_pct" value="{{ usage_amber_pct }}" min="1" max="99" step="1" required>
+              <small class="cfg-hint">Must be less than Critical (Per Alert Config).</small>
+            </label>
+          </div>
+          <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+            <button class="btn primary" type="submit">Save</button>
+            <button class="btn ghost" type="submit" name="action" value="reset">
+              Reset to default (75%)
+            </button>
+          </div>
+        </form>
+      </div></div>
+
+    </div>
+  </details>
+
+  <details class="cfg-section" id="sec-systemalerting">
+    <summary>System Alerting <span class="cfg-section-hint">— is our own monitoring pipeline still telling the truth</span></summary>
+    <div class="cfg-section-body">
+      <p class="cfg-note" style="margin-top:0">A SEPARATE notification type from the Alert groups above: not "is a monitored value over a threshold" but "has a checker or exporter itself stopped reporting fresh data." <b>Staleness Alert</b> is System Alerting's first (and so far only) check type.</p>
+
+      <div class="section-label sub">System alert types</div>
+      <div class="card"><div class="body" style="padding:14px 18px">
+        <table class="hist">
+          <thead><tr><th>Type</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><b>Staleness Alert</b></td>
+              <td style="text-align:right;color:var(--muted);font-size:12px">Live</td>
+            </tr>
+          </tbody>
+        </table>
+      </div></div>
+
+      <p class="cfg-note" style="margin-top:10px">Who hears about it is just an Alert group above (Type = System Alert) — nothing extra to manage here.</p>
+
+      <div class="section-label sub" style="margin-top:22px">Staleness Alert — freshness checks</div>
+      <p class="cfg-note" style="margin-top:0">One row per watched checker/exporter source — a group covering its system is notified once its own last write gets older than "Max age".</p>
+      <div class="card"><div class="body" style="padding:14px 18px">
+        {% if freshness_checks %}
+        <input type="text" class="cfg-search" data-table-search="#freshness-table" placeholder="Search by system, name, instance or file…" autocomplete="off" aria-label="Search freshness checks">
+        <div class="cfg-scroll-list" style="margin-top:10px">
+        <table class="hist" id="freshness-table">
+          <thead><tr><th>Name</th><th>System</th><th>Kind</th><th>Instance</th><th>File</th><th>Max age</th><th></th><th></th></tr></thead>
+          <tbody>
+          {% regroup freshness_checks by system as system_list %}
+          {% for group in system_list %}
+            <tr class="staleness-group-row" data-search-group="{{ group.grouper }}">
+              <td colspan="8">{{ group.grouper }} <span style="font-weight:400;color:var(--muted);font-size:12px">({{ group.list|length }})</span></td>
+            </tr>
+            {% for c in group.list %}
+            <tr class="rowlink" data-search-row data-search-group="{{ group.grouper }}" data-href="{% url 'config_freshness_check_edit' c.pk %}">
+              <td><b>{{ c.name }}</b></td>
+              <td style="color:var(--muted)">{{ c.system }}</td>
+              <td style="color:var(--muted)">{% if c.kind == "backup_check" %}Backup checker{% else %}Textfile mtime{% endif %}</td>
+              <td style="color:var(--muted);font-family:var(--mono, monospace);font-size:12px">{{ c.instance }}</td>
+              <td style="color:var(--muted);font-family:var(--mono, monospace);font-size:12px">{{ c.file|default:"—" }}</td>
+              <td style="color:var(--muted)">{{ c.max_age_seconds }}s</td>
+              <td>{% if not c.active %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">paused</span>{% endif %}</td>
+              <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+                   href="{% url 'config_freshness_check_edit' c.pk %}">Open</a></td>
+            </tr>
+            {% endfor %}
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+        {% else %}
+          <p style="margin:0;color:var(--muted);font-size:13px">No freshness checks defined yet.</p>
+        {% endif %}
+      </div></div>
+
+      <div class="section-label sub" style="margin-top:16px">Add a freshness check</div>
+      <div class="card"><div class="body" style="padding:16px 18px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="freshness_check">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>Name</span>
+              <input type="text" name="name" placeholder="T24 TSA Services Checker" required>
+            </label>
+            <label class="field">
+              <span>System</span>
+              <select name="system" required>
+                <option value="">Choose…</option>
+                {% for s in topology_systems %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>Kind</span>
+              <select name="kind" required>
+                <option value="textfile_mtime">Textfile mtime (needs a file)</option>
+                <option value="backup_check">Backup checker timestamp (no file needed)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Instance</span>
+              <input type="text" name="instance" placeholder="10.0.212.3:9182" required>
+            </label>
+          </div>
+          <div class="cfg-grid4" style="margin-top:10px">
+            <label class="field">
+              <span>File <span style="color:var(--muted);font-weight:normal">(textfile mtime only)</span></span>
+              <input type="text" name="file" placeholder="t24_services.prom">
+            </label>
+            <label class="field">
+              <span>Max age</span>
+              <input type="text" name="max_age" placeholder="2h" value="2h" required>
+              <small class="cfg-hint">s/m/h suffixes accepted.</small>
+            </label>
+            <label class="field">
+              <span>Scheduler instance <span style="color:var(--muted);font-weight:normal">(optional)</span></span>
+              <input type="text" name="scheduler_instance" placeholder="10.0.212.3:9847">
+            </label>
+            <label class="field">
+              <span>Scheduler job name <span style="color:var(--muted);font-weight:normal">(optional)</span></span>
+              <input type="text" name="scheduler_job" placeholder="t24_service_checker">
+            </label>
+          </div>
+          <p class="cfg-note" style="margin:8px 0 0">If this file is produced by a folder_exporter scheduled job, name it here — the alert e-mail will then show that job's own last-success time alongside the file's staleness, so "job says healthy, file says stale" is visible at a glance.</p>
+          <button class="btn primary cfg-add" type="submit">＋ Add</button>
+        </form>
+      </div></div>
+
+    </div>
+  </details>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var STORE = "cfgAlertsOpen";
+  var ids = ["sec-groups", "sec-templates", "sec-peralert", "sec-display", "sec-systemalerting"];
+  var saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(STORE) || "null"); } catch (e) { saved = null; }
+
+  ids.forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) { return; }
+    if (saved) {
+      el.open = !!saved[id];
+    } else {
+      el.open = (id === "sec-groups");
+    }
+    el.addEventListener("toggle", function () {
+      var state = {};
+      ids.forEach(function (i) {
+        var e = document.getElementById(i);
+        if (e) { state[i] = e.open; }
+      });
+      try { sessionStorage.setItem(STORE, JSON.stringify(state)); } catch (e) {}
+    });
+  });
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  var box = document.getElementById("liveDetailBox");
+  if (!box) { return; }
+  document.querySelectorAll(".live-chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      var tpl = document.getElementById(chip.getAttribute("data-detail"));
+      if (!tpl) { return; }
+      box.textContent = chip.textContent.trim() + " — " + tpl.textContent.trim();
+      box.style.display = "block";
+    });
+  });
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  var typeSel = document.getElementById("newGroupAlertType");
+  var subtypeField = document.getElementById("newGroupSubtypeField");
+  if (!typeSel || !subtypeField) { return; }
+  function sync() { subtypeField.style.display = (typeSel.value === "system") ? "" : "none"; }
+  typeSel.addEventListener("change", sync);
+  sync();
+})();
+</script>
+{% endblock %}

@@ -19,6 +19,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.test import TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.html import escape
 from unittest import mock
 
@@ -1697,13 +1698,20 @@ class AccountManagementAccess(TestCase):
             "confirm_username": "victim"})
         self.assertTrue(get_user_model().objects.filter(pk=self.victim.pk).exists())
 
-    def test_the_column_is_hidden_from_a_non_superuser(self):
+    def test_users_screen_is_hidden_from_a_non_superuser(self):
+        """Account management moved to its own screen, Configuration > Users, separate from
+        Roles (2026-09-04: "make user management a screen on its own, separate it from
+        roles") -- an Administrator is redirected away rather than shown a "Delete account"
+        button here at all."""
         self.client.login(username="radm", password="pw12345!")
-        self.assertNotContains(self.client.get(reverse("roles_console")), "Delete account")
+        resp = self.client.get(reverse("config_users"), follow=True)
+        self.assertNotContains(resp, "Delete account")
 
-    def test_a_superuser_sees_it(self):
+    def test_a_superuser_sees_the_users_screen_and_its_delete_action(self):
         self.client.login(username="root", password="pw12345!")
-        self.assertContains(self.client.get(reverse("roles_console")), "Delete account")
+        self.assertContains(self.client.get(reverse("config_users")), "Edit")
+        edit_page = self.client.get(reverse("config_edit_user", args=[self.victim.pk]))
+        self.assertContains(edit_page, "Delete account")
 
 
 class AccountPasswordReset(TestCase):
@@ -4011,8 +4019,17 @@ class ConfigurationNesting(PrometheusConfigBase):
     reason they could name.
     """
 
+    # config_role_scopes dropped (2026-09-04): Roles consolidated into ONE page with
+    # collapsible sections (config_roles), reachable via three URL names that all render the
+    # same content -- config_role_scopes no longer has its OWN drawer entry (see
+    # templates/base.html's drawer, which now lights "Roles" for any of the three), so it no
+    # longer belongs in a list asserting each name has its own href in the drawer. Its
+    # back-nav/ancestor-lighting behaviour is unchanged and still covered manually (it points
+    # straight at "configuration", same as before) -- just not exercised by this class any
+    # more, since it does not fit the "listed AND directly under the hub" shape the other
+    # entries here still do.
     CHILDREN = ["config_prometheus", "grafana_config", "config_snmp",
-                "config_topology", "system_settings", "config_role_scopes"]
+                "config_topology", "system_settings"]
 
     def setUp(self):
         super().setUp()
@@ -4708,3 +4725,53 @@ class SharedReportsBelongToBothRoles(TestCase):
             request.session = {"active_role": role}
             for page in ("report_form", "report"):
                 self.assertTrue(page_in_scope(request, page), f"{role} / {page}")
+
+
+class TotalsIntegrityCheckerFlagsNonMonotonicMetrics(TestCase):
+    """Automated Reports spec ("New Promt.txt"), Phase 3 item 9's own validation requirement:
+    "if the engine can't correctly flag a totals metric moving in both directions as at
+    minimum 'worth investigating', it isn't ready for Phase 4." reports.trend_classification
+    only ever sees per-(system, flag_key) issues, never the report's own aggregate totals
+    (total services, total tracked backups, total certs monitored) -- those live in
+    ReportSubmission.report_content["overview"], which is what reports.totals_integrity reads
+    instead. This proves that second, narrower checker against exactly the scenario item 9
+    names, plus a control case proving a cleanly-increasing total is NOT flagged."""
+
+    def _submission(self, created_at, *, services=40, missing=2, tracked=38, expired=1, monitored=50):
+        sub = ReportSubmission.objects.create(
+            report_content={"overview": {
+                "glance": [{"label": "Services", "value": services}],
+                "immediate": [
+                    {"label": "Missing backups", "value": f"{missing} | {tracked}"},
+                    {"label": "Expired certs", "value": f"{expired} | {monitored}"},
+                ],
+            }},
+        )
+        ReportSubmission.objects.filter(pk=sub.pk).update(created_at=created_at)
+        return sub
+
+    def test_a_total_that_dips_then_recovers_is_flagged_worth_investigating(self):
+        from .totals_integrity import detect_totals_anomalies
+
+        base = timezone.now() - datetime.timedelta(days=10)
+        # total_tracked_backups: 38 -> 36 -> 39 -- moves in both directions, per item 9.
+        self._submission(base, tracked=38)
+        self._submission(base + datetime.timedelta(days=1), tracked=36)
+        self._submission(base + datetime.timedelta(days=2), tracked=39)
+
+        anomalies = {a.metric: a for a in detect_totals_anomalies(window_days=30)}
+        self.assertIn("total_tracked_backups", anomalies)
+        found = anomalies["total_tracked_backups"]
+        self.assertEqual(found.confidence, "Low confidence")
+        self.assertEqual(found.example_drop["from"], 38)
+        self.assertEqual(found.example_drop["to"], 36)
+
+    def test_a_total_that_only_ever_grows_is_not_flagged(self):
+        from .totals_integrity import detect_totals_anomalies
+
+        base = timezone.now() - datetime.timedelta(days=10)
+        for n, services in enumerate((40, 41, 41, 42)):
+            self._submission(base + datetime.timedelta(days=n), services=services)
+
+        anomalies = {a.metric for a in detect_totals_anomalies(window_days=30)}
+        self.assertNotIn("total_services", anomalies)

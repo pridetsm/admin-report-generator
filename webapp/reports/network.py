@@ -216,6 +216,20 @@ def _fmt_bps(bits: Optional[float]) -> str:
     return f"{bits:.1f} Gbps"
 
 
+def _fmt_duration(seconds: Optional[float]) -> str:
+    """Seconds -> the coarsest readable unit ("47m", "2h", "3d") -- used only for the relay
+    freshness gap in _windows_device_flags, so an admin reads "no fresh metrics in 47m"
+    instead of a bare, harder-to-parse seconds count."""
+    if seconds is None:
+        return "an unknown duration"
+    seconds = max(0, seconds)
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
+
+
 def _iface_label(labels: Dict[str, str]) -> str:
     """What to call an interface.
 
@@ -650,6 +664,141 @@ DEVICES = [
         "job": "root_domain_controllers",
         "report": "network_report",
     },
+    # Child Domain Controllers (2026-09-09) -- these two are additional DCs, added under the
+    # existing "Child Domain Controllers" placeholder tier (see build_infrastructure_report's
+    # own tier loop, reserved for exactly this since before either of these two existed) rather
+    # than a separate third tier -- the admin's own call, for naming consistency with "Root
+    # Domain Controllers" (2026-09-09: "rename The Domain Controllers to Child Domain
+    # Controllers so its a bit more consistent with the root ones").
+    {
+        "key": "dc-203",
+        "name": "RBZHQ-DC-203",
+        "kind": "windows",
+        "target": "10.100.249.203:9182",
+        "system": "Child Domain Controllers",
+        "job": "domain_controllers",   # prometheus.yml must scrape this target under this job
+        "report": "network_report",
+    },
+    # RBZHQ-DC-204 -- Device Guard on this host blocks windows_exporter outright (code-signing
+    # policy could not be found/disabled to allow it), so unlike every other windows-kind
+    # device here, 204 has NO `up{instance=...}` of its own at all -- there is nothing to scrape
+    # directly. Worked around with a scheduled ps1 script running on 204 itself every ~3
+    # minutes, writing a textfile-collector .prom file that lands on 203's OWN textfile-
+    # collector input directory instead -- so 204's readings are physically scraped as part of
+    # 203's scrape, arriving under 203's own `instance` label. `metric_prefix` is how they're
+    # told apart from 203's own genuine windows_exporter readings on that same instance --
+    # `rbz_hq_cdc_02_` (matching the script's own hostname-derived naming), CONFIRMED LIVE
+    # 2026-09-09 against real Prometheus data ("we could not install the exporter... but we do
+    # have all its metrics" -- the script was already deployed and had its own naming by the
+    # time this was checked; an earlier `dc204_`/textfile-mtime guess written before that check
+    # has been corrected here to match). Real metric names confirmed present at that check:
+    #
+    #   rbz_hq_cdc_02_wmi_workaround_last_run_timestamp_seconds   gauge, unix seconds -- NOT
+    #                                                               trusted for freshness, see
+    #                                                               "freshness_file" below
+    #   rbz_hq_cdc_02_wmi_workaround_cpu_load_percent              gauge, 0-100
+    #   rbz_hq_cdc_02_wmi_workaround_memory_used_percent           gauge, 0-100 (pre-computed)
+    #   rbz_hq_cdc_02_windows_logical_disk_free_bytes{volume="C:"} gauge, raw bytes
+    #   rbz_hq_cdc_02_windows_logical_disk_size_bytes{volume="C:"} gauge, raw bytes
+    #
+    #   (also present but not yet wired into this report: AD replication last_result/
+    #   consecutive_failures per partition/partner, Defender status, pending-reboot,
+    #   eventlog-errors-last-hour, TCP connection counts, uptime -- a genuinely richer set than
+    #   CPU/RAM/disk alone; worth a follow-up if the admin wants those surfaced as flags too.)
+    {
+        "key": "dc-204",
+        "name": "RBZHQ-DC-204",
+        "kind": "windows",
+        "target": "10.100.249.204:relay",   # synthetic -- not a real queryable instance, see above
+        "relay_instance": "10.100.249.203:9182",
+        "relay_job": "domain_controllers",
+        "metric_prefix": "rbz_hq_cdc_02_",
+        # 2026-09-09, corrected the SAME day it was wired up: the script's own self-reported
+        # `wmi_workaround_last_run_timestamp_seconds` was originally trusted as the freshness
+        # signal (a script's own "when did I last finish" claim looked like the most authoritative
+        # thing available) -- caught live as WRONG ("this shouldn't be correct... 2.0h" while the
+        # server was confirmed fine): script_duration_seconds/uptime_seconds/process_count were
+        # ALL still advancing on a healthy ~3-minute cadence the whole time, and the .prom FILE's
+        # own OS-level mtime (windows_textfile_mtime_seconds) was consistently only ~3 minutes
+        # old -- the script genuinely runs and rewrites the file every cycle; only the ONE
+        # last_run_timestamp_seconds VALUE it computes/writes had gotten stuck. Freshness now
+        # comes from the FILE's own mtime instead -- a signal windows_exporter computes itself
+        # from the OS (stat() on the file), which cannot inherit a bug in the script's own
+        # internal timestamp arithmetic the way trusting the script's self-report can.
+        "freshness_file": "rbz-hq-cdc-02_wmi_metrics.prom",
+        # 10x the ~3-minute publish cadence (the admin's own instruction: "greater than 3
+        # minutes... say 30 minutes") -- deliberately generous so a couple of missed runs (a
+        # slow WMI call, a brief network blip to 203's share) never misreports this device as
+        # down; see _relay_windows_metrics for the other safeguards against a false negative.
+        "stale_after_seconds": 1800,
+        # A SECOND, fully independent reachability signal (2026-09-09, on request: "treat 204
+        # like an anomaly... we need different mechanisms for checking whether it's reachable...
+        # the server currently is up and running" -- the metrics-freshness check alone had just
+        # flagged it fully "unreachable" purely because its OWN scheduled ps1 script had stalled
+        # for a few hours, while the box itself was confirmed alive the whole time). ICMP-probed
+        # via blackbox_exporter (prometheus.yml's own blackbox_ping_network job, the same
+        # mechanism already used for switches/routers/firewalls/WLCs), independent of the ps1
+        # script and of 203 entirely -- a ping failure here can only mean the BOX itself is
+        # unreachable, never "the script didn't run." See _relay_windows_metrics for how this
+        # is combined with metrics-freshness into a genuine three-state read (down / stale-but-
+        # confirmed-up / healthy) instead of one collapsed reachable/unreachable boolean.
+        "ping_target": "10.100.249.204",
+        "ping_job": "blackbox_ping_network",
+        "system": "Child Domain Controllers",
+        "job": "domain_controllers",
+        "report": "network_report",
+    },
+    # BYO-AD-DC-01 (2026-09-10) -- a THIRD Child Domain Controller, at the Bulawayo site
+    # (10.200.200.x, not the HQ 10.100.249.x range every other DC here lives in) -- already
+    # known to this report as a replication PARTNER of 203/204 (see network.py's own
+    # _ad_replication_rows) before now being monitored directly. Unlike RBZHQ-DC-204, this one
+    # needs NO relay/workaround at all: confirmed live 2026-09-10 that it runs a full,
+    # unrestricted windows_exporter (cpu/logical_disk/memory/service/ad collectors all present,
+    # same as RBZHQ-DC-203/206/207) plus the same wmi_workaround_* textfile publishing every
+    # other DC-tier host has -- so it flows through the existing generic "normal" (non-relay)
+    # windows-kind path in _windows_metrics/_ad_service_states/_ad_replication_states
+    # unchanged, same as RBZHQ-DC-203 itself. All 7 _AD_SERVICES confirmed running, and its own
+    # windows_ad_replication_* series (not a relay-prefixed copy) confirmed present.
+    {
+        "key": "dc-byo",
+        "name": "BYO-AD-DC-01",
+        "kind": "windows",
+        "target": "10.200.200.8:9182",
+        "system": "Child Domain Controllers",
+        "job": "domain_controllers",
+        "report": "network_report",
+    },
+    # AD Sync & Authentication (2026-09-10) -- two more AD-identity servers, not domain
+    # controllers themselves: RBZ-HQ-ADS-01 runs Azure AD Connect Sync, RBZ-ADAPT-01 runs the
+    # Pass-Through Authentication agent. The admin's own call ("New tier under Active
+    # Directory"): a third tier alongside Root/Child Domain Controllers, same nested-group
+    # shape, rather than standalone top-level systems -- see build_infrastructure_report's own
+    # ad_hosts filter and tier loop. Both confirmed reachable on windows_exporter:9182 the same
+    # TLS+basic_auth way as the DCs (plain HTTP returned 400 -- a TLS-only listener, matching
+    # that pattern) 2026-09-10; hostnames are reverse-DNS confirmed (corp.rbz.co.zw suffix
+    # dropped, matching the RBZHQ-DC-203-style short-name convention already used elsewhere in
+    # this list), not guessed -- no cs/os collector is enabled on either host (same
+    # service+textfile-only collector set as the DCs), so there is no in-metrics hostname to
+    # read directly. See _AD_SYNC_AUTH_SERVICES below for why each host's own service list is
+    # looked up per-device rather than shared the way _AD_SERVICES is across every DC.
+    {
+        "key": "ad-sync",
+        "name": "RBZ-HQ-ADS-01",
+        "kind": "windows",
+        "target": "10.100.249.206:9182",
+        "system": "AD Sync & Authentication",
+        "job": "ad_sync_auth",
+        "report": "network_report",
+    },
+    {
+        "key": "pta",
+        "name": "RBZ-ADAPT-01",
+        "kind": "windows",
+        "target": "10.100.249.207:9182",
+        "system": "AD Sync & Authentication",
+        "job": "ad_sync_auth",
+        "report": "network_report",
+    },
 ]
 
 # volume filter for windows_logical_disk queries -- mirrors generate_report.py's own _VOL
@@ -679,13 +828,34 @@ def _windows_metrics(only: Optional[set] = None) -> Dict[str, dict]:
         except Exception:                   # noqa: BLE001
             return []
 
+    # A RELAY device (2026-09-09: RBZHQ-DC-204, Device Guard blocks its own windows_exporter
+    # outright) has no `up{instance=...}` of its own to check at all -- its whole CPU/RAM/disk/
+    # reachability path is inferred differently, in _relay_windows_metrics below. Split it out
+    # here so the rest of this function's plain per-instance queries are untouched by it.
+    normal = [d for d in wanted if not d.get("relay_instance")]
+    relays = [d for d in wanted if d.get("relay_instance")]
+
     up: Dict[str, float] = {}
-    for job in {d["job"] for d in wanted}:
+    for job in {d["job"] for d in normal} | {d["relay_job"] for d in relays}:
         for r in q(f'up{{job="{job}"}}'):
             up[r["labels"].get("instance", "")] = r["value"]
 
+    # wmi_workaround_cpu_load_percent, NOT windows_cpu_time_total's rate() (2026-09-08, on
+    # request, after confirming live on both Root DCs: the perflib-based idle-time counter
+    # reads wildly wrong here (.200: 40.2% counter vs 1.0% workaround gauge; .201: 18.7% vs
+    # 0.0%) -- the same perflib breakage HCI's own nodes have, just not yet noticed on these
+    # hosts because their textfile collector only started publishing today. RAM and disk are
+    # NOT switched: wmi_workaround_memory_used_percent/disk_free_bytes/disk_size_bytes agree
+    # with the standard windows_memory_*/windows_logical_disk_* readings within rounding on
+    # both hosts, confirming perflib's breakage here is CPU-rate-specific (a byte-count gauge
+    # was never exposed to whatever perflib counter class is broken), not a wholesale reason to
+    # distrust every collector on these hosts. HELP text (via /api/v1/metadata) confirms this is
+    # a genuinely different measurement from HCI's own windows_hci_cpu_usage_percent ("via
+    # Health Service Get-ClusterPerf", cluster-specific, no equivalent for a standalone DC) --
+    # this one is "CPU load percent via WMI (perflib workaround)", the generic non-cluster
+    # equivalent, which is why Root DCs need this metric instead of that one.
     cpu = {r["labels"]["instance"]: r["value"]
-          for r in q('100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100)')
+          for r in q("wmi_workaround_cpu_load_percent")
           if r["labels"].get("instance")}
     mem = {r["labels"]["instance"]: r["value"]
           for r in q("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)")
@@ -702,7 +872,7 @@ def _windows_metrics(only: Optional[set] = None) -> Dict[str, dict]:
             size.setdefault(r["labels"]["instance"], {})[r["labels"].get("volume")] = r["value"]
 
     out = {}
-    for d in wanted:
+    for d in normal:
         t = d["target"]
         scraped = up.get(t)
         disks = [{"volume": vol, "used": u,
@@ -714,6 +884,152 @@ def _windows_metrics(only: Optional[set] = None) -> Dict[str, dict]:
             "cpu_pct": cpu.get(t),
             "mem_pct": mem.get(t),
             "disks": disks,
+        }
+    if relays:
+        out.update(_relay_windows_metrics(relays, q, up))
+    return out
+
+
+def _relay_windows_metrics(relays: list, q, up: Dict[str, float]) -> Dict[str, dict]:
+    """known/reachable/cpu/mem/disk for a device with NO windows_exporter of its own at all
+    (2026-09-09: RBZHQ-DC-204, blocked outright by a Device Guard code-signing policy that
+    could not be found or disabled) -- worked around with a scheduled ps1 script that writes a
+    textfile-collector .prom file onto a DIFFERENT, healthy host's own windows_exporter (its
+    own `relay_instance`), with every metric given this device's own `metric_prefix`
+    (`rbz_hq_cdc_02_`, matching the script's own hostname-derived naming, confirmed live
+    2026-09-09) so it can never collide with the relay host's own genuine readings on that same
+    instance. Corrected 2026-09-09 from an earlier, purely guessed convention (`dc204_` /
+    `windows_textfile_mtime_seconds{file="dc204_metrics.prom"}`) written before the ps1 script
+    had actually been deployed -- it was already live with its own, richer naming by the time
+    this was checked against real data ("we could not install the exporter... but we do have
+    all its metrics").
+
+    Reachability can't be `up{instance=...}==1` here -- there is no such series for a device
+    that is never itself scraped -- so it's inferred from FRESHNESS instead, using the
+    `.prom` FILE's own OS-level mtime (`windows_textfile_mtime_seconds{file=freshness_file}`,
+    something windows_exporter computes itself via stat(), not the script). CORRECTED
+    2026-09-09, the same day this first shipped, after a report read "has not reported in 2.0h"
+    while the admin insisted the server was fine ("this shouldn't be correct"): the ORIGINAL
+    version trusted the script's own self-reported `{prefix}wmi_workaround_last_run_timestamp_
+    seconds` instead, reasoning a script's own "when did I last finish" claim looked more
+    authoritative than a bare file-touch time -- but live data proved that backwards. Checked
+    against `script_duration_seconds`/`uptime_seconds`/`process_count` (all climbing steadily on
+    a healthy ~3-minute cadence throughout) and the file's own mtime (consistently ~3 minutes
+    old) at the exact moment `last_run_timestamp_seconds` claimed a 2-hour-old run: the script
+    genuinely runs and rewrites the file every cycle -- only the ONE `last_run_timestamp_
+    seconds` VALUE it computes and writes had gotten stuck, a bug INSIDE the script's own logic
+    that a "trust the script's self-report" design inherits by construction. The file's mtime,
+    computed by windows_exporter itself from the OS, cannot inherit that same class of bug.
+    Three deliberate safeguards against a FALSE NEGATIVE (2026-09-09, on request: "you may add
+    other safeguards so we can avoid a false negative") --
+
+      1. Staleness is computed with Prometheus's OWN clock -- `time() - max_over_time(...)`
+         evaluated INSIDE the PromQL expression itself, the query returning the age in seconds
+         directly. (An earlier version of this function computed `now - mtime` in PYTHON using
+         time.time() despite this same docstring already claiming otherwise -- a real
+         discrepancy caught and fixed the same day: this app server's own wall clock is now
+         never part of the comparison, so drift between it and the Prometheus server can never
+         manufacture a false "stale" reading.)
+      2. `max_over_time(...[5m])` rides out ONE single missed Prometheus scrape of the relay
+         host (a transient network blip, a slow scrape) without the metric appearing to vanish
+         entirely for this one report render.
+      3. `stale_after_seconds` (per-device, DEVICES' own dc-204 entry: 1800s) is a deliberately
+         generous 10x the documented ~3-minute publish cadence -- the admin's own instruction
+         ("greater than 3 minutes... say 30 minutes") -- so a couple of missed runs (a slow WMI
+         call, a brief share hiccup) never flips this to "unreachable" on its own.
+
+    `known` distinguishes "this metric has never been seen reporting at all" (script not yet
+    deployed, wrong prefix, or the relay host itself has been down for a while) from "was seen,
+    has since gone stale" -- the same known/reachable split every other device in this module
+    already uses, so a not-yet-configured device never gets rendered as a confirmed-down one.
+
+    `host_reachable` (2026-09-09, on request: "treat 204 like an anomaly... we need different
+    mechanisms for checking whether it's reachable... the server currently is up and running")
+    is a SECOND, fully independent signal: an ICMP probe (`ping_target`/`ping_job`, blackbox_
+    exporter, the same mechanism switches/routers/firewalls already use here) straight against
+    the device's own IP -- independent of both the ps1 script AND of the relay host (203)
+    entirely. This exists because metrics-freshness ALONE had just flagged 204 fully
+    "unreachable" purely because its own scheduled ps1 script had stalled for hours, while the
+    box itself stayed pingable the whole time -- conflating "the monitoring script stopped
+    running" with "the server is down" is exactly the false-negative risk this splits apart.
+    `host_reachable` is None (not False) when no `ping_target` is configured for this device, or
+    Prometheus has no probe data for it yet -- "no independent signal available" is a different,
+    weaker claim than "confirmed unreachable," and _windows_device_flags treats it that way
+    (falls back to the single-signal red verdict, not a false amber "confirmed fine").
+
+    `reachable` itself is UNCHANGED by `host_reachable` -- it still means "do the CPU/RAM/disk
+    numbers above reflect the device's CURRENT state," which only metrics freshness can answer
+    (a fresh ping says nothing about whether last night's CPU reading is still true). What
+    changes is _windows_device_flags' own SEVERITY when `reachable` is False: red ("possibly a
+    real outage") when `host_reachable` is False or unknown, amber ("server's up, its own
+    monitoring has stalled") when `host_reachable` is True despite stale metrics -- see that
+    function's own relay branch for the exact three-way split.
+
+    Returns {target: {"known":, "reachable":, "cpu_pct":, "mem_pct":, "disks": [...],
+             "relay_instance":, "relay_reachable":, "stale_seconds":, "host_reachable":}} --
+    the extra keys are ignored by every caller that only knows the plain windows-device shape,
+    and used by _windows_device_flags to phrase a precise, relay-aware reason and severity."""
+    ages: Dict[Tuple[str, str], float] = {}   # (instance, freshness_file) -> seconds since mtime
+    for d in relays:
+        inst, fname = d["relay_instance"], d["freshness_file"]
+        for r in q(f'time() - max_over_time('
+                  f'windows_textfile_mtime_seconds{{instance="{inst}", file="{fname}"}}[5m])'):
+            if r["labels"].get("instance") == inst:
+                ages[(inst, fname)] = r["value"]
+
+    ping: Dict[str, float] = {}   # ping_target -> probe_success (1.0/0.0)
+    ping_targets = {d["ping_target"] for d in relays if d.get("ping_target")}
+    if ping_targets:
+        ping_jobs = {d["ping_job"] for d in relays if d.get("ping_target")}
+        # NOT re.escape() -- see _ad_service_states' own comment: PromQL label-matcher strings
+        # consume a backslash as a STRING escape before RE2 ever sees the regex, so `\.` (what
+        # re.escape gives a dotted IP) comes back "unknown escape sequence"/HTTP 400 (confirmed
+        # live 2026-09-09, the exact same mistake that comment already warns against). A bare
+        # `.` in the regex just means "any character," harmless for these fixed, internally-
+        # configured IP values.
+        targets_re = "|".join(ping_targets)
+        for job in ping_jobs:
+            for r in q(f'probe_success{{job="{job}", instance=~"{targets_re}"}}'):
+                inst = r["labels"].get("instance")
+                if inst:
+                    ping[inst] = r["value"]
+
+    out: Dict[str, dict] = {}
+    for d in relays:
+        t, inst, prefix = d["target"], d["relay_instance"], d["metric_prefix"]
+        age = ages.get((inst, d["freshness_file"]))
+        known = age is not None
+        relay_reachable = up.get(inst) == 1.0
+        reachable = bool(known and relay_reachable
+                         and age <= d.get("stale_after_seconds", 1800))
+        ping_target = d.get("ping_target")
+        host_reachable = (ping.get(ping_target) == 1.0) if ping_target in ping else None
+
+        cpu_val = next((r["value"] for r in q(f"{prefix}wmi_workaround_cpu_load_percent")
+                        if r["labels"].get("instance") == inst), None)
+        # Already a pre-computed percentage from the script itself -- used directly rather than
+        # re-deriving from free/total (the script's own MB-denominated free/total pair would
+        # work identically as a ratio, but the ready-made percent needs no unit-matching at all).
+        mem_val = next((r["value"] for r in q(f"{prefix}wmi_workaround_memory_used_percent")
+                        if r["labels"].get("instance") == inst), None)
+        disk_used = {r["labels"].get("volume"): r["value"] for r in
+                    q(f"100*(1-{prefix}windows_logical_disk_free_bytes{{{_WIN_VOL}}}/"
+                      f"{prefix}windows_logical_disk_size_bytes{{{_WIN_VOL}}})")
+                    if r["labels"].get("instance") == inst}
+        disk_free = {r["labels"].get("volume"): r["value"] for r in
+                    q(f"{prefix}windows_logical_disk_free_bytes{{{_WIN_VOL}}}/1024/1024/1024")
+                    if r["labels"].get("instance") == inst}
+        disk_size = {r["labels"].get("volume"): r["value"] for r in
+                    q(f"{prefix}windows_logical_disk_size_bytes{{{_WIN_VOL}}}/1024/1024/1024")
+                    if r["labels"].get("instance") == inst}
+        disks = [{"volume": vol, "used": u, "free": disk_free.get(vol), "size": disk_size.get(vol)}
+                for vol, u in disk_used.items()]
+
+        out[t] = {
+            "known": known, "reachable": reachable,
+            "cpu_pct": cpu_val, "mem_pct": mem_val, "disks": disks,
+            "relay_instance": inst, "relay_reachable": relay_reachable, "stale_seconds": age,
+            "host_reachable": host_reachable,
         }
     return out
 
@@ -767,8 +1083,18 @@ def _hci_node_metrics() -> Dict[str, dict]:
         up[inst] = r["value"]
         display[inst] = r["labels"].get("display", inst)
 
+    # windows_hci_cpu_usage_percent, NOT windows_cpu_time_total's rate() (2026-09-08, on
+    # request, after confirming live: the idle-time counter reads garbage on these nodes --
+    # 40.96% and even NEGATIVE values (-1.66%, -2.01%) on real nodes at the same instant this
+    # gauge read 23.03% -- a wmi_workaround_metrics.prom textfile collector now publishes CPU
+    # usage directly for HCI nodes specifically, sidestepping whatever breaks the standard
+    # counter in this clustered/virtualized context. A gauge, so read as-is, no rate() --
+    # unlike windows_cpu_time_total, this already IS the usage percentage. Rolling out node by
+    # node (only node2 publishing it at the time of this fix): `.get(inst)` -> None for a node
+    # that hasn't started publishing yet, same "no data" rather than a stale/fabricated
+    # reading every other None-on-absence value in this function already means.
     cpu = {r["labels"]["instance"]: r["value"]
-          for r in q('100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100)')
+          for r in q("windows_hci_cpu_usage_percent")
           if r["labels"].get("instance")}
     mem = {r["labels"]["instance"]: r["value"]
           for r in q("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)")
@@ -950,13 +1276,55 @@ def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None,
     checks below with the SAME checks run per NODE across the whole cluster (plus network
     errors/discards and disk latency, which a single-target device has no equivalent of) --
     so a hot node 3 shows up even while node 1 (the device's own primary target) is fine.
+
+    (2026-09-08: CPU was briefly suppressed here for Infrastructure Admin's own report --
+    "kindly ignore the cpu metric from the infrastructure reports metric is broken" -- restored
+    same day once the underlying reading was fixed: "restore cpu issue has been resolved".)
     """
     from .services import FlagVM
 
-    if not m.get("known"):
+    # A RELAY device (2026-09-09: RBZHQ-DC-204) has no `up{instance=...}` of its own -- "has
+    # never been scraped"/"is not answering" would be misleading (nothing was ever scraped
+    # FROM it directly), so it gets its own, more accurate wording naming the relay host and,
+    # when known, exactly how stale its last-published metrics are. See _relay_windows_metrics
+    # for what "known"/"reachable"/"stale_seconds"/"relay_reachable" mean here.
+    if m.get("relay_instance"):
+        relay_name = next((d["name"] for d in DEVICES if d["target"] == m["relay_instance"]),
+                          m["relay_instance"])
+        if not m.get("known"):
+            return [FlagVM("win_unscraped",
+                           f"{dev['name']} has never published metrics via {relay_name}",
+                           "red", "unreachable")]
+        if not m.get("reachable"):
+            age_txt = _fmt_duration(m.get("stale_seconds"))
+            host_reachable = m.get("host_reachable")
+            # 2026-09-09, on request: "treat 204 like an anomaly... the server currently is up
+            # and running" -- an independent ICMP probe (host_reachable, see DEVICES' own
+            # ping_target/_relay_windows_metrics) can CONFIRM the box itself is alive even while
+            # its own metrics-collection script has stalled, which is a materially different,
+            # less severe situation than a genuine outage -- downgraded to amber rather than the
+            # same red a real down device gets. host_reachable is None (no ping configured/no
+            # data yet) falls through to the red, single-signal verdict unchanged.
+            if host_reachable is True:
+                cause = (f"its metrics can't currently be relayed via {relay_name}, which is "
+                        f"itself unreachable" if not m.get("relay_reachable") else
+                        f"its own metrics-collection script has not reported in {age_txt} via "
+                        f"{relay_name} -- check the scheduled task on {dev['name']} itself")
+                return [FlagVM(
+                    "win_stale_but_pinging",
+                    f"{dev['name']} is reachable (ping OK), but {cause}, not the server's "
+                    f"availability", "amber", "unreachable")]
+            reason = (f"{relay_name} is itself unreachable" if not m.get("relay_reachable")
+                      else f"no fresh metrics in {age_txt}")
+            if host_reachable is False:
+                reason = f"not answering ping, {reason}"
+            return [FlagVM("win_down",
+                           f"{dev['name']} has not reported fresh metrics via {relay_name} "
+                           f"({reason})", "red", "unreachable")]
+    elif not m.get("known"):
         return [FlagVM("win_unscraped", f"{dev['name']} has never been scraped by Prometheus",
                        "red", "unreachable")]
-    if not m.get("reachable"):
+    elif not m.get("reachable"):
         return [FlagVM("win_down", f"{dev['name']} is not answering", "red", "unreachable")]
     flags = []
     if nodes:
@@ -1023,6 +1391,86 @@ def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None,
     return flags
 
 
+def ad_device_label(dev: dict) -> str:
+    """A neutral, non-identifying label for an Active Directory device -- no hostname
+    (2026-09-11, on request: "hide hostnames from the picker, we need a neutral way of
+    referencing this devices... this is the exact same pattern we have for systems" -- the
+    System Admin picker shows a business system name, e.g. "RTGS", never a raw hostname).
+
+    Domain controllers get "Root Domain Controller N" / "Child Domain Controller N",
+    numbered within their own tier by DEVICES' own declared order -- the tier prefix is
+    required, not cosmetic: "Domain Controller 1" alone repeats once per tier (root's #1 and
+    child's #1 would read as the same device in the picker), which is the bug this labeling
+    was fixing (2026-09-11 follow-up). build_infrastructure_report's own per-host section
+    titles use the same N within a tier but also show the real hostname alongside it, so they
+    don't suffer the same collision and are left as-is.
+
+    AD Sync & Authentication's two hosts are different ROLES, not peer DC instances (same
+    reasoning as that report's own title split -- "AD Sync and PTA are two DIFFERENT roles,
+    not peer instances of the same role"), so they get their own functional name instead of a
+    number."""
+    if dev["system"] == "AD Sync & Authentication":
+        return {"ad-sync": "AD Sync Server", "pta": "PTA Server"}.get(dev["key"], dev["key"])
+    # Matched by `key`, not the dict itself: callers (device_inventory()) pass a COPY of the
+    # DEVICES entry with extra reachability fields merged in, which is never `==` to the
+    # plain entry still sitting in DEVICES -- list.index() would raise ValueError on it.
+    tier_keys = [d["key"] for d in DEVICES if d.get("system") == dev["system"]]
+    tier_prefix = "Root" if dev["system"] == "Root Domain Controllers" else "Child"
+    return f"{tier_prefix} Domain Controller {tier_keys.index(dev['key']) + 1}"
+
+
+_AD_SEVERITY_RANK = {"red": 2, "amber": 1}
+
+
+def hosts_from_ad_snapshot(systems, wm: dict) -> Dict[str, List[dict]]:
+    """{sysvm.name: [host]} for the Active Directory / Infrastructure Admin report review
+    screens -- connect.hosts_from_snapshot's own twin (2026-09-11, on request: "there should
+    be a button that shows both ip and hostname for whichever device has issues, this is the
+    exact same pattern we have for systems"), adapted for THIS module's own Snapshot shape:
+    a System Admin `System` can own several host `Component`s, but a network.py SystemVM
+    already IS one physical/virtual host -- so this builds exactly one connect host per
+    system, keyed by DEVICES' own `target`, rather than walking a `.components` list that
+    doesn't exist here.
+
+    Unlike the picker (device_inventory/ad_device_label), the REPORT review screen already
+    shows the real hostname everywhere (every card's own title) -- so the connect chip's own
+    label is the real name too, matching System Admin's own Connect chips (which show a real
+    host label like "DB"/"App", not a neutralised one). Neutrality is a picker-only concern.
+    """
+    from . import connect
+
+    by_name = {d["name"]: d for d in DEVICES}
+    up = {t: m.get("reachable", False) for t, m in (wm or {}).items()}
+    out: Dict[str, List[dict]] = {}
+    for s in systems:
+        dev = by_name.get(s.name)
+        if not dev:
+            continue
+        out[s.name] = [connect.build_host(s.name, s.name, dev["target"], up, "windows")]
+    return out
+
+
+def attach_ad_severity(hosts_by_system: Dict[str, List[dict]], system_vms) -> None:
+    """Colour each AD/Infra connect chip by the worst flag on its own SystemVM.
+
+    Simpler than connect.attach_flag_severity's own per-COMPONENT matching (which matches a
+    flag to one of SEVERAL hosts via the colon-delimited label segment of its key, e.g.
+    "disk:DB:E:") -- AD/Infra's own flags (see _windows_device_flags) use plain, uncolonned
+    keys like "win_down"/"cpu_high" and there is only ever ONE host per system in this shape,
+    so every flag on a SystemVM belongs to its own single chip; no key-parsing needed."""
+    for svm in system_vms:
+        hosts = hosts_by_system.get(svm.name) or []
+        if not hosts:
+            continue
+        h = hosts[0]
+        h["severity"] = None
+        h["issues"] = []
+        for f in getattr(svm, "flags", []):
+            h["issues"].append(f.text)
+            if _AD_SEVERITY_RANK.get(f.band, 0) > _AD_SEVERITY_RANK.get(h["severity"], 0):
+                h["severity"] = f.band
+
+
 def device_inventory() -> list:
     """The devices for the picker, each with its live reachability and interface count.
 
@@ -1055,7 +1503,13 @@ def device_inventory() -> list:
         t = d["target"]
         if d.get("kind") == "windows":
             m = wm.get(t, {"known": False, "reachable": False})
+            # host_reachable (2026-09-09, on request: "the whole chain of screens... still
+            # reflecting that one server is down") -- carried through so the picker can tell a
+            # relay device confirmed alive via ping (RBZHQ-DC-204's own amber state) apart from
+            # a device with no independent signal at all, the same distinction the report's own
+            # tables/flags already make (see _windows_reading_trusted).
             out.append(dict(d, reachable=m["reachable"], known=m["known"],
+                            host_reachable=m.get("host_reachable"),
                             iface_count=0, iface_up=0))
         else:
             scraped = up_by_target.get(t)
@@ -1504,13 +1958,18 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
             continue
         m = wm.get(dev["target"], {"known": False, "reachable": False})
         components_total += 1
-        if not m.get("reachable"):
+        # _windows_reading_trusted, NOT a bare m.get("reachable") (2026-09-09, on request: "the
+        # whole chain of screens... still reflecting that one server is down" -- this tile used
+        # to count RBZHQ-DC-204 as fully down purely from stale metrics-freshness, even once
+        # its own ping-confirmed-alive amber state had already been fixed everywhere else).
+        if not _windows_reading_trusted(m):
             components_down += 1
-        elif m.get("cpu_pct") is not None or m.get("mem_pct") is not None:
-            all_cpu_ram.append((m.get("cpu_pct") or 0.0, m.get("mem_pct") or 0.0))
-        for d in m.get("disks", []) or []:
-            if d.get("used") is not None:
-                all_disks.append(d["used"])
+        else:
+            if m.get("cpu_pct") is not None or m.get("mem_pct") is not None:
+                all_cpu_ram.append((m.get("cpu_pct") or 0.0, m.get("mem_pct") or 0.0))
+            for d in m.get("disks", []) or []:
+                if d.get("used") is not None:
+                    all_disks.append(d["used"])
 
     cluster_nodes = len(hci_nodes)
     cluster_nodes_down = sum(1 for n in hci_nodes.values() if not n.get("reachable"))
@@ -2097,12 +2556,30 @@ def infrastructure_report_filename(theme: str = "dark", when=None) -> str:
     return f"Infrastructure Admin Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
 
 
+# `system` label values that make up the Active Directory estate -- Root/Child Domain
+# Controllers and AD Sync & Authentication (2026-09-11: split out of the combined
+# Infrastructure Admin Report into its own report, reachable from both Infrastructure Admin
+# -- its real owner -- and Network Admin). One source of truth for both build_infrastructure_
+# report's own `ad_hosts` filter below AND views.py's active_directory_form/_report device
+# filters, so the two can never quietly drift apart on which systems count as "AD".
+AD_SYSTEMS = {"Root Domain Controllers", "Child Domain Controllers", "AD Sync & Authentication"}
+
+
+def active_directory_report_filename(theme: str = "dark", when=None) -> str:
+    """Same family as infrastructure_report_filename just above -- its own report now, not a
+    section of the combined Infrastructure Admin one, so it gets its own named file rather
+    than downloading as another "Infrastructure Admin Report"."""
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Active Directory Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
 #: flag.text already carries its own label for these -- see _windows_device_flags: the "nodes"
 #: branch (node_*) prefixes every text with the node's own display name, and win_down/
 #: win_unscraped are written with the device's name baked in before any branching happens.
 #: Every OTHER flag (cpu_high/mem_high/disk_high, cluster_node_down/cluster_resource_failed)
 #: carries no name at all, so _infra_notes prefixes those with the device/group name itself.
-_INFRA_LABELED_FLAG_PREFIXES = ("win_down", "win_unscraped", "node_")
+_INFRA_LABELED_FLAG_PREFIXES = ("win_down", "win_unscraped", "win_stale_but_pinging", "node_")
 
 #: The tree-nested Infrastructure Report already nests each HCI node under its "HCI Cluster
 #: Host" parent section, so the "HCI Cluster Node N (...)" wrapper prometheus.yml's `display`
@@ -2143,17 +2620,42 @@ def _infra_notes(sysvm, comment: str, flag_answers: dict) -> tuple:
             flagged_metric=text,
             fix_needed=flag_answers.get(flag.key, ""),
             comment=comment if i == last else "",
+            band=flag.band,
         ))
     return rows, critical, warning
+
+
+def _windows_reading_trusted(m: dict) -> bool:
+    """Whether m's own CPU/RAM/disk numbers should be treated as usable RIGHT NOW: either
+    genuinely reachable, or a RELAY device (2026-09-09: RBZHQ-DC-204) whose metrics-freshness
+    check reads unreachable but whose independent ICMP probe confirms the box is genuinely up
+    (`host_reachable`, see _relay_windows_metrics) -- its last-known numbers ARE real
+    (Prometheus is still holding whatever `rbz_hq_cdc_02_*` values it last scraped from 203,
+    just possibly some hours old), not a fabrication.
+
+    CENTRALISED (2026-09-09, on request: "the whole chain of screens in infrastructure reports
+    needs to be looked at, it's still reflecting that one server is down") so every screen that
+    decides "does this device count as down" -- the device picker, the review screen's own AT A
+    GLANCE tiles, and the final xlsx's own tables -- agrees on the SAME definition. Before this,
+    only the xlsx's own table-building (_infra_cpu_ram_disks) and flag wording
+    (_windows_device_flags) knew about `host_reachable` -- device_inventory() (the picker) and
+    _infra_overview (the review screen's own tile counts) each had their own, older, `not m.get
+    ("reachable")` check that still read 204 as fully down two screens upstream of where it had
+    already been fixed."""
+    return bool(m.get("reachable") or (m.get("relay_instance") and m.get("host_reachable")))
 
 
 def _infra_cpu_ram_disks(m: dict, label: str):
     """One windows_exporter target's raw metrics (see _windows_metrics/_hci_node_metrics) ->
     (CpuRam-or-None, [DiskRow, ...]). None for CpuRam when the target has never been
-    reachable -- there is no percentage to show, not a fabricated 0%."""
+    reachable -- there is no percentage to show, not a fabricated 0%. See
+    _windows_reading_trusted for the one exception (a relay device confirmed alive via ping
+    despite stale metrics) -- shown with a LAST-KNOWN caveat by build_infrastructure_report's
+    own AD tier loop, "treat it like an anomaly" means surfacing more of what's actually known,
+    not collapsing to the same blank table a genuinely-never-reported host gets."""
     import infrastructure_report as ir
 
-    if not m.get("reachable"):
+    if not _windows_reading_trusted(m):
         return None, []
     cpu_ram = None
     if m.get("cpu_pct") is not None or m.get("mem_pct") is not None:
@@ -2184,7 +2686,7 @@ _AD_SERVICES = [
 ]
 
 
-def _ad_service_states(targets: list) -> Dict[str, dict]:
+def _ad_service_states(targets: list, relay_devices: Optional[list] = None) -> Dict[str, dict]:
     """{target: {service_key: running_bool}} for _AD_SERVICES, one query across every target
     and service name. A service absent from the result (host unreachable, or genuinely not
     installed) is left out of the inner dict entirely -- not the same claim as "confirmed
@@ -2199,29 +2701,139 @@ def _ad_service_states(targets: list) -> Dict[str, dict]:
     installed" but never "running" from "stopped", silently reporting stopped services as
     running (confirmed live 2026-08-28: SmbWitness genuinely stopped on the HCI cluster host,
     state="stopped" value 1 / state="running" value 0, yet the old query still returned 1).
-    Pinning state="running" makes the value itself mean what running_bool claims."""
-    if not targets:
-        return {}
+    Pinning state="running" makes the value itself mean what running_bool claims.
+
+    `relay_devices` (2026-09-09, on request: "services table is empty [for 204]... are we not
+    getting any service metrics" -- confirmed live: we ARE, just never queried) covers a device
+    like RBZHQ-DC-204 with no windows_exporter/windows_service_state of its own: its own
+    `target` is a synthetic placeholder that can never match a real `instance` label, so it was
+    silently degrading to "no services listed" every time. Its relay's OWN prefixed gauge
+    (`{prefix}wmi_workaround_service_running{name=...}`, confirmed live to cover all seven
+    _AD_SERVICES for RBZHQ-DC-204) is queried separately here and merged back into `out` keyed
+    by the RELAY DEVICE's own (synthetic) target -- so the caller's existing `ad_svc_states.
+    get(dev["target"], {})` lookup keeps working unchanged for both kinds of device. Unlike the
+    real windows_service_state gauge, this one has no `state=` enumeration at all -- it's
+    already a plain 1/0 running boolean, no `state="running"` filter needed."""
     prom, _ = _prometheus()
     # No re.escape() here: PromQL label-matcher strings consume a backslash as a STRING escape
     # before RE2 ever sees the regex, so `\.` (what re.escape gives a dotted IP) comes back as
     # "unknown escape sequence" -- confirmed live. `.` un-escaped just means "any character" in
     # the regex, harmless for these fixed, internally-configured name/IP:port values.
     names_re = "|".join(k for k, _ in _AD_SERVICES)
-    targets_re = "|".join(targets)
-    try:
-        rows = prom.query(
-            f'windows_service_state{{state="running", '
-            f'name=~"(?i)^({names_re})$", instance=~"{targets_re}"}}')
-    except Exception:                       # noqa: BLE001
-        rows = []
     by_lower = {k.lower(): k for k, _ in _AD_SERVICES}
     out: Dict[str, dict] = {t: {} for t in targets}
-    for r in rows:
-        inst = r["labels"].get("instance")
-        key = by_lower.get(r["labels"].get("name", "").lower())
-        if inst in out and key:
-            out[inst][key] = r["value"] >= 1
+
+    if targets:
+        targets_re = "|".join(targets)
+        try:
+            rows = prom.query(
+                f'windows_service_state{{state="running", '
+                f'name=~"(?i)^({names_re})$", instance=~"{targets_re}"}}')
+        except Exception:                       # noqa: BLE001
+            rows = []
+        for r in rows:
+            inst = r["labels"].get("instance")
+            key = by_lower.get(r["labels"].get("name", "").lower())
+            if inst in out and key:
+                out[inst][key] = r["value"] >= 1
+
+    for d in (relay_devices or []):
+        t, inst, prefix = d["target"], d["relay_instance"], d["metric_prefix"]
+        out.setdefault(t, {})
+        try:
+            rows = prom.query(
+                f'{prefix}wmi_workaround_service_running{{'
+                f'name=~"(?i)^({names_re})$", instance="{inst}"}}')
+        except Exception:                       # noqa: BLE001
+            rows = []
+        for r in rows:
+            key = by_lower.get(r["labels"].get("name", "").lower())
+            if key:
+                out[t][key] = r["value"] >= 1
+    return out
+
+
+# AD replication (2026-09-10, on request: "add a table in the Domain controllers level to show
+# replication these metrics are already there") -- genuine Active Directory NTDS replication
+# between domain controller partners, NOT Hyper-V Replica (the admin's own clarification: "not
+# throughhyper v") -- windows_exporter's `ad` collector, confirmed live only on RBZHQ-DC-203
+# (and, by relay, RBZHQ-DC-204 -- see _ad_replication_states' own relay_devices param below):
+# 4 partitions x 3
+# partners = 12 (partition, partner) series per metric on that host. Root Domain Controllers
+# (200/201) do NOT expose this at all yet (confirmed live 2026-09-10 -- no windows_ad_
+# replication_* series on either), so their own replication table is simply empty, same
+# "nothing to show" handling used everywhere else in this report rather than a fabricated
+# all-OK row.
+# 'CN=NTDS Settings,CN=RBZ-HQ-CDC-02,CN=Servers,CN=Harare,CN=Sites,CN=Configuration,...' ->
+# 'RBZ-HQ-CDC-02 (Harare)' -- the partner DN's own server CN + site CN, not the whole
+# distinguishedName (unreadable at this table's own column width).
+_REPL_PARTNER_RE = re.compile(r"CN=NTDS Settings,CN=([^,]+),CN=Servers,CN=([^,]+),CN=Sites")
+
+
+def _replication_partner_label(dn: Optional[str]) -> str:
+    m = _REPL_PARTNER_RE.search(dn or "")
+    return f"{m.group(1)} ({m.group(2)})" if m else (dn or "unknown partner")
+
+
+def _ad_replication_rows(prefix: str, instance: str, q) -> list:
+    """[{"partner":, "failures":, "ok":, "last_success":}, ...] for one target, rolled up per
+    PARTNER across every partition that partner replicates -- windows_exporter's `ad` collector
+    reports one series per (partition, partner) pair, and partition-level detail has no
+    admin-facing value a partner-level rollup doesn't already carry: a genuine replication
+    problem with a partner shows up on every partition it carries, so collapsing to worst-case-
+    per-partner keeps the table at a few readable rows per DC instead of a dozen. failures = MAX
+    across that partner's partitions (a single stuck partition is still a real problem); ok =
+    True only if every partition's last_result == 0 (AD replication result codes follow the
+    Win32 error-code convention: 0 = success) AND failures == 0; last_success = the OLDEST (min)
+    timestamp across partitions -- the most conservative reading, so a partially-stale partner
+    is never hidden behind a fresher partition's own success time."""
+    by_partner: Dict[str, dict] = {}
+    fail_rows = q(f'{prefix}windows_ad_replication_consecutive_failures{{instance="{instance}"}}')
+    result_rows = q(f'{prefix}windows_ad_replication_last_result{{instance="{instance}"}}')
+    success_rows = q(f'{prefix}windows_ad_replication_last_success_timestamp_seconds{{instance="{instance}"}}')
+
+    def bucket(partner: str) -> dict:
+        return by_partner.setdefault(
+            partner, {"failures": 0, "bad_result": False, "last_success": None})
+
+    for r in fail_rows:
+        d = bucket(_replication_partner_label(r["labels"].get("partner")))
+        d["failures"] = max(d["failures"], int(r["value"]))
+    for r in result_rows:
+        d = bucket(_replication_partner_label(r["labels"].get("partner")))
+        if r["value"] != 0:
+            d["bad_result"] = True
+    for r in success_rows:
+        d = bucket(_replication_partner_label(r["labels"].get("partner")))
+        v = r["value"]
+        d["last_success"] = v if d["last_success"] is None else min(d["last_success"], v)
+
+    return [{"partner": p, "failures": d["failures"],
+             "ok": d["failures"] == 0 and not d["bad_result"],
+             "last_success": d["last_success"]}
+            for p, d in sorted(by_partner.items())]
+
+
+def _ad_replication_states(devices: list, relay_devices: Optional[list] = None) -> Dict[str, list]:
+    """{target: [row dicts from _ad_replication_rows]} for every DEVICES entry passed in.
+    `relay_devices` (2026-09-10, same convention as _ad_service_states' own relay_devices
+    param) covers RBZHQ-DC-204: no windows_exporter of its own, so its replication data is its
+    relay's own prefixed series (`rbz_hq_cdc_02_windows_ad_replication_*` on RBZHQ-DC-203's own
+    instance), queried separately and merged back keyed by the RELAY DEVICE's own (synthetic)
+    target."""
+    prom, _ = _prometheus()
+
+    def q(expr):
+        try:
+            return prom.query(expr)
+        except Exception:                       # noqa: BLE001
+            return []
+
+    out: Dict[str, list] = {}
+    for d in devices:
+        out[d["target"]] = _ad_replication_rows("", d["target"], q)
+    for d in (relay_devices or []):
+        out[d["target"]] = _ad_replication_rows(d["metric_prefix"], d["relay_instance"], q)
     return out
 
 
@@ -2274,35 +2886,206 @@ def _hci_service_states(targets: list) -> Dict[str, dict]:
     return out
 
 
+# AD Sync & Authentication (2026-09-10) -- unlike _AD_SERVICES/_HCI_SERVICES (one shared
+# service list queried across several SAME-role hosts), RBZ-HQ-ADS-01 (Azure AD Connect Sync)
+# and RBZ-ADAPT-01 (Pass-Through Authentication agent) run genuinely different services, so
+# this is keyed per DEVICES `key` instead of one list shared by the whole tier. Real service
+# short names (windows_service_state's own `name` label) CONFIRMED LIVE 2026-09-10, queried
+# right after both hosts started scraping -- deliberately NOT the DisplayName column the
+# admin's own brief quoted (Get-Service's DisplayName != the short Name windows_exporter
+# reports as `name`; e.g. "Microsoft Azure AD Sync" is really `ADSync`, "Microsoft Entra
+# Connect Health Agent" is really `AzureADConnectHealthAgent`, "Windows Security Service" is
+# really `SecurityHealthService`). "Windows Security Service" was initially left off (Manual
+# start, judged as a generic Windows service rather than one of the named services to watch,
+# same reasoning as _HCI_SERVICES' own SmbWitness/TieringEngineService case) -- corrected
+# 2026-09-10 on explicit request, since the admin's own original brief did list it (Get-Service
+# output showed it Running on both hosts) even though Manual start type doesn't guarantee it
+# stays running the way Automatic does. `AzureADConnectAgentUpdater`/`vmictimesync` (also
+# present on both, never named in the brief) remain excluded.
+# `AzureADConnectAuthenticationAgent` is also present (and running) on RBZ-HQ-ADS-01 itself,
+# not just RBZ-ADAPT-01 -- Azure AD Connect installs the PTA agent capability alongside Sync by
+# default even when PTA isn't that box's own primary role, per the admin's own brief ("PTA
+# 10.100.249.207") only that host's copy is the one being watched here.
+_AD_SYNC_AUTH_SERVICES = {
+    "ad-sync": [
+        ("ADSync", "Azure AD Sync"),
+        ("AzureADConnectHealthAgent", "Microsoft Entra Connect Health Agent"),
+        ("SecurityHealthService", "Windows Security Service"),
+    ],
+    "pta": [
+        ("AzureADConnectAuthenticationAgent", "Azure AD Connect Authentication Agent (PTA)"),
+        ("SecurityHealthService", "Windows Security Service"),
+    ],
+}
+
+
+def _ad_sync_auth_service_states(devices: list) -> Dict[str, dict]:
+    """{target: {service_key: running_bool}} for _AD_SYNC_AUTH_SERVICES -- same state="running"
+    requirement as _ad_service_states/_hci_service_states (see _ad_service_states' own
+    docstring for why a bare max-by would silently report stopped services as running), but
+    queried per-device since these two hosts don't share one service list the way DCs/HCI
+    nodes do."""
+    prom, _ = _prometheus()
+    out: Dict[str, dict] = {}
+    for d in devices:
+        target = d["target"]
+        svc_list = _AD_SYNC_AUTH_SERVICES.get(d["key"], [])
+        out[target] = {}
+        if not svc_list:
+            continue
+        names_re = "|".join(k for k, _ in svc_list)
+        by_lower = {k.lower(): k for k, _ in svc_list}
+        try:
+            rows = prom.query(
+                f'windows_service_state{{state="running", '
+                f'name=~"(?i)^({names_re})$", instance="{target}"}}')
+        except Exception:                       # noqa: BLE001
+            rows = []
+        for r in rows:
+            key = by_lower.get(r["labels"].get("name", "").lower())
+            if key:
+                out[target][key] = r["value"] >= 1
+    return out
+
+
+# NTP / Time Sync Status (2026-09-11, on request), scoped to RBZHQ-ROOT-01 ONLY -- the
+# forest's primary time source, not every domain controller. Confirmed live 2026-09-11: all
+# four w32time metrics genuinely present on 10.100.249.200:9182 (root-dc-1's own target).
+# Bands per the request's own explicit thresholds: stratum <=3 green / >3 amber / ==16
+# (w32time's own "never synchronized" sentinel) red; sync age <=300s green / <=900s amber /
+# >900s red.
+_HARARE_OFFSET_SECONDS = 7200  # UTC+2 -- Africa/Harare observes no DST, so a fixed offset is
+                               # exact, not an approximation (2026-09-11, on request:
+                               # "wmi_workaround_w32tm_last_sync_timestamp_seconds is UTC --
+                               # display as UTC+2").
+
+
+def _ntp_sync_row(target: str, dc_name: str) -> Optional[dict]:
+    """One row's worth of raw values for `target`'s own w32time state, or None if either
+    metric is missing (a host with no w32time textfile publishing yet, rather than a
+    fabricated all-clear row -- same "nothing to show" discipline as everywhere else in this
+    report). Returns a plain dict, not an ir.NtpSyncRow -- the caller (build_infrastructure_
+    report) does that conversion, same split _ad_replication_rows already uses.
+
+    Sync age is computed LIVE as `time() - last_sync_timestamp` in the PromQL query itself
+    (2026-09-11, on request), not read from the script's own separately-published
+    wmi_workaround_w32tm_seconds_since_last_sync gauge -- confirmed live the two disagree
+    significantly (the pre-computed gauge read a small, stale value while the live
+    subtraction showed ~2h), so the script's own gauge isn't refreshed often enough to trust
+    for "how stale is this right now"; time() is evaluated at THIS query, so it can't lag the
+    same way."""
+    import datetime
+
+    prom, _ = _prometheus()
+
+    def q1(expr):
+        try:
+            rows = prom.query(expr)
+        except Exception:                       # noqa: BLE001
+            return None
+        return rows[0] if rows else None
+
+    stratum_row = q1(f'wmi_workaround_w32tm_stratum{{instance="{target}"}}')
+    source_row = q1(f'wmi_workaround_w32tm_source_info{{instance="{target}"}}')
+    last_sync_row = q1(f'wmi_workaround_w32tm_last_sync_timestamp_seconds{{instance="{target}"}}')
+    age_row = q1(f'time() - wmi_workaround_w32tm_last_sync_timestamp_seconds{{instance="{target}"}}')
+    if not (stratum_row and source_row and last_sync_row and age_row):
+        return None
+
+    stratum = int(stratum_row["value"])
+    stratum_band = "red" if stratum == 16 else ("amber" if stratum > 3 else "green")
+    age_seconds = age_row["value"]
+    hours, minutes = divmod(int(age_seconds) // 60, 60)
+    last_sync_utc2 = datetime.datetime.fromtimestamp(
+        last_sync_row["value"] + _HARARE_OFFSET_SECONDS, tz=datetime.timezone.utc)
+    return {
+        "dc": dc_name,
+        "stratum": stratum,
+        "stratum_band": stratum_band,
+        "source": source_row["labels"].get("source") or "—",
+        "last_sync": last_sync_utc2.strftime("%d %b %Y, %H:%M:%S"),
+        "sync_age": f"{hours}h {minutes}m",
+        "sync_age_band": "red" if age_seconds > 900 else ("amber" if age_seconds > 300 else "green"),
+    }
+
+
 def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
-                                annotations: dict, summary_comment: str) -> bytes:
+                                annotations: dict, summary_comment: str,
+                                report_title: str = "INFRASTRUCTURE ADMIN REPORT") -> bytes:
     """Map the annotated Snapshot into a ReportData tree and render it via
-    infrastructure_report.build_report(). See this section's module docstring above."""
+    infrastructure_report.build_report(). See this section's module docstring above.
+
+    `report_title` (2026-09-11): the Active Directory Report shares this exact renderer
+    (build_infrastructure_report is already correctly scoped by whatever `only=` subset the
+    caller's own capture_snapshot used) rather than needing a second one -- only the masthead
+    text and sheet-tab name need to say something different, so this is the one thing the
+    caller can override rather than duplicating the whole function. Defaults to the original
+    literal so infra_generate's own existing call site is unaffected."""
     import infrastructure_report as ir
 
     wm = getattr(snapshot, "_wm", None) or {}
     hci_nodes = getattr(snapshot, "_hci_nodes", None) or {}
     wc = getattr(snapshot, "_wc", None) or {}
     by_name = {d["name"]: d for d in DEVICES}
+    # DEVICES' own declared order (root-dc-1 before root-dc-2) -- the intentional ordering
+    # this report should follow within a tier, independent of whatever order snapshot.systems
+    # itself arrived in. views.infra_report sorts snapshot.systems alphabetically by name for
+    # the picker/review screen's own reasons, but "RBZ-HQ-ROOT-02" alphabetically precedes
+    # "RBZHQ-ROOT-01" (a hyphen sorts before a letter), which silently reversed the two DCs
+    # here (2026-09-08, on request: "start with the first root... now its vice versed"). Keying
+    # on DEVICES' own position sidesteps that naming-inconsistency trap entirely, rather than
+    # relying on the two names happening to sort in the intended order.
+    device_order = {d["name"]: i for i, d in enumerate(DEVICES)}
 
     groups = []
     # Three real levels: "Active Directory" (all DCs combined) > "Root Domain Controllers" /
-    # "Child Domain Controllers" (one DEVICES `system` value each -- only Root exists today,
-    # Child is expected to gain entries later and will start rendering the moment it does,
-    # no code change needed) > each DC's own section. Genuine nested DeviceGroups at indent
+    # "Child Domain Controllers" (one DEVICES `system` value each) > each DC's own section,
+    # titled "Domain Controller N (Hostname)" -- the SAME shape HCI Cluster Host uses for its
+    # own nodes ("HCI Cluster Node N (Hostname)"), applied here 2026-09-09 on request ("Is it
+    # Possible to say Domain Controller 1 (Hostname) to match the naming convention established
+    # in HCL CLuster Host"). Numbered PER TIER, restarting at 1 in each (the admin's own choice:
+    # "take option 2" -- Root's own two get "Domain Controller 1/2", Child's own two ALSO get
+    # "Domain Controller 1/2", the tier heading directly above each is what distinguishes Root
+    # from Child, exactly how "HCI Cluster Node N" never repeats "HCI Cluster" in the child
+    # title since the parent section already says that). Genuine nested DeviceGroups at indent
     # 0/1/2, not a label-only divider -- see infrastructure_report.py's COL_WIDTHS for the gap-
     # column equations that make indent 2 actually fit (Disk's own column is fixed while
     # Services/CPU-RAM shift per indent, so a 3rd level needs its own reserved gap column).
     ad_hosts = [s for s in snapshot.systems
-               if by_name.get(s.name, {}).get("system") in
-               ("Root Domain Controllers", "Child Domain Controllers")]
+               if by_name.get(s.name, {}).get("system") in AD_SYSTEMS]
     if ad_hosts:
         ad_children = []
         ad_critical = ad_warning = 0
-        ad_svc_states = _ad_service_states([by_name[s.name]["target"] for s in ad_hosts])
+        dc_hosts = [s for s in ad_hosts if by_name[s.name]["system"] != "AD Sync & Authentication"]
+        # A relay device (RBZHQ-DC-204)'s own service state is queried separately, from its
+        # relay's OWN prefixed metric -- see _ad_service_states' own relay_devices docstring
+        # (2026-09-09, on request: "services table is empty... are we not getting any service
+        # metrics" -- we ARE, this just wasn't querying for them yet). Scoped to dc_hosts only
+        # (2026-09-10) -- RBZ-HQ-ADS-01/RBZ-ADAPT-01 run entirely different services than
+        # _AD_SERVICES names, see _ad_sync_auth_service_states below for their own query.
+        ad_svc_states = _ad_service_states(
+            [by_name[s.name]["target"] for s in dc_hosts if not by_name[s.name].get("relay_instance")],
+            relay_devices=[by_name[s.name] for s in dc_hosts if by_name[s.name].get("relay_instance")])
+        # AD replication (2026-09-10) -- same relay split as ad_svc_states just above, same
+        # reason (RBZHQ-DC-204 has no windows_exporter of its own to query directly).
+        ad_repl_states = _ad_replication_states(
+            [by_name[s.name] for s in dc_hosts if not by_name[s.name].get("relay_instance")],
+            relay_devices=[by_name[s.name] for s in dc_hosts if by_name[s.name].get("relay_instance")])
+        ad_sync_auth_states = _ad_sync_auth_service_states(
+            [by_name[s.name] for s in ad_hosts if by_name[s.name]["system"] == "AD Sync & Authentication"])
+        # RBZHQ-DC-203/204 (2026-09-09) live under "Child Domain Controllers" -- the admin's own
+        # call, for naming consistency with "Root Domain Controllers" ("rename The Domain
+        # Controllers to Child Domain Controllers so its a bit more consistent with the root
+        # ones"), reusing this tier value rather than a separate third one -- it had been an
+        # empty placeholder (reserved for exactly this) until now. "AD Sync & Authentication"
+        # (2026-09-10) is a genuine third tier, not reusing either -- the admin's own call ("New
+        # tier under Active Directory") for these two non-DC AD-identity servers.
         for tier_label, tier_system in (("Root Domain Controllers", "Root Domain Controllers"),
-                                        ("Child Domain Controllers", "Child Domain Controllers")):
-            tier_hosts = [s for s in ad_hosts if by_name[s.name]["system"] == tier_system]
+                                        ("Child Domain Controllers", "Child Domain Controllers"),
+                                        ("AD Sync & Authentication", "AD Sync & Authentication")):
+            tier_hosts = sorted(
+                (s for s in ad_hosts if by_name[s.name]["system"] == tier_system),
+                key=lambda s: device_order.get(s.name, 0))
             if not tier_hosts:
                 continue
             # Each DC gets its OWN section (child), not one Services/CPU-RAM/Disk table
@@ -2316,14 +3099,33 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             # host, sysvm.name) instead of being merged into one shared list.
             tier_children = []
             tier_critical = tier_warning = 0
-            for sysvm in tier_hosts:
+            is_ad_sync_auth_tier = tier_system == "AD Sync & Authentication"
+            for dc_num, sysvm in enumerate(tier_hosts, start=1):
                 dev = by_name[sysvm.name]
                 m = wm.get(dev["target"], {"known": False, "reachable": False})
                 cr, dk = _infra_cpu_ram_disks(m, sysvm.name)
+                if is_ad_sync_auth_tier:
+                    svc_list = _AD_SYNC_AUTH_SERVICES.get(dev["key"], [])
+                    svc_state = ad_sync_auth_states.get(dev["target"], {})
+                else:
+                    svc_list = _AD_SERVICES
+                    svc_state = ad_svc_states.get(dev["target"], {})
                 host_services = [ir.ServiceRow(display_name, "RUNNING" if running else "DOWN")
-                                 for key, display_name in _AD_SERVICES
-                                 for running in [ad_svc_states.get(dev["target"], {}).get(key)]
+                                 for key, display_name in svc_list
+                                 for running in [svc_state.get(key)]
                                  if running is not None]
+                # AD replication (2026-09-10) -- DC tiers only, never AD Sync & Authentication
+                # (neither RBZ-HQ-ADS-01 nor RBZ-ADAPT-01 is a domain controller, so there is no
+                # NTDS replication state to show for either).
+                repl_rows = []
+                if not is_ad_sync_auth_tier:
+                    now = time.time()
+                    for r in ad_repl_states.get(dev["target"], []):
+                        last_success = (f"{_fmt_duration(now - r['last_success'])} ago"
+                                        if r["last_success"] is not None else "never")
+                        repl_rows.append(ir.ReplicationRow(
+                            partner=r["partner"], status="OK" if r["ok"] else "FAILED",
+                            last_success=last_success, failures=r["failures"]))
                 ann = annotations.get(sysvm.name, {})
                 rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
                 if cr is None and m.get("reachable"):
@@ -2342,12 +3144,31 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                     rows = [ir.NoteRow(f"Reachable, but CPU/RAM/Disk have not been published "
                                        f"yet (expected via the textfile collector); service "
                                        f"status below is live.")] + rows
+                elif cr is not None and not m.get("reachable") and m.get("host_reachable"):
+                    # A relay device shown DESPITE stale metrics (2026-09-09, see
+                    # _infra_cpu_ram_disks' own comment) -- flags the table itself as last-
+                    # known, not live, so it never reads as a fresher reading than it is.
+                    rows = [ir.NoteRow(
+                        f"CPU/RAM/Disk below are the LAST KNOWN reading, "
+                        f"{_fmt_duration(m.get('stale_seconds'))} old -- {sysvm.name} is "
+                        f"confirmed reachable via ping, but its own metrics-collection script "
+                        f"has not reported since then.")] + rows
                 tier_critical += c
                 tier_warning += w
+                # Section title only -- every ROW beneath it (CPU/RAM, disk, notes, flags,
+                # services) still uses the bare sysvm.name, unchanged, the same "full label on
+                # the title, bare hostname on every row underneath" split HCI Cluster Node
+                # already uses (see _infra_short_node's own comment for why repeating the
+                # wrapper on every row under an already-titled section is redundant).
+                # AD Sync and PTA are two DIFFERENT roles, not peer instances of the same role
+                # the way Root/Child DCs are -- "Domain Controller 1/2" numbering only makes
+                # sense for interchangeable peers, so this tier's own hosts title on their bare
+                # hostname instead (still unique, still matches the row labels beneath it).
+                title = sysvm.name if is_ad_sync_auth_tier else f"Domain Controller {dc_num} ({sysvm.name})"
                 tier_children.append(ir.DeviceGroup(
-                    title=sysvm.name, services=host_services, cpu_ram=[cr] if cr else [],
-                    disks=dk, notes=rows, critical=c, warning=w, count=1, count_label="host",
-                    signed_by=author))
+                    title=title, services=host_services, replication=repl_rows,
+                    cpu_ram=[cr] if cr else [], disks=dk, notes=rows, critical=c, warning=w,
+                    count=1, count_label="host", signed_by=author))
             ad_critical += tier_critical
             ad_warning += tier_warning
             ad_children.append(ir.DeviceGroup(
@@ -2355,13 +3176,30 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 critical=tier_critical, warning=tier_warning,
                 count=len(tier_hosts), count_label="host" if len(tier_hosts) == 1 else "hosts",
                 signed_by=author))
-        # Neither the tier nor the top level carries its own tables now -- with 3 real levels,
-        # an aggregate at EVERY level (Active Directory, tier, AND host) was one rollup too
-        # many; both are pure labels, each DC's own section is where the real data lives.
+        # NTP / Time Sync Status (2026-09-11: "move the table to the highest point under
+        # active directory" -- previously nested three levels deep in RBZHQ-ROOT-01's own
+        # per-host card; it now sits directly on the Active Directory group itself, one
+        # forest-wide fact rather than something that belongs to one host's own section.
+        # Still scoped to RBZHQ-ROOT-01 only -- rendered only when that specific host is
+        # actually part of this report run, same as before.
+        ntp_rows = []
+        root1 = next((s for s in ad_hosts if by_name[s.name]["key"] == "root-dc-1"), None)
+        if root1 is not None:
+            ntp_raw = _ntp_sync_row(by_name[root1.name]["target"], root1.name)
+            if ntp_raw:
+                ntp_rows.append(ir.NtpSyncRow(**ntp_raw))
+        # The tier level still carries no tables of its own -- with 3 real levels, an
+        # aggregate at EVERY level (Active Directory, tier, AND host) was one rollup too
+        # many; each DC's own section is still where the CPU/RAM/disk/services/replication
+        # data lives. Active Directory itself is the one exception now: NTP is a top-level
+        # fact, not a per-host or per-tier one, so it (and the sentinel Notes panel that
+        # comes with any table on this report) live here instead.
         groups.append(ir.DeviceGroup(
-            title="Active Directory", notes=[], children=ad_children,
+            title="Active Directory", children=ad_children,
             critical=ad_critical, warning=ad_warning,
-            count=len(ad_hosts), count_label="devices", signed_by=author))
+            count=len(ad_hosts), count_label="devices", signed_by=author,
+            ntp_sync=ntp_rows,
+            notes=[ir.NoteRow(ir.SENTINEL_NOTE)] if ntp_rows else []))
 
     hci_sysvm = next((s for s in snapshot.systems if by_name.get(s.name, {}).get("key") == "hci-cluster"), None)
     if hci_sysvm is not None:
@@ -2394,13 +3232,24 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             notes = [ir.NoteRow(f"Cluster's own view of node membership (queried via "
                                 f"{_infra_short_node(queried_via)}): {parts}.")] + notes
         node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
-        # The parent "HCI Cluster" row always carries its own CPU/RAM/Disk table -- the same
-        # aggregate-across-hosts pattern generate_report.py uses for every multi-host system
-        # card (e.g. RTGS, Attendance System: one table listing every host's row) -- so it
-        # never sits structurally empty just because it also has per-node children below it.
-        # DeviceGroup.is_cluster_host names exactly this shape: a group with BOTH its own
-        # data AND children. Per-node children are additionally built once there's more than
-        # one node, giving the reachability/critical breakdown a flat host list can't carry.
+        # The parent "HCI Cluster Host" row carries ONLY facts that belong to the host/cluster
+        # itself -- notes, critical/warning, count -- never a rolled-up copy of what each
+        # child node's OWN section already shows (on request, 2026-09-04: "the parent node...
+        # is currently displaying information that is already shown in its child nodes...
+        # each child node should display only its own data"). Per-node CPU/RAM/disk/services
+        # go on the parent ONLY when there is exactly one node and therefore no child section
+        # for them to live in instead -- otherwise every node gets its own child DeviceGroup
+        # below and the parent stays a pure container.
+        multi_node = len(node_order) > 1
+        if multi_node:
+            # _infra_notes already turned hci_sysvm's own "node_down:..." flags into a
+            # "{label} is not answering" NoteRow above -- exactly the fact each unreachable
+            # node's own child section repeats below via child_notes. Drop it from the
+            # parent's copy so it shows in exactly one place, the same duplication already
+            # fixed for CPU/RAM/disk/services.
+            down_texts = {f"{_infra_short_node(n.get('display', target))} is not answering"
+                         for target, n in node_order if not n.get("reachable")}
+            notes = [nr for nr in notes if nr.flagged_metric not in down_texts]
         cpu_ram, disks, children, parent_services = [], [], [], []
         hci_svc_states = _hci_service_states([target for target, _ in node_order])
         for target, n in node_order:
@@ -2411,9 +3260,6 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             full_label = n.get("display", target)
             label = _infra_short_node(full_label)
             cr, dk = _infra_cpu_ram_disks(n, label)
-            if cr:
-                cpu_ram.append(cr)
-            disks += dk
             # A node not yet reporting (see _hci_node_metrics) has nothing in
             # hci_svc_states[target] at all -- an empty services list, not a table full of
             # "unknown", same as its own empty cpu_ram/disks above.
@@ -2421,19 +3267,20 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                              for key, display_name in _HCI_SERVICES
                              for running in [hci_svc_states.get(target, {}).get(key)]
                              if running is not None]
-            # Rolled up onto the parent "HCI Cluster Host" row too, named per node (same
-            # "{service} ({host})" shape the Active Directory group's own services use above)
-            # -- the parent's CPU/RAM/Disk tables are already an aggregate-across-nodes view,
-            # so its services shouldn't sit empty just because the per-node detail lives below.
-            parent_services += [ir.ServiceRow(f"{row.name} ({label})", row.status)
-                                for row in node_services]
-            if len(node_order) > 1:
+            if multi_node:
                 child_notes = ([ir.NoteRow(ir.SENTINEL_NOTE)] if n.get("reachable")
-                               else [ir.NoteRow(f"{label} is not answering")])
+                               else [ir.NoteRow(f"{label} is not answering", band="red")])
                 children.append(ir.DeviceGroup(
                     title=full_label, services=node_services, cpu_ram=[cr] if cr else [], disks=dk,
                     notes=child_notes, critical=0 if n.get("reachable") else 1, count=1,
                     count_label="node", signed_by=author))
+            else:
+                # Only node -- no child section exists, so its data has to live on the
+                # parent, the same as it always did before this device ever had siblings.
+                if cr:
+                    cpu_ram.append(cr)
+                disks += dk
+                parent_services += node_services
         groups.append(ir.DeviceGroup(
             title="HCI Cluster Host", services=parent_services, cpu_ram=cpu_ram, disks=disks,
             notes=notes, children=children,
@@ -2529,6 +3376,14 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                 lbl, detail = text[: -len(" is not answering")], "not answering"
             elif text.endswith(" has never been scraped by Prometheus"):
                 lbl, detail = text[: -len(" has never been scraped by Prometheus")], "never scraped by Prometheus"
+            # Relay devices (2026-09-09: RBZHQ-DC-204) phrase their own reason differently --
+            # see _windows_device_flags' own relay branch for exactly what these two shapes are.
+            elif " has never published metrics via " in text:
+                lbl, _, tail = text.partition(" has never published metrics via ")
+                detail = f"never published via {tail}"
+            elif " has not reported fresh metrics via " in text:
+                lbl, _, tail = text.partition(" has not reported fresh metrics via ")
+                detail = tail
             else:
                 lbl, detail = s.name, text
             lbl = _infra_short_node(lbl)
@@ -2633,6 +3488,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                        if summary_comment else []),
         groups=groups,
         banners=banners,
+        report_title=report_title,
         summary_signed_by=author,
         components_total=components_total,
     )

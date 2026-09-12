@@ -16,25 +16,24 @@
   {% endif %}
 
   <div class="card"><div class="body" style="padding:18px">
-    <p style="margin:0 0 16px;color:var(--muted)">
-      How many days old a host's newest backup may be and still count as current — the
-      report reads each host's newest backup file against this on every capture. Almost every
-      host backs up daily, so <b>{{ default_days }}</b> (today or yesterday) is the default for
-      any host left blank here; a host on a slower cycle (e.g. a database whose full backup
-      runs every 3rd day) needs its own number, otherwise the gap between its runs reads as a
-      missing backup. <b>Off days</b> are a separate setting, for a host that simply doesn't
-      run a backup on a given day of the week at all (not a slower fixed cycle like the
-      3-day example above) — tick a day and a check run the morning after it will not treat
-      that gap as a missing backup. <b>Backup folder drain (hours)</b> is a third, separate
-      setting: how long a watched backup folder (Drainage Monitoring) may hold a file before
-      it's flagged as stuck — defaulted from this same host's own frequency (a daily backup's
-      file may legitimately sit until tomorrow's lands) so it never needs setting by hand
-      unless a host's backup folder genuinely clears on a different schedule than the backup
-      itself. Every Save creates a new, permanent revision below —
-      nothing is ever edited or deleted. <b>Save</b> only records the revision.
-      <b>Save &amp; Apply</b> also rewrites the live policy file — no service to restart, so
-      it takes effect on the very next report.
+    <p class="cfg-note" style="margin:0 0 10px">
+      How many days old a host's newest backup may be and still count as current — default is
+      <b>{{ default_days }}</b> day{{ default_days|pluralize }}.
     </p>
+    <details class="cfg-learn-more"><summary>Learn more</summary>
+      <div class="cfg-learn-more-body">
+        A host on a slower cycle (e.g. a database whose full backup runs every 3rd day) needs its
+        own number, otherwise the gap between its runs reads as a missing backup.
+        <b>Off days</b> are separate: for a host that simply doesn't run a backup on a given day of
+        the week at all, tick that day and a check run the morning after won't treat the gap as
+        missing. <b>Backup folder drain (hours)</b> is a third setting: how long a watched backup
+        folder (Drainage Monitoring) may hold a file before it's flagged stuck — defaulted from
+        this host's own frequency, so it rarely needs setting by hand.
+        Every Save creates a new, permanent revision below — nothing is edited or deleted.
+        <b>Save</b> only records the revision; <b>Save &amp; Apply</b> also rewrites the live
+        policy file — no restart needed, it takes effect on the next report.
+      </div>
+    </details>
 
     <form method="post" id="backupPolicyForm">
       {% csrf_token %}

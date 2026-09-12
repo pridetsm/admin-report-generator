@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}{{ group.name }} · Event groups{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {{ group.stakeholder_count }} stakeholder{{ group.stakeholder_count|pluralize }} ·
+      {{ group.systems|length }} system{{ group.systems|length|pluralize }} ·
+      {% if not group.active %}<span class="chip amber">paused</span>{% else %}<span class="chip green">active</span>{% endif %}
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_events' %}">All groups</a>
+  </div>
+
+  <form method="post">{% csrf_token %}
+    <div class="section-label sub">Name</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span>Name</span>
+        <input type="text" name="name" value="{{ group.name }}" required>
+      </label>
+    </div></div>
+
+    <div class="section-label sub">Systems this group covers</div>
+    <div class="card"><div class="body" style="padding:14px 18px">
+      {% if not systems %}
+        <p class="cfg-note" style="margin:0">No systems found — nothing to map yet.</p>
+      {% else %}
+      <input type="text" class="cfg-search" data-scope-search placeholder="Search systems…" autocomplete="off" aria-label="Search systems">
+      <div class="scope-grid" data-scope-group>
+        {% for s in systems %}
+        <label class="scope-opt">
+          <input type="checkbox" name="systems" value="{{ s }}" {% if s in group.systems %}checked{% endif %}>
+          <span>{{ s }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
+        <button type="button" class="btn ghost cfg-add" data-scope-none>Clear</button>
+      </div>
+      {% endif %}
+    </div></div>
+
+    <div class="section-label sub">Active</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" name="active" {% if group.active %}checked{% endif %} style="width:auto">
+          Active
+        </span>
+        <small class="cfg-hint">Untick to pause without deleting — nothing fires while paused.</small>
+      </label>
+    </div></div>
+
+    <div class="section-label sub">App-user stakeholders</div>
+    <div class="card"><div class="body" style="padding:14px 18px">
+      <p class="cfg-note" style="margin:0 0 10px">Notified at their account e-mail.</p>
+      {% if not users %}
+        <p class="cfg-note" style="margin:0 0 10px">No active users found.</p>
+      {% else %}
+      <input type="text" class="cfg-search" data-scope-search placeholder="Search stakeholders…" autocomplete="off" aria-label="Search stakeholders">
+      <div class="scope-grid" data-scope-group>
+        {% for u in users %}
+        <label class="scope-opt">
+          <input type="checkbox" name="users" value="{{ u.pk }}" {% if u.pk in chosen_users %}checked{% endif %}>
+          <span>{{ u.username }}{% if u.email %} · {{ u.email }}{% endif %}</span>
+        </label>
+        {% endfor %}
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
+        <button type="button" class="btn ghost cfg-add" data-scope-none>Clear</button>
+      </div>
+      {% endif %}
+    </div></div>
+
+    <div class="section-label sub">Plain-e-mail stakeholders</div>
+    <div class="card"><div class="body" style="padding:16px 18px">
+      <label class="field">
+        <span>One address per line (or comma-separated)</span>
+        <textarea name="emails" rows="4" placeholder="ops@rbz.co.zw&#10;dba@rbz.co.zw">{{ email_list }}</textarea>
+        <small class="cfg-hint">For stakeholders with no app account.</small>
+      </label>
+    </div></div>
+
+    <div class="actionbar">
+      <div class="container-inner">
+        <button class="btn primary" type="submit">Save</button>
+        <span class="spacer" style="flex:1"></span>
+        <button class="btn ghost" type="submit" name="action" value="delete"
+                style="color:var(--red)"
+                onclick="return confirm('Remove “{{ group.name }}”?\n\nThis cannot be undone.');">
+          Remove group
+        </button>
+      </div>
+    </div>
+  </form>
+
+</div>
+{% endblock %}

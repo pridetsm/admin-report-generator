@@ -49,7 +49,19 @@ _NAV_PARENT = {
     "network_sod_select": "reports",
     "infra_form": "reports",
     "os_inventory": "reports",
+    "automated_reports": "reports",
+    # Both child screens map straight back to the top tile rather than to each other: their
+    # own URLs take report_type/pk kwargs, and _back_nav's reverse(parent) call passes none --
+    # a parent that itself needs kwargs would raise NoReverseMatch and silently drop the Back
+    # button, so the chain is kept flat and argument-free instead (same reasoning as every
+    # other Back target in this map).
+    "automated_report_type": "automated_reports",
+    "automated_report_detail": "automated_reports",
     "infra_report": "infra_form",
+    # Active Directory Report (2026-09-11) -- split out of Infrastructure Admin's own picker,
+    # same shape: its report sits under its own picker, not infra_form's.
+    "active_directory_form": "reports",
+    "active_directory_report": "active_directory_form",
     # Each report sits under the picker that opened it, so Back steps out of the report
     # rather than dead-ending on it. The network report already worked this way; the systems
     # one had no Back at all and relied solely on the "Change systems" button in its header.
@@ -80,22 +92,54 @@ _NAV_PARENT = {
     "config_topology": "configuration",
     "config_backup_policy": "configuration",
     "config_scripts": "configuration",
-    # Roles moved here from being its own home page (2026-09-04) -- now a normal Configuration
-    # child, same shape as config_role_scopes/config_alert_groups below.
-    "roles_console": "configuration",
     # a definition and its preview hang off the catalogue, so Back walks
     # preview -> definition -> catalogue -> hub one step at a time
     "config_script_edit": "config_scripts",
     "config_script_preview": "config_script_edit",
     "system_settings": "configuration",
+    # Roles is now ONE PAGE with collapsible sections, reachable via three URLs that all
+    # render the identical content (config_roles/roles_console/config_role_scopes -- see
+    # config_roles' own docstring for why all three still exist). All three sit directly
+    # under Configuration -- none is a "child" of another any more, since none of them is a
+    # different SCREEN, just a different entry point onto the same one (on request,
+    # 2026-09-04: "consolidate everything... on one screen... do this for roles as well").
+    # roles_console is relabelled "Role assignments" in the nav (see _NAV_LABEL) for when its
+    # own section is the one that matters (e.g. the notification bell's own link into it).
+    "config_roles": "configuration",
+    "roles_console": "configuration",
     "config_role_scopes": "configuration",
-    "config_alert_groups": "configuration",
-    "config_alert_group_edit": "config_alert_groups",
-    "config_alert_templates": "configuration",
-    # Account creation is an ACCOUNT action (superuser-gated, same as password reset/delete),
-    # not a Configuration screen -- it hangs off Roles the same way those two already do,
-    # regardless of which page's "Add stakeholder" link happened to reach it.
-    "config_create_user": "roles_console",
+    # Account management -- SEPARATE from Roles on purpose (2026-09-04: "make user management
+    # a screen on its own, separate it from roles"), its own hub tile, grayed out for anyone
+    # but a superuser (see views._SUPERUSER_ONLY_CHILDREN).
+    "config_users": "configuration",
+    # Alerting (renamed from "Alerts" 2026-09-05) is ONE PAGE with collapsible sections
+    # (2026-09-04, on request: "consolidate everything to do with alerts on one screen") --
+    # Alert groups, Notification reminder schedule, Alert templates, every per-type
+    # threshold, AND System Alerting (folded in 2026-09-05: "add system alerting as a section
+    # of alerting") all live as sections on config_alerts; only the per-RECORD drill-downs
+    # (editing/testing one alert group, one freshness check, previewing one template) still
+    # have their own screen, since a record's own full form doesn't fold into an accordion
+    # row. ONE group model/screen for every alert now (2026-09-05: "alert groups must be for
+    # all alerts even if there are system alerts... let user specify this in the alert type
+    # and sub type in alert groups") -- config_alert_group_edit handles a System Alert group
+    # exactly the same way it handles a Monitoring Alert one, adapting which fields it shows
+    # based on the group's own alert_type; there is no separate system-alert-group screen any
+    # more.
+    "config_alerts": "configuration",
+    "config_alert_group_edit": "config_alerts",
+    # Freshness checks stay their own record screen -- FreshnessCheck is still a separate
+    # MODEL from AlertGroup (a staleness finding and a threshold finding are structurally
+    # different things), only the group/stakeholder side merged.
+    "config_freshness_check_edit": "config_alerts",
+    # Events -- a SIBLING of Alerting, not nested under it (2026-09-04: "decouple notifications
+    # from alerts... notification types, alert notification and event notification").
+    "config_events": "configuration",
+    "config_event_group_edit": "config_events",
+    # Account creation/editing hang off Users, not Roles, now that the two are separate
+    # screens (2026-09-04) -- regardless of which page's "Add stakeholder" link happened to
+    # reach config_create_user.
+    "config_create_user": "config_users",
+    "config_edit_user": "config_users",
     # The raw editors are how you edit the SAME file the screen above them presents as fields,
     # so they hang off that screen rather than off the hub — Back from raw YAML returns to
     # Prometheus, the way Temenos returns to Folder Watch.
@@ -110,6 +154,9 @@ _NAV_LABEL = {
     "role_select": "Role Select",
     "reports": "Reports",
     "os_inventory": "OS Inventory",
+    "automated_reports": "Automated Reports",
+    "automated_report_type": "Report history",
+    "automated_report_detail": "Report",
     "report_form": "System Picker",
     "report": "Report",
     "connect": "Connect",
@@ -123,7 +170,8 @@ _NAV_LABEL = {
     "infra_form": "Infrastructure Picker",
     "infra_report": "Infrastructure Admin Report",
     "history": "History",
-    "roles_console": "Roles",
+    "roles_console": "Role assignments",
+    "config_roles": "Roles",
     "configuration": "Configuration",
     "config_prometheus": "Prometheus",
     "config_topology": "Topology",
@@ -137,10 +185,14 @@ _NAV_LABEL = {
     "grafana_config": "Grafana",
     "system_settings": "Data sources",
     "config_role_scopes": "Role scopes",
-    "config_alert_groups": "Alert groups",
+    "config_users": "Users",
+    "config_alerts": "Alerting",
     "config_alert_group_edit": "Alert group",
-    "config_alert_templates": "Alert templates",
+    "config_events": "Events",
+    "config_event_group_edit": "Event group",
+    "config_freshness_check_edit": "Freshness check",
     "config_create_user": "Add stakeholder",
+    "config_edit_user": "Edit account",
     "profile": "Profile",
 }
 
@@ -196,12 +248,12 @@ def _back_nav(request):
     # retrace the report rather than the screen it was started from.
     # ...but never when you are ALREADY on that report: the override would hand its own URL
     # back as "Back", so the button pointed at the page you were standing on and did nothing.
-    on_the_open_report = name in ("report", "network_report", "infra_report")
-    on_a_picker = name in ("report_form", "network_dashboard", "infra_form")
+    on_the_open_report = name in ("report", "network_report", "infra_report", "active_directory_report")
+    on_a_picker = name in ("report_form", "network_dashboard", "infra_form", "active_directory_form")
     # A picker's Back steps OUT of the estate, so the open-report override does not apply
     # there — the picker already offers "Continue that report" in its own widget, and having
     # Back do the same thing would leave no way up at all.
-    if (parent in ("report_form", "network_dashboard", "infra_form")
+    if (parent in ("report_form", "network_dashboard", "infra_form", "active_directory_form")
             and not on_the_open_report and not on_a_picker):
         if "Network Admin" in scope and request.session.get("network_devices"):
             try:
@@ -211,6 +263,15 @@ def _back_nav(request):
         if "Infrastructure Admin" in scope and request.session.get("infra_report_systems"):
             try:
                 return reverse("infra_report"), "Report"
+            except NoReverseMatch:
+                pass
+        # Active Directory Report (2026-09-11) -- owned by Infrastructure Admin, view access
+        # for Network Admin (see roles.py), so either role's own open AD report outranks the
+        # tree the same way the two estates above already do.
+        if (("Infrastructure Admin" in scope or "Network Admin" in scope)
+                and request.session.get("active_directory_report_systems")):
+            try:
+                return reverse("active_directory_report"), "Report"
             except NoReverseMatch:
                 pass
         # An empty scope means the user holds no catalogue role at all — the pre-picker
@@ -289,6 +350,10 @@ def role_flags(request):
 
     ctx = {
         "is_role_admin": admin and in_scope("Administrator"),
+        # Drives the Users drawer/hub entry's grayed-out state (2026-09-04: "gray it out unless
+        # the user is a super user") -- NOT scoped by in_scope/active-role the way is_role_admin
+        # is above, since being a superuser isn't a role you can switch out of.
+        "is_superuser": bool(user and getattr(user, "is_superuser", False)),
         # drives the Folder Watch nav group
         "is_system_admin": is_system_admin(user) and in_scope("System Admin"),
         "is_network_admin": is_network_admin(user) and in_scope("Network Admin"),

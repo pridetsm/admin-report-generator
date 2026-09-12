@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}{{ page_label }} · RBZ Monitoring Console{% endblock %}
+
+{% comment %}
+  Automated Reports tile (spec "New Promt.txt", section 17): the six scheduled report types,
+  each showing its most recent stored instance so an admin can see at a glance whether
+  anything new has landed since they last looked. Cards, not a table -- six items, each with
+  enough per-item context (cadence, latest status) that a dense table would just be the same
+  information wrapped tighter for no benefit (see feedback_ui_preferences memory: that call
+  goes the other way for dense CONFIG listings, which this isn't).
+
+  2026-09-07 history on this page's text, since it went back and forth: an earlier pass cut
+  each card's descriptive sentence and the "AI-assisted reporting" status row outright, on a
+  request to declutter. Correction, same day: cutting AI-assisted reporting was NEVER asked
+  for -- the actual ask was to space its elements out, not delete the row -- so it's back,
+  under the same spacing rules as everything else on this page. The descriptive text that WAS
+  fairly cut stays cut from the default view, but isn't gone: the About toggle below reveals it
+  rather than deleting it a second time.
+{% endcomment %}
+
+{% block body %}
+<style>
+  /* One consistent rhythm: 24px is this page's own "edge" measure -- card interior, status-row
+     interior, and the gap between cards all match it, so nothing here reads as tighter or
+     looser than its neighbour for no reason. */
+  .ar-status-row { padding:24px; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .ar-status-row + .ar-status-row { border-top:1px solid var(--line); }
+  /* Hierarchy (2026-09-07, on request): a left rule + indent marks text that's DETAIL under
+     the bold heading directly above it, rather than a sibling of equal weight -- the same
+     "this belongs to that" cue a nested list gives, without actually nesting these in list
+     markup. */
+  .ar-status-note, .ar-latest {
+    border-left:2px solid var(--line); padding-left:10px; margin-top:6px;
+    color:var(--muted); font-size:12.5px; line-height:1.5;
+  }
+  .ar-badge { font-family:Consolas,monospace; font-size:10px; font-weight:700; padding:3px 8px; border-radius:4px; text-transform:uppercase; }
+  .ar-badge.ai-on { background:#E4EEE6; color:#2F6B45; }
+  .ar-badge.ai-off { background:var(--panel-2); color:var(--muted); }
+
+  .ar-about-toggle { font-size:12.5px; color:var(--muted); background:none; border:0; cursor:pointer; text-decoration:underline; padding:0; margin-bottom:20px; }
+  .ar-about-toggle:hover { color:var(--ink); }
+  .ar-about { display:none; padding:24px; margin-bottom:20px; }
+  .ar-about.is-open { display:block; }
+  .ar-about h4 { margin:0 0 4px; font-size:13px; }
+  .ar-about p { margin:0 0 16px; font-size:12.5px; color:var(--muted); line-height:1.6; }
+  .ar-about p:last-child { margin-bottom:0; }
+
+  .ar-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px,1fr)); gap:20px; margin-top:24px; }
+  .ar-card { border:1px solid var(--line-strong); border-radius:12px; padding:24px; background:var(--panel); display:flex; flex-direction:column; gap:10px; }
+  .ar-card-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+  .ar-cadence { font-family:Consolas,monospace; font-size:10.5px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); white-space:nowrap; }
+  .ar-card h3 { margin:0; font-size:16px; line-height:1.3; }
+  .ar-actions-primary { margin-top:8px; }
+  .ar-actions-primary .btn { width:100%; justify-content:center; }
+  .ar-actions-secondary { display:flex; gap:8px; flex-wrap:wrap; }
+  .ar-actions-primary form, .ar-actions-secondary form { margin:0; }
+  /* Row-action sizing matches the rest of the app's per-item buttons (see config_alerts.html's
+     "Open"/"Preview" links: .btn ghost with reduced padding) rather than the full-size .btn
+     used for page-level submits. */
+  .ar-actions-secondary .btn { padding:6px 12px; font-size:12.5px; font-weight:600; flex:1; justify-content:center; }
+</style>
+<div class="container" style="max-width:1080px">
+  <div class="rs-head">
+    <h1>{{ page_label }}</h1>
+    <p>Scheduled trend analysis from the same monitoring data as the System Health Report.</p>
+  </div>
+
+  <button type="button" class="ar-about-toggle" onclick="document.getElementById('arAbout').classList.toggle('is-open')">About these reports ▾</button>
+  <div class="card ar-about" id="arAbout">
+    <h4>What each report type covers</h4>
+    {% for c in cards %}
+    <p><b>{{ c.label }}</b> ({{ c.cadence }}) — {{ c.purpose }}</p>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <div class="ar-status-row">
+      <div style="flex:1">
+        <b>Distribution</b>
+        <div class="ar-status-note">
+          {% if sc.automated_reports_distribution_enabled %}
+            Reports are e-mailed automatically on their schedule.
+          {% else %}
+            Shadow mode — generating and storing, nothing e-mailed yet.
+          {% endif %}
+        </div>
+      </div>
+      {% if sc.automated_reports_distribution_enabled %}
+        <span class="ar-badge ai-on">Enabled</span>
+      {% else %}
+        <span class="ar-badge ai-off">Shadow mode</span>
+      {% endif %}
+      {% if can_toggle_distribution %}
+      <form method="post" action="{% url 'automated_report_toggle_distribution' %}">
+        {% csrf_token %}
+        <button class="btn ghost" type="submit">
+          {% if sc.automated_reports_distribution_enabled %}Turn off{% else %}Enable{% endif %}
+        </button>
+      </form>
+      {% else %}
+      <span style="color:var(--muted);font-size:12px">Superuser only</span>
+      {% endif %}
+    </div>
+    <div class="ar-status-row">
+      <div style="flex:1">
+        <b>AI-assisted reporting</b>
+        <div class="ar-status-note">
+          Will let the narrative sections use an AI provider instead of the deterministic
+          offline analysis.
+        </div>
+      </div>
+      <span class="ar-badge ai-off">Coming soon</span>
+      <button class="btn ghost" type="button" disabled>Enable</button>
+    </div>
+  </div>
+
+  <div class="ar-grid">
+    {% for c in cards %}
+    <div class="ar-card">
+      <div class="ar-card-head">
+        <h3>{{ c.label }}</h3>
+        <span class="ar-cadence">{{ c.cadence }}</span>
+      </div>
+      <div class="ar-latest">
+        {% if c.latest %}Latest: {{ c.latest.generated_at|date:"d M Y, H:i" }}
+        {% else %}No instance generated yet.{% endif %}
+      </div>
+      <div class="ar-actions-primary">
+        <form method="post" action="{% url 'automated_report_type' c.key %}">
+          {% csrf_token %}
+          <button class="btn ghost accent" type="submit">Generate now</button>
+        </form>
+      </div>
+      <div class="ar-actions-secondary">
+        <a class="btn ghost" href="{% url 'automated_report_type' c.key %}">History</a>
+        {% if c.latest %}
+        <a class="btn ghost" href="{% url 'automated_report_detail' c.key c.latest.pk %}">Latest</a>
+        <a class="btn ghost" href="{% url 'automated_report_download' c.key c.latest.pk %}">PDF</a>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

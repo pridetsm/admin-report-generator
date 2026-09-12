@@ -24,6 +24,12 @@
     .drawer-children::before { content: ""; position: absolute; left: 20px; top: 2px; bottom: 2px;
                                width: 1px; background: var(--line-strong); }
     .drawer .drawer-child { padding-left: 34px; font-size: 14px; }
+    /* Grayed out, not hidden (2026-09-04: "gray it out unless the user is a super user") --
+       a <span>, not a link, since .drawer a's own display/padding/radius don't apply to it. */
+    .drawer .drawer-child.is-disabled {
+      display: block; padding: 11px 12px 11px 34px; border-radius: 8px; font-weight: 550;
+      color: var(--muted); opacity: .6; cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -211,10 +217,30 @@
       the branch you are inside, each child marks itself when you are on it. Prometheus and
       Topology are two halves of one file; the raw editors hang off Prometheus rather than
       appearing here, so the drawer lists what you configure, not every URL that can edit it.
+      Roles and Alerts are the same idea one level deeper (2026-09-04): Role assignments /
+      Role scopes hang off the Roles entry, and Alert groups / Reminder schedule / Alert
+      templates hang off the Alerts entry, not this list -- reached via each hub's own cards,
+      the same way Scripts' own edit/preview screens aren't listed here either.
     {% endcomment %}
     <a href="{% url 'configuration' %}"{% if current_page == 'configuration' %} class="is-current" aria-current="page"{% elif 'configuration' in current_ancestors %} class="is-ancestor"{% endif %}>Configuration</a>
     <div class="drawer-children">
-      <a href="{% url 'roles_console' %}" class="drawer-child{% if current_page == 'roles_console' %} is-current{% elif 'roles_console' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'roles_console' %} aria-current="page"{% endif %}>Roles</a>
+      {% comment %}
+        Three URL names (config_roles/roles_console/config_role_scopes) all render the
+        identical combined page (see views.config_roles' own docstring) -- the drawer lights
+        this one entry for any of the three, not just the canonical name.
+      {% endcomment %}
+      <a href="{% url 'config_roles' %}" class="drawer-child{% if current_page == 'config_roles' or current_page == 'roles_console' or current_page == 'config_role_scopes' %} is-current{% endif %}"{% if current_page == 'config_roles' or current_page == 'roles_console' or current_page == 'config_role_scopes' %} aria-current="page"{% endif %}>Roles</a>
+      {% comment %}
+        Users is superuser-only (2026-09-04: "make user management a screen on its own,
+        separate it from roles... gray it out unless the user is a super user") -- grayed out
+        here too, not just on the Configuration hub tile, so the drawer never offers a link an
+        Administrator can't actually open.
+      {% endcomment %}
+      {% if is_superuser %}
+      <a href="{% url 'config_users' %}" class="drawer-child{% if current_page == 'config_users' or current_page == 'config_create_user' or current_page == 'config_edit_user' %} is-current{% endif %}"{% if current_page == 'config_users' %} aria-current="page"{% endif %}>Users</a>
+      {% else %}
+      <span class="drawer-child is-disabled" title="Superuser only" aria-disabled="true">Users 🔒</span>
+      {% endif %}
       <a href="{% url 'config_prometheus' %}" class="drawer-child{% if current_page == 'config_prometheus' %} is-current{% elif 'config_prometheus' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_prometheus' %} aria-current="page"{% endif %}>Prometheus</a>
       <a href="{% url 'grafana_config' %}" class="drawer-child{% if current_page == 'grafana_config' %} is-current{% endif %}"{% if current_page == 'grafana_config' %} aria-current="page"{% endif %}>Grafana</a>
       <a href="{% url 'config_snmp' %}" class="drawer-child{% if current_page == 'config_snmp' %} is-current{% endif %}"{% if current_page == 'config_snmp' %} aria-current="page"{% endif %}>SNMP</a>
@@ -222,9 +248,8 @@
       <a href="{% url 'config_backup_policy' %}" class="drawer-child{% if current_page == 'config_backup_policy' %} is-current{% endif %}"{% if current_page == 'config_backup_policy' %} aria-current="page"{% endif %}>Backup policy</a>
       <a href="{% url 'config_scripts' %}" class="drawer-child{% if current_page == 'config_scripts' %} is-current{% elif 'config_scripts' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_scripts' %} aria-current="page"{% endif %}>Scripts</a>
       <a href="{% url 'system_settings' %}" class="drawer-child{% if current_page == 'system_settings' %} is-current{% endif %}"{% if current_page == 'system_settings' %} aria-current="page"{% endif %}>Data sources</a>
-      <a href="{% url 'config_role_scopes' %}" class="drawer-child{% if current_page == 'config_role_scopes' %} is-current{% endif %}"{% if current_page == 'config_role_scopes' %} aria-current="page"{% endif %}>Role scopes</a>
-      <a href="{% url 'config_alert_groups' %}" class="drawer-child{% if current_page == 'config_alert_groups' %} is-current{% elif 'config_alert_groups' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_alert_groups' %} aria-current="page"{% endif %}>Alert groups</a>
-      <a href="{% url 'config_alert_templates' %}" class="drawer-child{% if current_page == 'config_alert_templates' %} is-current{% endif %}"{% if current_page == 'config_alert_templates' %} aria-current="page"{% endif %}>Alert templates</a>
+      <a href="{% url 'config_alerts' %}" class="drawer-child{% if current_page == 'config_alerts' %} is-current{% elif 'config_alerts' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_alerts' %} aria-current="page"{% endif %}>Alerts</a>
+      <a href="{% url 'config_events' %}" class="drawer-child{% if current_page == 'config_events' %} is-current{% elif 'config_events' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_events' %} aria-current="page"{% endif %}>Events</a>
     </div>
     {% endif %}
   </nav>

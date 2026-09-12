@@ -653,6 +653,18 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
         _kpi("SWIFT txns", swift, NAVY),
         _kpi("COB &middot; T24", cob, NAVY),
     ])
+    # Queue folders drained (2026-09-08, on request) -- T24's payment/interface message queues
+    # (see engine.Store.queue_folders' own docstring), scoped to whichever systems THIS e-mail
+    # actually covers, the same "don't leak systems outside the scope" discipline every other
+    # KPI here already follows -- store.queue_folders itself is captured unconditionally from
+    # Prometheus, so this filters it down here rather than showing e.g. Temenos's own queues on
+    # an RTGS-only run.
+    sysnames_lower = {s.name.lower() for s in systems}
+    queue_entries = [e for sn, entries in store.queue_folders.items()
+                    if sn in sysnames_lower for e in entries]
+    n_queue_folders = len(queue_entries)
+    n_queue_drained = sum(1 for (_, _, waiting, _) in queue_entries if waiting <= 0)
+
     immediate_kpis = [
         # missing out of TRACKED hosts (an untracked host isn't judged either way — see the
         # separate Backup tracking tile for those).
@@ -666,6 +678,13 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                    RED if down else GREEN),
         _kpi_panel("Expired certs", [("Expired", len(cert_expired)), ("Total", engine.cert_monitored(store))],
                    RED if cert_expired else GREEN),
+        # "Drained", not "Stuck", out of Total -- the positive framing every affected-out-of-
+        # total tile here already uses. AMBER, not RED: the finer verdict already happens once,
+        # correctly, via the flagged-metric mechanism (reports.alerting.
+        # undrained_folder_flags_by_system) -- this tile is a glance-level count, not a second
+        # independently-computed severity judgement.
+        _kpi_panel("Queue folders drained", [("Drained", n_queue_drained), ("Total", n_queue_folders)],
+                   GREEN if n_queue_drained == n_queue_folders else AMBER),
     ]
     _disk_high_h, disk_high_d, disk_high_state = engine.disk_high(store, systems, thr, CRIT)
     disk_high_color = {"good": GREEN, "warn": AMBER, "bad": RED}[disk_high_state]
@@ -790,6 +809,8 @@ def plain_summary(unreach, crit, warn, nodata, report_url=None, attachment_name=
 
 # -------------------------------------------------------------------------- send
 XLSX_MIME = ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+PDF_MIME = ("application", "pdf")
+_ATTACHMENT_MIME = {".xlsx": XLSX_MIME, ".pdf": PDF_MIME}
 
 
 # Retries for the SMTP conversation itself (connect/STARTTLS/login/send) -- NOT for anything
@@ -834,7 +855,7 @@ def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
             html_part.add_related(png_bytes, maintype="image", subtype="png", cid=f"<{cid}>")
     if attachment is not None:
         path = Path(attachment)
-        maintype, subtype = XLSX_MIME if path.suffix.lower() == ".xlsx" else ("application", "octet-stream")
+        maintype, subtype = _ATTACHMENT_MIME.get(path.suffix.lower(), ("application", "octet-stream"))
         msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
     ctx = ssl.create_default_context()
     if mail["skip_verify"]:

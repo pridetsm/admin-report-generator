@@ -90,6 +90,12 @@
   @keyframes fwBeat { 0%,100%{opacity:1} 50%{opacity:.25} }
   .fw-live .beat { animation: fwBeat 2.4s ease-in-out infinite; }
 
+  .fw-group + .fw-group { margin-top:30px; }
+  .fw-group-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:0 2px 14px; }
+  .fw-group-title { font-size:13px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--ink); }
+  .fw-group-count { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .fw-group-hint { flex-basis:100%; font-size:12px; color:var(--muted); margin-top:2px; }
+
   .fw-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(148px, 1fr)); gap:22px 18px; }
   .fw-tile {
     position:relative; display:flex; flex-direction:column; align-items:center; gap:2px;
@@ -253,41 +259,71 @@
     <span class="fw-live" id="fwLive"><span class="beat"></span><span id="fwLiveText">live</span></span>
   </div>
 
-  <div class="fw-grid" id="fwGrid">
-    {% for f in fw.folders %}
-    {% comment %}
-      The badge is the TOTAL number of files waiting — the previous exporter could only
-      report how many were over the limit, so a tile could never say how deep the queue was.
+  {% comment %}
+    Grouped by the type of monitoring being done (reports/folders.py's WATCH_TYPES) rather
+    than one flat list — a payment queue jammed for ten minutes and a backup folder that's
+    expected to sit for most of a day read on completely different clocks, and mixing them
+    in one grid was hiding that difference behind dashes/colour alone. A group with nothing
+    in it is simply not rendered (see folders.py's own comment on why).
+  {% endcomment %}
+  <div id="fwGroups">
+    {% for grp in fw.groups %}
+    {% if grp.folders %}
+    <div class="fw-group" data-group="{{ grp.key }}">
+      <div class="fw-group-head">
+        <span class="fw-group-title">{{ grp.label }}</span>
+        <span class="fw-group-count">{{ grp.folders|length }}</span>
+        <span class="fw-group-hint">{{ grp.hint }}</span>
+      </div>
+      <div class="fw-grid">
+        {% for f in grp.folders %}
+        {% comment %}
+          The badge is the TOTAL number of files waiting — the previous exporter could only
+          report how many were over the limit, so a tile could never say how deep the queue was.
 
-      Anything spanning lines must use this block form. The hash-brace comment is
-      single-line only in Django, and a multi-line one is not treated as a comment at
-      all — it renders as literal text, which here meant once per tile.
-    {% endcomment %}
-    <button type="button" class="fw-tile" data-key="{{ f.key }}" data-state="{{ f.state }}"
-            data-has-files="{% if f.files %}1{% else %}0{% endif %}"
-            data-len="{% if f.name|length > 16 %}xlong{% elif f.name|length > 10 %}long{% else %}short{% endif %}"
-            data-search="{{ f.name|lower }} {{ f.host|lower }} {{ f.path_text|lower }} {{ f.format|lower }}"
-            title="{{ f.name }}{% if f.path_text %} — {{ f.path_text }}{% endif %}{% if f.format %} ({{ f.format }}){% endif %} — last scanned {{ f.checked_at_text }}">
-      <span class="fw-ico-wrap">
-        <svg class="fw-ico" viewBox="0 0 120 92" aria-hidden="true">
-          <path class="back"  d="M6 26 q0-11 11-11 h23 q5 0 8 3.4 L54 25 h49 q11 0 11 11 v40 q0 11-11 11 H17 q-11 0-11-11 Z"/>
-          <path class="front" d="M6 40 h108 v36 q0 11-11 11 H17 q-11 0-11-11 Z"/>
-        </svg>
-        <span class="fw-count" data-count-el>{{ f.files }}</span>
-        <span class="fw-fmt">{{ f.format }}</span>
-        <span class="fw-name"><span>{{ f.name_wrap }}</span></span>
-      </span>
-      <span class="fw-sub" data-sub-el>
-        {% if not f.readable %}path missing{% elif f.stale %}not scanning{% elif f.has_files %}{{ f.age_text }}{% else %}drained{% endif %}
-      </span>
-      <span class="fw-proc" data-proc-el>{% if f.processed != None %}processed {{ f.processed }}{% endif %}</span>
-      {% comment %}
-        Rendered server-side and left alone by the repaint: the path is configuration from
-        folder_exporter.yml, not telemetry, so it cannot change without a deploy.
-      {% endcomment %}
-      <span class="fw-path">{% for hop in f.path %}{% if not forloop.first %}<span class="hop">→</span>{% endif %}{{ hop }}{% endfor %}</span>
-      {% if fw.hosts|length > 1 %}<span class="fw-host">{{ f.host }}</span>{% endif %}
-    </button>
+          Anything spanning lines must use this block form. The hash-brace comment is
+          single-line only in Django, and a multi-line one is not treated as a comment at
+          all — it renders as literal text, which here meant once per tile.
+        {% endcomment %}
+        <button type="button" class="fw-tile" data-key="{{ f.key }}" data-state="{{ f.state }}" data-watch="{{ f.watch_type }}"
+                data-has-files="{% if f.watch_type == 'logfiles' %}1{% elif f.files %}1{% else %}0{% endif %}"
+                data-len="{% if f.name|length > 16 %}xlong{% elif f.name|length > 10 %}long{% else %}short{% endif %}"
+                data-search="{{ f.name|lower }} {{ f.host|lower }} {{ f.path_text|lower }} {{ f.format|lower }}"
+                title="{{ f.name }}{% if f.path_text %} — {{ f.path_text }}{% endif %}{% if f.format %} ({{ f.format }}){% endif %} — last scanned {{ f.checked_at_text }}">
+          <span class="fw-ico-wrap">
+            <svg class="fw-ico" viewBox="0 0 120 92" aria-hidden="true">
+              <path class="back"  d="M6 26 q0-11 11-11 h23 q5 0 8 3.4 L54 25 h49 q11 0 11 11 v40 q0 11-11 11 H17 q-11 0-11-11 Z"/>
+              <path class="front" d="M6 40 h108 v36 q0 11-11 11 H17 q-11 0-11-11 Z"/>
+            </svg>
+            {% comment %}
+              A "logfiles" tile (a continuously-written file, never expected to empty) badges
+              its % of expected size instead of a waiting-file count, and its sub-line shows
+              size vs expected instead of an age that would mean nothing for it — see
+              reports/folders.py's own comment on why this watch type is judged differently.
+            {% endcomment %}
+            <span class="fw-count" data-count-el>{% if f.watch_type == "logfiles" %}{% if f.size_pct != None %}{{ f.size_pct }}%{% else %}—{% endif %}{% else %}{{ f.files }}{% endif %}</span>
+            <span class="fw-fmt">{{ f.format }}</span>
+            <span class="fw-name"><span>{{ f.name_wrap }}</span></span>
+          </span>
+          <span class="fw-sub" data-sub-el>
+            {% if f.watch_type == "logfiles" %}
+              {% if not f.readable %}path missing{% elif f.stale %}not scanning{% elif f.size_expected_bytes %}{{ f.size_text }} of {{ f.size_expected_text }}{% else %}size unknown{% endif %}
+            {% else %}
+              {% if not f.readable %}path missing{% elif f.stale %}not scanning{% elif f.has_files %}{{ f.age_text }}{% else %}drained{% endif %}
+            {% endif %}
+          </span>
+          <span class="fw-proc" data-proc-el>{% if f.watch_type != "logfiles" and f.processed != None %}processed {{ f.processed }}{% endif %}</span>
+          {% comment %}
+            Rendered server-side and left alone by the repaint: the path is configuration from
+            folder_exporter.yml, not telemetry, so it cannot change without a deploy.
+          {% endcomment %}
+          <span class="fw-path">{% for hop in f.path %}{% if not forloop.first %}<span class="hop">→</span>{% endif %}{{ hop }}{% endfor %}</span>
+          {% if fw.hosts|length > 1 %}<span class="fw-host">{{ f.host }}</span>{% endif %}
+        </button>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
     {% endfor %}
   </div>
 
@@ -318,17 +354,20 @@
       <br><br>
       <b>Grey is healthy.</b> An empty interface folder means everything drained, which is the
       normal steady state. <b>Green</b> means files are waiting and all of them are fresh — work
-      in progress. <b>Amber</b> means the oldest has passed <b>{{ fw.amber_text }}</b> and the
-      folder is drifting. <b>Red</b> means it has passed <b>{{ fw.red_text }}</b>: the folder is
-      not busy, it is jammed, and the consumer that should be draining it has almost certainly
-      stopped. These are payment queues — a message that has sat that long has missed its window.
+      in progress. The tile turns amber at <b>Warning</b>: the oldest has passed
+      <b>{{ fw.amber_text }}</b> and the folder is drifting. It turns red at <b>Critical</b>: past
+      <b>{{ fw.red_text }}</b>, the folder is not busy, it is jammed, and the consumer that should
+      be draining it has almost certainly stopped. These are payment queues — a message that has
+      sat that long has missed its window.
       <br><br>
       <b>Dashed and faded</b> is neither good nor bad — it means we are not being told. Either the
       path could not be found on the host, the scan reported an error or was cut short, the folder
-      has not been scanned in the last {{ fw.stale_after }} seconds, or the exporter is not
-      answering at all. Prometheus keeps serving the last values it saw, so a stopped exporter
-      would otherwise read as a set of permanently perfect folders. It is called out rather than
-      coloured in.
+      has not been scanned recently enough (within {{ fw.stale_after }} seconds for a payment or
+      interface folder; backup and log folders scan on their own much slower, roughly hourly
+      cadence and get a matching multi-hour allowance instead of being marked stale between
+      every scan), or the exporter is not answering at all. Prometheus keeps serving the last
+      values it saw, so a stopped exporter would otherwise read as a set of permanently perfect
+      folders. It is called out rather than coloured in.
       <br><br>
       <b>The page updates itself.</b> Every ten seconds it asks for fresh figures and repaints
       in place — there is no page refresh, and nothing here needs one. The clock at the top
@@ -401,8 +440,8 @@
   var el = document.getElementById("fwData");
   if (!el) { return; }
   var data = JSON.parse(el.textContent);
-  var grid = document.getElementById("fwGrid");
-  if (!grid) { return; }
+  var groupsEl = document.getElementById("fwGroups");
+  if (!groupsEl) { return; }
 
   var skew = data.now - (Date.now() / 1000);
   function serverNow() { return (Date.now() / 1000) + skew; }
@@ -458,7 +497,19 @@
   function live(f) {
     var now = serverNow();
     var age = f.oldest_mtime ? (now - f.oldest_mtime) : null;
-    var stale = !f.checked_at || (now - f.checked_at) > data.stale_after || !f.reachable;
+    // Per-folder, not the page-wide data.stale_after: a BACKUP_HOST_INSTANCES folder scans
+    // roughly hourly, not every 10s like the interface host, and judging it against the
+    // fast default would flip it back to "unknown" within a second of the (correct) initial
+    // server render — see reports/folders.py's STALE_AFTER_BACKUP for the full reasoning.
+    var staleAfter = (f.stale_after === undefined || f.stale_after === null) ? data.stale_after : f.stale_after;
+    var stale = !f.checked_at || (now - f.checked_at) > staleAfter || !f.reachable;
+    if (f.watch_type === "logfiles") {
+      // Judged by SIZE against a volume's total capacity, not by file age — that verdict
+      // only changes on a fresh poll (a volume's capacity doesn't tick client-side the way
+      // an age does), so it comes straight from the payload rather than being re-derived
+      // every second like the age-based watch types below.
+      return { age: null, stale: stale, state: stale ? "unknown" : f.state };
+    }
     return {
       age: age, stale: stale,
       state: verdict(age, f.files, f.readable, stale, f.scan_ok, f.amber_seconds, f.red_seconds)
@@ -516,7 +567,7 @@
     var counts = { all: 0, red: 0, amber: 0, green: 0, idle: 0, unknown: 0 };
     var worst = null, shown = 0;
 
-    Array.prototype.slice.call(grid.querySelectorAll(".fw-tile")).forEach(function (tile) {
+    Array.prototype.slice.call(groupsEl.querySelectorAll(".fw-tile")).forEach(function (tile) {
       var f = byKey[tile.getAttribute("data-key")];
       if (!f) { return; }
       var v = live(f);
@@ -526,20 +577,29 @@
       }
 
       tile.setAttribute("data-state", v.state);
-      tile.setAttribute("data-has-files", f.files > 0 ? "1" : "0");
+      var isLogFile = f.watch_type === "logfiles";
+      tile.setAttribute("data-has-files", isLogFile ? "1" : (f.files > 0 ? "1" : "0"));
       var countEl = tile.querySelector("[data-count-el]");
-      if (countEl) { countEl.textContent = f.files; }
+      if (countEl) {
+        countEl.textContent = isLogFile
+          ? ((f.size_pct === null || f.size_pct === undefined) ? "—" : f.size_pct + "%")
+          : f.files;
+      }
       var sub = tile.querySelector("[data-sub-el]");
       if (sub) {
-        sub.textContent = !f.readable ? "path missing"
-          : v.stale ? "not scanning"
-          : f.files > 0 ? fmtAge(v.age)
-          : "drained";
+        sub.textContent = isLogFile
+          ? (!f.readable ? "path missing"
+            : v.stale ? "not scanning"
+            : f.size_expected_bytes ? (f.size_text + " of " + f.size_expected_text)
+            : "size unknown")
+          : (!f.readable ? "path missing"
+            : v.stale ? "not scanning"
+            : f.files > 0 ? fmtAge(v.age)
+            : "drained");
       }
       var proc = tile.querySelector("[data-proc-el]");
       if (proc) {
-
-        proc.textContent = (f.processed === null || f.processed === undefined)
+        proc.textContent = (isLogFile || f.processed === null || f.processed === undefined)
           ? "" : "processed " + f.processed.toLocaleString();
       }
 
@@ -629,7 +689,10 @@
   function fillDialog(f) {
     var v = live(f);
     dlgTitle.textContent = f.path_text || f.name;
-    dlgSub.textContent = f.reason || SUMMARY[v.state] || "";
+    dlgSub.textContent = f.reason ||
+      (f.watch_type === "logfiles" && v.state === "green"
+        ? "Within its expected share of the volume it lives on."
+        : SUMMARY[v.state]) || "";
     dlgIcon.textContent = v.state === "red" ? "⛔" : v.state === "amber" ? "⏳"
       : v.state === "unknown" ? "❔" : "📁";
     dlgIcon.style.background = v.state === "red" ? "var(--red-bg)"
@@ -648,7 +711,18 @@
     row("Folder", f.name);
     row("Path found", f.readable ? "yes" : "no — the folder could not be read");
 
-    if (f.files > 0) {
+    if (f.watch_type === "logfiles") {
+      // A continuously-written file, never expected to empty — judged by size against its
+      // volume's own capacity, not by age or a waiting count. See reports/folders.py's own
+      // comment on why this watch type skips every age/drainage row below.
+      row("Size", f.size_text);
+      if (f.size_expected_bytes) {
+        row("Expected ceiling", f.size_expected_text +
+            (f.size_pct !== null && f.size_pct !== undefined ? "   (" + f.size_pct + "%)" : ""));
+      } else {
+        row("Expected ceiling", "not currently available");
+      }
+    } else if (f.files > 0) {
       var breakdown = String(f.files) + " waiting";
       if (f.over_red !== null && f.over_red !== undefined) {
         breakdown += "   ·   " + f.over_red + " past " + fmtAge(f.red_seconds);
@@ -668,21 +742,22 @@
       row("Files", "none waiting — drained");
     }
 
-    if (f.last_added) {
-      row("Last arrival", fmtClock(f.last_added) +
-          "   (" + fmtAge(serverNow() - f.last_added) + " ago)");
-    } else {
-      row("Last arrival", "nothing has arrived since the exporter started");
+    if (f.watch_type !== "logfiles") {
+      if (f.last_added) {
+        row("Last arrival", fmtClock(f.last_added) +
+            "   (" + fmtAge(serverNow() - f.last_added) + " ago)");
+      } else {
+        row("Last arrival", "nothing has arrived since the exporter started");
+      }
+      if (f.processed !== null && f.processed !== undefined) {
+        row("Processed today", f.processed.toLocaleString() +
+            "   (files that have left this folder since midnight)");
+      }
+      if (f.added_total !== null && f.added_total !== undefined) {
+        row("Since exporter start", f.added_total + " arrived   ·   " + f.removed_total + " consumed");
+      }
+      row("Limits", "ageing at " + fmtAge(f.amber_seconds) + "   ·   too old at " + fmtAge(f.red_seconds));
     }
-    if (f.processed !== null && f.processed !== undefined) {
-      row("Processed today", f.processed.toLocaleString() +
-          "   (files that have left this folder since midnight)");
-    }
-    if (f.added_total !== null && f.added_total !== undefined) {
-      row("Since exporter start", f.added_total + " arrived   ·   " + f.removed_total + " consumed");
-    }
-
-    row("Limits", "ageing at " + fmtAge(f.amber_seconds) + "   ·   too old at " + fmtAge(f.red_seconds));
     row("Last scanned", f.checked_at
       ? fmtClock(f.checked_at) + "   (" + fmtAge(serverNow() - f.checked_at) + " ago)"
       : "never");
@@ -705,7 +780,7 @@
 
   }
 
-  grid.addEventListener("click", function (e) {
+  groupsEl.addEventListener("click", function (e) {
     var tile = e.target.closest ? e.target.closest(".fw-tile") : null;
     if (tile) { openDialog(tile.getAttribute("data-key")); }
   });
@@ -752,24 +827,31 @@
 
   function playWave() {
     if (reduceMotion) { return; }
-    var tiles = Array.prototype.slice.call(grid.querySelectorAll(".fw-tile:not(.fw-hidden)"));
-    if (!tiles.length) { return; }
+    var allTiles = Array.prototype.slice.call(groupsEl.querySelectorAll(".fw-tile"));
+    if (!allTiles.length) { return; }
 
     clearTimeout(waveClear);
-    tiles.forEach(function (t) { t.classList.remove("fw-wave"); });
-    void grid.offsetWidth;        // reflow, or re-adding the class won't restart the animation
+    allTiles.forEach(function (t) { t.classList.remove("fw-wave"); });
+    void groupsEl.offsetWidth;    // reflow, or re-adding the class won't restart the animation
 
-    var box = grid.getBoundingClientRect();
-    var width = box.width || 1;
-    tiles.forEach(function (t) {
-      var b = t.getBoundingClientRect();
-      var x = (b.left + b.width / 2 - box.left) / width;      // 0 at the left edge, 1 at the right
-      t.style.setProperty("--fw-delay", Math.round(x * WAVE_TRAVEL_MS) + "ms");
-      t.classList.add("fw-wave");
+    // Each group's own grid runs its own left-to-right wave — the crest travels across ONE
+    // group at a time, not diagonally across two stacked grids, which is what a single
+    // shared bounding box would produce now that there is more than one .fw-grid.
+    Array.prototype.slice.call(groupsEl.querySelectorAll(".fw-grid")).forEach(function (grid) {
+      var tiles = Array.prototype.slice.call(grid.querySelectorAll(".fw-tile:not(.fw-hidden)"));
+      if (!tiles.length) { return; }
+      var box = grid.getBoundingClientRect();
+      var width = box.width || 1;
+      tiles.forEach(function (t) {
+        var b = t.getBoundingClientRect();
+        var x = (b.left + b.width / 2 - box.left) / width;    // 0 at the left edge, 1 at the right
+        t.style.setProperty("--fw-delay", Math.round(x * WAVE_TRAVEL_MS) + "ms");
+        t.classList.add("fw-wave");
+      });
     });
 
     waveClear = setTimeout(function () {
-      tiles.forEach(function (t) { t.classList.remove("fw-wave"); });
+      allTiles.forEach(function (t) { t.classList.remove("fw-wave"); });
     }, WAVE_TRAVEL_MS + WAVE_CYCLE_MS + 60);
   }
 

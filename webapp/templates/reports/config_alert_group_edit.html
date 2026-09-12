@@ -7,12 +7,13 @@
 
   <div class="cfg-bar">
     <span class="cfg-bar-state">
+      {% if group.alert_type == "system" %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">System Alert{% if group.alert_subtype %} · {{ group.get_alert_subtype_display }}{% endif %}</span> ·{% endif %}
       {{ group.stakeholder_count }} stakeholder{{ group.stakeholder_count|pluralize }} ·
       {{ group.systems|length }} system{{ group.systems|length|pluralize }} ·
       {% if not group.active %}<span class="chip amber">paused</span>{% else %}<span class="chip green">active</span>{% endif %}
     </span>
     <span class="spacer"></span>
-    <a class="btn ghost" href="{% url 'config_alert_groups' %}">All groups</a>
+    <a class="btn ghost" href="{% url 'config_alerts' %}">All groups</a>
   </div>
 
   <form method="post">{% csrf_token %}
@@ -29,6 +30,7 @@
       {% if not systems %}
         <p class="cfg-note" style="margin:0">No systems found — nothing to map yet.</p>
       {% else %}
+      <input type="text" class="cfg-search" data-scope-search placeholder="Search systems…" autocomplete="off" aria-label="Search systems">
       <div class="scope-grid" data-scope-group>
         {% for s in systems %}
         <label class="scope-opt">
@@ -48,23 +50,6 @@
     <div class="card"><div class="body" style="padding:16px 18px">
       <div class="cfg-grid4">
         <label class="field">
-          <span>Minimum severity to alert on</span>
-          <select name="min_severity">
-            {% for value, label in group.MIN_SEVERITY_CHOICES %}
-            <option value="{{ value }}"{% if value == group.min_severity %} selected{% endif %}>{{ label }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <div class="field">
-          <span>Reminders</span>
-          <div class="cfg-hint" style="margin-top:6px">
-            Exactly 3 per finding, then silence until it resolves or escalates: the
-            <b>first</b> 10 minutes after the original notification, the <b>second</b> at 40
-            minutes, and the <b>final</b> at 60 minutes (checked every time the alert poller
-            runs). Not configurable per group — every open finding follows this same schedule.
-          </div>
-        </div>
-        <label class="field" style="justify-content:flex-end">
           <span style="display:flex;align-items:center;gap:6px">
             <input type="checkbox" name="active" {% if group.active %}checked{% endif %} style="width:auto">
             Active
@@ -73,6 +58,7 @@
         </label>
       </div>
 
+      {% if group.alert_type == "monitoring" %}
       <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
         <div class="field" style="margin-bottom:10px">
           <span>Metrics to alert on, per system
@@ -82,16 +68,17 @@
         {% if not category_grid %}
           <p class="cfg-note" style="margin:0">Pick systems above first — metrics are chosen per system.</p>
         {% else %}
-        <p class="cfg-note" style="margin:0 0 10px">
-          Reflects systems as of the last Save. Ticked a new system above? Save once, then come
-          back here to set its metrics too.
-        </p>
+        <p class="cfg-note" style="margin:0 0 10px">Reflects systems as of the last Save.</p>
         <div style="overflow-x:auto" data-scope-group>
           <table class="hist" style="min-width:760px">
             <thead>
               <tr>
+                <th></th>
+                {% for c in category_headers %}<th style="text-align:center;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;white-space:nowrap">{{ c.group_label }}</th>{% endfor %}
+              </tr>
+              <tr>
                 <th>System</th>
-                {% for value, label in group.CATEGORY_CHOICES %}<th style="text-align:center">{{ label }}</th>{% endfor %}
+                {% for c in category_headers %}<th style="text-align:center">{{ c.label }}</th>{% endfor %}
               </tr>
             </thead>
             <tbody>
@@ -118,17 +105,18 @@
         </div>
         {% endif %}
       </div>
+      {% else %}
+      <p class="cfg-note" style="margin:18px 0 0;padding-top:16px;border-top:1px solid var(--border)">A System Alert group has no per-metric filter — it hears about every Freshness check on the systems selected above.</p>
+      {% endif %}
     </div></div>
 
     <div class="section-label sub">App-user stakeholders</div>
     <div class="card"><div class="body" style="padding:14px 18px">
-      <p style="margin:0 0 10px;color:var(--muted);font-size:13px">
-        Notified at their account e-mail. Don't see the person you want — they don't have an
-        account yet; add one, then come back and refresh this page.
-      </p>
+      <p class="cfg-note" style="margin:0 0 10px">Notified at their account e-mail.</p>
       {% if not users %}
         <p class="cfg-note" style="margin:0 0 10px">No active users found.</p>
       {% else %}
+      <input type="text" class="cfg-search" data-scope-search placeholder="Search stakeholders…" autocomplete="off" aria-label="Search stakeholders">
       <div class="scope-grid" data-scope-group>
         {% for u in users %}
         <label class="scope-opt">
@@ -145,8 +133,7 @@
       <div style="margin-top:12px">
         <a class="btn ghost cfg-add" href="{% url 'config_create_user' %}?next={{ request.path|urlencode }}">＋ Add stakeholder</a>
         <small class="cfg-hint" style="display:block;margin-top:6px">
-          Creates a new account, then brings you straight back here to pick them.
-          Superuser only — matches password-reset/delete on the Roles console.
+          Not listed? Creates an account and brings you back here. Superuser only.
         </small>
       </div>
     </div></div>
@@ -173,19 +160,135 @@
     </div>
   </form>
 
+  <div class="section-label sub">Active schedule</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <p class="cfg-note" style="margin-top:0">A recurring day/time window this group is allowed to fire in — NOT the reminder timing below, which is about how often an already-open finding re-notifies. Off by default: this group fires any time, subject only to the Active toggle above.</p>
+    <form method="post" id="scheduleForm">{% csrf_token %}
+      <input type="hidden" name="form" value="schedule">
+      <label class="field" style="max-width:320px">
+        <span style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" name="schedule_enabled" id="scheduleEnabled" {% if group.schedule_enabled %}checked{% endif %} style="width:auto">
+          Restrict to a schedule
+        </span>
+      </label>
+      <div id="scheduleFields" style="margin-top:14px;{% if not group.schedule_enabled %}display:none{% endif %}">
+        <div class="field" style="margin-bottom:10px">
+          <span>Active days <small style="color:var(--muted);font-weight:400">— none ticked means every day</small></span>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px">
+            {% for value, label in weekday_choices %}
+            <label style="display:flex;align-items:center;gap:5px;font-size:13px">
+              <input type="checkbox" name="schedule_days" value="{{ value }}" {% if value in group.schedule_days %}checked{% endif %} style="width:auto">
+              {{ label }}
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="cfg-grid4">
+          <label class="field">
+            <span>Active from</span>
+            <input type="time" name="schedule_start" value="{{ group.schedule_start|time:'H:i' }}">
+          </label>
+          <label class="field">
+            <span>Active until</span>
+            <input type="time" name="schedule_end" value="{{ group.schedule_end|time:'H:i' }}">
+            <small class="cfg-hint">Earlier than "from" wraps past midnight, e.g. 22:00 → 06:00.</small>
+          </label>
+        </div>
+        <p class="cfg-note" style="margin:10px 0 0">Leave both times blank to restrict by day only, any time of day.</p>
+      </div>
+      <div style="margin-top:18px">
+        <button class="btn primary" type="submit">Save</button>
+      </div>
+    </form>
+  </div></div>
+
+  {% if group.alert_type == "system" %}
+  <div class="section-label sub">Reminders</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <p class="cfg-note" style="margin-top:0">A System Alert group has ONE persistent interval, not a schedule — a stale checker has no severity to escalate, so it just reminds at this interval, forever, until it starts updating again.</p>
+    <form method="post">{% csrf_token %}
+      <input type="hidden" name="form" value="reminders">
+      <label class="field" style="max-width:220px">
+        <span>Remind every</span>
+        <input type="text" name="system_reminder_minutes" value="{{ system_reminder_value }}" required>
+        <small class="cfg-hint">s/m/h suffixes accepted.</small>
+      </label>
+      <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+        <button class="btn primary" type="submit">Save</button>
+        <button class="btn ghost" type="submit" name="action" value="reset">
+          Reset to default ({{ group.DEFAULT_SYSTEM_ALERT_REMINDER_MINUTES }} minutes)
+        </button>
+      </div>
+    </form>
+  </div></div>
+  {% else %}
+  <div class="section-label sub">Reminders</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <p class="cfg-note" style="margin-top:0">This group's own schedule. Repeats daily until a finding clears.</p>
+    <details class="cfg-learn-more"><summary>Learn more</summary>
+      <div class="cfg-learn-more-body">
+        Counted from when a finding was first notified today, then quiet for the rest of the
+        day. Still open tomorrow? A fresh day's worth of reminders starts, on and on until it
+        resolves or gets worse. Named "first reminder", "second reminder", ... "final reminder"
+        in the e-mail itself. Takes effect on the poller's next run — no restart.
+      </div>
+    </details>
+    <form method="post" id="remForm" style="margin-top:14px">{% csrf_token %}
+      <input type="hidden" name="form" value="reminders">
+      <div class="field">
+        <span>Time after first notification, in order</span>
+        <div id="remList" style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+          {% for row in schedule_preview_rows %}
+          <div class="rem-row" style="display:flex;align-items:center;gap:10px">
+            <input type="text" class="rem-input" value="{{ row.minutes }}" placeholder="10m"
+                   style="width:100px" aria-label="Time for reminder {{ row.n }}">
+            <span class="rem-label" style="color:var(--muted);font-size:12px;min-width:120px">{{ row.label|capfirst }}</span>
+            <button type="button" class="btn ghost rem-remove" style="padding:4px 11px" aria-label="Remove this reminder">&times;</button>
+          </div>
+          {% endfor %}
+        </div>
+        <div style="margin-top:12px">
+          <button type="button" class="btn ghost cfg-add" id="remAdd">＋ Add another reminder</button>
+        </div>
+        <input type="hidden" name="reminder_minutes" id="remHidden" value="{{ schedule_raw_value }}">
+        <small class="cfg-hint">Add or remove as many as you want, in ascending order — e.g. 30s, 10m, 2h (a plain number means minutes).</small>
+      </div>
+
+      <div class="field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);max-width:220px">
+        <span>Imminent persistence</span>
+        <input type="text" name="imminent_reminder_minutes" value="{{ imminent_reminder_value }}" placeholder="10m">
+        <small class="cfg-hint">
+          A component-unreachable finding ignores the schedule above — it re-reminds at this
+          interval, forever, until resolved.
+        </small>
+      </div>
+
+      <div style="margin-top:18px;display:flex;gap:8px;align-items:center">
+        <button class="btn primary" type="submit">Save</button>
+        <button class="btn ghost" type="submit" name="action" value="reset">
+          Reset to default (10, 40, 60 · imminent every 10m)
+        </button>
+      </div>
+    </form>
+  </div></div>
+  {% endif %}
+
+  {% if group.alert_type == "monitoring" %}
   <div class="section-label sub">Test tools</div>
   <div class="card"><div class="body" style="padding:16px 18px">
     {% if not group.systems %}
     <p class="cfg-note" style="margin:0">Save at least one system above before testing this group.</p>
     {% else %}
-    <p style="margin:0 0 14px;color:var(--muted);font-size:13px">
-      Every button here tests the group AS LAST SAVED, not unsaved edits above — save first to
-      test your changes. The two synthetic buttons send a real e-mail built from a made-up
-      finding, clearly marked <b>[SYNTHETIC TEST]</b> throughout so recipients are never alarmed
-      by what looks like a real incident. “Run live check” checks Prometheus for real, right
-      now, and only sends if something on this group's own systems genuinely qualifies. None of
-      the three ever touch this group's real notification history.
-    </p>
+    <p class="cfg-note" style="margin:0">Tests the group as last saved — save first to test edits above.</p>
+    <details class="cfg-learn-more"><summary>Learn more</summary>
+      <div class="cfg-learn-more-body">
+        The two synthetic buttons send a real e-mail built from a made-up finding, clearly marked
+        <b>[SYNTHETIC TEST]</b> throughout so recipients are never alarmed by what looks like a
+        real incident. "Run live check" checks Prometheus for real, right now, and only sends if
+        something on this group's own systems genuinely qualifies. None of the three ever touch
+        this group's real notification history.
+      </div>
+    </details>
     <form method="post" action="{% url 'config_alert_group_test' group.pk %}">
       {% csrf_token %}
       <div class="cfg-grid4">
@@ -204,9 +307,10 @@
         <label class="field">
           <span>Severity</span>
           <select name="tband">
-            <option value="red">Red</option>
-            <option value="amber">Amber</option>
+            <option value="red">Critical / Imminent</option>
+            <option value="amber">Warning</option>
           </select>
+          <small class="cfg-hint">Only Component unreachable reads Imminent; others read Critical.</small>
         </label>
         <label class="field">
           <span>Send test to</span>
@@ -240,5 +344,89 @@
     </form>
     {% endif %}
   </div></div>
+  {% endif %}
 </div>
+
+<script>
+(function () {
+  "use strict";
+  var list = document.getElementById("remList");
+  var addBtn = document.getElementById("remAdd");
+  var hidden = document.getElementById("remHidden");
+  var form = document.getElementById("remForm");
+  if (!list || !addBtn || !hidden || !form) { return; }
+
+  function ordinal(n) {
+    var s = n % 100;
+    if (s >= 10 && s <= 20) { return n + "th"; }
+    switch (n % 10) {
+      case 1: return n + "st";
+      case 2: return n + "nd";
+      case 3: return n + "rd";
+      default: return n + "th";
+    }
+  }
+  function reminderLabel(n, total) {
+    if (n >= total) { return "final reminder"; }
+    if (n === 1) { return "first reminder"; }
+    if (n === 2) { return "second reminder"; }
+    return ordinal(n) + " reminder";
+  }
+
+  function rows() { return Array.prototype.slice.call(list.querySelectorAll(".rem-row")); }
+
+  function renumber() {
+    var all = rows();
+    all.forEach(function (row, i) {
+      var label = row.querySelector(".rem-label");
+      if (label) { label.textContent = reminderLabel(i + 1, all.length).replace(/^./, function (c) { return c.toUpperCase(); }); }
+    });
+    hidden.value = all.map(function (row) { return row.querySelector(".rem-input").value; })
+                      .filter(function (v) { return v !== ""; }).join(",");
+  }
+
+  function addRow(value) {
+    var row = document.createElement("div");
+    row.className = "rem-row";
+    row.style.cssText = "display:flex;align-items:center;gap:10px";
+    row.innerHTML =
+      '<input type="text" class="rem-input" placeholder="10m" style="width:100px">' +
+      '<span class="rem-label" style="color:var(--muted);font-size:12px;min-width:120px"></span>' +
+      '<button type="button" class="btn ghost rem-remove" style="padding:4px 11px" aria-label="Remove this reminder">&times;</button>';
+    row.querySelector(".rem-input").value = value || "";
+    list.appendChild(row);
+    renumber();
+    row.querySelector(".rem-input").focus();
+  }
+
+  addBtn.addEventListener("click", function () { addRow(""); });
+
+  list.addEventListener("click", function (e) {
+    var btn = e.target.closest ? e.target.closest(".rem-remove") : null;
+    if (!btn) { return; }
+    var row = btn.closest(".rem-row");
+    if (row) { row.remove(); renumber(); }
+  });
+
+  list.addEventListener("input", function (e) {
+    if (e.target.classList.contains("rem-input")) { renumber(); }
+  });
+
+  form.addEventListener("submit", renumber);
+
+  renumber();
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  var toggle = document.getElementById("scheduleEnabled");
+  var fields = document.getElementById("scheduleFields");
+  if (!toggle || !fields) { return; }
+  toggle.addEventListener("change", function () {
+    fields.style.display = toggle.checked ? "" : "none";
+  });
+})();
+</script>
 {% endblock %}

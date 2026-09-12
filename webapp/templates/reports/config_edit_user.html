@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}{{ target.get_username }} · Edit account{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:640px">
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {{ target.get_full_name|default:target.get_username }}
+      <span style="color:var(--muted)">({{ target.get_username }})</span>
+      {% if target.is_superuser %}· <span class="chip green">superuser</span>{% endif %}
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{% url 'config_users' %}">All users</a>
+  </div>
+
+  <div class="section-label sub">Profile</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <form method="post">{% csrf_token %}
+      <input type="hidden" name="action" value="update_profile">
+      <div class="cfg-grid2">
+        <label class="field">
+          <span>Username</span>
+          <input type="text" value="{{ target.get_username }}" disabled>
+        </label>
+        <label class="field">
+          <span>E-mail</span>
+          <input type="email" name="email" value="{{ target.email }}">
+        </label>
+        <label class="field">
+          <span>First name</span>
+          <input type="text" name="first_name" value="{{ target.first_name }}">
+        </label>
+        <label class="field">
+          <span>Last name</span>
+          <input type="text" name="last_name" value="{{ target.last_name }}">
+        </label>
+      </div>
+      <div style="margin-top:18px">
+        <button class="btn primary" type="submit">Save</button>
+      </div>
+    </form>
+  </div></div>
+
+  <div class="section-label sub" style="margin-top:20px">Password</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    {% if passwords_are_local %}
+    <p class="cfg-note" style="margin-top:0">Sets a temporary password — share it with them directly, not by e-mail.</p>
+    <form method="post" action="{% url 'roles_console' %}">{% csrf_token %}
+      <input type="hidden" name="action" value="reset_password">
+      <input type="hidden" name="user_id" value="{{ target.pk }}">
+      <div class="cfg-grid2">
+        <label class="field">
+          <span>New password</span>
+          <input type="password" name="new_password" autocomplete="new-password" required>
+        </label>
+        <label class="field">
+          <span>Confirm</span>
+          <input type="password" name="new_password2" autocomplete="new-password" required>
+        </label>
+      </div>
+      <small class="cfg-hint">Ends every session they're currently signed into.</small>
+      <div style="margin-top:18px">
+        <button class="btn primary" type="submit">Reset password</button>
+      </div>
+    </form>
+    {% else %}
+    <p class="cfg-note" style="margin:0">Passwords are managed in Keycloak — reset it there.</p>
+    {% endif %}
+  </div></div>
+
+  <div class="section-label sub" style="margin-top:20px">Danger zone</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    {% if deletable %}
+    <form method="post" action="{% url 'roles_console' %}">{% csrf_token %}
+      <input type="hidden" name="action" value="delete_user">
+      <input type="hidden" name="user_id" value="{{ target.pk }}">
+      <label class="field">
+        <span>Type <b>{{ target.get_username }}</b> to delete this account</span>
+        <input type="text" name="confirm_username" autocomplete="off" required>
+      </label>
+      <small class="cfg-hint">Irreversible. Past reports are kept and stay attributed by name.</small>
+      <div style="margin-top:18px">
+        <button class="btn ghost" type="submit" style="color:var(--red)">Delete account</button>
+      </div>
+    </form>
+    {% else %}
+    <p class="cfg-note" style="margin:0">
+      {% if target.pk == request.user.pk %}This is the account you are signed in as.
+      {% else %}The only remaining superuser.{% endif %}
+    </p>
+    {% endif %}
+  </div></div>
+
+</div>
+{% endblock %}

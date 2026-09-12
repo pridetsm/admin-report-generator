@@ -12,6 +12,7 @@ exact numbers they reviewed (Prometheus could drift in the seconds between form 
 from __future__ import annotations
 
 import datetime
+import io
 import re
 import time
 import uuid
@@ -27,6 +28,7 @@ from django.core.validators import validate_email
 from django.core.cache import cache
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
@@ -37,24 +39,29 @@ import generate_report as gr   # to show the config.ini defaults on the settings
 
 from pathlib import Path
 
-from . import (alert_email_templates, alerting, backup_policy_admin, connect, crypto, folders,
-               grafana_admin, network, network_sod, promconfig, prometheus_admin, scripts,
-               snmp_admin)
+from . import (alert_email_templates, alerting, backup_policy_admin, connect, crypto,
+               folder_size_admin, folders, grafana_admin, network, network_sod, promconfig,
+               prometheus_admin, scripts, snmp_admin, system_alerts, usage_threshold_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
-from .models import (AlertGroup, BackupPolicyRevision, GeneratedScript, GrafanaConfigRevision,
-                     PrometheusConfigRevision,
+from .models import (AlertGroup, AutomatedReportGroup, AutomatedReportInstance, BackupPolicyRevision,
+                     DrainageThresholdConfig, EventGroup, FreshnessCheck, GeneratedScript,
+                     GrafanaConfigRevision, PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
                      SnmpConfigRevision, SystemConfig, UserProfile)
 from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_LABEL,
                     ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
-                    SESSION_KEY as ROLE_SESSION_KEY, roles_without_screens,
+                    SESSION_KEY as ROLE_SESSION_KEY, SYSTEM_ADMIN_ROLE, roles_without_screens,
                     active_role, held_roles, is_infra_admin, is_network_admin, is_role_admin,
                     effective_roles, is_security_admin, reports_for,
                     role_icon, role_screens,
                     is_superuser, is_system_admin)
+from .automated_reports import REPORT_TYPES, generate_automated_report, report_to_dict
+from .scheduled_xlsx_reports import XLSX_REPORT_TYPES
+from .xlsx_report_mail import send_xlsx_report_bundle
+from .automated_reports_mail import send_automated_report
 from .services import (
     OsInventoryUnavailable,
     build_os_inventory,
@@ -288,13 +295,16 @@ def role_select(request):
 #: the admin's attention ("your answers are still there"), so it has to expire on its own —
 #: otherwise the resume bar offers to continue a report whose numbers went stale hours ago.
 _OPEN_UNTIL = {"systems": "report_expires_at", "network": "network_expires_at",
-              "infra": "infra_report_expires_at"}
+              "infra": "infra_report_expires_at",
+              "active_directory": "active_directory_report_expires_at"}
 
 #: session keys an estate's open report claims, cleared together once it lapses or is closed.
 _ESTATE_SESSION_KEYS = {
     "systems": {"report_systems", "snapshot_token", "report_expires_at"},
     "network": {"network_devices", "network_token", "network_expires_at"},
     "infra":   {"infra_report_systems", "infra_snapshot_token", "infra_report_expires_at"},
+    "active_directory": {"active_directory_report_systems", "active_directory_snapshot_token",
+                         "active_directory_report_expires_at"},
 }
 
 
@@ -337,11 +347,20 @@ def reports(request):
         # Administrator configures the app rather than reporting on it; a role with no estate
         # yet has its own screen that says so. Neither should meet an empty grid.
         return redirect("configuration" if is_role_admin(request.user) else "role_empty")
-    return render(request, "reports/reports.html", {
-        "options": [{"key": r.key, "label": r.label, "blurb": r.blurb,
-                     "url": reverse(r.url_name), "icon": r.icon, "initial": r.label[:1]}
-                    for r in available],
-    })
+    # `available` is built from effective_roles (the UNION of every role the user HOLDS, per
+    # reports_for's own docstring), so a user holding both System Admin and Security Admin
+    # still sees Automated Reports' tile exactly ONCE here regardless of role -- the label
+    # override below therefore has to happen at RENDER time, keyed on active_role (the single
+    # role currently SELECTED), not by adding a second roles.REPORTS entry for System Admin --
+    # that would have shown two separate tiles to anyone holding both roles at once, pointing
+    # at the identical page. 2026-09-10, on request ("its Automated Reports but only in the
+    # System Admin Role") -- see _automated_reports_label's own docstring.
+    options = []
+    for r in available:
+        label = _automated_reports_label(request) if r.key == "automated_reports" else r.label
+        options.append({"key": r.key, "label": label, "blurb": r.blurb,
+                        "url": reverse(r.url_name), "icon": r.icon, "initial": label[:1]})
+    return render(request, "reports/reports.html", {"options": options})
 
 
 @never_cache
@@ -395,6 +414,556 @@ def os_inventory(request):
     })
 
 
+def _automated_reports_gate(user) -> bool:
+    return is_system_admin(user) or is_security_admin(user) or user.is_superuser
+
+
+def _automated_reports_label(request) -> str:
+    """"Analytical Reports" for a session CURRENTLY ACTING as System Admin, "Automated Reports"
+    for everyone else who can reach this screen (Security Admin, or an unscoped/superuser
+    session that hasn't picked a role) -- 2026-09-10, on request ("its Automated Reports but
+    only in the System Admin Role"): a display-label rename scoped to how this ONE role sees
+    the feature, not a rename of the feature itself -- reports.models.AutomatedReportGroup,
+    reports.automated_reports's own module, the config_automated_reports screen, and every
+    other role/internal name stay "Automated Report(s)" unchanged. Checked against
+    active_role(request), not is_system_admin(user), since the same user can hold both System
+    Admin and Security Admin and see either label depending which they've currently selected."""
+    return "Analytical Reports" if active_role(request) == SYSTEM_ADMIN_ROLE else "Automated Reports"
+
+
+@login_required
+@never_cache
+def automated_reports(request):
+    """Automated Reports tile landing page (spec "New Promt.txt", section 17): the six
+    scheduled report types, each with its most recent stored instance, so an admin can see
+    at a glance whether anything new has landed since they last looked."""
+    if not _automated_reports_gate(request.user):
+        return redirect("reports")
+
+    cards = []
+    for key, spec in REPORT_TYPES.items():
+        latest = (AutomatedReportInstance.objects.filter(report_type=key)
+                 .order_by("-generated_at").first())
+        cards.append({"key": key, **spec, "latest": latest})
+
+    return render(request, "reports/automated_reports.html", {
+        "cards": cards,
+        "sc": SystemConfig.get(),
+        "can_toggle_distribution": request.user.is_superuser,
+        "page_label": _automated_reports_label(request),
+    })
+
+
+@login_required
+@never_cache
+def automated_report_type(request, report_type):
+    """One report type's browsable history (Phase 5 item 13), plus a "Generate now" action
+    an administrator uses to produce a fresh instance to review -- the same action the
+    scheduled job runs unattended, and the only way System Attention Report ever gets a new
+    instance at all, since that one type deliberately has no cron (section 17: "doesn't wait
+    for a scheduled cycle")."""
+    if not _automated_reports_gate(request.user):
+        return redirect("reports")
+    if report_type not in REPORT_TYPES:
+        raise Http404("Unknown Automated Report type.")
+
+    if request.method == "POST":
+        report = generate_automated_report(report_type)
+        instance = AutomatedReportInstance.objects.create(
+            report_type=report_type, generated_at=report.generated_at,
+            window_start=report.window_start, window_end=report.window_end,
+            ai_provider=report.ai_provider, ai_requested_provider=report.ai_requested_provider,
+            ai_error=report.ai_error, content=report_to_dict(report),
+        )
+        messages.success(request, f"Generated a fresh {report.label}.")
+        return redirect("automated_report_detail", report_type=report_type, pk=instance.pk)
+
+    instances = (AutomatedReportInstance.objects.filter(report_type=report_type)
+                .order_by("-generated_at")[:60])
+    return render(request, "reports/automated_report_history.html", {
+        "spec": {"key": report_type, **REPORT_TYPES[report_type]},
+        "instances": instances,
+        "page_label": _automated_reports_label(request),
+    })
+
+
+@login_required
+@require_POST
+def automated_finding_action(request):
+    """Saves one (system, flag_key) finding's Comment/Fix needed?/Resolved -- 2026-09-10, item
+    10a. Updates the LIVE AutomatedFindingAction record (the value that carries forward into
+    every FUTURE report run); the report instance the admin is currently looking at keeps
+    showing whatever was already frozen into it at generation time until the NEXT run picks
+    this edit up -- consistent with AutomatedReportInstance's own append-only/immutable
+    design (see that model's own docstring), not a special case invented for this feature.
+
+    Takes system/flag_key as POST fields, not URL path segments -- a flag_key routinely
+    contains colons and slashes (e.g. "disk:DB:E:"), which would need per-character escaping
+    to survive as a raw path component; a POST body has no such restriction."""
+    from .models import AutomatedFindingAction
+
+    if not _automated_reports_gate(request.user):
+        return redirect("reports")
+
+    system = (request.POST.get("system") or "").strip()
+    flag_key = (request.POST.get("flag_key") or "").strip()
+    next_url = request.POST.get("next") or reverse("reports")
+    if not system or not flag_key:
+        messages.error(request, "That finding could not be identified — nothing was saved.")
+        return redirect(next_url)
+
+    def _tristate(field):
+        raw = request.POST.get(field, "")
+        return raw if raw in (AutomatedFindingAction.YES, AutomatedFindingAction.NO) else AutomatedFindingAction.UNSET
+
+    AutomatedFindingAction.objects.update_or_create(
+        system=system, flag_key=flag_key,
+        defaults={
+            "comment": (request.POST.get("comment") or "").strip(),
+            "fix_needed": _tristate("fix_needed"),
+            "resolved": _tristate("resolved"),
+            "updated_by": request.user,
+        },
+    )
+    messages.success(request, f"Saved for {system} · {flag_key}. Takes effect on this "
+                              f"finding's next report run.")
+    return redirect(next_url)
+
+
+def _extra_report_charts(content: dict, window_days: int, generated_at) -> dict:
+    """The 4 new diagrams added 2026-09-10 (spec items 11-14): Pareto chart, category-
+    breakdown donut, onset timeline, and aggregate-total sparklines -- SHARED between
+    automated_report_detail (web) and build_automated_report_pdf (PDF/email), so all three
+    surfaces render the identical image rather than three independent computations that could
+    quietly drift. Rendered as static matplotlib PNGs everywhere, including the web view --
+    unlike the donut/attention/themes charts (live Chart.js on web), these 4 don't currently
+    have a web-interactive counterpart; adding one for each was out of scope for landing all
+    four diagrams in one pass, and a static image is still a real chart, which is what items
+    11-14 actually asked for. Returns {"pareto":, "category_breakdown":, "onset_timeline":,
+    "totals_sparklines":} -- each a data URI or None if there was nothing to chart."""
+    from . import report_charts
+    from .totals_integrity import all_totals_series
+
+    return {
+        "pareto": report_charts.pareto_chart(content.get("system_attention", [])),
+        "category_breakdown": report_charts.category_breakdown_chart(
+            content.get("recurring_issues", [])),
+        "onset_timeline": report_charts.onset_timeline_chart(
+            content.get("recurring_issues", [])),
+        "totals_sparklines": report_charts.totals_sparklines_chart(
+            all_totals_series(window_days=window_days, now=generated_at)),
+    }
+
+
+def _persistent_recurring_counts(content: dict) -> tuple:
+    recurring_issues = content.get("recurring_issues", [])
+    persistent = sum(1 for i in recurring_issues if i.get("label") == "Persistent")
+    return persistent, len(recurring_issues) - persistent
+
+
+def _split_persistent_recurring(content: dict) -> tuple:
+    """`report.recurring_issues` (the flat Persistent+Recurring pool) split into its own two
+    lists -- Persistent and Recurring get separate report sections/tables now (2026-09-07, on
+    request, after confirming a combined heatmap can't actually let a viewer tell them apart:
+    a raw distinct-days count reads identically for 40/50 days, 80% coverage, Persistent, and
+    40/200 days, 20% coverage, Recurring). Relative order is preserved from classify_all's own
+    significance ranking -- filtering never reorders."""
+    recurring_issues = content.get("recurring_issues", [])
+    persistent = [i for i in recurring_issues if i.get("label") == "Persistent"]
+    recurring = [i for i in recurring_issues if i.get("label") == "Recurring"]
+    return persistent, recurring
+
+
+#: Column-width legibility floor and the resulting portrait/landscape/collapse thresholds
+#: (2026-09-10, item 23) -- confirmed against this report's own real print stylesheet: at the
+#: portrait content width (~860px web / ~490pt PDF), a column narrower than ~200px is where
+#: component labels ("DR Servers DB:/u01", "Backend:/perago") stop fitting on one line. 4
+#: columns clears that floor in portrait; a 5th column needs landscape's wider content area to
+#: clear it; 6+ drops below the floor even in landscape, so those get capped and folded behind
+#: "+N more" rather than shrunk past legibility. A PER-REPORT switch (the whole PDF goes
+#: landscape if ANY system needs a 5th simultaneous column), not per-page -- mixing orientations
+#: within one PDF is real added production complexity item 23 explicitly said isn't worth
+#: taking on here.
+_SPIKE_COLS_PORTRAIT_MAX = 4
+_SPIKE_COLS_LANDSCAPE_MAX = 5
+_SPIKE_CHARTS_PER_COLUMN_MAX = 3   # "+N more" beyond this, per column, per item 23's own note
+
+
+def _spike_chart_targets(recurring_issues: list) -> list:
+    """Shared plumbing between automated_report_detail (Chart.js JSON), automated_report_
+    download (web images), and build_automated_report_pdf: one SYSTEM subsection per affected
+    system, each carrying every metric CATEGORY currently active for that system as its own
+    column (2026-09-10, item 23, regrouping from an earlier category-first shape on request:
+    "CRB's three active metrics... split across separate Disk/RAM sections, which buries the
+    '3+ metrics simultaneously active' fan-in finding the report itself calls out in §02...
+    grouping every flagged system's charts together makes that co-occurrence visible instead of
+    requiring the reader to cross-reference sections").
+
+    Columns, not a fixed disk/RAM pair (item 23's own instruction) -- ONE column per metric
+    category currently active for THAT system, whatever categories those happen to be, not a
+    hardcoded "disk left, RAM right" that only works for a two-category system.
+
+    A percentage category (report_charts.PERCENT_CATEGORIES) can have more than one component
+    per system (two hosts' readings can't share one line -- see spike_flag_keys_for_category),
+    so `components` there is every flag_key actually affected, one chart each. A count-based
+    category has exactly one whole-system chart (no further split -- see spike_systems_for_
+    category), so `components` there is always the single-element `[None]`.
+
+    Returns [{"system":, "categories": [
+        {"category":, "category_label":, "is_percent":, "components": [flag_key, ...] or [None]}
+    , ...]}] for every system with at least one active category, sorted by system name --
+    `categories` sorted by category name too, for a stable, reproducible column order across
+    renders of the same report."""
+    from . import report_charts
+
+    by_system: dict = {}
+    for cat in report_charts.spike_categories(recurring_issues):
+        cat_label = report_charts.resource_type_label(cat)
+        is_percent = cat in report_charts.PERCENT_CATEGORIES
+        per_system: dict = {}
+        if is_percent:
+            for sysname, flag_key in report_charts.spike_flag_keys_for_category(recurring_issues, cat):
+                per_system.setdefault(sysname, []).append(flag_key)
+        else:
+            for sysname in report_charts.spike_systems_for_category(recurring_issues, cat):
+                per_system.setdefault(sysname, []).append(None)
+        for sysname, components in per_system.items():
+            by_system.setdefault(sysname, []).append({
+                "category": cat, "category_label": cat_label, "is_percent": is_percent,
+                "components": components,
+            })
+
+    groups = []
+    for sysname in sorted(by_system):
+        categories = sorted(by_system[sysname], key=lambda c: c["category"])
+        groups.append({"system": sysname, "categories": categories,
+                       "needs_landscape": len(categories) >= _SPIKE_COLS_PORTRAIT_MAX + 1})
+    return groups
+
+
+def _spike_report_needs_landscape(spike_targets: list) -> bool:
+    """Whether ANY system in this report needs a 5th simultaneous column -- a PER-REPORT switch
+    (item 23's own instruction), computed once, not per-system, so the whole PDF's own page
+    orientation is decided consistently rather than per-page."""
+    return any(g["needs_landscape"] for g in spike_targets)
+
+
+@login_required
+@never_cache
+def automated_report_detail(request, report_type, pk):
+    """One stored instance, viewed in the browser -- renders automated_report_download.html
+    (the browser-facing template; the actual downloadable FILE is a PDF from its own template,
+    see automated_report_download below) with `inline=True`, which switches on the small
+    in-app-only action bar (Back / Download / Send now) that has no place in a saved file, and
+    lets Django's messages framework render here even though this template doesn't extend
+    base.html (deliberately: the report keeps one consistent look, not the rest of the app's
+    chrome). Also builds the Chart.js data this template's charts render live -- the browser-
+    side counterpart to the static PNGs reports.report_charts pre-renders for the PDF."""
+    if not _automated_reports_gate(request.user):
+        return redirect("reports")
+    instance = get_object_or_404(AutomatedReportInstance, pk=pk, report_type=report_type)
+
+    if request.method == "POST" and request.POST.get("action") == "send_now":
+        if not request.user.is_superuser:
+            return redirect("automated_report_detail", report_type=report_type, pk=pk)
+        try:
+            subject = send_automated_report(instance)
+        except Exception as exc:   # noqa: BLE001 -- surface any SMTP/config failure to the admin
+            messages.error(request, f"Not sent: {exc}")
+        else:
+            instance.distributed = True
+            instance.distributed_at = timezone.now()
+            instance.save(update_fields=["distributed", "distributed_at"])
+            messages.success(request, f"Sent: {subject}")
+        return redirect("automated_report_detail", report_type=report_type, pk=pk)
+
+    from . import report_charts
+    from .ai_narrative import narrative_sections
+    persistent_count, recurring_count = _persistent_recurring_counts(instance.content)
+    persistent_issues, recurring_only_issues = _split_persistent_recurring(instance.content)
+    extra_charts = _extra_report_charts(
+        instance.content, instance.content.get("window_days", 7), instance.generated_at)
+    # Live/interactive on the web (hover tooltips, load-in animation) -- unlike the PDF view,
+    # which renders these same three as static matplotlib PNGs (xhtml2pdf can't run JS or a
+    # <canvas>). 2026-09-07, on request: a static image on the WEB page lost the hover-
+    # description/animation behaviour the console's other live charts already have, and there's
+    # no PDF-side reason to hold the web page back to match it.
+    chart_data = report_charts.chart_data_json(
+        instance.content, persistent_count, recurring_count,
+        total_systems=instance.content.get("total_systems", 0))
+    # A plain table, not a chart -- see report_charts.finding_table's own docstring for why the
+    # bar chart this replaced (2026-09-08) stopped earning its space once most of its rows tied
+    # at the same coverage/days.
+    persistent_table = report_charts.finding_table(persistent_issues)
+    recurring_table = report_charts.finding_table(recurring_only_issues)
+    # One Hourly Activity chart per COMPONENT AFFECTED, grouped under its issue type and then
+    # under the system it belongs to -- a live percentage reading for cpu/ram/disk (2026-09-08,
+    # on request: "shouldn't it be the percentage reading... wouldn't it be easier to read" than
+    # a concurrent-incident count); the count-based chart for everything else (unreachable/
+    # service/backup*, a binary state with no percentage to show). Systems get their own
+    # subsection with their component charts nested under it (same day, on request: "CEPECS DB
+    # and CEPECS APP... why not just have cepecs be a subsection and the servers be the indented
+    # children") rather than every (system, component) pair reading as an unrelated grid cell.
+    # See _spike_chart_targets for the shared category/system/component selection both this view
+    # and automated_report_download build from.
+    recurring_issues = instance.content.get("recurring_issues", [])
+    spike_charts = []
+    idx = 0
+    for sysgrp in _spike_chart_targets(recurring_issues):
+        sysname = sysgrp["system"]
+        columns = []
+        for catrow in sysgrp["categories"]:
+            cat, cat_label = catrow["category"], catrow["category_label"]
+            is_percent = catrow["is_percent"]
+            charts = []
+            for flag_key in catrow["components"]:
+                if flag_key:
+                    data = report_charts.resource_percent_line_data(sysname, flag_key, cat)
+                    label = report_charts.flag_location(flag_key)
+                else:
+                    data = report_charts.spike_line_data_single(sysname, cat)
+                    label = None
+                if data:
+                    charts.append({"canvas_id": f"spikeLines-{idx}", "label": label, "data": data})
+                    idx += 1
+            if charts:
+                # Cap charts PER COLUMN (item 23: "cap charts per column... rather than
+                # continuing to shrink" when one category has far more components than
+                # another) -- the rest fold behind a "+N more" the template renders, not
+                # dropped from the data entirely (still counted, just not all pre-rendered).
+                columns.append({
+                    "category_label": cat_label, "is_percent": is_percent,
+                    "charts": charts[:_SPIKE_CHARTS_PER_COLUMN_MAX],
+                    "more_count": max(0, len(charts) - _SPIKE_CHARTS_PER_COLUMN_MAX),
+                })
+        if columns:
+            spike_charts.append({"system": sysname, "columns": columns})
+    # "cluster" (items 33-37) -- every chart under the same system shares this key so the
+    # web page's own zoom plugin can sync a drag/pinch/preset-range on ANY chart to every
+    # other chart in the same system's cluster. Web-only: the PDF/email pipeline below never
+    # reads this key, and the value carries no meaning outside this page's own in-memory
+    # Chart.js instances (never persisted, never sent back to the server).
+    chart_data["spikeCharts"] = [
+        {"canvasId": c["canvas_id"], "data": c["data"], "isPercent": col["is_percent"],
+         "cluster": sysgrp["system"]}
+        for sysgrp in spike_charts for col in sysgrp["columns"] for c in col["charts"]
+    ]
+    # SWIFT transaction throughput -- its own Hourly Activity line, alongside the per-category
+    # ones above (2026-09-08, on request: "add trend analyses for swift transactions as well...
+    # very similar to existing line graphs"). Not tied to a system/category/recurring_issues at
+    # all (see report_charts.swift_transaction_series), so it's built and gated independently
+    # rather than folded into the _spike_chart_targets loop above.
+    swift_data = report_charts.swift_transaction_line_data()
+    if swift_data:
+        chart_data["spikeCharts"].append(
+            {"canvasId": "swiftLine", "data": swift_data, "isPercent": False})
+    return render(request, "reports/automated_report_download.html", {
+        "instance": instance, "report": instance.content,
+        "sections": narrative_sections(instance.content.get("narrative", {})),
+        "persistent_count": persistent_count, "recurring_count": recurring_count,
+        "chart_data": chart_data,
+        "extra_charts": extra_charts,
+        "spike_charts": spike_charts,
+        "swift_available": bool(swift_data),
+        # Editable Action fields (item 10a) -- explicit context flag/URL rather than relying on
+        # template auto-context for `request`. This template is ONLY ever rendered from here
+        # (the downloaded PDF is a wholly separate template, automated_report_pdf.html, always
+        # read-only), so editing is always allowed on this render path.
+        "action_next_url": request.get_full_path(),
+        "persistent_grid": report_charts.heatmap_grid(
+            report_charts.persistent_issue_matrix(instance.content.get("recurring_issues", []))),
+        "recurring_grid": report_charts.heatmap_grid(
+            report_charts.recurring_issue_matrix(instance.content.get("recurring_issues", []))),
+        "persistent_table": persistent_table, "recurring_table": recurring_table,
+        "can_send": request.user.is_superuser, "inline": True,
+    })
+
+
+class PdfRenderError(RuntimeError):
+    """Raised by build_automated_report_pdf when xhtml2pdf itself reports an error -- callers
+    decide whether that's a 500 page (the download view) or a reason to abort/log a send (the
+    mail sender), the same "raise, don't swallow" discipline EmailNotConfigured already uses."""
+
+
+def build_automated_report_pdf(instance, *, zoom_persistent: float = 1.0,
+                               zoom_recurring: float = 1.0) -> bytes:
+    """The presentation-quality PDF for one stored AutomatedReportInstance -- shared by
+    automated_report_download (the in-app "Download PDF" link) and automated_reports_mail.
+    send_automated_report (2026-09-08, on request: the e-mailed report "had zero graphs... at
+    least just send a pdf no need to use outlook html with its limitations" -- the Outlook-safe
+    HTML body was deliberately chart-free from the start, since xhtml2pdf's renderer and an
+    Outlook-safe inbox have almost nothing in common; attaching this actual PDF, which DOES
+    carry every chart, is the fix, not trying to teach the HTML body to draw them).
+
+    Rendered from automated_report_pdf.html, not automated_report_download.html: xhtml2pdf's
+    renderer is reportlab-based, not a browser engine (no CSS variables, no grid/flexbox, no
+    media queries) -- the same reason alert_email_templates.py renders a separate, plainer
+    template for Outlook rather than reusing the browser-facing one.
+
+    Raises PdfRenderError if xhtml2pdf itself reports a failure."""
+    from xhtml2pdf import pisa
+
+    from . import report_charts
+    from .ai_narrative import narrative_sections
+
+    content = dict(instance.content)
+    persistent_count, recurring_count = _persistent_recurring_counts(content)
+    extra_charts = _extra_report_charts(
+        content, content.get("window_days", 7), instance.generated_at)
+    attention_rows = content.get("system_attention", [])
+    total_systems = content.get("total_systems", 0)
+    red_systems = sum(1 for r in attention_rows if r["worst_band"] == "red")
+    amber_systems = len(attention_rows) - red_systems
+    healthy_systems = max(0, total_systems - len(attention_rows))
+    persistent_issues, recurring_only_issues = _split_persistent_recurring(content)
+    charts = {
+        "donut": report_charts.issue_breakdown_donut(
+            persistent_count, recurring_count,
+            len(content.get("anomalies", [])), len(content.get("one_off_issues", []))),
+        "estate_health": (report_charts.estate_health_donut(
+            healthy_systems, amber_systems, red_systems) if total_systems else None),
+        "attention_bar": report_charts.system_attention_bar(attention_rows),
+        "persistent_heatmap": report_charts.issue_occurrence_heatmap(
+            report_charts.persistent_issue_matrix(content.get("recurring_issues", [])),
+            title="Persistent issue occurrence across all systems"),
+        "recurring_heatmap": report_charts.issue_occurrence_heatmap(
+            report_charts.recurring_issue_matrix(content.get("recurring_issues", [])),
+            title="Recurring issue occurrence across all systems"),
+        "theme_bar": report_charts.theme_bar_chart(content.get("themes", [])),
+    }
+    # A plain table, not a chart -- see report_charts.finding_table's own docstring for why the
+    # bar chart this replaced (2026-09-08) stopped earning its space once most of its rows tied
+    # at the same coverage/days.
+    persistent_table = report_charts.finding_table(persistent_issues)
+    recurring_table = report_charts.finding_table(recurring_only_issues)
+    # One Hourly Activity chart per COMPONENT AFFECTED, grouped under its issue type and then
+    # under the system it belongs to -- see automated_report_detail's own identical comment for
+    # the full reasoning (2026-09-08).
+    recurring_issues = content.get("recurring_issues", [])
+    spike_targets = _spike_chart_targets(recurring_issues)
+    needs_landscape = _spike_report_needs_landscape(spike_targets)
+    spike_charts = []
+    for sysgrp in spike_targets:
+        sysname = sysgrp["system"]
+        # NOT named `charts` -- 2026-09-08, on request, after confirming live: that name
+        # collided with the OUTER `charts = {...}` dict (donut/heatmaps/attention_bar/
+        # theme_bar) built above, silently overwriting it with this per-column list by the
+        # time render_to_string ran. Django's template lookup on a list rather than a dict
+        # just resolves every `charts.xxx` reference to nothing, which is why the heatmaps
+        # (and donut/estate-health/attention-bar) were vanishing from the PDF specifically
+        # -- the web view's own equivalent loop never had this bug, since its outer
+        # variable is named `chart_data`, not `charts`.
+        columns = []
+        for catrow in sysgrp["categories"]:
+            cat, cat_label = catrow["category"], catrow["category_label"]
+            is_percent = catrow["is_percent"]
+            sys_charts = []
+            for flag_key in catrow["components"]:
+                if flag_key:
+                    label = report_charts.flag_location(flag_key)
+                    chart = report_charts.resource_percent_chart_single(
+                        sysname, flag_key, cat, title=f"{cat_label} — {sysname} · {label}")
+                else:
+                    label = None
+                    chart = report_charts.issue_spike_line_single(
+                        sysname, cat, title=f"{cat_label} — {sysname}")
+                if chart:
+                    sys_charts.append({"label": label, "chart": chart})
+            if sys_charts:
+                # Cap charts per column -- see automated_report_detail's own identical comment.
+                columns.append({
+                    "category_label": cat_label, "is_percent": is_percent,
+                    "charts": sys_charts[:_SPIKE_CHARTS_PER_COLUMN_MAX],
+                    "more_count": max(0, len(sys_charts) - _SPIKE_CHARTS_PER_COLUMN_MAX),
+                })
+        if columns:
+            # Cap COLUMNS shown too (item 23: "cap visible columns (e.g. at 5) and fold any
+            # remaining metric categories for that system behind a '+N more' expandable" for
+            # the 6+ case) -- even in landscape, a 6th column drops below the 200px floor.
+            col_cap = _SPIKE_COLS_LANDSCAPE_MAX if needs_landscape else _SPIKE_COLS_PORTRAIT_MAX
+            spike_charts.append({
+                "system": sysname, "columns": columns[:col_cap],
+                "more_columns": max(0, len(columns) - col_cap),
+            })
+    # SWIFT transaction throughput -- see automated_report_detail's own identical comment
+    # (2026-09-08); built independently of the _spike_chart_targets loop above since it has no
+    # system/category of its own.
+    swift_chart = report_charts.swift_transaction_chart(title="SWIFT Transactions")
+    html = render_to_string("reports/automated_report_pdf.html", {
+        "instance": instance, "report": content,
+        "sections": narrative_sections(content.get("narrative", {})),
+        "persistent_count": persistent_count, "recurring_count": recurring_count,
+        "charts": charts, "spike_charts": spike_charts, "swift_chart": swift_chart,
+        "extra_charts": extra_charts, "needs_landscape": needs_landscape,
+        "zoom_persistent": zoom_persistent, "zoom_recurring": zoom_recurring,
+        "persistent_table": persistent_table, "recurring_table": recurring_table,
+        "logo_data_uri": report_charts.logo_data_uri(),
+    })
+    buffer = io.BytesIO()
+    result = pisa.CreatePDF(io.StringIO(html), dest=buffer)
+    if result.err:
+        raise PdfRenderError(f"xhtml2pdf reported {result.err} error(s) rendering this report")
+    return buffer.getvalue()
+
+
+def automated_report_pdf_filename(instance) -> str:
+    """Shared by automated_report_download and automated_reports_mail.send_automated_report so
+    the downloaded file and the e-mailed attachment are never named differently."""
+    return (f"{instance.content.get('label', 'Automated Report')} "
+           f"{instance.generated_at:%Y-%m-%d %H%M}.pdf")
+
+
+@login_required
+def automated_report_download(request, report_type, pk):
+    """A standalone, presentation-quality PDF of one stored instance -- the exact same data
+    as the in-app view, formatted for saving/printing/forwarding outside the console
+    (section 12: "Keep the visual design professional and suitable for presentation to
+    management"). See build_automated_report_pdf for the actual rendering."""
+    if not _automated_reports_gate(request.user):
+        return redirect("reports")
+    instance = get_object_or_404(AutomatedReportInstance, pk=pk, report_type=report_type)
+
+    def _zoom(param):
+        # "save this zoom config for when we download PDF" -- the web view's own heatmap zoom
+        # (see automated_report_download.html's own script block) has no other way to reach
+        # this separate, server-rendered request, so it rides along as a query param instead.
+        # Clamped to the same [0.5, 2.0] range the web view's own zoom buttons enforce.
+        try:
+            return min(2.0, max(0.5, float(request.GET.get(param, 1.0))))
+        except ValueError:
+            return 1.0
+
+    try:
+        pdf_bytes = build_automated_report_pdf(
+            instance, zoom_persistent=_zoom("zoom_persistent"),
+            zoom_recurring=_zoom("zoom_recurring"))
+    except PdfRenderError:
+        return render(request, "reports/error.html",
+                     {"detail": "Could not render this report as a PDF."}, status=500)
+
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{automated_report_pdf_filename(instance)}"'
+    return response
+
+@login_required
+@require_POST
+def automated_report_toggle_distribution(request):
+    """Phase 7 rollout gate. Superuser-only: this decides whether every FUTURE scheduled
+    Automated Report also gets e-mailed, not just this one instance (see automated_report_
+    detail's "Send now" for a one-off send that bypasses the gate for the Phase 7 review
+    itself)."""
+    if not request.user.is_superuser:
+        return redirect("automated_reports")
+    sc = SystemConfig.get()
+    sc.automated_reports_distribution_enabled = not sc.automated_reports_distribution_enabled
+    sc.updated_by = request.user
+    sc.save(update_fields=["automated_reports_distribution_enabled", "updated_at", "updated_by"])
+    messages.success(
+        request,
+        "Automated Reports distribution ENABLED — future scheduled reports will be e-mailed."
+        if sc.automated_reports_distribution_enabled else
+        "Automated Reports distribution disabled — back to shadow mode (generate + store only).")
+    return redirect("automated_reports")
 
 
 @login_required
@@ -1123,11 +1692,18 @@ def infra_form(request):
     dead — this screen would show devices with zero real data behind them. Infrastructure
     Admin reads the SAME live Prometheus data Network Admin's own report reads; ownership of
     these devices stays with Network Admin (display-only, per network.DEVICES' own comments).
+
+    Active Directory devices (Root/Child Domain Controllers, AD Sync & Authentication) are
+    EXCLUDED here (2026-09-11: split into their own Active Directory Report, reachable from
+    both this role and Network Admin -- see active_directory_form/_report/_generate below) --
+    they no longer belong in the general hardware picker now that they have a home of their
+    own; HCI Cluster and Oracle Hosts still do.
     """
     if not is_infra_admin(request.user):
         return redirect("report_form")
     try:
-        devices = [d for d in network.device_inventory() if d.get("kind") == "windows"]
+        devices = [d for d in network.device_inventory()
+                  if d.get("kind") == "windows" and d.get("system") not in network.AD_SYSTEMS]
     except network.NetworkUnavailable as exc:
         return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
     open_seconds = _open_report_seconds(request, "infra")
@@ -1136,7 +1712,13 @@ def infra_form(request):
     return render(request, "reports/infra_select.html", {
         "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
         "total_hosts": len(devices),
-        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        # A relay device confirmed alive via ping (host_reachable) despite stale metrics is NOT
+        # counted here as "not responding" -- 2026-09-09, on request: "the whole chain of
+        # screens... still reflecting that one server is down" -- matches network._windows_
+        # reading_trusted's own definition, so this summary stat and the per-row badge below
+        # never disagree.
+        "unreachable_count": sum(1 for d in devices
+                                 if d["known"] and not d["reachable"] and not d.get("host_reachable")),
         "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
         "open_seconds": open_seconds,
     })
@@ -1153,13 +1735,17 @@ def infra_report(request):
     Session key kept as "infra_report_systems" (now holding device KEYS rather than system
     names) — context.py's back-button override only checks it for truthiness, so renaming it
     would have touched a second file for no behavioural gain.
+
+    Active Directory device keys are rejected here (2026-09-11, same split as infra_form's
+    own docstring) -- they post to active_directory_report instead.
     """
     if not is_infra_admin(request.user):
         return redirect("report_form")
 
     if request.method == "POST":
         keys = [k for k in request.POST.getlist("include_device") if k]
-        known = {d["key"] for d in network.DEVICES if d.get("kind") == "windows"}
+        known = {d["key"] for d in network.DEVICES
+                if d.get("kind") == "windows" and d.get("system") not in network.AD_SYSTEMS}
         keys = [k for k in keys if k in known]
         if not keys:
             messages.error(request, "Select at least one device to include in the report.")
@@ -1195,6 +1781,15 @@ def infra_report(request):
 
     elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
     remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    # Per-device connect strip -- same as active_directory_report's own (see its comment).
+    # HCI Cluster is one SystemVM covering several nodes; hosts_from_ad_snapshot's own
+    # one-host-per-system shape only reaches its primary target (node 1) here, a real but
+    # non-regressive limitation -- this screen had no connect chip at all before.
+    hosts_by_system = network.hosts_from_ad_snapshot(snapshot.systems, getattr(snapshot, "_wm", None))
+    network.attach_ad_severity(hosts_by_system, snapshot.systems)
+    for svm in snapshot.systems:
+        svm.connect_hosts = hosts_by_system.get(svm.name, [])
 
     return render(request, "reports/form.html", {
         "snapshot": snapshot,
@@ -1286,6 +1881,197 @@ def infra_generate(request):
     return resp
 
 
+@never_cache
+@login_required
+def active_directory_form(request):
+    """Active Directory's own landing page (2026-09-11, split out of the combined
+    Infrastructure Admin Report into its own report, on request: "separate the Active
+    Directory section to be its own report under the infrastructure role... the networks
+    role can also have this"). Same device-picker shape as infra_form -- literally the same
+    network.device_inventory() call -- just scoped to network.AD_SYSTEMS (Root/Child Domain
+    Controllers, AD Sync & Authentication) instead of every windows-kind device.
+
+    Reachable from EITHER Infrastructure Admin (the real owner -- these are physical/virtual
+    hosts, infra's own estate) or Network Admin (view access -- AD is core network-adjacent
+    infrastructure their team also cares about). See roles.py's own REPORTS entry for the
+    "owned by Infrastructure Admin" hint shown on the Reports tile.
+    """
+    if not (is_infra_admin(request.user) or is_network_admin(request.user)):
+        return redirect("report_form")
+    try:
+        devices = [d for d in network.device_inventory() if d.get("system") in network.AD_SYSTEMS]
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    open_seconds = _open_report_seconds(request, "active_directory")
+    open_keys = (request.session.get("active_directory_report_systems") or []) if open_seconds else []
+    by_key = {d["key"]: d for d in devices}
+    return render(request, "reports/active_directory_select.html", {
+        # `label` (2026-09-11, on request: "hide hostnames from the picker... a neutral way
+        # of referencing this devices") is what the tile shows by default; `name`/`target`
+        # (the real hostname/IP) stay in the payload for the per-tile reveal button, never
+        # removed -- an admin who needs to actually connect to one still can, just not by
+        # default and not for every device at a glance.
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"]), label=network.ad_device_label(d))
+                   for d in devices],
+        "total_hosts": len(devices),
+        # Same "confirmed alive despite stale metrics" carve-out as infra_form's own summary
+        # stat -- see its docstring for why host_reachable is excluded here.
+        "unreachable_count": sum(1 for d in devices
+                                 if d["known"] and not d["reachable"] and not d.get("host_reachable")),
+        "open_report": [network.ad_device_label(by_key[k]) for k in open_keys if k in by_key],
+        "open_seconds": open_seconds,
+    })
+
+
+@login_required
+def active_directory_report(request):
+    """The annotation screen for the SELECTED Active Directory devices -- infra_report's own
+    twin, same network.py Snapshot/SystemVM capture and the same shared form.html annotation
+    screen, just its own session keys/picker/generate endpoint so the two estates' open
+    reports never collide."""
+    if not (is_infra_admin(request.user) or is_network_admin(request.user)):
+        return redirect("report_form")
+
+    if request.method == "POST":
+        keys = [k for k in request.POST.getlist("include_device") if k]
+        known = {d["key"] for d in network.DEVICES if d.get("system") in network.AD_SYSTEMS}
+        keys = [k for k in keys if k in known]
+        if not keys:
+            messages.error(request, "Select at least one device to include in the report.")
+            return redirect("active_directory_form")
+        request.session["active_directory_report_systems"] = keys
+        request.session.pop("active_directory_snapshot_token", None)   # new selection -> fresh capture
+        return redirect("active_directory_report")
+
+    keys = request.session.get("active_directory_report_systems")
+    if not keys:
+        return redirect("active_directory_form")
+
+    force = request.GET.get("fresh") == "1"
+    snapshot = None
+    token = request.session.get("active_directory_snapshot_token", "")
+    if not force and token:
+        snapshot = cache.get(_cache_key(token))
+
+    if snapshot is None:
+        token = uuid.uuid4().hex
+        try:
+            snapshot = network.capture_snapshot(token, only=set(keys), infra=True)
+        except network.NetworkUnavailable as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+        if not snapshot.systems:
+            messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+            request.session.pop("active_directory_report_systems", None)
+            return redirect("active_directory_form")
+        snapshot.systems.sort(key=lambda s: s.name.lower())
+        cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+        request.session["active_directory_snapshot_token"] = token
+        request.session["active_directory_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+
+    elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
+    remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    # Per-device connect strip -- report()'s own pattern (2026-09-11, on request: "a button
+    # that shows both ip and hostname for whichever device has issues, this is the exact same
+    # pattern we have for systems"), adapted for this module's Snapshot shape (one host per
+    # SystemVM) via hosts_from_ad_snapshot/attach_ad_severity -- see their own docstrings for
+    # why connect.hosts_from_snapshot/attach_flag_severity themselves don't fit unchanged.
+    hosts_by_system = network.hosts_from_ad_snapshot(snapshot.systems, getattr(snapshot, "_wm", None))
+    network.attach_ad_severity(hosts_by_system, snapshot.systems)
+    for svm in snapshot.systems:
+        svm.connect_hosts = hosts_by_system.get(svm.name, [])
+
+    return render(request, "reports/form.html", {
+        "snapshot": snapshot,
+        "token": token,
+        "selected_count": len(snapshot.systems),
+        "suggested_author": _profile_author(request.user),
+        "suggested_recipients": default_recipients(),
+        "recipient_options": recipient_options(),
+        "default_filename": network.active_directory_report_filename(
+            getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
+        "ttl_minutes": settings.SNAPSHOT_TTL // 60,
+        "ttl_seconds": settings.SNAPSHOT_TTL,
+        "remaining_seconds": remaining,
+        "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        "dash_title": "Active Directory Analyses Dashboard",
+        "subject": "device",
+        "draft_key": "draft:ad:" + ",".join(sorted(keys)),
+        "picker_url": reverse("active_directory_form"),
+        "generate_url": reverse("active_directory_generate"),
+        # See infra_report's own comment: form.html's <form action> always RESOLVES the
+        # `default` filter's argument even when generate_url is truthy, so this must still
+        # be a real, reversible url name or the page 500s.
+        "generate_default": reverse("generate"),
+    })
+
+
+@login_required
+@require_POST
+def active_directory_generate(request):
+    """Build the Active Directory Report from the reviewed snapshot -- infra_generate's own
+    twin, rendering through the same network.build_infrastructure_report tree-nested template
+    (already correctly scoped to whatever `only=` subset of devices the snapshot carries,
+    proven throughout this session's own AD-specific testing), just its own filename/session
+    keys."""
+    if not (is_infra_admin(request.user) or is_network_admin(request.user)):
+        return redirect("report_form")
+
+    token = request.POST.get("token", "") or request.session.get("active_directory_snapshot_token", "")
+    snapshot = cache.get(_cache_key(token)) if token else None
+    if snapshot is None:
+        messages.error(request, "That snapshot has expired. Capture a fresh one.")
+        return redirect("active_directory_report")
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    annotations: dict = {}
+    for si, sysvm in enumerate(snapshot.systems):
+        answers = {}
+        for fi, flag in enumerate(sysvm.flags):
+            ans = request.POST.get(f"fix__{si}__{fi}", "")
+            if ans in ("Yes", "No"):
+                answers[flag.key] = ans
+        comment = request.POST.get(f"comment__{si}", "").strip()
+        if answers or comment:
+            annotations[sysvm.name] = {"flags": answers, "comment": comment}
+
+    data = network.build_infrastructure_report(
+        snapshot, theme=theme, author=author,
+        annotations=annotations, summary_comment=summary_comment,
+        report_title="ACTIVE DIRECTORY REPORT")
+    filename = network.active_directory_report_filename(theme, timezone.localtime())
+
+    report_content = {
+        "overview": snapshot.overview,
+        "systems": [{
+            "name": s.name, "hosts": s.hosts,
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category,
+                       "answer": annotations.get(s.name, {}).get("flags", {}).get(f.key, "")}
+                      for f in s.flags],
+            "comment": annotations.get(s.name, {}).get("comment", ""),
+        } for s in snapshot.systems],
+    }
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        annotations=annotations, report_content=report_content,
+        immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
+        summary_comment=summary_comment,
+    )
+
+    resp = HttpResponse(
+        data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
 @login_required
 @require_POST
 def mark_notifications_seen(request):
@@ -1320,17 +2106,34 @@ def set_report_theme(request):
 #  option ON the Prometheus screen rather than a sibling of it.
 #
 #      Configuration                                 (Administrator's landing page)
-#        ├─ Roles          who holds which role, and pending requests -- this app's
-#        │                 own former landing page, now a child of this one (2026-09-04)
+#        ├─ Roles          ONE PAGE, collapsible sections (2026-09-04) -- Role assignments +
+#        │                 Role scopes, reachable via config_roles/roles_console/
+#        │                 config_role_scopes (all three render the same page; see
+#        │                 config_roles' own docstring for why there are still three URLs).
+#        │                 Who holds which role -- an Administrator's own job, not an
+#        │                 account-level one, so it stays here even though Users (below) now
+#        │                 owns everything else about an account.
+#        ├─ Users          Superuser-only (2026-09-04: "make user management a screen on its
+#        │                 own, separate it from roles... gray it out unless the user is a
+#        │                 super user") -- profile edits, password resets, deletion. Grayed
+#        │                 out on this very hub for anyone else, not merely hidden -- see
+#        │                 _SUPERUSER_ONLY_CHILDREN and configuration.html's own template
+#        │                 logic; the actual URL is ALSO blocked server-side (config_users'
+#        │                 own is_superuser check), since a disabled tile is presentation,
+#        │                 not access control.
 #        ├─ Prometheus     global/storage/rules   → Edit raw YAML → rule files
 #        ├─ Grafana        custom.ini
 #        ├─ SNMP           (awaiting the server-side update)
 #        ├─ Topology       systems → hosts, pivoted out of the same prometheus.yml
 #        ├─ Backup policy  per-host backup-frequency overrides
 #        ├─ Data sources   which Prometheus/Grafana to read
-#        └─ Role scopes    which systems each role sees
+#        └─ Alerts         ONE PAGE, collapsible sections (2026-09-04) -- Alert groups,
+#                          Notification reminder schedule, Alert templates, Drainage,
+#                          Disk/RAM/CPU usage, Size monitoring -- see config_alerts' own
+#                          docstring
 _CONFIG_CHILDREN = [
-    ("roles_console", "Roles", "Who holds which role, and pending requests"),
+    ("config_roles", "Roles", "Who holds which role, pending requests, and which systems each role sees"),
+    ("config_users", "Users", "Accounts: profile, password reset, deletion — superuser only"),
     ("config_prometheus", "Prometheus", "Scrape intervals, storage and rule files"),
     ("grafana_config", "Grafana", "custom.ini, versioned and applied"),
     ("config_snmp", "SNMP", "Network device polling"),
@@ -1338,19 +2141,942 @@ _CONFIG_CHILDREN = [
     ("config_backup_policy", "Backup policy", "Per-host backup-frequency overrides"),
     ("config_scripts", "Scripts", "Generate the checker scripts hosts run"),
     ("system_settings", "Data sources", "Which Prometheus / Grafana to read"),
-    ("config_role_scopes", "Role scopes", "Which systems each role sees"),
-    ("config_alert_groups", "Alert groups", "Who gets notified, and when, per system group"),
-    ("config_alert_templates", "Alert templates", "The branded e-mail design for each metric"),
+    # Renamed from "Alerts" to "Alerting" (2026-09-05, on request) -- now also the home for
+    # System Alerting (see config_alerts' own docstring), which used to be a separate sibling
+    # tile here until the same request folded it in as one more section of this same page.
+    ("config_alerts", "Alerting", "Notification groups, reminder timing, System Alerting, and the e-mail design"),
+    # Deliberately a SIBLING of Alerting, not a child of it (2026-09-04: "decouple notifications
+    # from alerts") -- an event group has no severity/reminders at all, see reports.models.
+    # EventGroup's own docstring on why it's a different notification TYPE, not a variant of
+    # an alert.
+    ("config_events", "Events", "Who hears about a system event (e.g. a backup file dropping)"),
+    # Third sibling notification family alongside Alerting and Events (2026-09-08, on request:
+    # "we also need Automated report Groups and event groups in much the same way we have
+    # alert groups") -- who receives which of the six scheduled Automated Reports. Relabelled
+    # "Reporting" (2026-09-12, on request) once it stopped being narrative-only: the same
+    # group mechanism now also covers the unattended xlsx Active Directory Report (see
+    # reports.scheduled_xlsx_reports.XLSX_REPORT_TYPES) -- url_name kept as-is, label-only.
+    ("config_automated_reports", "Reporting", "Who receives which scheduled report"),
 ]
+#: hub cards that render grayed-out/unclickable for anyone who isn't a superuser -- the
+#: server-side gate lives on each such view itself (is_superuser check, redirect otherwise);
+#: this set only controls the HUB TILE's own presentation.
+_SUPERUSER_ONLY_CHILDREN = {"config_users"}
 
 
-def _config_context(active: str) -> dict:
+def _hub_cards(children: list, active: str | None, *, viewer_is_superuser: bool = True) -> list:
+    return [{"url_name": n, "label": lbl, "hint": hint, "active": n == active,
+             "disabled": n in _SUPERUSER_ONLY_CHILDREN and not viewer_is_superuser}
+           for n, lbl, hint in children]
+
+
+def _config_context(active: str, *, viewer_is_superuser: bool = True) -> dict:
     return {
-        "config_children": [{"url_name": n, "label": lbl, "hint": hint, "active": n == active}
-                            for n, lbl, hint in _CONFIG_CHILDREN],
+        "config_children": _hub_cards(_CONFIG_CHILDREN, active, viewer_is_superuser=viewer_is_superuser),
         "yaml_source": promconfig.source_info(),
         "service_status": prometheus_admin.service_status(),
     }
+
+
+@never_cache
+@login_required
+def config_roles(request):
+    """Everything to do with roles, ONE PAGE with a properly labelled, collapsible SECTION
+    per concern -- Role assignments (who holds which role, and pending requests) and Role
+    scopes (which systems each role sees) -- the same "one screen, not several" treatment
+    Alerts gets (config_alerts' own docstring), on request (2026-09-04: "do the same for
+    roles as well").
+
+    THREE URLs still render this identical page -- this one (the canonical entry point),
+    roles_console (`/roles/`, this app's own former landing page, still linked from the
+    notifications bell and several defaults -- see _safe_next/context._NAV_PARENT) and
+    config_role_scopes (kept for its own pre-existing tests that assert on
+    resp.context["systems"] after a GET). All three share _role_assignments_context/
+    _role_scopes_context for their read-side data and differ only in which section opens by
+    default and which URL actually processes their own POST -- so wherever a request lands,
+    the SAME combined page renders, and nothing that already links to/tests the older URLs
+    needed to change."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    return render(request, "reports/config_roles.html", {
+        **_config_context("config_roles"),
+        **_role_assignments_context(request),
+        **_role_scopes_context(),
+        "default_open": "assignments",
+    })
+
+
+_DURATION_UNITS = {
+    "": 60,       # a bare number means MINUTES -- every value this app ever stored before
+                  # units existed was already in minutes; a plain "10" must keep meaning that.
+    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+}
+_DURATION_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([a-zA-Z]*)\s*$")
+
+
+def _parse_duration_seconds(raw: str):
+    """"10" (bare number = minutes), "45s", "2h", "1.5m" -> seconds (a float, so "30s" is
+    exact rather than rounding through minutes first), or None if it doesn't parse / the unit
+    isn't recognised (2026-09-04: "in alerts allow users to specify the time value units eg
+    15s is 15 seconds h is hours"). One parser for every time-value field in Alerts (Drainage
+    Critical/Warning, the Backup drainage override, and each entry in a group's own Reminders
+    list) rather than each field inventing its own bare-number-means-minutes convention."""
+    m = _DURATION_RE.match(raw or "")
+    if not m:
+        return None
+    amount, unit = m.groups()
+    factor = _DURATION_UNITS.get(unit.lower())
+    if factor is None:
+        return None
+    return float(amount) * factor
+
+
+def _seconds_to_duration_str(seconds) -> str:
+    """Seconds -> the cleanest unit it divides evenly into -- whole hours as "2h", whole
+    minutes as "10m", anything else (including a sub-minute value only a unit suffix could
+    have produced, e.g. 15s) as a plain seconds count "15s" -- so a saved value redisplays
+    recognisably instead of always being forced back through decimal minutes."""
+    seconds = float(seconds)
+    if seconds == int(seconds):
+        seconds = int(seconds)
+        if seconds % 3600 == 0:
+            return f"{seconds // 3600}h"
+        if seconds % 60 == 0:
+            return f"{seconds // 60}m"
+        return f"{seconds}s"
+    return f"{seconds:g}s"
+
+
+def _backup_drainage_rows(request, section: str) -> list:
+    """One row per system in the FULL topology, not just ones with currently-live backup
+    folder data (2026-09-04: "show all systems and their current values as intuited from
+    backup policy here... even though the live data not there you may gray out these systems
+    but add them") -- 'auto' is what folders.backup_drain_limits computes for that system
+    RIGHT NOW (its own backup cadence, or the documented 24h fallback); 'override_value' is
+    this admin's own saved override for it, or -- if THIS section's own save was just rejected
+    -- exactly what was typed, so a rejected save re-shows what you typed rather than what's
+    still saved (the same pattern every other Alerts field in this view uses); 'live'
+    distinguishes a system reports.folders.backup_drainage_systems() currently sees real
+    folder data for from one that's topology-only so far (rendered greyed out, not omitted --
+    the override still applies the moment a folder does show up)."""
+    cfg = gr.load_config()
+    topo_systems = gr.load_topology(cfg.prometheus_yml, scope="all")
+    live = folders.backup_drainage_systems()
+    overrides = DrainageThresholdConfig.get().backup_red_seconds_overrides or {}
+    rejected = section == "backup_drainage"
+    rows = []
+    for s in sorted(topo_systems, key=lambda x: x.name):
+        _, auto_red = folders.backup_drain_limits(s.name)
+        if rejected:
+            override_value = request.POST.get(f"backup_override__{s.name}", "")
+        else:
+            override_value = _seconds_to_duration_str(overrides[s.name]) if s.name in overrides else ""
+        rows.append({
+            "system": s.name,
+            "auto": _seconds_to_duration_str(auto_red),
+            "override_value": override_value,
+            "live": s.name in live,
+        })
+    return rows
+
+
+def _alert_group_health(group) -> dict:
+    """Whether one AlertGroup is genuinely wired to fire, and exactly why not if it isn't --
+    on request (2026-09-04): "have a small section where we show all successfully configured
+    alerts that are set to fire... a glowing green halo... If an alert was configured, for
+    example but has no recipients or has not proper notification config it must have a red
+    halo... tell you exactly whats wrong." Pure config inspection (no live Prometheus call) --
+    "live" here means "correctly configured to fire", not "currently firing"."""
+    problems = []
+    if not group.active:
+        problems.append("Paused — nothing will fire until it's reactivated.")
+    if not group.systems:
+        problems.append("No systems selected — it has nothing to watch.")
+    if not group.recipient_emails():
+        problems.append("No stakeholders with a valid e-mail address.")
+    return {"group": group, "is_live": not problems, "problems": problems}
+
+
+def _grouped_alert_groups(groups) -> list:
+    """[{"label": "Monitoring Alert"/"System Alert", "key": "monitoring"/"system",
+    "subtypes": [{"label": "" or "Staleness Alert", "key": "monitoring:"/"system:staleness",
+    "groups": [AlertGroup, ...]}]}] -- the Alert groups list's own two-level hierarchy
+    (2026-09-05, on request: "make the system hierarchy more readable, different font sizes
+    and opacity for children... following the already established structure" -- the
+    established structure being the Freshness checks list's own grouped-table-with-
+    sub-header-rows treatment, extended one level deeper here since Type has its own nested
+    Sub type). Monitoring Alert has no real subtype tier today (one implicit blank-label
+    bucket, rendered as data rows straight under the Type header, no Sub type row); System
+    Alert nests by alert_subtype (currently just "staleness"/Staleness Alert)."""
+    type_order = [AlertGroup.ALERT_TYPE_MONITORING, AlertGroup.ALERT_TYPE_SYSTEM]
+    type_labels = dict(AlertGroup.ALERT_TYPE_CHOICES)
+    subtype_labels = dict(AlertGroup.ALERT_SUBTYPE_CHOICES)
+    by_type: dict = {}
+    for g in groups:
+        by_type.setdefault(g.alert_type, {}).setdefault(g.alert_subtype, []).append(g)
+
+    result = []
+    for t in type_order:
+        if t not in by_type:
+            continue
+        subtypes = []
+        for subtype_key in sorted(by_type[t], key=lambda k: subtype_labels.get(k, "")):
+            subtypes.append({
+                "label": subtype_labels.get(subtype_key, ""),
+                "key": f"{t}:{subtype_key}",
+                "groups": sorted(by_type[t][subtype_key], key=lambda g: g.name),
+            })
+        result.append({"label": type_labels[t], "key": t, "subtypes": subtypes})
+    return result
+
+
+_SIZE_MONITORING_FOLDER = "T24 Log File"   # the only entry FOLDER_EXPECTED_PCT has today
+
+#: 0=Monday .. 6=Sunday, matching AlertGroup.schedule_days/in_schedule's own numbering
+#: (Python's own date.weekday()) -- used by config_alert_group_edit's Schedule section.
+_WEEKDAY_CHOICES = [(0, "Mon"), (1, "Tue"), (2, "Wed"), (3, "Thu"), (4, "Fri"), (5, "Sat"), (6, "Sun")]
+
+
+def _category_headers() -> list:
+    """[{"value":, "label":, "group_label":}, ...] in AlertGroup.CATEGORY_CHOICES' own order
+    -- one list the template iterates for BOTH header rows of the categories grid (the plain
+    labels and the folder-group super-labels above them), rather than two separate lists a
+    Django template would have no clean way to zip together by position."""
+    return [{"value": v, "label": l, "group_label": AlertGroup.CATEGORY_GROUP_LABELS.get(v, "")}
+           for v, l in AlertGroup.CATEGORY_CHOICES]
+
+
+@never_cache
+@login_required
+def config_alerts(request):
+    """Everything to do with alerts, ONE PAGE with a properly labelled, collapsible SECTION
+    per concern (on request, 2026-09-04: "consolidate everything to do with alerts on one
+    screen have properly labelled and collapsible sections with clear and clean separation of
+    concerns this is better than multiple screens" -- replaces the earlier hub-of-cards
+    version of this same page, which itself replaced four separate screens before that). Each
+    section is independently submitted (own <form>, own `section` hidden field, own Save
+    button) so saving one never touches another's unsaved edits; which section reopens after
+    a save is left to the page's own client-side memory (see the template's own script), not
+    tracked here.
+
+      - Alert groups -- who gets notified, and when, per system group (AlertGroup). Creating
+        one still opens its own full edit screen next (config_alert_group_edit) -- one
+        record's full form (systems, categories, stakeholders, test tools, its OWN reminder
+        schedule -- group-specific, 2026-09-04, not app-wide any more) is a drill-down, not
+        something that folds into an accordion row.
+      - Alert templates -- the designed sample e-mail gallery, read-only (opens
+        config_alert_template_preview in a new tab).
+      - Per Alert Config -- the thresholds that actually alert (Critical only, 2026-09-04:
+        "there are no expected alerts for warning severity"): payment & interface queue
+        drainage, an admin override onto backup drainage's own automatic per-system cadence
+        ("backup drainage monitoring and payment and interface queues... have a different
+        cadence"), Disk/RAM/CPU usage, and Size monitoring.
+      - Display thresholds -- the Warning/amber values Per Alert Config used to also carry,
+        moved out (2026-09-04) since they no longer alert anyone; kept editable here because
+        they still drive Folder Watch's amber tile colour and the daily report's amber chip.
+      - System Alerting -- a SECTION of this page, not its own Configuration hub tile any
+        more (2026-09-05, on request: "rename the main alerts screen to alerting and add
+        system alerting as a section of alerting"). Still a genuinely separate notification
+        type underneath (SystemAlertGroup/FreshnessCheck, reports.system_alerts -- a checker
+        going silently stale is a structurally different thing from a monitored value
+        crossing a threshold, see FreshnessCheck's own docstring) -- only the PAGE moved, not
+        the model or its detection logic. "Staleness Alert" (the checker/exporter-freshness
+        check type) is this section's own first, so-far-only check type.
+    """
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    section = request.POST.get("section") if request.method == "POST" else None
+
+    # ---- Alert groups: create-new only; editing/deleting one lives on its own screen -------
+    # Covers EVERY alert group regardless of classification (2026-09-05, on request: "alert
+    # groups must be for all alerts even if there are system alerts, let user specify this in
+    # the alert type and sub type in alert groups") -- alert_type/alert_subtype are picked
+    # HERE, at creation, and are immutable afterward (see AlertGroup's own docstring on why).
+    if section == "groups":
+        name = (request.POST.get("name") or "").strip()
+        alert_type = request.POST.get("alert_type") or AlertGroup.ALERT_TYPE_MONITORING
+        if alert_type not in dict(AlertGroup.ALERT_TYPE_CHOICES):
+            alert_type = AlertGroup.ALERT_TYPE_MONITORING
+        if alert_type == AlertGroup.ALERT_TYPE_SYSTEM:
+            # Only one subtype exists today -- picked automatically rather than shown as a
+            # single-option dropdown with nothing else to choose (a future second System
+            # Alert subtype would need this to actually read the posted value).
+            alert_subtype = AlertGroup.ALERT_SUBTYPE_STALENESS
+        else:
+            alert_subtype = ""
+        if not name:
+            messages.error(request, "Give the group a name.")
+        elif AlertGroup.objects.filter(name=name).exists():
+            messages.error(request, f"A group called “{name}” already exists.")
+        else:
+            create_kwargs = {"name": name, "updated_by": request.user,
+                             "alert_type": alert_type, "alert_subtype": alert_subtype}
+            if alert_type == AlertGroup.ALERT_TYPE_SYSTEM:
+                create_kwargs["reminder_minutes"] = [AlertGroup.DEFAULT_SYSTEM_ALERT_REMINDER_MINUTES]
+            group = AlertGroup.objects.create(**create_kwargs)
+            messages.success(request, f"Created “{name}”. Add its systems and stakeholders below.")
+            return redirect("config_alert_group_edit", pk=group.pk)
+        return redirect("config_alerts")
+
+    # ---- Drainage: Critical (payment & interface queues) -- the one value that actually
+    # alerts; Warning lives in the "display" section below since it no longer does ------------
+    elif section == "drainage_critical":
+        drainage_cfg = DrainageThresholdConfig.get()
+        if request.POST.get("action") == "reset":
+            drainage_cfg.red_seconds = None
+            drainage_cfg.updated_by = request.user
+            drainage_cfg.save(update_fields=["red_seconds", "updated_by", "updated_at"])
+            messages.success(request, "Drainage Critical reset to the shipped default (10 minutes).")
+            return redirect("config_alerts")
+        errors = []
+        red_s = _parse_duration_seconds(request.POST.get("red_minutes", "").strip())
+        if red_s is None:
+            errors.append("Drainage: enter a duration like 10, 10m, 30s, or 2h.")
+        current_amber_s, _ = drainage_cfg.effective_seconds
+        if red_s is not None:
+            if red_s <= 0:
+                errors.append("Drainage: must be greater than zero.")
+            elif red_s <= current_amber_s:
+                errors.append("Drainage: Critical must be greater than the current Warning "
+                              "display threshold (see Display thresholds).")
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+        else:
+            drainage_cfg.red_seconds = round(red_s)
+            drainage_cfg.updated_by = request.user
+            drainage_cfg.save(update_fields=["red_seconds", "updated_by", "updated_at"])
+            messages.success(request, "Drainage Critical saved — the next page load / poll uses it.")
+            return redirect("config_alerts")
+
+    # ---- Drainage: backup folders -- an explicit override onto the otherwise-automatic
+    # per-system backup-cadence calculation (2026-09-04: "backup drainage monitoring and
+    # payment and interface queues... have a different cadence to be set") ------------------
+    elif section == "backup_drainage":
+        drainage_cfg = DrainageThresholdConfig.get()
+        if request.POST.get("action") == "reset":
+            drainage_cfg.backup_red_seconds_overrides = {}
+            drainage_cfg.updated_by = request.user
+            drainage_cfg.save(update_fields=["backup_red_seconds_overrides", "updated_by", "updated_at"])
+            messages.success(request, "Every system back to its own automatic backup-cadence calculation.")
+            return redirect("config_alerts")
+        # One row per system, one Save for the whole table -- a blank field means "no override
+        # for this system", so a save always fully replaces the dict rather than merging, the
+        # same "Metrics to alert on, per system" pattern config_alert_group_edit.html uses.
+        cfg_ini = gr.load_config()
+        topo_systems = gr.load_topology(cfg_ini.prometheus_yml, scope="all")
+        errors = []
+        new_overrides = {}
+        for s in topo_systems:
+            raw = (request.POST.get(f"backup_override__{s.name}") or "").strip()
+            if not raw:
+                continue
+            seconds = _parse_duration_seconds(raw)
+            if seconds is None or seconds <= 0:
+                errors.append(f"{s.name}: enter a duration like 10, 10m, 30s, or 2h, or leave blank for automatic.")
+                continue
+            new_overrides[s.name] = round(seconds)
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+        else:
+            drainage_cfg.backup_red_seconds_overrides = new_overrides
+            drainage_cfg.updated_by = request.user
+            drainage_cfg.save(update_fields=["backup_red_seconds_overrides", "updated_by", "updated_at"])
+            messages.success(request, "Backup drainage overrides saved.")
+            return redirect("config_alerts")
+
+    # ---- Disk, RAM & CPU usage: Critical -- the one value that actually alerts; Warning
+    # lives in the "display" section below since it no longer does -----------------------------
+    elif section == "usage_critical":
+        if request.POST.get("action") == "reset":
+            current_amber, _ = usage_threshold_admin.read_live()
+            ok, msg = usage_threshold_admin.write_live(current_amber, usage_threshold_admin.DEFAULT_RED_PCT)
+            (messages.success if ok else messages.error)(request, msg)
+            return redirect("config_alerts")
+        errors = []
+        try:
+            red_pct = int(request.POST.get("red_pct", "").strip())
+        except ValueError:
+            errors.append("Disk/RAM/CPU: enter a whole-number percentage.")
+            red_pct = None
+        current_amber, _ = usage_threshold_admin.read_live()
+        if red_pct is not None:
+            if not (0 < red_pct < 100):
+                errors.append("Disk/RAM/CPU: must be between 1 and 99.")
+            elif red_pct <= current_amber:
+                errors.append("Disk/RAM/CPU: Critical must be greater than the current Warning "
+                              "display threshold (see Display thresholds).")
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+        else:
+            ok, msg = usage_threshold_admin.write_live(current_amber, red_pct)
+            (messages.success if ok else messages.error)(request, msg)
+            return redirect("config_alerts")
+
+    # ---- Display thresholds: the amber/Warning values, kept editable here since they still
+    # drive Folder Watch's tile colour and the daily report's chip colour even though neither
+    # any longer triggers an alert (only "red" does, 2026-09-04) --------------------------------
+    elif section == "drainage_warning":
+        drainage_cfg = DrainageThresholdConfig.get()
+        if request.POST.get("action") == "reset":
+            drainage_cfg.amber_seconds = None
+            drainage_cfg.updated_by = request.user
+            drainage_cfg.save(update_fields=["amber_seconds", "updated_by", "updated_at"])
+            messages.success(request, "Drainage Warning reset to the shipped default (5 minutes).")
+            return redirect("config_alerts")
+        errors = []
+        amber_s = _parse_duration_seconds(request.POST.get("amber_minutes", "").strip())
+        if amber_s is None:
+            errors.append("Drainage: enter a duration like 5, 5m, 30s, or 1h.")
+        _, current_red_s = drainage_cfg.effective_seconds
+        if amber_s is not None:
+            if amber_s <= 0:
+                errors.append("Drainage: must be greater than zero.")
+            elif amber_s >= current_red_s:
+                errors.append("Drainage: Warning must be less than the current Critical threshold.")
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+        else:
+            drainage_cfg.amber_seconds = round(amber_s)
+            drainage_cfg.updated_by = request.user
+            drainage_cfg.save(update_fields=["amber_seconds", "updated_by", "updated_at"])
+            messages.success(request, "Drainage Warning saved.")
+            return redirect("config_alerts")
+
+    elif section == "usage_warning":
+        if request.POST.get("action") == "reset":
+            _, current_red = usage_threshold_admin.read_live()
+            ok, msg = usage_threshold_admin.write_live(usage_threshold_admin.DEFAULT_AMBER_PCT, current_red)
+            (messages.success if ok else messages.error)(request, msg)
+            return redirect("config_alerts")
+        errors = []
+        try:
+            amber_pct = int(request.POST.get("amber_pct", "").strip())
+        except ValueError:
+            errors.append("Disk/RAM/CPU: enter a whole-number percentage.")
+            amber_pct = None
+        _, current_red = usage_threshold_admin.read_live()
+        if amber_pct is not None:
+            if not (0 < amber_pct < 100):
+                errors.append("Disk/RAM/CPU: must be between 1 and 99.")
+            elif amber_pct >= current_red:
+                errors.append("Disk/RAM/CPU: Warning must be less than the current Critical threshold.")
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+        else:
+            ok, msg = usage_threshold_admin.write_live(amber_pct, current_red)
+            (messages.success if ok else messages.error)(request, msg)
+            return redirect("config_alerts")
+
+    # ---- Size monitoring ----------------------------------------------------------------------
+    elif section == "size":
+        policy = folder_size_admin.parse_live_policy()
+        entry = policy.get(_SIZE_MONITORING_FOLDER, {"mount": "F:", "pct": 80})
+        if request.POST.get("action") == "reset":
+            entry["pct"] = round(0.80 * 100, 2)
+            policy[_SIZE_MONITORING_FOLDER] = entry
+            ok, msg = folder_size_admin.write_policy(policy)
+            (messages.success if ok else messages.error)(request, "Size monitoring reset to the shipped default (80%).")
+            return redirect("config_alerts")
+        errors = []
+        try:
+            size_pct = float(request.POST.get("size_pct", "").strip())
+        except ValueError:
+            errors.append("Size monitoring: enter a percentage.")
+            size_pct = None
+        if size_pct is not None and not (0 < size_pct < 100):
+            errors.append("Size monitoring: must be between 1 and 99.")
+        if errors:
+            for e in errors:
+                messages.error(request, e)
+        else:
+            entry["pct"] = size_pct
+            policy[_SIZE_MONITORING_FOLDER] = entry
+            ok, msg = folder_size_admin.write_policy(policy)
+            (messages.success if ok else messages.error)(request, msg)
+            return redirect("config_alerts")
+
+    # ---- System Alerting: Freshness checks -- what's WATCHED for staleness, a SECTION of
+    # this same page (2026-09-05, on request: "add system alerting as a section of alerting").
+    # Groups that HEAR about staleness are just AlertGroup rows now (alert_type=System Alert,
+    # created via the "groups" section above) -- FreshnessCheck stays its own model, since a
+    # staleness finding is structurally different from a threshold finding (see that model's
+    # own docstring). ---------------------------------------------------------------------------
+    elif section == "freshness_check":
+        name = (request.POST.get("name") or "").strip()
+        system_name = (request.POST.get("system") or "").strip()
+        kind = request.POST.get("kind") or FreshnessCheck.KIND_TEXTFILE_MTIME
+        instance = (request.POST.get("instance") or "").strip()
+        file = (request.POST.get("file") or "").strip()
+        needs_file = kind == FreshnessCheck.KIND_TEXTFILE_MTIME
+        max_age_s = _parse_duration_seconds((request.POST.get("max_age") or "").strip())
+        if not (name and system_name and instance) or (needs_file and not file):
+            messages.error(request, "Name, system, instance"
+                                    + (" and file" if needs_file else "") + " are all required.")
+        elif max_age_s is None:
+            messages.error(request, "Max age must be a number, optionally suffixed s/m/h "
+                                    "(e.g. \"2h\").")
+        elif FreshnessCheck.objects.filter(instance=instance, file=file if needs_file else "").exists():
+            messages.error(request, f"A check for {instance} / {file or '(backup checker)'} already exists.")
+        else:
+            FreshnessCheck.objects.create(
+                name=name, system=system_name, kind=kind, instance=instance,
+                file=file if needs_file else "",
+                max_age_seconds=int(max_age_s),
+                scheduler_instance=(request.POST.get("scheduler_instance") or "").strip(),
+                scheduler_job=(request.POST.get("scheduler_job") or "").strip())
+            messages.success(request, f"Added “{name}”.")
+        return redirect("config_alerts")
+
+    # ---- Read-side context for every section, regardless of which one (if any) was posted ----
+    # `groups` deliberately includes EVERY alert_type/alert_subtype (2026-09-05) -- ONE list
+    # for the whole "Alert groups" section, with a Type column distinguishing them, rather
+    # than a second parallel list for System Alert groups.
+    groups = AlertGroup.objects.all()
+    health_rows = [_alert_group_health(g) for g in groups]
+    grouped_alert_groups = _grouped_alert_groups(groups)
+    freshness_checks = FreshnessCheck.objects.all()
+    topology_systems = _topology_systems()
+
+    template_rows = [{"category": cat, "label": lbl, "available": cat in alert_email_templates.FILE_BY_CATEGORY}
+                     for cat, lbl in AlertGroup.CATEGORY_CHOICES]
+
+    drainage_cfg = DrainageThresholdConfig.get()
+    drainage_amber_s, drainage_red_s = drainage_cfg.effective_seconds
+    if section == "drainage_critical":
+        # A rejected save re-shows exactly what was typed, not what's still saved.
+        drainage_red_min = request.POST.get("red_minutes", "")
+    else:
+        drainage_red_min = _seconds_to_duration_str(drainage_red_s)
+    if section == "drainage_warning":
+        drainage_amber_min = request.POST.get("amber_minutes", "")
+    else:
+        drainage_amber_min = _seconds_to_duration_str(drainage_amber_s)
+    backup_drainage_rows = _backup_drainage_rows(request, section)
+
+    usage_amber_pct, usage_red_pct = usage_threshold_admin.read_live()
+    usage_red_val = request.POST.get("red_pct", "") if section == "usage_critical" else str(usage_red_pct)
+    usage_amber_val = request.POST.get("amber_pct", "") if section == "usage_warning" else str(usage_amber_pct)
+
+    size_policy = folder_size_admin.parse_live_policy()
+    size_entry = size_policy.get(_SIZE_MONITORING_FOLDER, {"mount": "F:", "pct": 80})
+    if section == "size":
+        size_pct_val = request.POST.get("size_pct", "")
+    else:
+        size_pct_val = str(size_entry.get("pct", 80))
+
+    return render(request, "reports/config_alerts.html", {
+        **_config_context("config_alerts"),
+        "groups": groups,
+        "grouped_alert_groups": grouped_alert_groups,
+        "health_rows": health_rows,
+        "template_rows": template_rows,
+        "drainage_amber_minutes": drainage_amber_min,
+        "drainage_red_minutes": drainage_red_min,
+        "backup_drainage_rows": backup_drainage_rows,
+        "usage_amber_pct": usage_amber_val,
+        "usage_red_pct": usage_red_val,
+        "size_folder_name": _SIZE_MONITORING_FOLDER,
+        "size_mount": size_entry.get("mount", "F:"),
+        "size_pct": size_pct_val,
+        "freshness_checks": freshness_checks,
+        "topology_systems": topology_systems,
+    })
+
+
+@never_cache
+@login_required
+def config_events(request):
+    """Everything to do with EVENT notifications -- a screen deliberately SEPARATE from
+    Alerts (2026-09-04: "decouple notifications from alerts... I want to have notification
+    types, alert notification and event notification"). Mirrors config_alerts' own "one
+    screen, collapsible sections" shape but for a genuinely different, simpler concept: an
+    EventGroup has no severity, no per-category filter and no reminder schedule, because an
+    event has none of those either -- see reports.events' own module docstring. Today's only
+    event type is "backup file dropped" (reports.events.run_event_cycle); this page just
+    manages who hears about it, per system, the same stakeholder-management shape
+    config_alerts uses for Alert groups."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    if request.method == "POST":
+        name = (request.POST.get("name") or "").strip()
+        if not name:
+            messages.error(request, "Give the group a name.")
+        elif EventGroup.objects.filter(name=name).exists():
+            messages.error(request, f"A group called “{name}” already exists.")
+        else:
+            group = EventGroup.objects.create(name=name, updated_by=request.user)
+            messages.success(request, f"Created “{name}”. Add its systems and stakeholders below.")
+            return redirect("config_event_group_edit", pk=group.pk)
+        return redirect("config_events")
+
+    groups = EventGroup.objects.all()
+    return render(request, "reports/config_events.html", {
+        **_config_context("config_events"),
+        "groups": groups,
+    })
+
+
+@login_required
+def config_event_group_edit(request, pk):
+    """One event group's own screen: which systems it covers and who its stakeholders are --
+    the stakeholder half of AlertGroup's own edit screen, none of the alert-specific half
+    (severity, per-category metrics, reminder schedule), since an EventGroup has none of
+    those (see reports.models.EventGroup's own docstring)."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    group = get_object_or_404(EventGroup, pk=pk)
+    systems = _topology_systems()
+    users = get_user_model().objects.filter(is_active=True).order_by("username")
+
+    if request.method == "POST":
+        if request.POST.get("action") == "delete":
+            name = group.name
+            group.delete()
+            messages.success(request, f"Removed “{name}”.")
+            return redirect("config_events")
+
+        name = (request.POST.get("name") or group.name).strip()
+        if EventGroup.objects.exclude(pk=group.pk).filter(name=name).exists():
+            messages.error(request, f"A group called “{name}” already exists.")
+            return redirect("config_event_group_edit", pk=group.pk)
+
+        chosen_systems = [s for s in request.POST.getlist("systems") if s in systems]
+        chosen_user_ids = [int(i) for i in request.POST.getlist("users") if i.isdigit()]
+        raw = request.POST.get("emails", "")
+        # ";" too, not just "," / newline -- see config_alert_group_edit's identical fix
+        # (2026-09-08) for why an Outlook "To:" field pasted verbatim used to wipe this field.
+        candidates = [e.strip() for e in re.split(r"[,;\n]", raw) if e.strip()]
+        valid, bad = [], []
+        for e in candidates:
+            try:
+                validate_email(e)
+                valid.append(e)
+            except ValidationError:
+                bad.append(e)
+        if bad:
+            messages.error(request, "Dropped invalid address(es): " + ", ".join(bad))
+
+        group.name = name
+        group.systems = chosen_systems
+        group.emails = sorted(set(valid))
+        group.active = request.POST.get("active") == "on"
+        group.updated_by = request.user
+        group.save()
+        group.users.set(get_user_model().objects.filter(pk__in=chosen_user_ids))
+        messages.success(request, f"Saved — {len(group.emails)} plain e-mail address(es), "
+                                  f"{group.users.count()} app-user stakeholder(s) on file.")
+        return redirect("config_event_group_edit", pk=group.pk)
+
+    return render(request, "reports/config_event_group_edit.html", {
+        "group": group, "systems": systems, "users": users,
+        "chosen_users": set(group.users.values_list("pk", flat=True)),
+        "email_list": "\n".join(group.emails or []),
+    })
+
+
+@never_cache
+@login_required
+def config_automated_reports(request):
+    """Everything to do with AUTOMATED REPORT notifications -- the third notification family
+    alongside AlertGroup and EventGroup (2026-09-08, on request: "we also need Automated report
+    Groups and event groups in much the same way we have alert groups to maintain a consistant
+    design"). Mirrors config_events' own "one screen, groups list + create form" shape exactly:
+    an AutomatedReportGroup is thin like an EventGroup (no severity, no reminder schedule), just
+    with `report_types` (which of the six scheduled report kinds it receives) standing in for
+    EventGroup's `systems` -- see AutomatedReportGroup's own docstring on why it has no systems
+    field at all (reports are estate-wide)."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+
+    if request.method == "POST":
+        name = (request.POST.get("name") or "").strip()
+        if not name:
+            messages.error(request, "Give the group a name.")
+        elif AutomatedReportGroup.objects.filter(name=name).exists():
+            messages.error(request, f"A group called “{name}” already exists.")
+        else:
+            group = AutomatedReportGroup.objects.create(name=name, updated_by=request.user)
+            messages.success(request, f"Created “{name}”. Choose its report types and stakeholders below.")
+            return redirect("config_automated_report_group_edit", pk=group.pk)
+        return redirect("config_automated_reports")
+
+    groups = AutomatedReportGroup.objects.all()
+    return render(request, "reports/config_automated_reports.html", {
+        **_config_context("config_automated_reports"),
+        "groups": groups,
+        # Narrative REPORT_TYPES + the xlsx family (reports.scheduled_xlsx_reports) --
+        # widened here only, not in REPORT_TYPES itself: generate_automated_report.py's own
+        # CLI choices must stay narrative-only (see that module's own docstring).
+        "report_type_choices": [(k, v["label"])
+                                for k, v in {**REPORT_TYPES, **XLSX_REPORT_TYPES}.items()],
+    })
+
+
+@login_required
+def config_automated_report_group_edit(request, pk):
+    """One automated-report group's own screen: which report types it receives and who its
+    stakeholders are -- the stakeholder half of AlertGroup's own edit screen, with
+    `report_types` (checkboxes against the six REPORT_TYPES keys) standing in for the
+    system/category pickers, since a report type isn't scoped to a system the way an alert
+    category is (see AutomatedReportGroup.covers_report_type)."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    group = get_object_or_404(AutomatedReportGroup, pk=pk)
+    combined_report_types = {**REPORT_TYPES, **XLSX_REPORT_TYPES}
+    report_type_choices = [(k, v["label"]) for k, v in combined_report_types.items()]
+    valid_types = set(combined_report_types.keys())
+    users = get_user_model().objects.filter(is_active=True).order_by("username")
+
+    if request.method == "POST":
+        if request.POST.get("action") == "delete":
+            name = group.name
+            group.delete()
+            messages.success(request, f"Removed “{name}”.")
+            return redirect("config_automated_reports")
+
+        name = (request.POST.get("name") or group.name).strip()
+        if AutomatedReportGroup.objects.exclude(pk=group.pk).filter(name=name).exists():
+            messages.error(request, f"A group called “{name}” already exists.")
+            return redirect("config_automated_report_group_edit", pk=group.pk)
+
+        chosen_types = [t for t in request.POST.getlist("report_types") if t in valid_types]
+        chosen_user_ids = [int(i) for i in request.POST.getlist("users") if i.isdigit()]
+        raw = request.POST.get("emails", "")
+        candidates = [e.strip() for e in re.split(r"[,;\n]", raw) if e.strip()]
+        valid, bad = [], []
+        for e in candidates:
+            try:
+                validate_email(e)
+                valid.append(e)
+            except ValidationError:
+                bad.append(e)
+        if bad:
+            messages.error(request, "Dropped invalid address(es): " + ", ".join(bad))
+
+        group.name = name
+        group.report_types = chosen_types
+        group.emails = sorted(set(valid))
+        group.active = request.POST.get("active") == "on"
+        group.updated_by = request.user
+        group.save()
+        group.users.set(get_user_model().objects.filter(pk__in=chosen_user_ids))
+        messages.success(request, f"Saved — {len(group.emails)} plain e-mail address(es), "
+                                  f"{group.users.count()} app-user stakeholder(s) on file.")
+        return redirect("config_automated_report_group_edit", pk=group.pk)
+
+    return render(request, "reports/config_automated_report_group_edit.html", {
+        "group": group, "report_type_choices": report_type_choices, "users": users,
+        "chosen_users": set(group.users.values_list("pk", flat=True)),
+        "email_list": "\n".join(group.emails or []),
+        "test_recipients": group.recipient_emails(),
+    })
+
+
+def _send_narrative_report_test(report_type: str, recipients: list) -> None:
+    """Reporting's own fire_live equivalent for a narrative report type: generates the SAME
+    real content generate_active_directory_report/generate_automated_report would (no
+    fabricated finding -- unlike a Monitoring Alert's single flag, there is no cheap fake
+    stand-in for a whole trend report), wraps it in a throwaway (never persisted) stand-in
+    object so render_report_html/build_automated_report_pdf can be reused unmodified, and
+    sends it with the subject clearly marked [SYNTHETIC TEST]. No AutomatedReportInstance row
+    is ever created -- same "never touch real history" principle config_alert_group_test's
+    own fire_live already established."""
+    import os
+    import pathlib
+    import tempfile
+    from types import SimpleNamespace
+
+    import generate_report as gr
+    import mail_report as mr
+
+    from . import automated_reports_mail as arm
+
+    report = generate_automated_report(report_type)
+    content = report_to_dict(report)
+    # pk=0 -- never a real AutomatedReportInstance row, so the e-mail's own "View full report"
+    # link will 404 if clicked; acceptable for a synthetic test (clearly marked as one) and
+    # far simpler than teaching render_report_html to omit that link for a fake instance.
+    fake = SimpleNamespace(content=content, report_type=report_type,
+                           generated_at=report.generated_at, pk=0)
+    chart_images = arm._summary_chart_images(content)
+    chart_cids = {key: key for key in chart_images}
+    html_body = arm.render_report_html(fake, chart_cids)
+    subject = f"[SYNTHETIC TEST] {content.get('label', 'Automated Report')} — {report.generated_at:%d %b %Y}"
+    text_body = (f"[SYNTHETIC TEST]\n\n{content.get('label', 'Automated Report')}\n\n"
+                "This is a test send, not saved to report history.")
+    pdf_bytes = build_automated_report_pdf(fake)
+    filename = automated_report_pdf_filename(fake)
+
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    if not mailcfg.get("host"):
+        raise RuntimeError("No SMTP host configured in send_report/config.ini ([smtp]).")
+    mailcfg["from_name"] = "RBZ Monitoring Console · Reporting"
+    tmpdir = tempfile.mkdtemp(prefix="reporting_test_")
+    path = pathlib.Path(tmpdir) / filename
+    try:
+        path.write_bytes(pdf_bytes)
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body, path,
+                      inline_images=chart_images)
+    finally:
+        try:
+            path.unlink()
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+
+def _send_xlsx_report_test(report_type: str, recipients: list) -> None:
+    """Reporting's own fire_live equivalent for an xlsx report type -- generates the real,
+    current Active Directory Report the same way generate_active_directory_report does, sends
+    it with the subject clearly marked [SYNTHETIC TEST], and never creates a ReportSubmission
+    row (there is no `kind` field on that model to tag a test row as such anyway, so simply
+    not persisting one is the only clean option -- same "never touch real history" principle
+    as the narrative twin above)."""
+    import uuid
+
+    if report_type != "active_directory":
+        # The only xlsx type registered today (reports.scheduled_xlsx_reports.
+        # XLSX_REPORT_TYPES) -- a future second entry needs its own branch here, same as
+        # generate_active_directory_report needed its own management command rather than a
+        # generic "generate any xlsx type" dispatcher.
+        raise ValueError(f"No test generator wired up for xlsx report type {report_type!r}.")
+
+    only = {d["key"] for d in network.DEVICES if d.get("system") in network.AD_SYSTEMS}
+    snapshot = network.capture_snapshot(uuid.uuid4().hex, only=only, infra=True)
+    data = network.build_infrastructure_report(
+        snapshot, theme="dark", author="Automated", annotations={}, summary_comment="",
+        report_title="ACTIVE DIRECTORY REPORT")
+    filename = network.active_directory_report_filename("dark", timezone.localtime())
+    send_xlsx_report_bundle(recipients, reports=[{
+        "type": report_type,
+        "title": f"[SYNTHETIC TEST] {XLSX_REPORT_TYPES[report_type]['label']}",
+        "filename": filename,
+        "overview": snapshot.overview,
+        "systems": [{"name": s.name, "hosts": s.hosts, "flags": [], "comment": ""}
+                   for s in snapshot.systems],
+        "xlsx_bytes": data,
+    }])
+
+
+@login_required
+def config_automated_report_group_test(request, pk):
+    """Reporting's own test-fire screen -- config_alert_group_test's blueprint (2026-09-12,
+    on request: "how come reporting doesnt have a test fire screen" / "yes same blueprint"),
+    adapted: a Reporting group can cover several report types (narrative + xlsx) at once, so
+    this picks ONE (scoped to the group's own report_types, matching how config_alert_group_
+    test scopes its own pickers to the group's own systems/categories) and sends REAL,
+    freshly-generated content for it right now -- clearly marked [SYNTHETIC TEST] -- to one or
+    all of the group's own current recipients, without persisting any history row.
+
+    Only ONE action, not three: every report type here is an aggregate over real data with no
+    cheap fabricated-single-finding equivalent the way a Monitoring Alert has one flag to fake
+    -- this is fire_live's own "real data, sent for real" mode, generalised, with no
+    fire_positive/fire_resolved equivalent to offer."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    group = get_object_or_404(AutomatedReportGroup, pk=pk)
+    if request.method != "POST":
+        return redirect("config_automated_report_group_edit", pk=group.pk)
+
+    combined_report_types = {**REPORT_TYPES, **XLSX_REPORT_TYPES}
+    ttype = request.POST.get("ttype", "")
+    if ttype not in (group.report_types or []):
+        messages.error(request, "Pick one of this group's own report types to test.")
+        return redirect("config_automated_report_group_edit", pk=group.pk)
+
+    tto = request.POST.get("tto", "").strip()
+    all_recipients = group.recipient_emails()
+    if tto and tto not in all_recipients:
+        messages.error(request, "That address isn't one of this group's current stakeholders.")
+        return redirect("config_automated_report_group_edit", pk=group.pk)
+    recipients = [tto] if tto else all_recipients
+    if not recipients:
+        messages.error(request, "This group has no stakeholders to send a test to yet.")
+        return redirect("config_automated_report_group_edit", pk=group.pk)
+
+    label = combined_report_types.get(ttype, {}).get("label", ttype)
+    try:
+        if ttype in XLSX_REPORT_TYPES:
+            _send_xlsx_report_test(ttype, recipients)
+        else:
+            _send_narrative_report_test(ttype, recipients)
+    except Exception as exc:   # noqa: BLE001 -- surfaced to the admin, not swallowed silently
+        messages.error(request, f"Test send failed: {exc}")
+        return redirect("config_automated_report_group_edit", pk=group.pk)
+
+    messages.success(request, f"Sent a synthetic test of “{label}” to {len(recipients)} address(es).")
+    return redirect("config_automated_report_group_edit", pk=group.pk)
+
+
+@login_required
+def config_freshness_check_edit(request, pk):
+    """One watched checker source's own screen -- name/system/instance/file plus how stale
+    its own last write may get before AlertGroups covering its system (alert_type=System
+    Alert) are notified (see FreshnessCheck's own docstring for the mechanism and the T24 incident that motivated
+    it)."""
+    denied = _require_admin(request)
+    if denied:
+        return denied
+    check = get_object_or_404(FreshnessCheck, pk=pk)
+    systems = _topology_systems()
+
+    if request.method == "POST":
+        if request.POST.get("action") == "delete":
+            name = check.name
+            check.delete()
+            messages.success(request, f"Removed “{name}”.")
+            return redirect("config_alerts")
+
+        name = (request.POST.get("name") or check.name).strip()
+        system = (request.POST.get("system") or check.system).strip()
+        kind = request.POST.get("kind") or check.kind
+        instance = (request.POST.get("instance") or check.instance).strip()
+        file = (request.POST.get("file") or "").strip()
+        needs_file = kind == FreshnessCheck.KIND_TEXTFILE_MTIME
+        max_age_s = _parse_duration_seconds((request.POST.get("max_age") or "").strip())
+        if not (name and system and instance) or (needs_file and not file):
+            messages.error(request, "Name, system, instance"
+                                    + (" and file" if needs_file else "") + " are all required.")
+            return redirect("config_freshness_check_edit", pk=check.pk)
+        if max_age_s is None:
+            messages.error(request, "Max age must be a number, optionally suffixed s/m/h "
+                                    "(e.g. \"2h\").")
+            return redirect("config_freshness_check_edit", pk=check.pk)
+        if FreshnessCheck.objects.exclude(pk=check.pk).filter(
+                instance=instance, file=file if needs_file else "").exists():
+            messages.error(request, f"A check for {instance} / {file or '(backup checker)'} already exists.")
+            return redirect("config_freshness_check_edit", pk=check.pk)
+
+        check.name, check.system, check.kind, check.instance = name, system, kind, instance
+        check.file = file if needs_file else ""
+        check.max_age_seconds = int(max_age_s)
+        check.scheduler_instance = (request.POST.get("scheduler_instance") or "").strip()
+        check.scheduler_job = (request.POST.get("scheduler_job") or "").strip()
+        check.active = request.POST.get("active") == "on"
+        check.save()
+        messages.success(request, "Saved.")
+        return redirect("config_freshness_check_edit", pk=check.pk)
+
+    return render(request, "reports/config_freshness_check_edit.html", {
+        "check": check, "systems": systems,
+        "max_age_str": _seconds_to_duration_str(check.max_age_seconds),
+    })
 
 
 def _save_prometheus(request, doc):
@@ -1404,7 +3130,8 @@ def configuration(request):
     denied = _require_admin(request)
     if denied:
         return denied
-    return render(request, "reports/configuration.html", _config_context("configuration"))
+    return render(request, "reports/configuration.html",
+                 _config_context("configuration", viewer_is_superuser=is_superuser(request.user)))
 
 
 def _prometheus_screen(request, *, active: str, template: str, extra=None):
@@ -1917,6 +3644,23 @@ def config_script_preview(request, pk):
     })
 
 
+def _role_scopes_context() -> dict:
+    """Which systems each role's workspace covers -- read-side only, reused by every entry
+    point onto the combined Roles page (config_roles / roles_console / config_role_scopes,
+    see config_roles' own docstring for why all three still exist) so whichever URL a request
+    lands on, the Role scopes section shows the same real data."""
+    systems = _topology_systems()
+    mapped = {s.role: set(s.systems or []) for s in RoleScope.objects.all()}
+    rows = [{
+        "role": role,
+        "icon": role_icon(role),
+        "description": ROLE_DESCRIPTIONS.get(role, ""),
+        "chosen": mapped.get(role, set()),
+        "unscoped": not mapped.get(role),
+    } for role in ROLE_NAMES]
+    return {"rows": rows, "systems": systems}
+
+
 @never_cache
 @login_required
 def config_role_scopes(request):
@@ -1924,6 +3668,11 @@ def config_role_scopes(request):
 
     A role with nothing ticked is UNRESTRICTED (it sees the whole estate), so the mapping can
     be filled in one role at a time without hiding systems from anyone in the meantime.
+
+    Renders the same combined Roles page as roles_console/config_roles (see config_roles'
+    own docstring) -- this URL's own POST handling (saving scopes) is unchanged, only what it
+    renders afterward changed, so the Role scopes section stays open when it lands you back
+    here.
     """
     denied = _require_admin(request)
     if denied:
@@ -1940,48 +3689,11 @@ def config_role_scopes(request):
         messages.success(request, "Role scopes saved — they apply the next time a role is selected.")
         return redirect("config_role_scopes")
 
-    mapped = {s.role: set(s.systems or []) for s in RoleScope.objects.all()}
-    rows = [{
-        "role": role,
-        "icon": role_icon(role),
-        "description": ROLE_DESCRIPTIONS.get(role, ""),
-        "chosen": mapped.get(role, set()),
-        "unscoped": not mapped.get(role),
-    } for role in ROLE_NAMES]
-    return render(request, "reports/config_role_scopes.html", {
-        **_config_context("config_role_scopes"),
-        "rows": rows, "systems": systems,
-    })
-
-
-@never_cache
-@login_required
-def config_alert_groups(request):
-    """The catalogue of alert groups, and the bare-name form that creates one.
-
-    A group starts covering NO systems and no stakeholders (see AlertGroup's own docstring for
-    why that's the opposite default from Role scopes) — creating one only ever opens its own
-    edit screen next, it never itself starts sending anything.
-    """
-    denied = _require_admin(request)
-    if denied:
-        return denied
-    if request.method == "POST":
-        name = (request.POST.get("name") or "").strip()
-        if not name:
-            messages.error(request, "Give the group a name.")
-            return redirect("config_alert_groups")
-        if AlertGroup.objects.filter(name=name).exists():
-            messages.error(request, f"A group called “{name}” already exists.")
-            return redirect("config_alert_groups")
-        group = AlertGroup.objects.create(name=name, updated_by=request.user)
-        messages.success(request, f"Created “{name}”. Add its systems and stakeholders below.")
-        return redirect("config_alert_group_edit", pk=group.pk)
-
-    groups = AlertGroup.objects.all()
-    return render(request, "reports/config_alert_groups.html", {
-        **_config_context("config_alert_groups"),
-        "groups": groups,
+    return render(request, "reports/config_roles.html", {
+        **_config_context("config_roles"),
+        **_role_assignments_context(request),
+        **_role_scopes_context(),
+        "default_open": "scopes",
     })
 
 
@@ -2005,7 +3717,121 @@ def config_alert_group_edit(request, pk):
             name = group.name
             group.delete()
             messages.success(request, f"Removed “{name}” and its notification history.")
-            return redirect("config_alert_groups")
+            return redirect("config_alerts")
+
+        # ---- Schedule: own <form>, own submit -- applies identically to Monitoring and
+        # System Alert groups alike (2026-09-07, on request: "people are asking for these
+        # alerts to be schedulable... enable them at a certain time and disable them at a
+        # certain time, even in terms of days"). Reads exactly like the Active toggle but on
+        # a recurring day/time window instead of a manual switch -- see AlertGroup.
+        # in_schedule's own docstring for the exact semantics.
+        if request.POST.get("form") == "schedule":
+            schedule_enabled = request.POST.get("schedule_enabled") == "on"
+            days = sorted({int(d) for d in request.POST.getlist("schedule_days")
+                          if d.isdigit() and 0 <= int(d) <= 6})
+            start_raw = (request.POST.get("schedule_start") or "").strip()
+            end_raw = (request.POST.get("schedule_end") or "").strip()
+            start_time = end_time = None
+            errors = []
+            try:
+                start_time = datetime.time.fromisoformat(start_raw) if start_raw else None
+            except ValueError:
+                errors.append("Start time is not valid.")
+            try:
+                end_time = datetime.time.fromisoformat(end_raw) if end_raw else None
+            except ValueError:
+                errors.append("End time is not valid.")
+            if not errors and (start_time is None) != (end_time is None):
+                errors.append("Set both a start and an end time, or leave both blank to "
+                             "restrict by day only.")
+            if errors:
+                for e in errors:
+                    messages.error(request, e)
+                return redirect("config_alert_group_edit", pk=group.pk)
+            group.schedule_enabled = schedule_enabled
+            group.schedule_days = days
+            group.schedule_start = start_time
+            group.schedule_end = end_time
+            group.updated_by = request.user
+            group.save(update_fields=["schedule_enabled", "schedule_days", "schedule_start",
+                                      "schedule_end", "updated_by", "updated_at"])
+            messages.success(request, "Schedule saved.")
+            return redirect("config_alert_group_edit", pk=group.pk)
+
+        # ---- Reminders: own <form>, own submit -- saving the main fields below never touches
+        # this group's reminder schedule, and vice versa (2026-09-04: "notification reminder
+        # schedule should be group specific").
+        if request.POST.get("form") == "reminders" and group.alert_type == AlertGroup.ALERT_TYPE_SYSTEM:
+            # A System Alert group has ONE persistent interval, not a capped schedule -- see
+            # AlertGroup.effective_system_reminder_minutes' own docstring on why one field
+            # serves both shapes (2026-09-05, merged from the since-retired SystemAlertGroup).
+            if request.POST.get("action") == "reset":
+                group.reminder_minutes = [AlertGroup.DEFAULT_SYSTEM_ALERT_REMINDER_MINUTES]
+                group.updated_by = request.user
+                group.save(update_fields=["reminder_minutes", "updated_by", "updated_at"])
+                messages.success(request, f"Reminder interval reset to the shipped default "
+                                          f"({AlertGroup.DEFAULT_SYSTEM_ALERT_REMINDER_MINUTES} minutes).")
+                return redirect("config_alert_group_edit", pk=group.pk)
+            seconds = _parse_duration_seconds((request.POST.get("system_reminder_minutes") or "").strip())
+            if seconds is None or seconds <= 0:
+                messages.error(request, "Reminder interval must be a number, optionally "
+                                        "suffixed s/m/h (e.g. \"60m\").")
+                return redirect("config_alert_group_edit", pk=group.pk)
+            group.reminder_minutes = [max(1, round(seconds / 60))]
+            group.updated_by = request.user
+            group.save(update_fields=["reminder_minutes", "updated_by", "updated_at"])
+            messages.success(request, "Reminder interval saved.")
+            return redirect("config_alert_group_edit", pk=group.pk)
+
+        if request.POST.get("form") == "reminders":
+            if request.POST.get("action") == "reset":
+                group.reminder_minutes = []
+                group.imminent_reminder_minutes = None
+                group.updated_by = request.user
+                group.save(update_fields=["reminder_minutes", "imminent_reminder_minutes",
+                                          "updated_by", "updated_at"])
+                messages.success(request, "Reminder schedule reset to the shipped default (10, 40, 60 minutes; imminent every 10 minutes).")
+                return redirect("config_alert_group_edit", pk=group.pk)
+            minutes, errors = _parse_reminder_minutes(request.POST.get("reminder_minutes", ""))
+            # Imminent (component unreachable) persistence interval -- its OWN field, on
+            # request (2026-09-04: "value must be editable in our already established
+            # reminder section"), sharing the same unit-aware parser every other Alerts
+            # time-value field uses. Blank = keep the shipped default (10 minutes).
+            imminent_raw = (request.POST.get("imminent_reminder_minutes") or "").strip()
+            imminent_minutes = None
+            if imminent_raw:
+                imminent_seconds = _parse_duration_seconds(imminent_raw)
+                if imminent_seconds is None or imminent_seconds <= 0:
+                    errors.append("Imminent persistence: enter a duration like 10, 10m, 30s, or 1h.")
+                else:
+                    imminent_minutes = round(imminent_seconds / 60)
+                    if imminent_minutes <= 0:
+                        imminent_minutes = 1
+            if errors:
+                for e in errors:
+                    messages.error(request, e)
+                # Re-render (not redirect) so the rejected input re-shows exactly what was
+                # typed, same pattern config_alerts' own per-section forms use.
+                return render(request, "reports/config_alert_group_edit.html", {
+                    **_config_context("config_alert_groups"),
+                    "group": group, "systems": systems, "users": users,
+                    "chosen_users": set(group.users.values_list("pk", flat=True)),
+                    "category_grid": _category_grid_rows(group),
+                    "email_list": "\n".join(group.emails or []),
+                    "test_recipients": group.recipient_emails(),
+                    "schedule_raw_value": request.POST.get("reminder_minutes", ""),
+                    "schedule_preview_rows": _reminder_preview_rows(minutes),
+                    "imminent_reminder_value": imminent_raw,
+                    "weekday_choices": _WEEKDAY_CHOICES,
+                    "category_headers": _category_headers(),
+                })
+            group.reminder_minutes = minutes
+            group.imminent_reminder_minutes = imminent_minutes
+            group.updated_by = request.user
+            group.save(update_fields=["reminder_minutes", "imminent_reminder_minutes",
+                                      "updated_by", "updated_at"])
+            messages.success(request, "Reminder schedule saved — the alert poller's next run uses it.")
+            return redirect("config_alert_group_edit", pk=group.pk)
 
         name = (request.POST.get("name") or group.name).strip()
         if AlertGroup.objects.exclude(pk=group.pk).filter(name=name).exists():
@@ -2024,7 +3850,11 @@ def config_alert_group_edit(request, pk):
                 chosen_categories[sys_name] = sorted(picked)
         chosen_user_ids = [int(i) for i in request.POST.getlist("users") if i.isdigit()]
         raw = request.POST.get("emails", "")
-        candidates = [e.strip() for e in re.split(r"[,\n]", raw) if e.strip()]
+        # Split on ";" too, not just "," / newline (2026-09-08: reported as "save clears the
+        # email" -- an Outlook "To:" field pasted verbatim is semicolon-separated, which used
+        # to survive as one long unsplit string, fail validate_email, land wholly in `bad`, and
+        # silently zero out group.emails since none of it ever reached `valid`).
+        candidates = [e.strip() for e in re.split(r"[,;\n]", raw) if e.strip()]
         valid, bad = [], []
         for e in candidates:
             try:
@@ -2039,14 +3869,17 @@ def config_alert_group_edit(request, pk):
         group.systems = chosen_systems
         group.categories = chosen_categories
         group.emails = sorted(set(valid))
-        group.min_severity = request.POST.get("min_severity") or group.min_severity
         group.active = request.POST.get("active") == "on"
         group.updated_by = request.user
         group.save()
         group.users.set(get_user_model().objects.filter(pk__in=chosen_user_ids))
-        messages.success(request, "Saved.")
+        # State what actually landed, not just "Saved." -- the reported confusion was not
+        # knowing whether an e-mail was really kept after a save.
+        messages.success(request, f"Saved — {len(group.emails)} plain e-mail address(es), "
+                                  f"{group.users.count()} app-user stakeholder(s) on file.")
         return redirect("config_alert_group_edit", pk=group.pk)
 
+    schedule_minutes = group.effective_reminder_minutes
     return render(request, "reports/config_alert_group_edit.html", {
         **_config_context("config_alert_groups"),
         "group": group, "systems": systems, "users": users,
@@ -2054,6 +3887,12 @@ def config_alert_group_edit(request, pk):
         "category_grid": _category_grid_rows(group),
         "email_list": "\n".join(group.emails or []),
         "test_recipients": group.recipient_emails(),
+        "schedule_raw_value": ", ".join(str(m) for m in schedule_minutes),
+        "schedule_preview_rows": _reminder_preview_rows(schedule_minutes),
+        "imminent_reminder_value": _seconds_to_duration_str(group.effective_imminent_reminder_minutes * 60),
+        "system_reminder_value": _seconds_to_duration_str(group.effective_system_reminder_minutes * 60),
+        "weekday_choices": _WEEKDAY_CHOICES,
+        "category_headers": _category_headers(),
     })
 
 
@@ -2079,6 +3918,12 @@ def config_alert_group_test(request, pk):
     if denied:
         return denied
     group = get_object_or_404(AlertGroup, pk=pk)
+    if group.alert_type != AlertGroup.ALERT_TYPE_MONITORING:
+        # Flag-based test tools only make sense for a Monitoring Alert group -- a System
+        # Alert group has no category/severity concept for these to fabricate against
+        # (2026-09-05, after alert_type became a real classification on this same model).
+        messages.error(request, "Test tools are only available for Monitoring Alert groups.")
+        return redirect("config_alert_group_edit", pk=group.pk)
     taction = request.POST.get("taction")
 
     tto = request.POST.get("tto", "").strip()
@@ -2122,6 +3967,8 @@ def config_alert_group_preview(request, pk):
     if denied:
         return denied
     group = get_object_or_404(AlertGroup, pk=pk)
+    if group.alert_type != AlertGroup.ALERT_TYPE_MONITORING:
+        return HttpResponse("Preview is only available for Monitoring Alert groups.", content_type="text/plain")
     valid_categories = {k for k, _ in AlertGroup.CATEGORY_CHOICES}
     kind = request.GET.get("kind") if request.GET.get("kind") in ("positive", "resolved") else "positive"
     tsys = request.GET.get("tsys") or (group.systems or [""])[0]
@@ -2134,19 +3981,48 @@ def config_alert_group_preview(request, pk):
     return HttpResponse(html_body)
 
 
-def config_alert_templates(request):
-    """Gallery of the designed sample e-mail for every alert category — a design reference,
-    not a live send: each file is fixed sample data (see alert_email_templates.py's own
-    comment), so this page never touches Prometheus, AlertGroup, or AlertFinding at all."""
-    denied = _require_admin(request)
-    if denied:
-        return denied
-    rows = [{"category": cat, "label": lbl, "available": cat in alert_email_templates.FILE_BY_CATEGORY}
-           for cat, lbl in AlertGroup.CATEGORY_CHOICES]
-    return render(request, "reports/config_alert_templates.html", {
-        **_config_context("config_alert_templates"),
-        "rows": rows,
-    })
+def _parse_reminder_minutes(raw: str) -> tuple:
+    """"10, 40, 60" or "30s, 10m, 2h" -> ([10, 40, 60], []) or (parsed-so-far, [error, ...]) --
+    one text field rather than N number inputs with add/remove buttons, on request ("keep UI
+    clean", 2026-09-04): admins type the schedule the same way they'd say it out loud. Each
+    entry goes through the SAME unit-aware parser every other Alerts time-value field uses
+    (2026-09-04: "in alerts allow users to specify the time value units eg 15s is 15 seconds h
+    is hours") -- still stored/returned as MINUTES (AlertGroup.reminder_minutes' own field, and
+    reports.alerting._decide's timedelta(minutes=...) comparison), just no longer restricted to
+    whole ones: "30s" is exactly 0.5, not rounded away. Strictly ascending (a reminder schedule
+    that doesn't move forward in time isn't a schedule) and capped at
+    AlertGroup.MAX_REMINDER_COUNT so neither this form nor a fired-digest e-mail can grow
+    unreadably long."""
+    errors = []
+    minutes = []
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        return [], ["Enter at least one reminder time."]
+    if len(parts) > AlertGroup.MAX_REMINDER_COUNT:
+        errors.append(f"At most {AlertGroup.MAX_REMINDER_COUNT} reminders are supported.")
+        parts = parts[:AlertGroup.MAX_REMINDER_COUNT]
+    for p in parts:
+        seconds = _parse_duration_seconds(p)
+        if seconds is None:
+            errors.append(f"“{p}” isn't a duration — try 10, 10m, 30s, or 2h.")
+            continue
+        n = seconds / 60
+        n = int(n) if n == int(n) else round(n, 4)
+        if n <= 0:
+            errors.append(f"“{p}” isn't positive — every reminder must be after the last.")
+            continue
+        minutes.append(n)
+    if not errors and minutes != sorted(set(minutes)):
+        errors.append("Reminder times must be strictly ascending — each one after the last, "
+                      "with no repeats.")
+    return minutes, errors
+
+
+def _reminder_preview_rows(minutes: list) -> list:
+    total = len(minutes)
+    return [{"n": i + 1, "minutes": _seconds_to_duration_str(m * 60),
+             "label": alert_email_templates.reminder_label(i + 1, total)}
+           for i, m in enumerate(minutes)]
 
 
 def config_alert_template_preview(request, category):
@@ -2174,13 +4050,14 @@ def _category_grid_rows(group) -> list:
     still just a topology-derived HINT, not a stored restriction: a system added to this group
     later, or a metric that starts reporting later, can make a cell applicable on a future
     visit with no data lost, since `applicable` is recomputed fresh every render rather than
-    saved. Three categories carry a genuine static signal, all pure local-file topology reads
-    with no live Prometheus call: `service` from generate_report's own SERVICE_CHECKS
-    (surfaced on the System.services topology object), and `folder`/`undrained_folders` from
-    folders.folder_watch_systems (same folder_exporter job, same T24-only applicability, two
-    different live verdicts). `backup_uncleared` is unconditionally inapplicable
-    everywhere -- a placeholder category with no detection built yet (see its own comment on
-    AlertGroup.CATEGORY_CHOICES). Every other category (disk/ram/cpu/unreachable, always
+    saved. Categories carrying a genuine static/live signal: `service` from generate_report's
+    own SERVICE_CHECKS (surfaced on the System.services topology object); `folder`/
+    `undrained_folders` from folders.folder_watch_systems (same folder_exporter job, same
+    T24-only applicability, two different live verdicts); `backup_uncleared` (2026-09-07,
+    real detection since alerting._backup_uncleared_flags_by_system) from
+    folders.backup_drainage_systems() -- live backup/log folder data, currently Temenos only,
+    same source `backup_drainage_systems()` already used for Per Alert Config's own backup
+    drainage override table. Every other category (disk/ram/cpu/unreachable, always
     structurally available; backup/untracked, which have no config-side declaration at all --
     entirely metric-driven, only ever visible from a live capture) is always applicable.
     """
@@ -2191,6 +4068,11 @@ def _category_grid_rows(group) -> list:
         all_systems = {}   # the Topology config screen itself; this grid degrades to
                             # "everything applicable" rather than failing to render at all.
     folder_systems = folders.folder_watch_systems(cfg.prometheus_yml)
+    # backup_uncleared (2026-09-07): real detection now exists (alerting.
+    # _backup_uncleared_flags_by_system) for the Temenos Backup & Log Folders specifically --
+    # applicable exactly where folders.backup_drainage_systems() has live backup/log folder
+    # data, the same "only offer it where there's real data" gating folder_systems above uses.
+    backup_drainage_systems = folders.backup_drainage_systems()
 
     chosen_by_system = group.categories or {}
     rows = []
@@ -2204,7 +4086,7 @@ def _category_grid_rows(group) -> list:
             if value in ("folder", "undrained_folders"):
                 return sys_name in folder_systems
             if value == "backup_uncleared":
-                return False   # placeholder category, no detection built anywhere yet
+                return sys_name in backup_drainage_systems
             return True
 
         cells = [{"category": value, "label": label, "checked": value in allowed,
@@ -2281,8 +4163,90 @@ def config_create_user(request):
 
 
 @login_required
+def config_users(request):
+    """The account-management screen -- deliberately SEPARATE from Roles (on request,
+    2026-09-04: "make user management a screen on its own, separate it from roles") and
+    superuser-only, grayed out (not merely hidden) on the Configuration hub itself for anyone
+    else (see _SUPERUSER_ONLY_CHILDREN). Roles still lets an Administrator manage who holds
+    which role -- that stays a role-level job, tested by
+    RoleWorkflow.test_administrator_sets_roles_directly, untouched by this screen's own gate --
+    but editing the ACCOUNT itself (profile, password, deletion, all on config_edit_user) is a
+    different kind of power, same reasoning AccountManagementAccess's own docstring already
+    gives for why that boundary sits on is_superuser, not is_role_admin.
+
+    A plain list + "Edit" per row; the actual editing (and its own superuser check, enforced
+    again there since a crafted URL must never rely on this list simply not linking to it) lives
+    on config_edit_user."""
+    if not is_superuser(request.user):
+        messages.error(request, "Only a superuser may manage user accounts.")
+        return redirect("configuration")
+
+    users = get_user_model().objects.all().prefetch_related("groups").order_by("username")
+    me = request.user
+    user_rows = [{
+        "u": u,
+        "roles": sorted(u.groups.values_list("name", flat=True)),
+        "is_me": u.pk == me.pk,
+    } for u in users]
+    return render(request, "reports/config_users.html", {
+        **_config_context("config_users", viewer_is_superuser=True),
+        "user_rows": user_rows,
+    })
+
+
+@login_required
+def config_edit_user(request, pk):
+    """Superuser-only: a full editing screen for one account (on request, 2026-09-04: "give
+    superuser the ability to modify existing user profile such as change email and
+    password... add an edit button... super admin can delete user, modify profile as well as
+    change password"). Profile fields (e-mail, first/last name) are handled entirely here --
+    genuinely new capability, no existing screen touched it. Password reset and delete are the
+    SAME actions the Roles console's own POST handler already offers (action=
+    reset_password/delete_user, posted to roles_console -- that endpoint's own logic is
+    untouched even though the UI that used to trigger it moved here, see config_users) --
+    reused as-is, not reimplemented, so this is a roomier front door onto identical,
+    already-tested server-side logic rather than a second copy of it.
+
+    Deliberately NOT relaxed to the Administrator role -- see AccountManagementAccess's own
+    docstring on why resetting a password is account takeover, a different kind of power from
+    managing roles, and was kept superuser-only on request (2026-09-04) even while building
+    this screen."""
+    target = get_object_or_404(get_user_model(), pk=pk)
+    if not is_superuser(request.user):
+        messages.error(request, "Only a superuser may edit accounts.")
+        return redirect("config_users")
+
+    if request.method == "POST" and request.POST.get("action") == "update_profile":
+        email = (request.POST.get("email") or "").strip()
+        if email:
+            try:
+                validate_email(email)
+            except ValidationError:
+                messages.error(request, "That doesn't look like a valid e-mail address.")
+                return redirect("config_edit_user", pk=target.pk)
+        target.email = email
+        target.first_name = (request.POST.get("first_name") or "").strip()
+        target.last_name = (request.POST.get("last_name") or "").strip()
+        target.save(update_fields=["email", "first_name", "last_name"])
+        messages.success(request, "Profile saved.")
+        return redirect("config_edit_user", pk=target.pk)
+
+    return render(request, "reports/config_edit_user.html", {
+        "target": target,
+        "passwords_are_local": not keycloak_mod.enabled(),
+        "deletable": (target.pk != request.user.pk
+                      and not (target.is_superuser and _other_superusers(target) == 0)),
+    })
+
+
+@login_required
 def system_settings(request):
-    """Administrator-only: the Prometheus/Grafana the dashboard fetches from (overrides config.ini)."""
+    """Administrator-only: the Prometheus/Grafana the dashboard fetches from (overrides
+    config.ini), plus which AI provider (if any) the Automated Reports engine's narrative
+    layer calls (2026-09-07 -- see reports/ai_narrative.py's own docstring). The two API key
+    fields follow the standard "blank means unchanged" convention rather than ever
+    re-displaying the real secret: a blank submission keeps whatever's already encrypted at
+    rest, a non-blank one replaces it."""
     denied = _require_admin(request)
     if denied:
         return denied
@@ -2291,9 +4255,16 @@ def system_settings(request):
         form = SystemConfigForm(request.POST, instance=sc)
         if form.is_valid():
             obj = form.save(commit=False)
+            obj.narrative_provider = request.POST.get("narrative_provider", "") or ""
+            anthropic_key = request.POST.get("anthropic_api_key", "").strip()
+            if anthropic_key:
+                obj.anthropic_api_key_encrypted = crypto.encrypt(anthropic_key)
+            copilot_key = request.POST.get("copilot_api_key", "").strip()
+            if copilot_key:
+                obj.copilot_api_key_encrypted = crypto.encrypt(copilot_key)
             obj.updated_by = request.user
             obj.save()
-            messages.success(request, "System settings saved — the next capture uses them.")
+            messages.success(request, "System settings saved — the next capture/report run uses them.")
             return redirect("system_settings")
     else:
         form = SystemConfigForm(instance=sc)
@@ -2302,6 +4273,9 @@ def system_settings(request):
         **_config_context("system_settings"),
         "form": form, "sc": sc,
         "config_prom": defaults.prom, "config_grafana": defaults.grafana,
+        "narrative_provider_choices": SystemConfig.NARRATIVE_PROVIDER_CHOICES,
+        "anthropic_key_set": bool(sc.anthropic_api_key_encrypted),
+        "copilot_key_set": bool(sc.copilot_api_key_encrypted),
     })
 
 
@@ -2639,26 +4613,25 @@ def roles_console(request):
 
         return redirect("roles_console")
 
+    return render(request, "reports/config_roles.html", {
+        **_config_context("config_roles"),
+        **_role_assignments_context(request),
+        **_role_scopes_context(),
+        "default_open": "assignments",
+    })
+
+
+def _role_assignments_context(request) -> dict:
+    """Who holds which role, and pending requests -- read-side only, reused by every entry
+    point onto the combined Roles page (see config_roles' own docstring). Account-level fields
+    (is_superuser/deletable/can_manage_accounts/passwords_are_local) used to live on these rows
+    too, back when Roles also rendered the account-actions "Manage" disclosure -- moved out
+    with that disclosure to Configuration > Users (2026-09-04: "make user management a screen
+    on its own, separate it from roles"), so this context is role-assignment-only now."""
     pending = RoleRequest.objects.filter(status="pending").select_related("user")
     users = get_user_model().objects.all().prefetch_related("groups").order_by("username")
-    me = request.user
-    # `deletable` is computed per row so the template never has to re-derive a rule the view
-    # already enforces — the two can then not drift into a button that promises what the
-    # POST handler refuses.
-    user_rows = [{
-        "u": u,
-        "roles": set(u.groups.values_list("name", flat=True)),
-        "is_superuser": u.is_superuser,
-        "is_me": u.pk == me.pk,
-        "deletable": (u.pk != me.pk
-                      and not (u.is_superuser and _other_superusers(u) == 0)),
-    } for u in users]
-    return render(request, "reports/roles.html", {
-        "pending": pending, "user_rows": user_rows, "role_names": ROLE_NAMES,
-        "can_manage_accounts": is_superuser(me),
-        # Local password resets are meaningless when Keycloak owns the credential.
-        "passwords_are_local": not keycloak_mod.enabled(),
-    })
+    user_rows = [{"u": u, "roles": set(u.groups.values_list("name", flat=True))} for u in users]
+    return {"pending": pending, "user_rows": user_rows, "role_names": ROLE_NAMES}
 
 
 def csrf_failure(request, reason="", template_name="reports/csrf_failure.html"):

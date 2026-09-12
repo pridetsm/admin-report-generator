@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Reporting · Configuration{% endblock %}
+
+{% comment %}
+  Report notifications -- the third notification family alongside Alerting and Events
+  (2026-09-08: "Automated reporting must be dependant on the Notification engine we have
+  already built... we also need Automated report Groups... in much the same way we have alert
+  groups to maintain a consistant design"). An AutomatedReportGroup has no systems and no
+  severity -- it just says which report types a stakeholder receives. See
+  reports.models.AutomatedReportGroup's own docstring. Relabelled "Reporting" (2026-09-12):
+  the six narrative Automated Report types plus, now, the unattended xlsx Active Directory
+  Report share this same group mechanism (reports.scheduled_xlsx_reports.XLSX_REPORT_TYPES),
+  so "Automated Report Groups" stopped being an accurate name for what this screen covers.
+{% endcomment %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="section-label">Reporting</div>
+  <p class="cfg-note" style="margin-top:0">Who receives which scheduled report — estate-wide, not per-system.</p>
+
+  <div class="section-label sub">Groups</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if groups %}
+    <table class="hist">
+      <thead><tr><th>Name</th><th>Report types</th><th>Stakeholders</th><th></th><th></th></tr></thead>
+      <tbody>
+      {% for g in groups %}
+        <tr class="rowlink" data-href="{% url 'config_automated_report_group_edit' g.pk %}">
+          <td><b>{{ g.name }}</b></td>
+          <td style="color:var(--muted)">
+            {% if g.report_types %}{{ g.report_types|length }}{% else %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">none yet</span>{% endif %}
+          </td>
+          <td style="color:var(--muted)">{{ g.stakeholder_count }}</td>
+          <td>{% if not g.active %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">paused</span>{% endif %}</td>
+          <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+               href="{% url 'config_automated_report_group_edit' g.pk %}">Open</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p style="margin:0;color:var(--muted);font-size:13px">No automated report groups defined yet.</p>
+    {% endif %}
+  </div></div>
+
+  <div class="section-label sub" style="margin-top:16px">Add a group</div>
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <form method="post">{% csrf_token %}
+      <div class="cfg-grid4">
+        <label class="field">
+          <span>Name</span>
+          <input type="text" name="name" placeholder="Executive Committee" required>
+        </label>
+      </div>
+      <button class="btn primary cfg-add" type="submit">＋ Create</button>
+    </form>
+  </div></div>
+
+  <div class="section-label sub" style="margin-top:22px">Report types</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <table class="hist">
+      <thead><tr><th>Report</th><th></th></tr></thead>
+      <tbody>
+        {% for value, label in report_type_choices %}
+        <tr>
+          <td><b>{{ label }}</b></td>
+          <td style="text-align:right;color:var(--muted);font-size:12px">{{ value }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="cfg-note" style="margin:10px 0 0">
+      Each group picks which of these it receives — a group can cover just one report type or all six.
+    </p>
+  </div></div>
+
+</div>
+{% endblock %}

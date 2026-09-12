@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Users · Configuration{% endblock %}
+
+{% comment %}
+  Account management, deliberately SEPARATE from Roles (2026-09-04: "make user management a
+  screen on its own, separate it from roles") -- Roles still owns who holds which role (an
+  Administrator's own job); this screen owns the account itself (profile, password, deletion),
+  superuser-only, grayed out on the Configuration hub for anyone else (views.py's own
+  _SUPERUSER_ONLY_CHILDREN). Editing one account's full form lives on config_edit_user, a
+  drill-down from each row's own "Edit" button here.
+{% endcomment %}
+
+{% block body %}
+<div class="container" style="max-width:900px">
+
+  <div class="section-label">Users</div>
+
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if not user_rows %}
+      <p style="margin:0;color:var(--muted);font-size:13px">No accounts found.</p>
+    {% else %}
+    <table class="hist">
+      <thead><tr><th>User</th><th>E-mail</th><th>Roles</th><th></th></tr></thead>
+      <tbody>
+      {% for row in user_rows %}
+        <tr class="rowlink" data-href="{% url 'config_edit_user' row.u.pk %}">
+          <td>
+            <b>{{ row.u.get_full_name|default:row.u.get_username }}</b>
+            <br><span style="color:var(--muted);font-size:12px">
+              {{ row.u.get_username }}{% if row.u.is_superuser %} · superuser{% endif %}{% if row.is_me %} · you{% endif %}
+            </span>
+          </td>
+          <td style="color:var(--muted)">{{ row.u.email|default:"—" }}</td>
+          <td style="color:var(--muted)">{{ row.roles|join:", "|default:"—" }}</td>
+          <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+               href="{% url 'config_edit_user' row.u.pk %}">Edit</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div></div>
+
+  <div style="margin-top:12px">
+    <a class="btn ghost cfg-add" href="{% url 'config_create_user' %}?next={{ request.path|urlencode }}">＋ Add user</a>
+  </div>
+
+</div>
+{% endblock %}

@@ -48,7 +48,9 @@ ROLE_PAGES = {
     # snapshot can only exist because a role-gated screen captured it. Nothing is widened by
     # letting the download itself belong to everyone.
     SYSTEM_ADMIN_ROLE:   {"reports", "report_form", "report", "history", "submission_detail",
-                          "connect", "folder_watch", "folder_watch_temenos", "folder_watch_data"},
+                          "connect", "folder_watch", "folder_watch_temenos", "folder_watch_data",
+                          "automated_reports", "automated_report_type", "automated_report_detail",
+                          "automated_report_toggle_distribution", "automated_report_download"},
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.
     # `network_sod_generate` sits alongside its screen for the same reason `generate` is
@@ -57,13 +59,28 @@ ROLE_PAGES = {
     # as a screen the role "adds".
     NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report", "history",
                           "submission_detail", "connect",
-                          "network_sod_select", "network_sod", "network_sod_generate"},
+                          "network_sod_select", "network_sod", "network_sod_generate",
+                          # Active Directory Report (2026-09-11) is owned by Infrastructure
+                          # Admin (see that role's own comment below) but Network Admin gets
+                          # view access too -- see roles.REPORTS' own entry for the on-tile
+                          # ownership hint.
+                          "active_directory_form", "active_directory_report"},
     # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
     # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
     # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
     # so that one page belongs to every estate rather than needing an infra_generate twin.
+    #
+    # Active Directory (Root/Child Domain Controllers, AD Sync & Authentication) was split
+    # out of this combined picker into its own report (2026-09-11, on request: "separate the
+    # Active Directory section to be its own report under the infrastructure role... the
+    # networks role can also have this") -- Infrastructure Admin is its real owner (same
+    # "underlying hardware" framing as HCI/Oracle above), Network Admin gets the same page
+    # listed on its own role just above. "active_directory_generate" is deliberately NOT
+    # listed here, same as "infra_generate"/"generate" above -- a POST-only step inside the
+    # report, not a screen of its own.
     INFRA_ADMIN_ROLE:    {"reports", "infra_form", "infra_report", "history",
-                          "submission_detail", "connect"},
+                          "submission_detail", "connect",
+                          "active_directory_form", "active_directory_report"},
     ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
                           "prometheus_config", "prometheus_rule_file",
                           "configuration", "config_yaml", "config_role_scopes",
@@ -76,7 +93,9 @@ ROLE_PAGES = {
     # PAGE_OWNER became a set: as a single owner, whichever role lost the tie was bounced off
     # a screen that is genuinely theirs.
     SECURITY_ADMIN_ROLE: {"reports", "report_form", "report", "os_inventory",
-                          "history", "submission_detail", "connect"},
+                          "history", "submission_detail", "connect",
+                          "automated_reports", "automated_report_type", "automated_report_detail",
+                          "automated_report_toggle_distribution", "automated_report_download"},
     # One role still has no estate. Deliberately empty rather than borrowing another role's
     # dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),
@@ -126,7 +145,9 @@ for _role, _pages in ROLE_PAGES.items():
 # ROLE_PAGES' own comment. Counting them as screens "added" by System Admin (or Network/
 # Infrastructure/Security Admin) would misrepresent a shared utility as that role's own estate.
 NON_SCREEN_PAGES = {"folder_watch_data", "report", "generate", "network_sod_generate",
-                    "history", "connect", "submission_detail"}
+                    "history", "connect", "submission_detail",
+                    "automated_report_type", "automated_report_detail",
+                    "automated_report_toggle_distribution", "automated_report_download"}
 
 
 def role_screens(role) -> list:
@@ -396,11 +417,41 @@ REPORTS = [
         "The hardware underneath the systems — hyper-converged clusters and standalone "
         "database hosts.",
         "infra_form", {INFRA_ADMIN_ROLE}, "img/reports/infrastructure.png"),
+    # Split out of the Infrastructure Admin Report above (2026-09-11, on request: "separate
+    # the Active Directory section to be its own report under the infrastructure role... the
+    # networks role can also have this"). Infrastructure Admin is the real owner (Root/Child
+    # DCs and AD Sync/PTA are hardware hosts, same estate as HCI/Oracle above); the blurb
+    # names that explicitly rather than building a second role-conditional-label mechanism
+    # like _automated_reports_label's -- that one exists because ONE feature needs a
+    # DIFFERENT NAME per viewing role, which isn't the case here: both roles see the same
+    # name, just one of them is a guest. Icon supplied 2026-09-11 (a folder/directory-tree
+    # glyph) -- flat art on a transparent background, same as every other file in img/reports/,
+    # so .grad-glyph's own CSS mask recolours it through the app's accent gradient exactly like
+    # the rest regardless of whatever colour the source PNG itself was drawn in (mask-image
+    # reads the alpha channel, not the RGB values).
+    ReportOption(
+        "active_directory", "Active Directory Report",
+        "Domain controllers and AD-adjacent servers — Root/Child DCs, AD Sync & "
+        "Authentication, and NTP time-sync health. Owned by Infrastructure Admin; Network "
+        "Admin has view access too.",
+        "active_directory_form", {INFRA_ADMIN_ROLE, NETWORK_ADMIN_ROLE},
+        "img/reports/active-directory.png"),
     ReportOption(
         "os_inventory", "OS Inventory Report",
         "Every monitored host's operating system, patch level against the newest build in "
         "this estate, and vendor support status.",
         "os_inventory", {SECURITY_ADMIN_ROLE}, "img/reports/os-inventory.png"),
+    # Automated Reports (New Promt.txt, section 17): six scheduled trend/analysis report
+    # types built on top of the same System Health data these two roles already run reports
+    # against -- not a new estate, so it shares their existing tile screen rather than
+    # getting one of its own.
+    ReportOption(
+        "automated_reports", "Automated Reports",
+        "Scheduled trend analysis — recurring issues, system attention, administrator "
+        "comment themes and anomaly history, generated automatically from the same "
+        "monitoring data.",
+        "automated_reports", {SYSTEM_ADMIN_ROLE, SECURITY_ADMIN_ROLE},
+        "img/reports/automated-reports.png"),
 ]
 
 

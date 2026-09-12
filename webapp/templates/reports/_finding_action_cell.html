@@ -1,0 +1,27 @@
+{% comment %}
+  One finding's Comment / Fix needed? / Resolved -- 2026-09-10, item 10a. Included from both
+  the Persistent and Recurring tables in automated_report_download.html (they need the
+  identical cell, not two copies of the same form markup). `r` is one persistent_table/
+  recurring_table row (report_charts.finding_table's own output, carrying the action_* fields
+  through unchanged from AutomatedReport.content -- see automated_reports._issue_to_dict).
+{% endcomment %}
+<form method="post" action="{% url 'automated_finding_action' %}" class="action-form">
+  {% csrf_token %}
+  <input type="hidden" name="system" value="{{ r.system }}">
+  <input type="hidden" name="flag_key" value="{{ r.flag_key }}">
+  <input type="hidden" name="next" value="{{ action_next_url }}">
+  <textarea name="comment" rows="1" class="action-comment" placeholder="Comment…">{{ r.action_comment }}</textarea>
+  <div class="action-row">
+    <select name="fix_needed" class="action-select" aria-label="Fix needed?">
+      <option value="" {% if not r.action_fix_needed %}selected{% endif %}>Fix needed?</option>
+      <option value="yes" {% if r.action_fix_needed == "yes" %}selected{% endif %}>Fix: Yes</option>
+      <option value="no" {% if r.action_fix_needed == "no" %}selected{% endif %}>Fix: No</option>
+    </select>
+    <select name="resolved" class="action-select" aria-label="Resolved?">
+      <option value="" {% if not r.action_resolved %}selected{% endif %}>Resolved?</option>
+      <option value="yes" {% if r.action_resolved == "yes" %}selected{% endif %}>Resolved: Yes</option>
+      <option value="no" {% if r.action_resolved == "no" %}selected{% endif %}>Resolved: No</option>
+    </select>
+    <button type="submit" class="action-save">Save</button>
+  </div>
+</form>

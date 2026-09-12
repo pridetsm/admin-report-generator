@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>{{ report.label }}</title></head>
+<body style="margin:0;padding:0;background:#F0EEE7;font-family:Segoe UI,Arial,sans-serif;color:#16233A">
+<span style="display:none;font-size:1px;color:#F0EEE7;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden">
+  {{ report.label }} — {{ report.total_issues }} distinct issues this window. View the full report or open the attached PDF.
+</span>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F0EEE7;padding:24px 0">
+  <tr><td align="center">
+    <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border:1px solid #DAD4C6">
+      <tr><td style="background:#16233A;padding:22px 28px">
+        <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+          {% if chart_cids.logo %}
+          <td style="padding-right:10px;vertical-align:middle"><img src="cid:{{ chart_cids.logo }}" width="22" height="22" alt="Reserve Bank of Zimbabwe" style="display:block"></td>
+          {% endif %}
+          <td style="vertical-align:middle">
+            <div style="font-family:Consolas,monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#B8935A">RBZ Monitoring Console &middot; Automated Reports</div>
+          </td>
+        </tr></table>
+        <div style="font-size:22px;color:#FFFFFF;margin-top:6px;font-family:Georgia,serif">{{ report.label }}</div>
+        <div style="font-size:12.5px;color:#C7C0AF;margin-top:6px">{{ report.window_start|slice:":10" }} &ndash; {{ report.window_end|slice:":10" }} &middot; {{ report.window_days }}-day window &middot; generated {{ instance.generated_at|date:"d M Y, H:i" }}</div>
+      </tr></td>
+      <tr><td style="padding:18px 28px;border-bottom:1px solid #DAD4C6;font-size:12px;color:#6B6558">
+        {% if report.ai_provider == 'offline' %}Statistics-based analysis{% else %}AI-assisted commentary (provider: <b style="color:#16233A">{{ report.ai_provider }}</b>){% endif %}
+        &nbsp;&middot;&nbsp; {{ report.total_issues }} distinct issues observed this window
+        {% if report.ai_error %}<br>AI note: {{ report.ai_error }}{% endif %}
+      </td></tr>
+
+      {% comment %}
+        KPI row -- a plain table, not CSS-grid tiles (item 25/5: table-based layout
+        throughout). Same 4 counts/order/colors the web KPI strip and PDF kpi-table both use.
+      {% endcomment %}
+      <tr><td style="padding:18px 28px;border-bottom:1px solid #DAD4C6">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+          <td width="25%" align="center" style="border-right:1px solid #DAD4C6">
+            <div style="font-family:Georgia,serif;font-size:22px;color:#d14a3a">{{ persistent_count }}</div>
+            <div style="font-family:Consolas,monospace;font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:#6B6558;margin-top:2px">Persistent</div>
+          </td>
+          <td width="25%" align="center" style="border-right:1px solid #DAD4C6">
+            <div style="font-family:Georgia,serif;font-size:22px;color:#b8790a">{{ recurring_count }}</div>
+            <div style="font-family:Consolas,monospace;font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:#6B6558;margin-top:2px">Recurring</div>
+          </td>
+          <td width="25%" align="center" style="border-right:1px solid #DAD4C6">
+            <div style="font-family:Georgia,serif;font-size:22px;color:#1a6fc4">{{ report.anomalies|length|default:0 }}</div>
+            <div style="font-family:Consolas,monospace;font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:#6B6558;margin-top:2px">Potential flukes</div>
+          </td>
+          <td width="25%" align="center">
+            <div style="font-family:Georgia,serif;font-size:22px;color:#7fa8d1">{{ report.one_off_issues|length|default:0 }}</div>
+            <div style="font-family:Consolas,monospace;font-size:9.5px;letter-spacing:.5px;text-transform:uppercase;color:#6B6558;margin-top:2px">One-off</div>
+          </td>
+        </tr></table>
+      </td></tr>
+
+      {% if top_findings or pareto_share_pct %}
+      <tr><td style="padding:20px 28px;border-bottom:1px solid #DAD4C6">
+        {% if pareto_share_pct %}
+        <div style="background:#e6f0fb;border-left:3px solid #1a6fc4;border-radius:6px;padding:12px 16px;font-size:13.5px;color:#16233A;margin-bottom:16px">
+          <b>{{ pareto_systems|length }} of {{ report.system_attention|length }} systems</b>
+          ({{ pareto_systems|slice:":5"|join:", " }}{% if pareto_systems|length > 5 %} &hellip;{% endif %})
+          account for <b>{{ pareto_share_pct }}%</b> of active (persistent/recurring) issues this window.
+        </div>
+        {% endif %}
+        {% if top_findings %}
+        <div style="font-family:Georgia,serif;font-size:15px;color:#16233A;margin-bottom:8px">Top findings this window</div>
+        <ul style="margin:0;padding-left:18px;font-size:13px;color:#3A4A63;line-height:1.7">
+          {% for i in top_findings %}
+          <li><b>{{ i.system }}</b> &middot; <span style="font-family:Consolas,monospace;font-size:11.5px;color:#6B6558">{{ i.flag_key }}</span> &mdash; {{ i.label }} ({{ i.distinct_days }}/{{ i.span_days }}d)</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </td></tr>
+      {% endif %}
+
+      {% comment %}
+        Two headline visuals (item 5's own approved structure): Pareto chart + classification
+        donut, rasterized server-side from the same chart components the web/PDF use.
+      {% endcomment %}
+      {% if chart_cids.pareto %}
+      <tr><td style="padding:20px 28px;border-bottom:1px solid #DAD4C6;text-align:center">
+        <div style="font-family:Georgia,serif;font-size:16px;color:#16233A;margin-bottom:10px;text-align:left">Systems Ranked by Active Issues</div>
+        <img src="cid:{{ chart_cids.pareto }}" alt="Systems ranked by active-issue count, with cumulative percentage" style="max-width:100%">
+      </td></tr>
+      {% endif %}
+      {% if chart_cids.donut %}
+      <tr><td style="padding:20px 28px;border-bottom:1px solid #DAD4C6;text-align:center">
+        <div style="font-family:Georgia,serif;font-size:16px;color:#16233A;margin-bottom:10px;text-align:left">Issue Breakdown</div>
+        <img src="cid:{{ chart_cids.donut }}" alt="Issue breakdown" style="max-width:100%">
+      </td></tr>
+      {% endif %}
+
+      {% comment %}
+        Two CTAs (item 5/item 6's own approved structure): a working link to the full web
+        report, and the PDF as a genuine attachment (never one without the other -- see this
+        module's own docstring).
+      {% endcomment %}
+      <tr><td style="padding:22px 28px;text-align:center">
+        <a href="{{ report_url }}" style="display:inline-block;background:#16233A;color:#FFFFFF;font-family:Segoe UI,Arial,sans-serif;font-size:13.5px;font-weight:600;text-decoration:none;padding:11px 26px;border-radius:6px">View full report &rarr;</a>
+        <div style="margin-top:12px;font-size:12px;color:#6B6558">Every chart, table and section — including System Areas Requiring Attention and Potential Anomalies — is also attached as a PDF.</div>
+      </td></tr>
+
+      <tr><td style="padding:16px 28px;background:#F6F4EF;font-family:Consolas,monospace;font-size:11px;color:#6B6558">
+        Generated automatically by the RBZ Monitoring Console.
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>

@@ -1,0 +1,898 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ report.label }} — {{ instance.generated_at|date:"d M Y" }}</title>
+{% comment %}
+  Chart.js -- vendored locally (static/js/vendor/chart.umd.min.js), not loaded from a CDN:
+  this console already treats "no external fetch at render time" as a rule for images (see
+  reports/alert_email_images.py's own comment), and the same reasoning applies to script the
+  browser would otherwise pull from a third party every time someone opens a report. Chosen
+  over Plotly/D3/ECharts as the single most widely used general-purpose charting library
+  (by a wide margin in both GitHub stars and weekly npm downloads) -- clean default styling,
+  no build step, works from one script tag.
+
+  chartjs-plugin-zoom -- vendored the same way, for items 33-37's drag/pinch/preset-range
+  cluster zoom on the Hourly Activity charts only (registered where those charts are built,
+  below). v2.2.0's pinch gesture no longer needs Hammer.js at all (dropped as a dependency
+  upstream), so nothing else needs vendoring alongside it.
+{% endcomment %}
+<script>
+  // Same pre-paint theme read as base.html's own script (2026-09-07, on request: "have report
+  // respond to system theme") -- this page has its own <html>/<head> (it's the browser-facing
+  // twin of a downloadable file, not a base.html child), so without this it never saw whatever
+  // explicit light/dark choice the user already made elsewhere in the console, only the OS-
+  // level prefers-color-scheme below. Reading the SAME localStorage key ("pageTheme") base.html
+  // writes means a choice made on any other screen carries over here too.
+  (function () {
+    var t = localStorage.getItem("pageTheme");
+    if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
+<script src="{% static 'js/vendor/chart.umd.min.js' %}"></script>
+<script src="{% static 'js/vendor/chartjs-plugin-zoom.min.js' %}"></script>
+<style>
+  :root {
+    /* --gold is the report's own BRAND accent (eyebrow dot, section numbers) -- decorative,
+       never used to mean a status. --red/--amber/--green/--blue are this console's actual
+       status colours (same hex values as static/css/app.css's light theme: chips, KPI
+       states, banners elsewhere in the app), reused here rather than re-derived from the
+       report's own branding, so "red" means the same thing on this page as everywhere else
+       in the console. See reports/report_charts.py's own docstring for the full rationale. */
+    --ink: #16233A; --ink-soft: #3A4A63; --paper: #F6F4EF; --surface: #FFFFFF;
+    --gold: #B8935A; --gold-soft: #F0E6D6; --line: #DAD4C6; --line-soft: #E8E4D9; --muted: #6B6558;
+    --red: #d14a3a; --red-soft: #fdebea; --amber: #b8790a; --amber-soft: #fff6e0;
+    --green: #0e9c74; --green-soft: #e8f6f0; --blue: #1a6fc4; --blue-soft: #e6f0fb;
+    --shadow: 0 1px 2px rgba(22,35,58,0.06), 0 8px 24px rgba(22,35,58,0.05);
+  }
+  /* Same three-way precedence base.html's own stylesheet (app.css) uses: bare :root is light
+     (above); an explicit in-app "dark" choice always wins (bottom block); absent that, OS-level
+     prefers-color-scheme decides, but :not([data-theme="light"]) lets an explicit "light"
+     choice still override a dark OS preference. Without that guard, someone who explicitly
+     picked light on a dark-mode OS would see this one page ignore their choice. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #E9E4D8; --ink-soft: #C7C0AF; --paper: #14181F; --surface: #1B212C;
+      --gold: #D2AC78; --gold-soft: #362C1E; --line: #333B48; --line-soft: #262D38; --muted: #9A9384;
+      --red: #ef6a5a; --red-soft: #3a1a16; --amber: #e8b04b; --amber-soft: #3a2f14;
+      --green: #4cc9a4; --green-soft: #14322b; --blue: #2dc7e6; --blue-soft: #123a4f;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #E9E4D8; --ink-soft: #C7C0AF; --paper: #14181F; --surface: #1B212C;
+    --gold: #D2AC78; --gold-soft: #362C1E; --line: #333B48; --line-soft: #262D38; --muted: #9A9384;
+    --red: #ef6a5a; --red-soft: #3a1a16; --amber: #e8b04b; --amber-soft: #3a2f14;
+    --green: #4cc9a4; --green-soft: #14322b; --blue: #2dc7e6; --blue-soft: #123a4f;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper); color: var(--ink); margin: 0; padding: 56px 24px 96px;
+    font-family: "Segoe UI", "Segoe UI Variable", system-ui, sans-serif; font-size: 15.5px; line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2 { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif; color: var(--ink); font-weight: 400; }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  .eyebrow {
+    font-family: Consolas, "Cascadia Code", monospace; font-size: 11.5px; letter-spacing: 0.11em;
+    text-transform: uppercase; color: var(--muted); display: flex; gap: 10px; align-items: center; margin-bottom: 14px;
+  }
+  .eyebrow .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--gold); flex: none; }
+  /* Same brand-mark.png base.html's own header already uses everywhere else in the console
+     (2026-09-10, item 32) -- not a re-sourced/re-exported logo file. */
+  .report-logo { height: 20px; width: 20px; object-fit: contain; flex: none; }
+  h1 { font-size: 32px; line-height: 1.18; margin: 0 0 10px; letter-spacing: -0.01em; }
+  .subtitle { color: var(--ink-soft); font-size: 15.5px; max-width: 66ch; margin: 0; }
+  .meta-row {
+    margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line);
+    display: flex; gap: 24px; flex-wrap: wrap; font-size: 13px; color: var(--muted); align-items: center;
+  }
+  .ai-badge {
+    font-family: Consolas, monospace; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+    padding: 4px 10px; border-radius: 4px; text-transform: uppercase;
+  }
+  .ai-on { background: var(--gold-soft); color: var(--gold); }
+  .ai-off { background: var(--line-soft); color: var(--muted); }
+  .kpi-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 28px 0 24px; }
+  /* Chart.js with maintainAspectRatio:false sizes the canvas to fill its PARENT's height --
+     if that parent's own height is left to "however tall its content is" (the canvas being
+     the content), the two chase each other and the canvas grows without bound on every
+     resize tick. Every chart container needs an explicit CSS height, not just the canvas's
+     own height="" attribute (which only sets Chart.js's initial internal resolution, not the
+     box Chart.js resizes it to fit). 280px is the shared default; charts whose content count
+     varies (attention/themes bars) override it inline with a calc()'d height instead. */
+  .chart-box { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; box-shadow: var(--shadow); margin-bottom: 40px; height: 280px; box-sizing: border-box; }
+  .chart-box canvas { max-width: 100%; }
+  .chart-box-row { display: flex; gap: 16px; }
+  .chart-box-row > div { flex: 1; min-width: 140px; height: 100%; display: flex; flex-direction: column; }
+  .chart-box-row canvas { flex: 1; min-height: 0; }
+  .kpi { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; box-shadow: var(--shadow); }
+  .kpi .n { font-family: Georgia, serif; font-size: 28px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .kpi .l { font-family: Consolas, monospace; font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-top: 2px; }
+  .kpi.persistent .n { color: var(--red); }
+  .kpi.recurring .n { color: var(--amber); }
+  /* Matches issue_breakdown_donut's own slice colors exactly (report_charts.py's _BLUE/
+     _BLUE_SOFT) -- both fixes, unlike --red/--amber above, use a literal hex rather than a
+     theme-aware CSS var: the donut itself is a matplotlib PNG with no dark-mode concept (see
+     that module's own docstring), so a tile that shifted color between themes would drift
+     from its own chart's unchanging slice color instead of matching it. */
+  .kpi.fluke .n { color: #1a6fc4; }
+  .kpi.oneoff .n { color: #7fa8d1; }
+  section.sec { margin: 0 0 40px; padding-top: 30px; border-top: 1px solid var(--line-soft); }
+  section.sec:first-of-type { border-top: none; padding-top: 0; }
+  .sec h2 { font-size: 20px; margin: 0 0 12px; display: flex; align-items: center; gap: 10px; }
+  .sec h2 .n { font-family: Consolas, monospace; font-size: 13px; color: var(--gold); }
+  .sec p.body { color: var(--ink-soft); max-width: 72ch; margin: 0 0 6px; }
+  /* Narrative sections render as terse bullet points, one idea per line (2026-09-07, on
+     request), not a flowing paragraph -- ai_narrative.narrative_sections' own "bits" list,
+     already one discrete finding/recommendation per entry before this. */
+  .sec ul.bits { margin: 0 0 8px; padding-left: 20px; max-width: 72ch; }
+  .sec ul.bits li { color: var(--ink-soft); margin-bottom: 6px; line-height: 1.55; }
+  /* Everything under a heading nests one step further right than the heading itself (2026-09-08,
+     on request) -- the same left-rule + indent automated_reports.html already uses to mark
+     "this belongs to that" (see that page's own .ar-status-note/.ar-latest). Stacks cleanly:
+     nesting one .indent inside another (a category label's body inside a sub-heading's body
+     inside a numbered section's body) compounds the same fixed step each level, rather than
+     needing a distinct rule per depth. */
+  .indent { border-left: 2px solid var(--line); padding-left: 16px; margin-left: 2px; }
+  table.data { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13.5px; }
+  table.data th {
+    text-align: left; padding: 8px 12px; font-family: Consolas, monospace; font-weight: 600;
+    color: var(--muted); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+    border-bottom: 1px solid var(--line);
+  }
+  table.data td { padding: 10px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  table.data td.num { font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
+  table.data td.empty { color: var(--muted); font-style: italic; text-align: center; padding: 18px; }
+  .scrollbox { overflow-x: auto; }
+  /* Every diagram's own "what this shows" line (2026-09-07, on request) -- smaller and
+     italicised than ordinary body copy so it reads as a caption, not another paragraph of the
+     surrounding narrative, and centred so it sits under the diagram it describes rather than
+     trailing off to the left like left-aligned body text would. */
+  .diagram-note { font-size: 11px; font-style: italic; color: var(--muted);
+    text-align: center; margin: 0 0 20px; }
+  /* Interactive heatmap grid -- the web view's counterpart to report_charts.issue_occurrence_
+     heatmap's static PNG (2026-09-07, on request: hovering a cell should describe it, and the
+     page should animate in the way this page's live Chart.js canvases already do -- neither is
+     possible on a flat image). Server-rendered (reports.report_charts.heatmap_grid computes
+     every cell's colour/tooltip in Python, the same colour logic the PNG version uses), so no
+     client-side data-wiring is needed for this one -- just CSS for the hover tooltip and the
+     load-in animation. */
+  table.heatgrid { border-collapse: separate; border-spacing: 3px; font-size: 12px; margin: 10px 0 18px; }
+  table.heatgrid th { padding: 4px 6px; font-family: Consolas, monospace; font-size: 10px;
+    color: var(--muted); font-weight: 600; text-align: center; white-space: nowrap; }
+  table.heatgrid th.row-label, table.heatgrid td.row-label { text-align: left; font-weight: 600;
+    padding-right: 14px; white-space: nowrap; font-size: 13px; }
+  table.heatgrid td { padding: 0; }
+  table.heatgrid .cell {
+    display: flex; align-items: center; justify-content: center;
+    min-width: 56px; height: 32px; border-radius: 4px; padding: 0 6px;
+    font-weight: 700; font-variant-numeric: tabular-nums; position: relative; cursor: default;
+    animation: heatcell-in .4s ease both;
+  }
+  @keyframes heatcell-in { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: scale(1); } }
+  table.heatgrid .cell[data-tooltip]:hover::after {
+    content: attr(data-tooltip); position: absolute; bottom: 130%; left: 50%;
+    transform: translateX(-50%); background: var(--ink); color: var(--surface);
+    padding: 5px 9px; border-radius: 4px; font-size: 11.5px; font-weight: 500;
+    white-space: nowrap; z-index: 10; box-shadow: var(--shadow); pointer-events: none;
+  }
+  table.heatgrid .cell[data-tooltip]:hover::before {
+    content: ""; position: absolute; bottom: 118%; left: 50%; transform: translateX(-50%);
+    border: 5px solid transparent; border-top-color: var(--ink); z-index: 10; pointer-events: none;
+  }
+  /* Heatmap zoom controls (2026-09-07, on request) -- same border/radius/hover language as
+     .app-btn above so a new widget still reads as part of this page's existing button family
+     rather than a one-off. Saved to localStorage per grid (see this template's own script
+     block) and carried into the PDF download link as a query param, so "download PDF" matches
+     whatever zoom level was last set here -- the one piece of state this page persists that
+     the server-rendered PDF also honours. */
+  .zoom-bar { display: flex; align-items: center; gap: 6px; margin: 10px 0 6px; }
+  .zoom-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 26px; height: 26px; font-family: Consolas, monospace; font-size: 14px; font-weight: 700;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    border-radius: 6px; cursor: pointer; line-height: 1; padding: 0;
+  }
+  .zoom-btn:hover { border-color: var(--gold); }
+  .zoom-btn.zoom-reset { width: auto; padding: 0 10px; font-size: 11px; font-weight: 600; }
+  .zoom-pct { font-family: Consolas, monospace; font-size: 12px; color: var(--muted); min-width: 38px; text-align: center; }
+  /* Per-system cluster time-range control (2026-09-10, items 33-37) -- same button language as
+     .zoom-btn above, but this is a DIFFERENT kind of zoom (analytical time-range drill-down on
+     the Hourly Activity line charts, not a display-magnification preference on the heatmaps),
+     so it deliberately does NOT reuse .zoom-bar's own state (no localStorage, no PDF query
+     param -- see this file's own script block for why). The "Full" button doubles as reset. */
+  .range-bar { display: flex; align-items: center; gap: 6px; margin: 4px 0 10px; flex-wrap: wrap; }
+  .range-bar .range-label { font-family: Consolas, monospace; font-size: 10.5px; color: var(--muted); margin-right: 2px; }
+  .range-btn { width: auto; padding: 0 9px; font-size: 10.5px; font-weight: 600; }
+  .range-btn[aria-pressed="true"] { border-color: var(--gold); background: var(--gold); color: #16233A; }
+  .flagkey { font-family: Consolas, monospace; font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .banddot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; }
+  .band-red { background: var(--red); } .band-amber { background: var(--amber); }
+  .pill { font-family: Consolas, monospace; font-size: 10.5px; font-weight: 700; padding: 3px 8px; border-radius: 4px; letter-spacing: 0.03em; }
+  .pill.Persistent { background: var(--red-soft); color: var(--red); }
+  .pill.Recurring { background: var(--amber-soft); color: var(--amber); }
+  .pill.Potential, .pill.One-off { background: var(--blue-soft); color: var(--blue); }
+  /* Distinct from ordinary body copy (2026-09-10, on request: this note "currently blends
+     into body text despite representing ~28% of all issues found") -- same tint pairing as
+     .pill.One-off above, so it visually pairs with the KPI tile it's talking about rather than
+     introducing a new color just for this one box. 2026-09-10: this note did not previously
+     exist on web at all (PDF-only) -- added here too for parity. */
+  .callout { background: var(--blue-soft); border-left: 3px solid var(--blue); border-radius: 6px;
+    padding: 10px 14px; font-size: 13px; color: var(--ink-soft); margin: 10px 0 4px; }
+  /* Per-finding action fields (2026-09-10, item 10a) -- a row with neither Fix needed? nor
+     Resolved ever recorded gets a subtle amber tint (row-level, not just the action cell) so
+     it's visible while scanning the whole table, matching the spec's own "highlight rows...
+     instead of listing them again in a separate section" instruction. */
+  tr.action-unset { background: var(--amber-soft); }
+  .action-form { display: flex; flex-direction: column; gap: 5px; min-width: 190px; }
+  .action-comment { font-size: 11.5px; font-family: "Segoe UI", system-ui, sans-serif; padding: 4px 6px;
+    border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--ink);
+    resize: vertical; min-height: 26px; }
+  .action-row { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  .action-select { font-size: 10.5px; padding: 3px 4px; border: 1px solid var(--line); border-radius: 4px;
+    background: var(--surface); color: var(--ink); }
+  .action-save { font-size: 10.5px; font-weight: 600; padding: 3px 9px; border-radius: 4px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+  .action-save:hover { border-color: var(--gold); }
+  .conf { font-size: 10.5px; color: var(--muted); margin-top: 3px; }
+  .comment { margin-top: 6px; font-size: 12.5px; color: var(--ink-soft); font-style: italic; }
+  .comment-date { font-family: Consolas, monospace; font-style: normal; font-size: 10.5px; color: var(--muted); }
+  footer.colophon { margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); font-family: Consolas, monospace; }
+  @media print { body { padding: 0; background: var(--surface); } .kpi { box-shadow: none; } .app-bar, .app-messages { display: none; } }
+  /* In-app-only chrome (never present in the downloaded file -- see the "inline" context flag
+     the view sets only on the browsable URL, not the attachment one): a way back to the
+     Automated Reports screen, and the actions that only make sense while inside the app. */
+  .app-bar { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; flex-wrap: wrap; }
+  .app-back { font-size: 13px; color: var(--muted); text-decoration: none; }
+  .app-back:hover { color: var(--ink); }
+  .app-actions { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+  .app-btn {
+    display: inline-flex; align-items: center; font-family: "Segoe UI", system-ui, sans-serif;
+    font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    cursor: pointer; text-decoration: none;
+  }
+  .app-btn:hover { border-color: var(--gold); text-decoration: none; }
+  .app-messages { list-style: none; padding: 0; margin: 0 0 20px; font-family: "Segoe UI", system-ui, sans-serif; }
+  .app-messages li { padding: 9px 14px; border-radius: 7px; margin-bottom: 8px; font-size: 13.5px; }
+  .app-messages li.success { background: #E4EEE6; color: #2F6B45; }
+  .app-messages li.error { background: var(--red-soft); color: var(--red); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  {% if inline %}
+  {% if messages %}
+  <ul class="app-messages">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>
+  {% endif %}
+  <div class="app-bar">
+    <a class="app-back" href="{% url 'automated_report_type' instance.report_type %}">‹ Back to {{ report.label }} history</a>
+    <div class="app-actions">
+      <a class="app-btn" id="downloadPdfLink" href="{% url 'automated_report_download' instance.report_type instance.pk %}">Download PDF</a>
+      {% if can_send %}
+      <form method="post" style="margin:0">{% csrf_token %}
+        <input type="hidden" name="action" value="send_now">
+        <button class="app-btn" type="submit">Send this report now</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+  <div class="eyebrow">
+    <img src="{% static 'img/brand-mark.png' %}" alt="Reserve Bank of Zimbabwe" class="report-logo">
+    <span class="dot"></span> RBZ Monitoring Console — Automated Reports
+  </div>
+  <h1>{{ report.label }}</h1>
+  <p class="subtitle">{{ report.window_start|slice:":10" }} — {{ report.window_end|slice:":10" }} · {{ report.window_days }}-day window · generated {{ instance.generated_at|date:"d M Y, H:i" }}</p>
+  <div class="meta-row">
+    <span class="ai-badge {% if report.ai_provider == 'offline' %}ai-off{% else %}ai-on{% endif %}">
+      {% if report.ai_provider == 'offline' %}Statistics-based analysis{% else %}AI-assisted commentary ({{ report.ai_provider }}){% endif %}
+    </span>
+    <span>{{ report.total_issues }} distinct issues observed</span>
+    {% if report.ai_error %}<span>AI note: fell back to offline</span>{% endif %}
+  </div>
+
+  <div class="kpi-strip">
+    <div class="kpi persistent"><div class="n">{{ persistent_count }}</div><div class="l">Persistent</div></div>
+    <div class="kpi recurring"><div class="n">{{ recurring_count }}</div><div class="l">Recurring</div></div>
+    <div class="kpi fluke"><div class="n">{{ report.anomalies|length }}</div><div class="l">Potential flukes</div></div>
+    <div class="kpi oneoff"><div class="n">{{ report.one_off_issues|length }}</div><div class="l">One-off</div></div>
+  </div>
+  <p class="diagram-note" style="text-align:left;margin:-16px 0 24px">
+    <b>Persistent</b> = active 3+ distinct days, 70%+ of the days since it started — rarely
+    clears. <b>Recurring</b> = active 3+ distinct days below that 70% — clears, then comes
+    back. Full detail in §04 below.
+  </p>
+
+  {{ chart_data|json_script:"chart-data" }}
+  <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:16px">
+    <div>
+      <div class="chart-box" style="margin-bottom:8px"><canvas id="donutChart" height="140"></canvas></div>
+      <p class="diagram-note">Every distinct issue this window, split by classification. Hover
+        a slice for its exact count.</p>
+    </div>
+    <div id="estateHealthWrap" style="display:none">
+      <div class="chart-box" id="estateHealthBox" style="margin-bottom:8px"><canvas id="estateHealthChart" height="140"></canvas></div>
+      <p class="diagram-note">Every monitored system in the estate, not just ones with an open
+        issue — how much of it is healthy right now.</p>
+    </div>
+    {% if extra_charts.category_breakdown %}
+    <div>
+      <div class="chart-box" style="margin-bottom:8px"><img src="{{ extra_charts.category_breakdown }}" style="width:100%;height:100%;object-fit:contain"></div>
+      <p class="diagram-note">Active (Persistent + Recurring) load, split by resource category —
+        backs the category-concentration claim in §02.</p>
+    </div>
+    {% endif %}
+  </div>
+  <div style="height:20px"></div>
+
+  {% for s in sections %}
+  <section class="sec"><h2><span class="n">{{ s.num }}</span> {{ s.label }}</h2>
+    <div class="indent">
+    <ul class="bits">{% for b in s.bits %}<li>{{ b }}</li>{% endfor %}</ul>
+    {% if s.key == "executive_summary" and extra_charts.pareto %}
+    <div class="chart-box" style="height:280px;margin:12px 0 8px"><img src="{{ extra_charts.pareto }}" style="width:100%;height:100%;object-fit:contain"></div>
+    <p class="diagram-note">Systems ranked by active-issue count, with the cumulative-%
+      line — the dashed line marks 80%, the usual Pareto threshold.</p>
+    {% endif %}
+    {% if s.key == "emerging_risks" and extra_charts.onset_timeline %}
+    <div class="chart-box" style="height:280px;margin:12px 0 8px"><img src="{{ extra_charts.onset_timeline }}" style="width:100%;height:100%;object-fit:contain"></div>
+    <p class="diagram-note">Each system's own earliest non-Persistent onset this window — dots
+      clustered close together on the time axis visually confirm (or don't) a coincident-onset
+      pattern.</p>
+    {% endif %}
+    {% if s.key == "further_investigation" and extra_charts.totals_sparklines %}
+    <div class="chart-box" style="height:calc(160px * {{ report.totals_anomalies|length|default:2 }} / 2 + 20px);margin:12px 0 8px"><img src="{{ extra_charts.totals_sparklines }}" style="width:100%;height:100%;object-fit:contain"></div>
+    <p class="diagram-note">Every watched aggregate total's own series across this window —
+      a dip anywhere (not just the ones flagged as anomalies above) is visible here directly.</p>
+    {% endif %}
+    </div>
+  </section>
+
+  {% if s.key == "key_trends" %}
+  <section class="sec" style="border-top:none;padding-top:0">
+    <h2 style="font-size:16px"><span class="n">04</span> Recurring Issues</h2>
+    <div class="indent">
+
+    <h2 style="font-size:13px;margin-bottom:8px">Hourly Activity (last 7 days)</h2>
+    <div class="indent">
+    <p class="body">RAM/CPU/Disk are the live % reading straight off Prometheus for that one
+      component — a red-ringed point is at or above that reading's own red threshold.
+      Everything else (Unreachable/Service/Backup) is a binary state with no percentage to
+      show, so it plots how many distinct incidents were active that hour instead — a
+      red-ringed point there is a statistical spike (that system's own count exceeds its mean +
+      2 standard deviations). One chart per system affected, grouped under its issue type,
+      since a shared chart can't isolate one system's reading from every other affected
+      system's line. Each system's own charts share one time-range control — drag across any
+      one of them (or pinch to zoom on touch) and every other chart for that system zooms to
+      the identical window, so metrics that moved together are easy to line up; the Range
+      buttons above each system are the same control for keyboard/screen-reader use, and
+      "Full" resets. This is a live drill-down on this page only — it never changes what's in
+      the downloaded PDF or e-mail, which always show the full 7 days.</p>
+    {% if spike_charts %}
+    {% comment %}
+      System-first, one COLUMN per metric category currently active for that system (item 23,
+      regrouped 2026-09-10 from an earlier category-first shape -- see views._spike_chart_
+      targets' own docstring: grouping every flagged system's charts together makes a
+      simultaneous-metrics fan-in visible instead of requiring cross-referencing sections).
+      `repeat(auto-fit, minmax(200px, 1fr))` is CSS Grid's own native answer to item 23's
+      column-width floor/wrap rule -- no column-count breakpoint logic needed here at all (that
+      logic DOES exist, in Python, for the PDF specifically, since xhtml2pdf has no Grid/
+      Flexbox and can't wrap responsively the way a real browser does); the web page just lets
+      the grid wrap to as many rows as it needs, always staying above the 200px floor.
+    {% endcomment %}
+    {% for sysgrp in spike_charts %}
+    <h3 style="font-size:11.5px;margin:10px 0 4px;color:var(--muted);font-weight:600">{{ sysgrp.system }}</h3>
+    <div class="indent">
+    <div class="range-bar" data-cluster="{{ sysgrp.system }}" role="group" aria-label="Time range for {{ sysgrp.system }}'s charts">
+      <span class="range-label">Range:</span>
+      <button type="button" class="zoom-btn range-btn" data-range="24h" aria-pressed="false">24h</button>
+      <button type="button" class="zoom-btn range-btn" data-range="3d" aria-pressed="false">3d</button>
+      <button type="button" class="zoom-btn range-btn" data-range="7d" aria-pressed="false">7d</button>
+      <button type="button" class="zoom-btn range-btn" data-range="full" aria-pressed="true">Full</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:16px">
+    {% for col in sysgrp.columns %}
+    <div>
+    <h4 style="font-size:10.5px;margin:0 0 4px;color:var(--muted);font-weight:600">{{ sysgrp.system }}-{{ col.category_label }}</h4>
+    {% for c in col.charts %}
+    {% if c.label %}
+    <p style="font-size:9.5px;margin:0 0 4px;color:var(--muted);font-weight:600">{{ sysgrp.system }}-{{ col.category_label }}-{{ c.label }}</p>
+    {% endif %}
+    <div class="chart-box" style="height:220px;margin-bottom:8px"><canvas id="{{ c.canvas_id }}"></canvas></div>
+    {% if col.is_percent %}
+    <p class="diagram-note">{{ col.category_label }} on {{ sysgrp.system }}{% if c.label %} · {{ c.label }}{% endif %} — the x-axis is time
+      (hourly, last 7 days) and the y-axis is the actual % reading. Hover a point for the exact
+      hour and value — a red-ringed point is at or above this component's own red threshold.</p>
+    {% else %}
+    <p class="diagram-note">{{ col.category_label }} on {{ sysgrp.system }} — the x-axis is time
+      (hourly, last 7 days) and the y-axis is how many distinct {{ col.category_label }} issues
+      were active that hour. Hover a point for the exact hour and count — a red-ringed point is
+      a spike.</p>
+    {% endif %}
+    {% endfor %}
+    {% if col.more_count %}
+    {% comment %}
+      Cap charts PER COLUMN (item 23: "cap charts per column... rather than continuing to
+      shrink" when one category has far more components than another) -- uneven column heights
+      are the accepted, deliberate result; nothing here stretches a shorter column to match.
+    {% endcomment %}
+    <p class="diagram-note" style="font-weight:600">+{{ col.more_count }} more {{ col.category_label }} component{{ col.more_count|pluralize }} not shown.</p>
+    {% endif %}
+    </div>
+    {% endfor %}
+    </div>
+    </div>
+    {% endfor %}
+    {% else %}<p class="empty">No incident history yet.</p>{% endif %}
+
+    {% if swift_available %}
+    <h2 style="font-size:12.5px;margin:14px 0 6px;color:var(--muted)">SWIFT Transactions</h2>
+    <div class="indent">
+    <div class="chart-box" style="height:220px;margin-bottom:8px"><canvas id="swiftLine"></canvas></div>
+    <p class="diagram-note">SWIFT's own running daily total — the x-axis is time (hourly, last 7
+      days) and the y-axis is how many messages have accumulated so far that day. It climbs
+      through the business day, plateaus once processing for the day is done, and resets to 0
+      at the start of the next day — the reset is expected, not a fault. Hover a point for the
+      exact hour and running total.</p>
+    </div>
+    {% endif %}
+    </div>
+
+    <h2 style="font-size:13px;margin:20px 0 8px">Persistent</h2>
+    <div class="indent">
+    <p class="body">An issue seen on 3 or more distinct days, firing on 70% or more of the days
+      across the span it has been appearing in — it rarely, if ever, actually clears.</p>
+    {% if persistent_grid %}
+    <div class="zoom-bar" data-zoom-target="persistentHeat" data-zoom-key="heatmapZoom:persistent">
+      <button type="button" class="zoom-btn" data-zoom-action="out" aria-label="Zoom out">−</button>
+      <span class="zoom-pct">100%</span>
+      <button type="button" class="zoom-btn" data-zoom-action="in" aria-label="Zoom in">+</button>
+      <button type="button" class="zoom-btn zoom-reset" data-zoom-action="reset">Reset</button>
+    </div>
+    <div class="scrollbox"><div id="persistentHeat">{% include "reports/_heatmap_grid.html" with grid=persistent_grid %}</div></div>
+    <p class="diagram-note">Rows are systems, columns are issue types; each cell is how many
+      distinct days that combination has been Persistent. Darker red means more days — hover
+      any cell for the exact count. Zoom is remembered, including in the downloaded PDF.</p>
+    {% else %}<p class="empty">None this period.</p>{% endif %}
+    {% if persistent_table %}
+    <div class="scrollbox"><table class="data">
+      <thead><tr><th>System</th><th>Flag</th><th>Coverage</th><th>Days</th><th>Comment / Fix needed? / Resolved</th></tr></thead>
+      <tbody>
+        {% for r in persistent_table %}
+        <tr{% if r.action_unset %} class="action-unset"{% endif %}>
+          <td><span class="banddot band-{{ r.band }}"></span><b>{{ r.system }}</b></td>
+          <td><span class="flagkey">{{ r.flag_key }}</span></td>
+          <td class="num">{{ r.coverage_pct }}%</td>
+          <td class="num">{{ r.days }}</td>
+          <td>{% include "reports/_finding_action_cell.html" %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="diagram-note">Every Persistent finding, ranked most significant first — coverage %
+      and distinct days, since two findings at the same coverage aren't equally persistent if
+      one has run far longer.</p>
+    {% endif %}
+    </div>
+
+    <h2 style="font-size:13px;margin:20px 0 8px">Recurring</h2>
+    <div class="indent">
+    <p class="body">The same 3-or-more-distinct-day minimum as Persistent, but below that 70%
+      coverage — it clears, then comes back, rather than staying continuously present.</p>
+    {% if recurring_grid %}
+    <div class="zoom-bar" data-zoom-target="recurringHeat" data-zoom-key="heatmapZoom:recurring">
+      <button type="button" class="zoom-btn" data-zoom-action="out" aria-label="Zoom out">−</button>
+      <span class="zoom-pct">100%</span>
+      <button type="button" class="zoom-btn" data-zoom-action="in" aria-label="Zoom in">+</button>
+      <button type="button" class="zoom-btn zoom-reset" data-zoom-action="reset">Reset</button>
+    </div>
+    <div class="scrollbox"><div id="recurringHeat">{% include "reports/_heatmap_grid.html" with grid=recurring_grid %}</div></div>
+    <p class="diagram-note">Same layout as the Persistent grid above, scoped to Recurring
+      findings only — hover any cell for the exact count. Zoom is remembered, including in the
+      downloaded PDF.</p>
+    {% else %}<p class="empty">None this period.</p>{% endif %}
+    {% if recurring_table %}
+    <div class="scrollbox"><table class="data">
+      <thead><tr><th>System</th><th>Flag</th><th>Coverage</th><th>Days</th><th>Comment / Fix needed? / Resolved</th></tr></thead>
+      <tbody>
+        {% for r in recurring_table %}
+        <tr{% if r.action_unset %} class="action-unset"{% endif %}>
+          <td><span class="banddot band-{{ r.band }}"></span><b>{{ r.system }}</b></td>
+          <td><span class="flagkey">{{ r.flag_key }}</span></td>
+          <td class="num">{{ r.coverage_pct }}%</td>
+          <td class="num">{{ r.days }}</td>
+          <td>{% include "reports/_finding_action_cell.html" %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="diagram-note">Every Recurring finding, ranked most significant first — coverage %
+      and distinct days, since two findings at the same coverage aren't equally persistent if
+      one has run far longer.</p>
+    {% endif %}
+    </div>
+
+    <h2 style="font-size:13px;margin:20px 0 8px">Cleared over the past {{ report.window_days }} days</h2>
+    <div class="indent">
+    <p class="body">Fired earlier in this window, then quiet for the remainder of it — not an
+      unqualified "fixed" (this report has no visibility past its own window), just no longer
+      firing as of this run.</p>
+    {% if report.cleared_issues %}
+    <div class="scrollbox"><table class="data">
+      <thead><tr><th>System</th><th>Flag</th><th>Was</th><th>Last active</th><th>Quiet since</th></tr></thead>
+      <tbody>
+        {% for r in report.cleared_issues %}
+        <tr>
+          <td><b>{{ r.system }}</b></td>
+          <td><span class="flagkey">{{ r.flag_key }}</span></td>
+          <td><span class="pill {{ r.label }}">{{ r.label }}</span></td>
+          <td class="num">{{ r.last_active }}</td>
+          <td class="num">{{ r.clean_days }} day{{ r.clean_days|pluralize }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    {% else %}<p class="empty">Nothing cleared this period.</p>{% endif %}
+    </div>
+
+    </div>
+  </section>
+  {% endif %}
+
+  {% if s.key == "administrator_observations" %}
+  {% if report.themes %}
+  <section class="sec" style="border-top:none;padding-top:0">
+    <h2 style="font-size:16px">Administrator comment themes</h2>
+    <div class="indent">
+    <div class="chart-box" style="height:calc({% widthratio chart_data.themes.labels|length 1 34 %}px + 40px);margin-bottom:8px"><canvas id="themesChart"></canvas></div>
+    <p class="diagram-note">How many admin comments mention each recurring theme,
+      most-mentioned first. Hover a bar for the exact count.</p>
+    </div>
+  </section>
+  {% endif %}
+  <section class="sec" style="border-top:none;padding-top:0">
+    <h2 style="font-size:16px"><span class="n">06</span> System Areas Requiring Attention</h2>
+    <div class="indent">
+    {% if report.system_attention %}
+    <div class="chart-box" style="height:calc({% widthratio chart_data.attention.labels|length 1 34 %}px + 40px);margin-bottom:8px"><canvas id="attentionChart"></canvas></div>
+    <p class="diagram-note">Systems ranked by total open Persistent (red) + Recurring (amber)
+      issues, worst first — bar segments show the split. Every row here is drawn from §04's own
+      findings; hover a segment for the exact count.</p>
+    {% else %}
+    <p class="empty">No systems met the attention threshold this period.</p>
+    {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if s.key == "emerging_risks" %}
+  <section class="sec" style="border-top:none;padding-top:0">
+    <h2 style="font-size:16px"><span class="n">08</span> Potential Anomalies / Flukes</h2>
+    <div class="indent">
+    <div class="scrollbox"><table class="data">
+      <thead><tr><th>System / Flag</th><th>Days</th><th>Latest reading</th></tr></thead>
+      <tbody>
+        {% for i in report.anomalies %}
+        <tr>
+          <td><b>{{ i.system }}</b><div class="flagkey">{{ i.flag_key }}</div></td>
+          <td class="num">{{ i.distinct_days }}/{{ i.span_days }}d</td>
+          <td>{{ i.latest_text }}</td>
+        </tr>
+        {% empty %}<tr><td colspan="3" class="empty">None this period.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="callout">{{ report.one_off_issues|length }} one-off event(s) also observed this period, not listed individually.</p>
+    </div>
+  </section>
+  {% endif %}
+  {% endfor %}
+
+  <footer class="colophon">Generated by the RBZ Monitoring Console's Automated Reports engine.{% if report.ai_provider != 'offline' %} Narrative commentary is AI-assisted (provider: {{ report.ai_provider }}); statistical sections are unaffected.{% endif %}</footer>
+</div>
+<script>
+(function () {
+  var data = JSON.parse(document.getElementById("chart-data").textContent);
+  var ink = getComputedStyle(document.documentElement).getPropertyValue("--ink-soft").trim();
+  Chart.defaults.font.family = "Segoe UI, system-ui, sans-serif";
+  Chart.defaults.color = ink;
+
+  if (data.donut.values.length) {
+    new Chart(document.getElementById("donutChart"), {
+      type: "doughnut",
+      data: {
+        labels: data.donut.labels,
+        datasets: [{ data: data.donut.values, backgroundColor: data.donut.colors, borderWidth: 0 }],
+      },
+      options: {
+        cutout: "58%", responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "right", labels: { boxWidth: 12, padding: 14 } } },
+      },
+    });
+  }
+
+  if (data.estateHealth && data.estateHealth.values.some(function (v) { return v > 0; })) {
+    document.getElementById("estateHealthWrap").style.display = "";
+    new Chart(document.getElementById("estateHealthChart"), {
+      type: "doughnut",
+      data: {
+        labels: data.estateHealth.labels,
+        datasets: [{ data: data.estateHealth.values, backgroundColor: data.estateHealth.colors, borderWidth: 0 }],
+      },
+      options: {
+        cutout: "58%", responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: "right", labels: { boxWidth: 12, padding: 14 } } },
+      },
+    });
+  }
+
+  // Both remaining callers (attentionChart, themesChart) plot raw counts, not percentages --
+  // the end label prints the bare number, matching what the count actually is (the old
+  // persistent/recurring coverage bars, the only percentage values this ever plotted, are gone
+  // as of 2026-09-08 -- see report_charts.finding_table's own docstring for why).
+  function horizontalBar(canvasId, labels, values, colors) {
+    var el = document.getElementById(canvasId);
+    if (!el || !labels.length) return;
+    var endLabelPlugin = {
+      id: "endLabel-" + canvasId,
+      afterDatasetsDraw: function (chart) {
+        var ctx = chart.ctx;
+        var meta = chart.getDatasetMeta(0);
+        ctx.save();
+        ctx.font = "11px Consolas, monospace";
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--ink").trim();
+        ctx.textBaseline = "middle";
+        meta.data.forEach(function (bar, i) {
+          ctx.fillText(String(values[i]), bar.x + 6, bar.y);
+        });
+        ctx.restore();
+      },
+    };
+    new Chart(el, {
+      type: "bar",
+      data: { labels: labels, datasets: [{ data: values, backgroundColor: colors,
+                                          borderRadius: 3, maxBarThickness: 22 }] },
+      options: {
+        indexAxis: "y", responsive: true, maintainAspectRatio: false,
+        layout: { padding: { right: 46 } },
+        plugins: { legend: { display: false } },
+        scales: { x: { display: false, beginAtZero: true }, y: { grid: { display: false } } },
+      },
+      plugins: [endLabelPlugin],
+    });
+  }
+  // Stacked (persistent + recurring, 2026-09-10, item 10) -- the shared horizontalBar() above
+  // plots exactly one series, so this chart gets its own two-dataset builder rather than
+  // stretching that function to cover both shapes. End label prints the ROW TOTAL (persistent +
+  // recurring together), matching what system_attention_bar's own matplotlib PNG prints.
+  (function stackedAttentionBar() {
+    var el = document.getElementById("attentionChart");
+    var labels = data.attention.labels;
+    if (!el || !labels.length) return;
+    var totals = labels.map(function (_l, i) {
+      return data.attention.persistent[i] + data.attention.recurring[i];
+    });
+    var endLabelPlugin = {
+      id: "endLabel-attentionChart",
+      afterDatasetsDraw: function (chart) {
+        var ctx = chart.ctx;
+        var meta = chart.getDatasetMeta(1);   // top (recurring) segment -- bar's own right edge
+        ctx.save();
+        ctx.font = "11px Consolas, monospace";
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--ink").trim();
+        ctx.textBaseline = "middle";
+        meta.data.forEach(function (bar, i) {
+          ctx.fillText(String(totals[i]), bar.x + 6, bar.y);
+        });
+        ctx.restore();
+      },
+    };
+    new Chart(el, {
+      type: "bar",
+      data: {
+        labels: labels,
+        datasets: [
+          { label: "Persistent", data: data.attention.persistent, backgroundColor: "#d14a3a",
+            borderRadius: 3, maxBarThickness: 22, stack: "s" },
+          { label: "Recurring", data: data.attention.recurring, backgroundColor: "#b8790a",
+            borderRadius: 3, maxBarThickness: 22, stack: "s" },
+        ],
+      },
+      options: {
+        indexAxis: "y", responsive: true, maintainAspectRatio: false,
+        layout: { padding: { right: 46 } },
+        plugins: { legend: { position: "bottom", labels: { boxWidth: 10, padding: 10, font: { size: 11 } } } },
+        scales: {
+          x: { display: false, beginAtZero: true, stacked: true },
+          y: { grid: { display: false }, stacked: true },
+        },
+      },
+      plugins: [endLabelPlugin],
+    });
+  })();
+  if (data.themes) {
+    horizontalBar("themesChart", data.themes.labels, data.themes.values,
+                  data.themes.labels.map(function () { return "#1a6fc4"; }));
+  }
+
+  // Cluster zoom (items 33-37, 2026-09-10): one zoom+pan control PER SYSTEM, not per chart --
+  // dragging/pinching/preset-clicking any chart in a system's own cluster (registerCluster
+  // below groups them by chart_data.spikeCharts[].cluster, which views.py sets to the system
+  // name) syncs every OTHER chart in that same cluster to the identical x-axis range, so a
+  // reader can drill into the exact hours where that system's metrics moved together -- direct
+  // visual evidence for the fan-in claim §02 already makes in prose. Deliberately NOT the same
+  // mechanism as the heatmap .zoom-bar above: that's a display-magnification PREFERENCE (so it
+  // persists in localStorage and correctly carries into the PDF via a query param); this is an
+  // analytical drill-down over TIME RANGE, so it is NEVER written to localStorage and NEVER
+  // referenced by the PDF/email pipeline at all -- those are a fully separate server-side
+  // matplotlib render that always plots each cluster's full 7-day window regardless of
+  // whatever's live on this page when they're generated. It also always starts at "Full" on
+  // every fresh load, since a saved range from a past week's timestamps means nothing once
+  // the report's own window has moved on. Scope is exactly the Hourly Activity charts wired
+  // below (item 37) -- the Pareto/onset/sparkline charts elsewhere on this page are static
+  // <img> exports from matplotlib, not Chart.js instances, so there's nothing to zoom there.
+  var clusterCharts = {};     // system name -> [Chart instance, ...]
+  var clusterSyncing = {};    // system name -> true while this page is itself driving a sync,
+                              // so that sync doesn't re-trigger onZoomComplete on the siblings
+                              // it's updating and loop back on itself
+  function registerCluster(name, chart) {
+    (clusterCharts[name] = clusterCharts[name] || []).push(chart);
+  }
+  function syncClusterRange(name, min, max, source) {
+    if (clusterSyncing[name]) return;
+    clusterSyncing[name] = true;
+    (clusterCharts[name] || []).forEach(function (c) {
+      if (c !== source) c.zoomScale("x", { min: min, max: max }, "none");
+    });
+    clusterSyncing[name] = false;
+  }
+
+  // Hourly Activity's own charts: one line, one system, one issue type per canvas. RAM/CPU/Disk
+  // (sc.isPercent) plot the live % reading straight off Prometheus (2026-09-08, on request:
+  // "shouldn't it be the percentage reading... wouldn't it be easier to read" than a
+  // concurrent-incident count) -- everything else is a binary state with no percentage to show,
+  // so it keeps the incident-count chart. A red-ringed point is at/above the red threshold for
+  // a percentage chart, or a statistical spike (mean + 2 stdev) for a count one.
+  var haveZoomPlugin = typeof ChartZoom !== "undefined";
+  if (haveZoomPlugin) Chart.register(ChartZoom);
+  (data.spikeCharts || []).forEach(function (sc) {
+    var el = document.getElementById(sc.canvasId);
+    if (!el) return;
+    var cluster = sc.cluster;
+    var chart = new Chart(el, {
+      type: "line",
+      data: {
+        labels: sc.data.labels,
+        datasets: sc.data.datasets.map(function (d) {
+          return {
+            label: d.label, data: d.values, borderColor: d.color, backgroundColor: d.color,
+            borderWidth: 1.5, tension: 0.25, pointRadius: d.spikes.map(function (s) { return s ? 5 : 1.5; }),
+            pointHoverRadius: d.spikes.map(function (s) { return s ? 7 : 3; }),
+            pointBackgroundColor: d.spikes.map(function (s) { return s ? "#d14a3a" : d.color; }),
+            pointBorderColor: d.spikes.map(function (s) { return s ? "#d14a3a" : d.color; }),
+          };
+        }),
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: "nearest", axis: "x", intersect: false },
+        // One line per chart now (the system name is already this chart's own <h3> heading
+        // above it, see the template loop), so a legend repeating that same name is redundant.
+        plugins: Object.assign({ legend: { display: false } }, (haveZoomPlugin && cluster) ? {
+          zoom: {
+            limits: { x: { min: "original", max: "original" } },
+            pan: { enabled: false },
+            zoom: {
+              // Touch: pinch only, not single-finger drag -- a one-finger drag on a synced
+              // cluster chart stays page-scroll, matching this spec's own open-question
+              // guidance (a ~200-340px-wide canvas makes pinch-precision fiddly anyway, so
+              // touch users are expected to reach for the Range buttons above instead).
+              drag: { enabled: true, backgroundColor: "rgba(184,147,90,0.18)", borderColor: "#B8935A", borderWidth: 1 },
+              pinch: { enabled: true },
+              mode: "x",
+              // onZoomComplete (not onZoom) fires once per drag-end/pinch-end/wheel-tick, not
+              // per intermediate frame -- that's the debounce the spec's own "redraw jank"
+              // open question asks for, free from the plugin itself.
+              onZoomComplete: function (ctx) {
+                var r = ctx.chart.scales.x;
+                syncClusterRange(cluster, r.min, r.max, ctx.chart);
+                var bar = document.querySelector('.range-bar[data-cluster="' + cluster + '"]');
+                if (bar) bar.querySelectorAll(".range-btn").forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+              },
+            },
+          },
+        } : {}),
+        scales: {
+          x: { ticks: { maxTicksLimit: 12, autoSkip: true, font: { size: 9.5 } } },
+          y: sc.isPercent
+            ? { beginAtZero: true, max: 100, ticks: { callback: function (v) { return v + "%"; } } }
+            : { beginAtZero: true, ticks: { precision: 0 } },
+        },
+      },
+    });
+    if (haveZoomPlugin && cluster) registerCluster(cluster, chart);
+  });
+
+  // Range preset buttons (item 36) -- the required keyboard/screen-reader-accessible entry
+  // point (drag/pinch above are a faster path for mouse/touch users, not the only path).
+  // Index-based, not wall-clock: every chart in a report shares the identical hourly-cadence
+  // label array for the same 7-day window (item 33's own premise), so "last 24h" is simply
+  // "the last 24 label positions" -- no need to parse the label strings back into real dates.
+  if (haveZoomPlugin) {
+    document.querySelectorAll(".range-bar[data-cluster]").forEach(function (bar) {
+      var cluster = bar.getAttribute("data-cluster");
+      var charts = clusterCharts[cluster] || [];
+      if (!charts.length) return;
+      var presetHours = { "24h": 24, "3d": 72, "7d": 168 };
+      bar.querySelectorAll(".range-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          bar.querySelectorAll(".range-btn").forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+          btn.setAttribute("aria-pressed", "true");
+          var range = btn.getAttribute("data-range");
+          if (range === "full") {
+            charts.forEach(function (c) { c.resetZoom("none"); });
+            return;
+          }
+          var total = charts[0].data.labels.length;
+          var hours = presetHours[range] || total;
+          var min = Math.max(0, total - hours);
+          var max = total - 1;
+          charts.forEach(function (c) { c.zoomScale("x", { min: min, max: max }, "none"); });
+        });
+      });
+    });
+  }
+
+  // Heatmap zoom (2026-09-07, on request) -- CSS `zoom` (not transform) so the surrounding
+  // page reflows around the scaled table instead of overlapping it. Persisted per grid in
+  // localStorage, restored on every visit, not just this session.
+  function initZoom(targetId, storageKey) {
+    var el = document.getElementById(targetId);
+    var bar = document.querySelector('.zoom-bar[data-zoom-target="' + targetId + '"]');
+    if (!el || !bar) return;
+    var pctLabel = bar.querySelector(".zoom-pct");
+    function apply(z) {
+      z = Math.min(2, Math.max(0.5, Math.round(z * 10) / 10));
+      el.style.zoom = z;
+      pctLabel.textContent = Math.round(z * 100) + "%";
+      localStorage.setItem(storageKey, z);
+    }
+    apply(parseFloat(localStorage.getItem(storageKey)) || 1);
+    bar.querySelectorAll(".zoom-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var current = parseFloat(el.style.zoom) || 1;
+        var action = btn.getAttribute("data-zoom-action");
+        if (action === "in") apply(current + 0.1);
+        else if (action === "out") apply(current - 0.1);
+        else apply(1);
+      });
+    });
+  }
+  initZoom("persistentHeat", "heatmapZoom:persistent");
+  initZoom("recurringHeat", "heatmapZoom:recurring");
+
+  // Carry the same zoom into the PDF download ("save this zoom config for when we download
+  // PDF") -- the PDF is rendered by a separate server-side request (xhtml2pdf has no access to
+  // this page's localStorage or DOM), so a query param on the download link is the only way to
+  // hand it the current zoom; automated_report_download's own view reads it back and scales
+  // the PDF's own heatmap images to match (see that template's own comment).
+  var downloadLink = document.getElementById("downloadPdfLink");
+  if (downloadLink) {
+    downloadLink.addEventListener("click", function () {
+      var zp = localStorage.getItem("heatmapZoom:persistent") || "1";
+      var zr = localStorage.getItem("heatmapZoom:recurring") || "1";
+      var url = new URL(downloadLink.href, window.location.origin);
+      url.searchParams.set("zoom_persistent", zp);
+      url.searchParams.set("zoom_recurring", zr);
+      downloadLink.href = url.toString();
+    });
+  }
+})();
+</script>
+</body>
+</html>

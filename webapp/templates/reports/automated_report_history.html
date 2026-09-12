@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ spec.label }} · {{ page_label }}{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:900px">
+  <div class="rs-head">
+    <h1>{{ spec.label }}</h1>
+    <p>{{ spec.purpose }}</p>
+  </div>
+
+  <div class="card"><div class="body" style="padding:16px 18px">
+    <form method="post" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid var(--line)">
+      {% csrf_token %}
+      <button class="btn ghost accent" type="submit">Generate now</button>
+      {% if spec.cron %}
+        <span style="color:var(--muted);font-size:12.5px">Also runs automatically ({{ spec.cadence|lower }}).</span>
+      {% else %}
+        <span style="color:var(--muted);font-size:12.5px">This report type has no fixed schedule — it's always regenerated on demand.</span>
+      {% endif %}
+    </form>
+
+    {% if instances %}
+    <div class="cfg-scroll-list" style="max-height:480px;overflow-y:auto;border:1px solid var(--line);border-radius:var(--radius)">
+    <table style="margin:0">
+      <thead><tr>
+        <th style="text-align:left;padding:8px 12px">Generated</th>
+        <th style="text-align:left;padding:8px 12px">AI provider</th>
+        <th style="text-align:left;padding:8px 12px">Issues</th>
+        <th style="text-align:left;padding:8px 12px">Distributed</th>
+        <th></th>
+      </tr></thead>
+      <tbody>
+        {% for inst in instances %}
+        <tr>
+          <td style="padding:8px 12px">{{ inst.generated_at|date:"d M Y, H:i" }}</td>
+          <td style="padding:8px 12px">{{ inst.ai_provider }}{% if inst.ai_error %} <span style="color:var(--muted);font-size:11px" title="{{ inst.ai_error }}">(fallback)</span>{% endif %}</td>
+          <td style="padding:8px 12px">{{ inst.content.total_issues }}</td>
+          <td style="padding:8px 12px">{% if inst.distributed %}Sent {{ inst.distributed_at|date:"d M Y, H:i" }}{% else %}—{% endif %}</td>
+          <td style="padding:8px 12px;text-align:right;white-space:nowrap">
+            <a class="btn ghost" style="padding:5px 11px" href="{% url 'automated_report_detail' spec.key inst.pk %}">View</a>
+            <a class="btn ghost" style="padding:5px 11px" href="{% url 'automated_report_download' spec.key inst.pk %}">Download PDF</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p style="color:var(--muted)">No instances generated yet — use "Generate now" above.</p>
+    {% endif %}
+  </div></div>
+</div>
+{% endblock %}

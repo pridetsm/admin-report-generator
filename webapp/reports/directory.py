@@ -90,6 +90,14 @@ class HttpAuthBackend(BaseBackend):
         if not cfg.ready:
             return None                      # not configured -> let ModelBackend try (local login)
 
+        # Lower-cased before it ever leaves this process (2026-09-12, on request: "force all
+        # entries to lower case before submitting to ldap...except of course for passwords")
+        # -- the directory endpoint is case-insensitive about the account itself but this
+        # process wasn't, which is exactly what let "bofub"/"Bofub" provision two different
+        # Django users from the same account (see the get_or_create __iexact fix below, kept
+        # as defence in depth for any row already in the database with mixed case). Password
+        # is deliberately left untouched -- a password IS case-sensitive.
+        username = username.strip().lower()
         payload = json.dumps({"username": username, "password": password}).encode("utf-8")
         req = urllib.request.Request(
             cfg.url, data=payload, method="POST",
@@ -140,8 +148,21 @@ class HttpAuthBackend(BaseBackend):
             first, last = _split_name(str(data.get(cfg.name_field, "")) if cfg.name_field else "")
 
         User = get_user_model()
-        user, _ = User.objects.get_or_create(
-            username=username, defaults={"email": email, "is_active": True})
+        # Case-insensitive match FIRST (2026-09-12: a real duplicate-account bug -- "bofub"
+        # and "Bofub" provisioned as two separate rows because nothing here normalized case
+        # and Django's own username lookup is case-sensitive, so whichever casing someone
+        # happened to type that day silently created a brand-new account instead of reusing
+        # the existing one, splitting their profile/history/role assignments across both).
+        # Reuses the existing row's own original casing rather than ever renaming it, so a
+        # user who already exists never gets a second row just because they typed their
+        # username differently this time. Ordered so a leftover deactivated duplicate (e.g.
+        # a past case-variant row kept around rather than deleted) can never win an
+        # unordered `.first()` race against the real, active account -- active rows sort
+        # first, oldest (lowest pk, i.e. the original account) breaks any remaining tie.
+        user = User.objects.filter(username__iexact=username).order_by("-is_active", "id").first()
+        if user is None:
+            user, _ = User.objects.get_or_create(
+                username=username, defaults={"email": email, "is_active": True})
         changed = False
         for field, value in (("email", email), ("first_name", first), ("last_name", last)):
             if value and getattr(user, field) != value:

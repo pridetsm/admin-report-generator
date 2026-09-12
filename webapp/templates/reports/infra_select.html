@@ -18,6 +18,7 @@
   }
   .badge-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .badge-state.unk { background: var(--panel-2); color: var(--muted); }
+  .badge-state.stale-up { background: var(--amber-bg); color: var(--amber); }
 </style>
 
 <form method="post" action="{% url 'infra_report' %}" id="selectForm" autocomplete="off">
@@ -85,6 +86,14 @@
             never scraped this target, the other that it tried and failed.
           {% endcomment %}
           <span class="badge-state unk" title="Prometheus has no scrape for this target"><span class="dot"></span>not scraped</span>
+          {% elif not d.reachable and d.host_reachable %}
+          {% comment %}
+            A relay device (2026-09-09: RBZHQ-DC-204) whose metrics have gone stale but whose
+            OWN independent ICMP probe confirms it's genuinely up -- see network._windows_
+            reading_trusted's own docstring for why this is a materially different, less severe
+            state than "not responding" and must not read the same on this screen either.
+          {% endcomment %}
+          <span class="badge-state stale-up" title="The server answers ping, but its own metrics haven't reported recently"><span class="dot"></span>stale metrics, server up</span>
           {% elif not d.reachable %}
           <span class="badge-state" title="The target is not answering"><span class="dot"></span>not responding</span>
           {% endif %}

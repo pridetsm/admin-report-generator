@@ -2,10 +2,10 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import (AlertFinding, AlertGroup, BackupPolicyRevision, EmailRecipient,
-                     GrafanaConfigRevision, PrometheusConfigRevision, PrometheusRuleFileRevision,
-                     ReportSubmission, RoleRequest, RoleScope, SnmpConfigRevision, SystemConfig,
-                     UserProfile)
+from .models import (AlertFinding, AlertGroup, AutomatedFindingAction, AutomatedReportGroup, AutomatedReportInstance, BackupPolicyRevision,
+                     EmailRecipient, GrafanaConfigRevision, IssueOccurrence,
+                     PrometheusConfigRevision, PrometheusRuleFileRevision, ReportSubmission,
+                     RoleRequest, RoleScope, SnmpConfigRevision, SystemConfig, UserProfile)
 
 
 @admin.register(SystemConfig)
@@ -165,6 +165,25 @@ class AlertGroupAdmin(admin.ModelAdmin):
         return obj.users.count() + len(obj.emails or [])
 
 
+@admin.register(AutomatedReportGroup)
+class AutomatedReportGroupAdmin(admin.ModelAdmin):
+    """Normally edited in-app (Configuration › Automated Report Groups); here for completeness."""
+    list_display = ("name", "report_type_count", "stakeholder_count", "active",
+                     "updated_at", "updated_by")
+    list_filter = ("active",)
+    readonly_fields = ("updated_at", "updated_by")
+    search_fields = ("name",)
+    filter_horizontal = ("users",)
+
+    @admin.display(description="Report types")
+    def report_type_count(self, obj):
+        return len(obj.report_types or []) or "none yet"
+
+    @admin.display(description="Stakeholders")
+    def stakeholder_count(self, obj):
+        return obj.users.count() + len(obj.emails or [])
+
+
 @admin.register(AlertFinding)
 class AlertFindingAdmin(admin.ModelAdmin):
     """Read-only dedup ledger, written only by the alert poller (reports.alerting). Deleting a
@@ -179,13 +198,54 @@ class AlertFindingAdmin(admin.ModelAdmin):
                        "last_notified_at", "reminder_count", "resolved_at")
 
 
+@admin.register(IssueOccurrence)
+class IssueOccurrenceAdmin(admin.ModelAdmin):
+    """Read-only incident log, written only by reports.alerting.record_occurrences every
+    alert-poller cycle. Deleting a row erases that incident from reports.alert_spikes' Issue
+    Spikes chart history -- it does not affect anything currently live (that is re-derived
+    fresh from Flag data every poll)."""
+    list_display = ("system", "flag_key", "category", "band", "started_at",
+                    "last_seen_at", "resolved_at")
+    list_filter = ("category", "band")
+    search_fields = ("system", "flag_key")
+    readonly_fields = ("system", "flag_key", "category", "band", "text",
+                       "started_at", "last_seen_at", "resolved_at")
+
+
 @admin.register(EmailRecipient)
 class EmailRecipientAdmin(admin.ModelAdmin):
-    list_display = ("email", "name", "default_selected", "active")
-    list_editable = ("name", "default_selected", "active")
-    list_filter = ("active", "default_selected")
+    list_display = ("email", "name", "default_selected", "receives_automated_reports", "active")
+    list_editable = ("name", "default_selected", "receives_automated_reports", "active")
+    list_filter = ("active", "default_selected", "receives_automated_reports")
     search_fields = ("email", "name")
     ordering = ("name", "email")
+
+
+@admin.register(AutomatedReportInstance)
+class AutomatedReportInstanceAdmin(admin.ModelAdmin):
+    """Read-only browsing — instances are only ever created through
+    reports.automated_reports.generate_automated_report (the scheduled jobs or the
+    Automated Reports screen's "Generate now"), never hand-edited."""
+    list_display = ("__str__", "ai_provider", "distributed", "distributed_at")
+    list_filter = ("report_type", "ai_provider", "distributed")
+    readonly_fields = tuple(f.name for f in AutomatedReportInstance._meta.fields)
+    date_hierarchy = "generated_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AutomatedFindingAction)
+class AutomatedFindingActionAdmin(admin.ModelAdmin):
+    """Normally edited in-app (the report detail screen's own per-finding Comment/Fix needed/
+    Resolved fields); here for completeness."""
+    list_display = ("system", "flag_key", "fix_needed", "resolved", "updated_at", "updated_by")
+    list_filter = ("fix_needed", "resolved")
+    search_fields = ("system", "flag_key")
+    readonly_fields = ("updated_at",)
 
 
 @admin.register(ReportSubmission)

@@ -1,0 +1,361 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* xhtml2pdf's renderer is reportlab-based, not a browser engine: no CSS variables, no
+     grid/flexbox, no media queries, limited box-model support. Literal hex colors, tables/
+     inline-block for layout, pt font sizes -- the same "plainer rendering for a limited
+     renderer" approach reports/alert_email_templates.py already uses for Outlook. */
+  /* Same three-typeface system the web/in-app version uses (serif headings, monospace
+     labels/data, sans-serif body) -- generic CSS family keywords, not named fonts: xhtml2pdf
+     maps "serif"/"sans-serif"/"monospace" straight onto its three built-in base14 fonts
+     (Times-Roman/Helvetica/Courier), which render identically on every machine with no font
+     embedding needed, unlike a named font (e.g. "Georgia") which xhtml2pdf can't substitute
+     and would silently fall back on. */
+  {% comment %}
+    A PER-REPORT switch (item 23's own instruction, not per-page -- mixing orientations within
+    one PDF is added production complexity the spec explicitly said wasn't worth taking on
+    here): the whole PDF goes landscape the moment ANY system in it needs a 5th simultaneous
+    Hourly Activity column, since portrait's own ~490pt content width drops a 5th column below
+    the 200px-equivalent legibility floor a component label needs. `needs_landscape` is computed
+    once in views.build_automated_report_pdf (views._spike_report_needs_landscape), not
+    re-derived here.
+  {% endcomment %}
+  @page { size: A4{% if needs_landscape %} landscape{% endif %}; margin: 2.2cm 1.8cm; }
+  body { font-family: sans-serif; font-size: 9.5pt; color: #16233A; line-height: 1.5; }
+  h1 { font-family: serif; font-size: 21pt; color: #16233A; margin: 0 0 4pt; font-weight: normal; }
+  .eyebrow { font-family: monospace; font-size: 8pt; letter-spacing: 1px; text-transform: uppercase; color: #6B6558; margin-bottom: 8pt; }
+  .subtitle { color: #3A4A63; font-size: 9.5pt; margin: 0 0 10pt; }
+  .meta { font-size: 8.5pt; color: #6B6558; margin-bottom: 14pt; }
+  .badge { font-family: monospace; background: #E8E4D9; color: #6B6558; padding: 2px 6px; font-size: 8pt; font-weight: bold; }
+  .kpi-table { width: 100%; margin: 10pt 0 18pt; border: 1px solid #DAD4C6; }
+  .kpi-table td { width: 25%; border-right: 1px solid #DAD4C6; padding: 9pt 8pt; text-align: center; }
+  .kpi-n { font-family: serif; font-size: 18pt; font-weight: bold; }
+  .kpi-n.red { color: #d14a3a; } .kpi-n.amber { color: #b8790a; }
+  /* Matches issue_breakdown_donut's own slice colors (report_charts.py's _BLUE/_BLUE_SOFT). */
+  .kpi-n.fluke { color: #1a6fc4; } .kpi-n.oneoff { color: #7fa8d1; }
+  .kpi-l { font-family: monospace; font-size: 7.5pt; letter-spacing: .5px; text-transform: uppercase; color: #6B6558; }
+  h2 { font-family: serif; font-size: 13.5pt; margin: 17pt 0 6pt; color: #16233A; font-weight: normal; }
+  h2 .num { font-family: monospace; color: #B8935A; font-size: 10pt; margin-right: 7pt; }
+  h3.sub { font-family: serif; font-size: 11.5pt; margin: 13pt 0 5pt; font-weight: normal; }
+  h3.sub .num { font-family: monospace; color: #B8935A; font-size: 9pt; margin-right: 7pt; }
+  h3.sub.minor { font-family: serif; font-size: 9pt; margin: 12pt 0 4pt; }
+  p.body { font-size: 9.5pt; color: #3A4A63; margin: 0 0 6pt; }
+  /* Narrative sections render as terse bullet points, one idea per line (2026-09-07, on
+     request), not a flowing paragraph -- ai_narrative.narrative_sections' own "bits" list,
+     already one discrete finding/recommendation per entry before this. */
+  ul.bits { margin: 0 0 8pt; padding-left: 16pt; }
+  ul.bits li { font-size: 9.5pt; color: #3A4A63; margin-bottom: 4pt; }
+  table.data { width: 100%; margin: 6pt 0 4pt; font-size: 8.5pt; }
+  table.data th { font-family: monospace; text-align: left; padding: 4pt 6pt; font-size: 7pt; letter-spacing: .5px; text-transform: uppercase; color: #6B6558; border-bottom: 1px solid #16233A; }
+  table.data td { padding: 5pt 6pt; border-bottom: 1px solid #DAD4C6; vertical-align: top; }
+  .flagkey { font-family: monospace; font-size: 7.5pt; color: #6B6558; }
+  .banddot { color: #d14a3a; }
+  .banddot.band-amber { color: #b8790a; }
+  .pill { font-family: monospace; font-size: 7.5pt; font-weight: bold; padding: 1px 5px; }
+  .pill.Persistent { background: #fdebea; color: #d14a3a; }
+  .pill.Recurring { background: #fff6e0; color: #b8790a; }
+  .pill.Potential, .pill.One-off { background: #E8E4D9; color: #6B6558; }
+  .conf { display: block; font-size: 7pt; color: #6B6558; margin-top: 2pt; }
+  table.data td.comment-row { padding-top: 0; font-size: 8pt; font-style: italic; color: #6B6558; }
+  .empty { color: #6B6558; text-align: center; padding: 8pt; }
+  .caption { font-size: 7.5pt; font-style: italic; color: #6B6558; text-align: center; margin: 0 0 12pt; }
+  /* Distinct from ordinary body copy (2026-09-10, on request: this note "currently blends
+     into body text despite representing ~28% of all issues found") -- same tint/border
+     language as .pill.One-off (#E8E4D9/#6B6558) so it visually pairs with the KPI tile it's
+     talking about, not a new color introduced just for this one box. */
+  .callout { background: #E8E4D9; border-left: 3pt solid #6B6558; padding: 6pt 9pt; font-size: 8.5pt; color: #3A4A63; margin: 6pt 0 4pt; }
+  /* Everything under a heading nests one step further right than the heading itself (2026-09-08,
+     on request) -- the web view's own .indent, translated into xhtml2pdf's plainer box model
+     (border-left + padding-left, both supported; no grid/flexbox needed here). Stacks cleanly:
+     nesting one .indent inside another compounds the same fixed step each level. */
+  .indent { border-left: 1pt solid #DAD4C6; padding-left: 10pt; margin-left: 2pt; }
+  .footer { margin-top: 20pt; padding-top: 8pt; border-top: 1px solid #DAD4C6; font-family: monospace; font-size: 7.5pt; color: #6B6558; }
+  /* 2026-09-10, item 10a: a row with neither Fix needed? nor Resolved ever recorded gets a
+     subtle amber tint, same signal/color the web view's own tr.action-unset uses. */
+  tr.action-unset { background: #fff6e0; }
+  .action-comment { font-size: 7.5pt; color: #3A4A63; }
+  .masthead { width: 100%; margin: 0 0 6pt; }
+  .masthead .logo { width: 26pt; height: 26pt; }
+</style>
+</head>
+<body>
+  {% if logo_data_uri %}
+  <table class="masthead"><tr>
+    <td style="width:30pt;vertical-align:middle;padding:0"><img src="{{ logo_data_uri }}" class="logo" alt="Reserve Bank of Zimbabwe"/></td>
+    <td style="vertical-align:middle;padding:0"><div class="eyebrow" style="margin-bottom:0">RBZ Monitoring Console — Automated Reports</div></td>
+  </tr></table>
+  {% else %}
+  <div class="eyebrow">RBZ Monitoring Console — Automated Reports</div>
+  {% endif %}
+  <h1>{{ report.label }}</h1>
+  <p class="subtitle">{{ report.window_start|slice:":10" }} &ndash; {{ report.window_end|slice:":10" }} &middot; {{ report.window_days }}-day window &middot; generated {{ instance.generated_at|date:"d M Y, H:i" }}</p>
+  <div class="meta">
+    <span class="badge">{% if report.ai_provider == 'offline' %}Statistics-based analysis{% else %}AI-assisted commentary ({{ report.ai_provider }}){% endif %}</span>
+    &nbsp; {{ report.total_issues }} distinct issues observed
+  </div>
+
+  <table class="kpi-table">
+    <tr>
+      <td><div class="kpi-n red">{{ persistent_count }}</div><div class="kpi-l">Persistent</div></td>
+      <td><div class="kpi-n amber">{{ recurring_count }}</div><div class="kpi-l">Recurring</div></td>
+      <td><div class="kpi-n fluke">{{ report.anomalies|length }}</div><div class="kpi-l">Potential flukes</div></td>
+      <td><div class="kpi-n oneoff">{{ report.one_off_issues|length }}</div><div class="kpi-l">One-off</div></td>
+    </tr>
+  </table>
+  <p class="caption" style="text-align:left;margin:-4pt 0 10pt">
+    <b>Persistent</b> = active 3+ distinct days, 70%+ of the days since it started -- rarely
+    clears. <b>Recurring</b> = active 3+ distinct days below that 70% -- clears, then comes
+    back. Full detail in &sect;04 below.
+  </p>
+
+  <table style="width:100%"><tr>
+    <td style="width:56%;vertical-align:top;padding:0">
+      {% if charts.donut %}
+      <img src="{{ charts.donut }}" style="width:280pt;margin:0 0 4pt;" alt="Issue breakdown"/>
+      <p class="caption">Every distinct issue this window, split by classification.</p>
+      {% endif %}
+    </td>
+    <td style="width:44%;vertical-align:top;padding:0">
+      {% if charts.estate_health %}
+      <img src="{{ charts.estate_health }}" style="width:220pt;margin:0 0 4pt;" alt="Estate health"/>
+      <p class="caption">Every monitored system, not just ones with an open issue — how much
+        of the estate is healthy right now.</p>
+      {% endif %}
+    </td>
+  </tr></table>
+  {% if extra_charts.category_breakdown %}
+  <img src="{{ extra_charts.category_breakdown }}" style="width:280pt;margin:2pt 0 4pt;" alt="Active load by resource category"/>
+  <p class="caption">Active (Persistent + Recurring) load, split by resource category -- backs
+    the category-concentration claim in &sect;02.</p>
+  {% endif %}
+
+  {% for s in sections %}
+  <h2><span class="num">{{ s.num }}</span> {{ s.label }}</h2>
+  <div class="indent">
+  <ul class="bits">{% for b in s.bits %}<li>{{ b }}</li>{% endfor %}</ul>
+
+  {% if s.key == "executive_summary" and extra_charts.pareto %}
+  <img src="{{ extra_charts.pareto }}" style="width:490pt;margin:4pt 0 4pt;" alt="Systems ranked by active-issue count, with cumulative percentage"/>
+  <p class="caption">Systems ranked by active-issue count, with the cumulative-% line -- the
+    dashed line marks 80%, the usual Pareto threshold.</p>
+  {% endif %}
+  {% if s.key == "emerging_risks" and extra_charts.onset_timeline %}
+  <img src="{{ extra_charts.onset_timeline }}" style="width:490pt;margin:4pt 0 4pt;" alt="First onset date per system"/>
+  <p class="caption">Each system's own earliest non-Persistent onset this window -- dots
+    clustered close together visually confirm (or don't) a coincident-onset pattern.</p>
+  {% endif %}
+  {% if s.key == "further_investigation" and extra_charts.totals_sparklines %}
+  <img src="{{ extra_charts.totals_sparklines }}" style="width:490pt;margin:4pt 0 4pt;" alt="Aggregate-total series across the window"/>
+  <p class="caption">Every watched aggregate total's own series across this window -- a dip
+    anywhere (not just the ones flagged as anomalies above) is visible here directly.</p>
+  {% endif %}
+
+  {% if s.key == "key_trends" %}
+  <h3 class="sub"><span class="num">04</span> Recurring Issues</h3>
+  <div class="indent">
+
+  <h3 class="sub minor">Hourly Activity (last 7 days)</h3>
+  <div class="indent">
+  <p class="body">RAM/CPU/Disk are the live % reading straight off Prometheus for that one
+    component — a marked point is at or above that reading's own red threshold. Everything else
+    (Unreachable/Service/Backup) is a binary state with no percentage to show, so it plots how
+    many distinct incidents were active that hour instead — a marked point there is a
+    statistical spike (that system's own count exceeds its mean + 2 standard deviations). One
+    chart per system affected, grouped under its issue type, since a shared chart can't isolate
+    one system's reading from every other affected system's line.</p>
+  {% if spike_charts %}
+  {% comment %}
+    System-first, one COLUMN per metric category currently active for that system (item 23,
+    regrouped 2026-09-10 from an earlier category-first shape -- see _spike_chart_targets' own
+    docstring). Column count is whatever views._spike_chart_targets/build_automated_report_pdf
+    already capped this system's own columns list to (4 portrait / 5 landscape / folded behind
+    "+N more" beyond that -- needs_landscape flips this whole PDF's own @page orientation, see
+    this template's own <style> block), so {{ sysgrp.columns|length }} here is always already
+    the real, legibility-floor-respecting number to divide the row width by.
+  {% endcomment %}
+  {% for sysgrp in spike_charts %}
+  <p style="font-family:serif;font-size:9pt;font-weight:bold;margin:8pt 0 2pt;color:#16233A">{{ sysgrp.system }}</p>
+  <div class="indent">
+  <table style="width:100%"><tr>
+  {% for col in sysgrp.columns %}
+    <td style="width:{% widthratio 1 sysgrp.columns|length 100 %}%;vertical-align:top;padding:2pt">
+    <p style="font-size:7.5pt;font-weight:bold;color:#6B6558;margin:0 0 2pt">{{ sysgrp.system }}-{{ col.category_label }}</p>
+    {% for c in col.charts %}
+    {% if c.label %}
+    <p style="font-size:7pt;font-weight:bold;color:#6B6558;margin:0 0 2pt">{{ sysgrp.system }}-{{ col.category_label }}-{{ c.label }}</p>
+    {% endif %}
+    <img src="{{ c.chart }}" style="width:100%;margin:0 0 2pt;" alt="Hourly {{ col.category_label }} activity for {{ sysgrp.system }}{% if c.label %} · {{ c.label }}{% endif %}"/>
+    {% if col.is_percent %}
+    <p class="caption">{{ col.category_label }} on {{ sysgrp.system }}{% if c.label %} · {{ c.label }}{% endif %} —
+      x-axis is time (hourly), y-axis is the actual % reading. The dashed line is the red
+      threshold for this component; a marked point is at or above it.</p>
+    {% else %}
+    <p class="caption">{{ col.category_label }} on {{ sysgrp.system }} — x-axis is time (hourly),
+      y-axis is how many distinct {{ col.category_label }} issues were active that hour. A
+      marked point is a spike.</p>
+    {% endif %}
+    {% endfor %}
+    {% if col.more_count %}
+    <p class="caption" style="font-weight:bold">+{{ col.more_count }} more {{ col.category_label }} component{{ col.more_count|pluralize }} not shown — see the web report for the full set.</p>
+    {% endif %}
+    </td>
+  {% endfor %}
+  </tr></table>
+  {% if sysgrp.more_columns %}
+  <p class="caption" style="font-weight:bold">+{{ sysgrp.more_columns }} more metric categor{{ sysgrp.more_columns|pluralize:"y,ies" }} active for {{ sysgrp.system }}, not shown — see the web report for the full set.</p>
+  {% endif %}
+  </div>
+  {% endfor %}
+  {% else %}<p class="empty">No incident history yet.</p>{% endif %}
+
+  {% if swift_chart %}
+  <h4 class="sub minor" style="font-size:8.5pt;margin:8pt 0 2pt">SWIFT Transactions</h4>
+  <div class="indent">
+  <img src="{{ swift_chart }}" style="width:235pt;margin:0 0 2pt;" alt="SWIFT running daily transaction total"/>
+  <p class="caption">SWIFT's own running daily total — x-axis is time (hourly), y-axis is how
+    many messages have accumulated so far that day. It climbs through the business day,
+    plateaus once processing is done, and resets to 0 at the start of the next day — the reset
+    is expected, not a fault.</p>
+  </div>
+  {% endif %}
+  </div>
+
+  <h3 class="sub minor">Persistent</h3>
+  <div class="indent">
+  <p class="body">An issue seen on 3 or more distinct days, firing on 70% or more of the days
+    across the span it has been appearing in — it rarely, if ever, actually clears.</p>
+  {% if charts.persistent_heatmap %}
+  <img src="{{ charts.persistent_heatmap }}" style="width:{% widthratio zoom_persistent 1 490 %}pt;margin:4pt 0 4pt;" alt="Persistent issue occurrence across systems"/>
+  <p class="caption">Rows are systems, columns are issue types; each cell is how many distinct
+    days that combination has been Persistent. Darker red means more days.</p>
+  {% endif %}
+  {% if persistent_table %}
+  <table class="data">
+    <thead><tr><th>System</th><th>Flag</th><th>Coverage</th><th>Days</th><th>Comment</th><th>Fix?</th><th>Resolved?</th></tr></thead>
+    <tbody>
+    {% for r in persistent_table %}
+    <tr{% if r.action_unset %} class="action-unset"{% endif %}>
+      <td><span class="banddot band-{{ r.band }}">&#9679;</span> <b>{{ r.system }}</b></td>
+      <td><span class="flagkey">{{ r.flag_key }}</span></td>
+      <td>{{ r.coverage_pct }}%</td>
+      <td>{{ r.days }}</td>
+      <td class="action-comment">{{ r.action_comment|default:"—" }}</td>
+      <td>{{ r.action_fix_needed|default:"—"|capfirst }}</td>
+      <td>{{ r.action_resolved|default:"—"|capfirst }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="caption">Every Persistent finding, ranked most significant first -- coverage % and
+    distinct days, since two findings at the same coverage aren't equally persistent if one has
+    run far longer.</p>
+  {% else %}<p class="empty">None this period.</p>{% endif %}
+  </div>
+
+  <h3 class="sub minor">Recurring</h3>
+  <div class="indent">
+  <p class="body">The same 3-or-more-distinct-day minimum as Persistent, but below that 70%
+    coverage — it clears, then comes back, rather than staying continuously present.</p>
+  {% if charts.recurring_heatmap %}
+  <img src="{{ charts.recurring_heatmap }}" style="width:{% widthratio zoom_recurring 1 490 %}pt;margin:4pt 0 4pt;" alt="Recurring issue occurrence across systems"/>
+  <p class="caption">Same layout as the Persistent grid above, scoped to Recurring findings only.</p>
+  {% endif %}
+  {% if recurring_table %}
+  <table class="data">
+    <thead><tr><th>System</th><th>Flag</th><th>Coverage</th><th>Days</th><th>Comment</th><th>Fix?</th><th>Resolved?</th></tr></thead>
+    <tbody>
+    {% for r in recurring_table %}
+    <tr{% if r.action_unset %} class="action-unset"{% endif %}>
+      <td><span class="banddot band-{{ r.band }}">&#9679;</span> <b>{{ r.system }}</b></td>
+      <td><span class="flagkey">{{ r.flag_key }}</span></td>
+      <td>{{ r.coverage_pct }}%</td>
+      <td>{{ r.days }}</td>
+      <td class="action-comment">{{ r.action_comment|default:"—" }}</td>
+      <td>{{ r.action_fix_needed|default:"—"|capfirst }}</td>
+      <td>{{ r.action_resolved|default:"—"|capfirst }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="caption">Every Recurring finding, ranked most significant first -- coverage % and
+    distinct days, since two findings at the same coverage aren't equally persistent if one has
+    run far longer.</p>
+  {% else %}<p class="empty">None this period.</p>{% endif %}
+  </div>
+
+  <h3 class="sub minor">Cleared over the past {{ report.window_days }} days</h3>
+  <div class="indent">
+  <p class="body">Fired earlier in this window, then quiet for the remainder of it -- not an
+    unqualified "fixed" (this report has no visibility past its own window), just no longer
+    firing as of this run.</p>
+  {% if report.cleared_issues %}
+  <table class="data">
+    <thead><tr><th>System</th><th>Flag</th><th>Was</th><th>Last active</th><th>Quiet since</th></tr></thead>
+    <tbody>
+    {% for r in report.cleared_issues %}
+    <tr>
+      <td><b>{{ r.system }}</b></td>
+      <td><span class="flagkey">{{ r.flag_key }}</span></td>
+      <td><span class="pill {{ r.label }}">{{ r.label }}</span></td>
+      <td>{{ r.last_active }}</td>
+      <td>{{ r.clean_days }} day{{ r.clean_days|pluralize }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">Nothing cleared this period.</p>{% endif %}
+  </div>
+
+  </div>
+  {% endif %}
+
+  {% if s.key == "administrator_observations" %}
+  {% if report.themes %}
+  <h3 class="sub minor">Administrator comment themes</h3>
+  <div class="indent">
+  {% if charts.theme_bar %}
+  <img src="{{ charts.theme_bar }}" style="width:490pt;margin:4pt 0 4pt;" alt="Comment themes by mention count"/>
+  <p class="caption">How many admin comments mention each recurring theme, most-mentioned first.</p>
+  {% endif %}
+  </div>
+  {% endif %}
+  <h3 class="sub"><span class="num">06</span> System Areas Requiring Attention</h3>
+  <div class="indent">
+  {% if report.system_attention and charts.attention_bar %}
+  <img src="{{ charts.attention_bar }}" style="width:490pt;margin:4pt 0 4pt;" alt="Systems ranked by open issues, persistent and recurring segments"/>
+  <p class="caption">Systems ranked by total open Persistent (red) + Recurring (amber) issues,
+    worst first -- bar segments show the split. Every row here is drawn from &sect;04's own
+    findings.</p>
+  {% else %}<p class="empty">No systems met the attention threshold this period.</p>{% endif %}
+  </div>
+  {% endif %}
+
+  {% if s.key == "emerging_risks" %}
+  <h3 class="sub"><span class="num">08</span> Potential Anomalies / Flukes</h3>
+  <div class="indent">
+  {% if report.anomalies %}
+  <table class="data">
+    <thead><tr><th>System / Flag</th><th>Days</th><th>Latest reading</th></tr></thead>
+    <tbody>
+    {% for i in report.anomalies %}
+    <tr>
+      <td><b>{{ i.system }}</b><br/><span class="flagkey">{{ i.flag_key }}</span></td>
+      <td>{{ i.distinct_days }}/{{ i.span_days }}d</td>
+      <td>{{ i.latest_text }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">None this period.</p>{% endif %}
+  <p class="callout">{{ report.one_off_issues|length }} one-off event(s) also observed this period, not listed individually.</p>
+  </div>
+  {% endif %}
+
+  </div>
+  {% endfor %}
+
+  <div class="footer">Generated by the RBZ Monitoring Console's Automated Reports engine.{% if report.ai_provider != 'offline' %} Narrative commentary is AI-assisted (provider: {{ report.ai_provider }}); statistical sections are unaffected.{% endif %}</div>
+</body>
+</html>

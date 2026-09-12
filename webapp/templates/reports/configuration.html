@@ -18,10 +18,17 @@
 
   <div class="cfg-hub">
     {% for c in config_children %}
+    {% if c.disabled %}
+    <span class="cfg-hub-card is-disabled" title="Superuser only" aria-disabled="true">
+      <span class="cfg-hub-name">{{ c.label }} <span class="cfg-hub-lock">🔒</span></span>
+      <span class="cfg-hub-hint">Superuser only</span>
+    </span>
+    {% else %}
     <a class="cfg-hub-card" href="{% url c.url_name %}">
       <span class="cfg-hub-name">{{ c.label }}</span>
       <span class="cfg-hub-hint">{{ c.hint }}</span>
     </a>
+    {% endif %}
     {% endfor %}
   </div>
 

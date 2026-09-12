@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% block title %}Active Directory Device Picker{% endblock %}
+
+{% comment %}
+  Active Directory's own landing screen (2026-09-11, split out of Infrastructure Admin's
+  combined picker into its own report -- see views.active_directory_form's own docstring) --
+  a structural twin of infra_select.html/network_select.html (same shape, different data).
+  The inventory here is network.AD_SYSTEMS' own subset of network.DEVICES (Root/Child Domain
+  Controllers, AD Sync & Authentication).
+{% endcomment %}
+
+{% block body %}
+<style>
+  .badge-state {
+    display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+    background: var(--red-bg); color: var(--red);
+  }
+  .badge-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .badge-state.unk { background: var(--panel-2); color: var(--muted); }
+  .badge-state.stale-up { background: var(--amber-bg); color: var(--amber); }
+</style>
+
+<form method="post" action="{% url 'active_directory_report' %}" id="selectForm" autocomplete="off">
+{% csrf_token %}
+
+<div class="container">
+  <div class="snap" style="align-items:flex-start">
+    <div style="min-width:0">
+      <h1>Active Directory Device Picker</h1>
+      <div class="meta">Choose the devices for this report — live metrics are captured only for what you pick.</div>
+      <div class="meta" style="margin-top:2px">This report belongs to Infrastructure Admin's
+        estate — Network Admin has view access to it as well.</div>
+      <div class="sys-stats">
+        <span class="sys-stat">{{ devices|length }} device{{ devices|length|pluralize }}</span>
+        {% if unreachable_count %}<span class="sys-stat">{{ unreachable_count }} not responding</span>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% if open_report %}
+  {% comment %}
+    A report is already open. This screen is the picker, so without this the only way forward
+    is to choose devices again — which clears the snapshot token and discards answers already
+    typed. Landing here throws nothing away; this makes the way back visible and says plainly
+    what starting again would cost.
+  {% endcomment %}
+  <div class="resume-bar">
+    <div class="resume-text">
+      <b>You have a report open <span class="resume-cd" id="resumeCountdown" data-left="{{ open_seconds }}"></span></b>
+      <span>{{ open_report|join:", " }} — your answers are still there.</span>
+    </div>
+    <a class="btn primary" href="{% url 'active_directory_report' %}">Continue that report</a>
+  </div>
+  <p class="meta" style="margin:-4px 2px 14px">Choosing devices below starts a new report and
+    discards the open one.</p>
+  {% endif %}
+
+  <div class="section-label">Devices to include</div>
+  <div class="card"><div class="body" style="padding-top:14px">
+    <p class="meta" style="margin:0 0 4px;line-height:1.5">Domain controllers and AD-adjacent
+      servers currently monitored appear here — further Root/Child Domain Controllers or AD
+      Sync/Authentication hosts will appear automatically once they are added as Prometheus
+      targets.</p>
+
+    <div class="sys-toolbar">
+      <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All devices</span></label>
+      <span class="sys-search">
+        <span class="sys-search-ico" aria-hidden="true">⌕</span>
+        <input type="text" id="sysFilter" class="sys-filter" placeholder="Filter devices…"
+               autocomplete="off" aria-label="Filter devices">
+        <button type="button" class="sys-clear" id="sysClear" hidden aria-label="Clear filter">×</button>
+      </span>
+      <span class="spacer" style="flex:1"></span>
+      <span class="select-count" id="selectCountTop"></span>
+    </div>
+
+    <div class="sys-grid" id="selectList">
+      {% for d in devices %}
+      {% comment %}
+        Tiles show a NEUTRAL label (2026-09-11, on request: "hide hostnames from the
+        picker... a neutral way of referencing this devices... the exact same pattern we
+        have for systems" -- the System Admin picker shows a business system name, never a
+        raw hostname). No reveal-the-real-address control here: that already exists on the
+        report/review screen's own Connect strip (2026-09-11 follow-up: "remove this button
+        from the picker at all its already properly implemented in the dashboard").
+      {% endcomment %}
+      <label class="sys-tile" data-name="{{ d.label|lower }} {{ d.name|lower }} {{ d.target }}">
+        <input type="checkbox" class="select-check" name="include_device" value="{{ d.key }}">
+        <span class="sys-mono" style="--mono-h:{{ d.mono_hue }}">{{ d.label.0|upper }}</span>
+        <span class="sys-body">
+          <span class="sys-name">{{ d.label }}</span>
+          <span class="sys-sub">{{ d.system }}</span>
+          {% if not d.known %}
+          {% comment %}
+            No `up` series at all is a different answer from up == 0: one means Prometheus has
+            never scraped this target, the other that it tried and failed.
+          {% endcomment %}
+          <span class="badge-state unk" title="Prometheus has no scrape for this target"><span class="dot"></span>not scraped</span>
+          {% elif not d.reachable and d.host_reachable %}
+          {% comment %}
+            A relay device (2026-09-09: RBZHQ-DC-204) whose metrics have gone stale but whose
+            OWN independent ICMP probe confirms it's genuinely up -- see network._windows_
+            reading_trusted's own docstring for why this is a materially different, less severe
+            state than "not responding" and must not read the same on this screen either.
+          {% endcomment %}
+          <span class="badge-state stale-up" title="The server answers ping, but its own metrics haven't reported recently"><span class="dot"></span>stale metrics, server up</span>
+          {% elif not d.reachable %}
+          <span class="badge-state" title="The target is not answering"><span class="dot"></span>not responding</span>
+          {% endif %}
+        </span>
+        <span class="sys-tick" aria-hidden="true">✓</span>
+      </label>
+      {% empty %}
+      <div class="sys-empty"><span class="big">⌸</span>No Active Directory devices are being monitored yet.</div>
+      {% endfor %}
+    </div>
+    <div class="sys-empty" id="sysNoResults" hidden><span class="big">⌕</span>No devices match your filter.</div>
+  </div></div>
+</div>
+
+{% comment %} ---- sticky action bar ---- {% endcomment %}
+<div class="actionbar">
+  <div class="container-inner">
+    <span class="sel-pill"><b id="selCountNum">0</b><span id="selectCount"></span></span>
+    <button type="button" class="sel-clear" id="selClear" hidden>Clear</button>
+    <div class="spacer" style="flex:1"></div>
+    <button class="btn primary" type="submit">Capture &amp; continue ▸</button>
+  </div>
+</div>
+</form>
+
+<div id="toasts" class="toast-wrap" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("selectForm");
+  var tiles = Array.prototype.slice.call(document.querySelectorAll(".sys-tile"));
+  var checks = tiles.map(function (t) { return t.querySelector(".select-check"); });
+  var allBox = document.getElementById("selectAll");
+  var counts = [document.getElementById("selectCount"), document.getElementById("selectCountTop")];
+  var filter = document.getElementById("sysFilter");
+  var noResults = document.getElementById("sysNoResults");
+  var grid = document.getElementById("selectList");
+  var countNum = document.getElementById("selCountNum");
+  var selClear = document.getElementById("selClear");
+  var sysClear = document.getElementById("sysClear");
+
+  function sync() {
+    var n = 0;
+    tiles.forEach(function (t) {
+      var on = t.querySelector(".select-check").checked;
+      t.classList.toggle("checked", on);
+      if (on) n++;
+    });
+    // checks.length > 0 guard: n === checks.length is vacuously true with zero tiles (e.g. no
+    // devices at all), which would otherwise show "select all" checked with nothing selected.
+    if (allBox) { allBox.checked = checks.length > 0 && n === checks.length; allBox.indeterminate = n > 0 && n < checks.length; }
+    counts.forEach(function (el) { if (el) el.textContent = n + " of " + checks.length + " selected"; });
+
+    if (grid) grid.classList.toggle("has-selection", n > 0);
+    if (countNum) countNum.textContent = n;
+    if (selClear) selClear.hidden = n === 0;
+  }
+  checks.forEach(function (c) { c.addEventListener("change", sync); });
+
+  if (allBox) allBox.addEventListener("change", function () {
+    checks.forEach(function (c) { c.checked = allBox.checked; });
+    sync();
+  });
+
+  if (selClear) selClear.addEventListener("click", function () {
+    checks.forEach(function (c) { c.checked = false; });
+    sync();
+  });
+
+  function applyFilter() {
+    var q = filter.value.trim().toLowerCase(), shown = 0;
+    tiles.forEach(function (t) {
+      var hit = !q || t.getAttribute("data-name").indexOf(q) > -1;
+      t.classList.toggle("hidden-by-filter", !hit);
+      if (hit) shown++;
+    });
+    if (noResults) noResults.hidden = shown > 0 || tiles.length === 0;
+    if (sysClear) sysClear.hidden = !q;
+  }
+  if (filter) {
+    filter.addEventListener("input", applyFilter);
+    filter.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && filter.value) { e.preventDefault(); filter.value = ""; applyFilter(); }
+    });
+  }
+  if (sysClear) sysClear.addEventListener("click", function () {
+    filter.value = ""; applyFilter(); filter.focus();
+  });
+
+  if (form) form.addEventListener("submit", function (e) {
+    if (!checks.some(function (c) { return c.checked; })) {
+      e.preventDefault();
+      window.alert("Select at least one device to include in the report.");
+    }
+  });
+
+  sync();
+})();
+</script>
+
+{% comment %}
+  The open report expires on the same clock as its snapshot, so the widget counts down to the
+  moment it stops being true rather than offering to continue a report whose numbers went
+  stale hours ago. At zero the page reloads; the server has already dropped the session keys
+  by then, so the widget is simply gone.
+{% endcomment %}
+{% if open_seconds %}
+<script>
+(function () {
+  "use strict";
+  var el = document.getElementById("resumeCountdown");
+  if (!el) { return; }
+  var deadline = Date.now() + (parseInt(el.getAttribute("data-left"), 10) || 0) * 1000;
+  function tick() {
+    var left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    var m = Math.floor(left / 60), s = left % 60;
+    el.textContent = m + ":" + (s < 10 ? "0" : "") + s;
+    el.classList.toggle("warn", left <= 60);
+    if (left <= 0) { clearInterval(iv); window.location.reload(); }
+  }
+  tick();
+  var iv = setInterval(tick, 1000);
+})();
+</script>
+{% endif %}
+{% endblock %}

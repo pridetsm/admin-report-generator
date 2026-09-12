@@ -19,7 +19,13 @@ Layout model
   nesting level -- one consistent table spacing, so Used % / Fix needed? /
   Resolved / the title badge all line up straight down the page.
 * The Notes table lands its Resolved column on the shared right edge,
-  column Z (RIGHT_EDGE).
+  column AA (RIGHT_EDGE).
+* Every RIGHT table sits a fixed gap column away from its neighbour, Notes
+  included -- Notes is not itself a table, so nothing (Cluster Storage,
+  Replication, NTP / Time Sync Status) is ever allowed to end flush against
+  it (2026-09-11: "tables must be equidistance apart... must not touch any
+  tables"). See NOTES_COL's own comment for the dedicated gap column this
+  guarantees.
 * "Cluster Storage" is rendered only for cluster hosts (a host that owns
   child nodes).
 * GOLDEN RULE: MAX_COL stays at least 3 columns past RIGHT_EDGE, always kept
@@ -34,7 +40,7 @@ Groups written into the workbook
 * named range ``dashboard`` -> AT A GLANCE + NEEDS IMMEDIATE ATTENTION +
   NEEDS ATTENTION
 * named range ``banners``   -> the CRITICAL / WARNING banner block
-* named range ``RHS_Edge``  -> RIGHT_EDGE (column Z today; tracks the constant, not a
+* named range ``RHS_Edge``  -> RIGHT_EDGE (column AA today; tracks the constant, not a
   hardcoded letter, since RIGHT_EDGE has shifted more than once)
 """
 
@@ -72,12 +78,15 @@ LOGO_PATH = HERE / "logo.png"
 # there is still a clear gap column between CPU/RAM and Disk -- column I is
 # that guaranteed gap.  Beyond it, one fixed gap column between each table.
 #
-#   Services (2+i):(3+i) | gap | CPU/RAM (5+i):(7+i) | gap I | Disk J:N |
-#   gap O | Cluster Storage P:S | (variable gap) | Notes  flagged U:W, Fix X, Resolved Y
+#   Services (2+i):(3+i) | gap | CPU/RAM (5+i):(7+i) | gap I | Disk K:O |
+#   gap P | Cluster Storage / Replication / NTP Q:T (NTP alone spills to U) |
+#   gap V, ALWAYS | Notes  flagged W:Y, Fix Z, Resolved AA
 #
-# The gap before the Notes panel varies with each system's table config
-# (cluster host = 1 col, plain host / node = more); the Notes right edge
-# (Fix needed? / Resolved / the title badge) is always column Y.
+# The gap before Notes (V) is now fixed-width regardless of which table
+# (Cluster Storage, Replication, NTP, or none) rendered before it (2026-09-11:
+# "tables must be equidistance apart... must not touch any tables") -- the
+# Notes right edge (Fix needed? / Resolved / the title badge) is always
+# column AA.
 # ---------------------------------------------------------------------------
 
 def services_col(indent):   return 2 + indent           # B.., C.., D..  (name, status)
@@ -91,13 +100,25 @@ def cpuram_col(indent):     return 5 + indent           # E.., F.., G..  (node, 
 DISK_COL = 11          # K  Host   (L Used %, M Size GB, N Mount, O Free GB)
 DISK_LAST = 15         # O
 #                       # P  gap
-CLUSTER_COL = 17       # Q  Pool   (R Used %, S Size GB, T Free GB)
+# Q  Pool (R Used %, S Size GB, T Free GB) -- Cluster Storage/Replication's own 4 columns.
+# NTP / Time Sync Status (write_ntp_sync) uses one column further, Q-U, its 5th field
+# spilling into what would otherwise be the U gap here; that table gets its OWN dedicated
+# gap after it (V, below) instead, rather than ending flush against Notes.
+CLUSTER_COL = 17       # Q
 CLUSTER_LAST = 20      # T
-#                       # U  gap (absorbs the config variance)
-NOTES_COL = 22         # V  Flagged metric  (merged V:X), Y Fix needed?, Z Resolved
-NOTES_FLAG_LAST = 24   # X
-FIX_COL = 25           # Y
-RIGHT_EDGE = 26        # Z  Resolved  ==  shared right edge
+#                       # U  gap for Cluster Storage/Replication -- NTP's own 5th column
+#                       #    when NTP is the table actually rendering on that row instead
+#                       # V  gap, ALWAYS, regardless of which table (Cluster Storage,
+#                       #    Replication, or NTP) is rendering -- tables must sit an equal
+#                       #    distance apart and Notes is not a table, so nothing may ever end
+#                       #    flush against it (2026-09-11, on request: "tables must be
+#                       #    equidistance apart notes section is not a table and must not
+#                       #    touch any tables"). Same width as every other gap column here
+#                       #    (P, U) -- see COL_WIDTHS.
+NOTES_COL = 23         # W  Flagged metric  (merged W:Y), Z Fix needed?, AA Resolved
+NOTES_FLAG_LAST = 25   # Y
+FIX_COL = 26           # Z
+RIGHT_EDGE = 27        # AA  Resolved  ==  shared right edge
 
 DASH_LEFT = 2          # B   dashboard tiles / banners left edge
 # I, not J: matches the System Admin Report's own AT A GLANCE/banner width (its B:L span
@@ -250,11 +271,59 @@ class ClusterStorageRow:
 
 
 @dataclass
+class ReplicationRow:
+    """AD replication health with one partner, rolled up across every partition that partner
+    replicates (see network.py's own _ad_replication_rows docstring for why partition-level
+    detail is collapsed rather than shown as separate rows). Reuses ClusterStorageRow's own
+    column slot (see write_replication) rather than a new column block -- a device group is
+    never both a cluster host AND a domain controller, so the two tables never need to coexist
+    on the same row."""
+    partner: str
+    status: str = "OK"       # "OK" or "FAILED" -- decided by the capture layer (network.py),
+                              # same split as CpuRam.ram_size/DiskRow.free_gb: formatting logic
+                              # stays out of the renderer.
+    last_success: str = ""   # pre-formatted relative time, e.g. "14m ago" / "never"
+    failures: int = 0
+
+
+@dataclass
+class NtpSyncRow:
+    """One domain controller's own w32time sync state (2026-09-11, on request, scoped to
+    RBZHQ-ROOT-01 only -- the forest's primary time source). Reuses ReplicationRow/
+    ClusterStorageRow's own column slot, same reasoning: this device is never also a cluster
+    host, and Root DCs (no `ad` collector enabled -- see network.py's own confirmation) never
+    carry a Replication table either, so there is no real host where two of these three tables
+    would ever need to coexist on the same row. Five columns, one wider than Cluster Storage/
+    Replication's own four -- write_ntp_sync borrows the single gap column normally left before
+    Notes to fit `dc` as its own column (rather than folding it into the section title), since
+    that gap is unused on the one row this table ever actually renders on.
+    band/age_band are pre-computed by the capture layer (network.py), same split as
+    ReplicationRow.status -- thresholds are a policy decision, not a rendering one."""
+    dc: str
+    stratum: int
+    stratum_band: str          # "green" (<=3) / "amber" (>3) / "red" (==16, unsynced)
+    source: str
+    last_sync: str             # pre-formatted datetime, Africa/Harare local (UTC+2, no DST),
+                                # e.g. "11 Sep 2026, 14:32:05" -- the raw metric is UTC; the
+                                # capture layer (network.py) converts before this ever renders
+    sync_age: str              # pre-formatted "Xh Ym"
+    sync_age_band: str         # "green" (<=300s) / "amber" (<=900s) / "red" (>900s)
+
+
+@dataclass
 class NoteRow:
     flagged_metric: str
     fix_needed: str = ""
     resolved: str = ""
     comment: str = ""
+    # This row's OWN severity ("red"/"amber"/"" for informational) -- 2026-09-04, on request:
+    # "by system admin report convention comments are never red". A group-level "is this
+    # group critical at all" check coloured EVERY row in a group red the moment ANY of its
+    # flags was critical, including a purely informational row (e.g. "Cluster's own view of
+    # node membership") that isn't itself describing a problem. Matches the Systems Admin
+    # Report's own generate_report.py convention: a flagged row is coloured by ITS OWN
+    # flag.band, never by another row's.
+    band: str = ""
 
 
 @dataclass
@@ -264,6 +333,8 @@ class DeviceGroup:
     cpu_ram: list[CpuRam] = field(default_factory=list)
     disks: list[DiskRow] = field(default_factory=list)
     cluster_storage: list[ClusterStorageRow] = field(default_factory=list)
+    replication: list[ReplicationRow] = field(default_factory=list)
+    ntp_sync: list[NtpSyncRow] = field(default_factory=list)
     notes: list[NoteRow] = field(default_factory=list)
     critical: int = 0
     warning: int = 0
@@ -329,6 +400,11 @@ class ReportData:
     banners: list[Banner] = field(default_factory=list)
     summary_signed_by: str = "Pride Moyo"
     components_total: int = 0
+    # Masthead title + sheet-tab name (2026-09-11: Active Directory split into its own report,
+    # reusing this same renderer -- see network.build_infrastructure_report's own caller).
+    # Defaulted to the original literal so every existing caller (the combined Infrastructure
+    # Report, the standalone CLI twin) keeps reading "INFRASTRUCTURE ADMIN REPORT" unchanged.
+    report_title: str = "INFRASTRUCTURE ADMIN REPORT"
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +471,7 @@ def write_header(sh: Sheet, data: ReportData) -> None:
         sh.ws.add_image(img)
     except Exception as exc:                      # missing/unreadable logo -> carry on
         print(f"[!] logo not embedded ({exc})", file=sys.stderr)
-    sh.put(1, 3, "INFRASTRUCTURE ADMIN REPORT", sz=22, bold=True, color=TEXT_PRIMARY,
+    sh.put(1, 3, data.report_title, sz=22, bold=True, color=TEXT_PRIMARY,
            bg=BG, halign="left")
     sh.rowh(1, 26.25)
     sh.put(2, 3, f"snapshot generated {data.generated_at}      •      "
@@ -618,12 +694,14 @@ def _notes_title(title: str, indent: int) -> str:
     return title.split(" (")[0] + " Notes"
 
 
-def _flagged_style(text: str, group: DeviceGroup) -> tuple[str, bool]:
-    if text.strip() == SENTINEL_NOTE:
+def _flagged_style(note: "NoteRow") -> tuple[str, bool]:
+    """Per-ROW, not per-group (2026-09-04: "comments are never red" -- a group merely
+    CONTAINING a critical flag must not turn every other, unrelated row in it red too)."""
+    if note.flagged_metric.strip() == SENTINEL_NOTE:
         return TEXT_MUTED, True
-    if group.critical > 0:
+    if note.band == "red":
         return CHIP_RED_TXT, False
-    if group.warning > 0:
+    if note.band == "amber":
         return CHIP_AMBER_TXT, False
     return TEXT_MUTED, False
 
@@ -751,6 +829,57 @@ def write_cluster_storage(sh, top, rows) -> int:
     return r - 1
 
 
+def write_replication(sh, top, rows) -> int:
+    """AD replication, at CLUSTER_COL -- the same 4-column slot write_cluster_storage uses
+    (Pool/Used%/Size GB/Free GB there vs. Partner/Status/Last Success/Failures here). Never
+    drawn for the same group as Cluster Storage (a domain controller is never also a cluster
+    host), so there is no real collision to design around -- reusing the slot avoids adding a
+    whole new fixed-column block (and the RIGHT_EDGE/MAX_COL renumbering that would require,
+    see this module's own GOLDEN RULE) for a table that's mutually exclusive with the one
+    already sitting there."""
+    _fixed_table(sh, top, CLUSTER_COL, CLUSTER_LAST, "AD Replication",
+                 ("Partner", "Status", "Last Success", "Failures"))
+    r = top + 2
+    for rep in sorted(rows, key=lambda x: x.partner):
+        ok = rep.status.upper() == "OK"
+        rbg, rtxt = (CHIP_GREEN_BG, CHIP_GREEN_TXT) if ok else (CHIP_RED_BG, CHIP_RED_TXT)
+        sh.put(r, CLUSTER_COL, rep.partner, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+               halign="left")
+        sh.put(r, CLUSTER_COL + 1, rep.status, sz=8, bold=True, color=rtxt,
+               bg=rbg, halign="center")
+        sh.put(r, CLUSTER_COL + 2, rep.last_success, sz=8.5, color=TEXT_SECONDARY,
+               bg=CARD, halign="center")
+        sh.put(r, CLUSTER_COL + 3, rep.failures, sz=8, bold=not ok,
+               color=(TEXT_SECONDARY if ok else CHIP_RED_TXT), bg=CARD, halign="center")
+        r += 1
+    return r - 1
+
+
+def write_ntp_sync(sh, top, rows) -> int:
+    """NTP / Time Sync Status, at CLUSTER_COL -- one column wider than Cluster Storage/
+    Replication's own four (DC/Stratum/Source/Last Sync/Sync Age), spilling into what would
+    otherwise be their own gap column (CLUSTER_LAST+1) -- but NEVER into the dedicated gap
+    that sits after that (see NOTES_COL's own comment: "tables must be equidistance apart...
+    must not touch any tables", 2026-09-11), so Notes still starts a full clear column away
+    regardless of which of these three tables actually rendered on a given row. Safe for the
+    same reason write_replication's own docstring gives: never coexists on a row with Cluster
+    Storage (not a cluster host) or Replication (Root DCs have no `ad` collector enabled,
+    confirmed live -- see network.py)."""
+    _fixed_table(sh, top, CLUSTER_COL, CLUSTER_LAST + 1, "NTP / Time Sync Status",
+                 ("DC", "Stratum", "Source", "Last Sync", "Sync Age"))
+    r = top + 2
+    for row in rows:
+        sbg, stxt = TONE_BG[row.stratum_band], TONE_TXT[row.stratum_band]
+        abg, atxt = TONE_BG[row.sync_age_band], TONE_TXT[row.sync_age_band]
+        sh.put(r, CLUSTER_COL, row.dc, sz=8.5, color=TEXT_SECONDARY, bg=CARD, halign="left")
+        sh.put(r, CLUSTER_COL + 1, row.stratum, sz=8, bold=True, color=stxt, bg=sbg, halign="center")
+        sh.put(r, CLUSTER_COL + 2, row.source, sz=8.5, color=TEXT_SECONDARY, bg=CARD, halign="left")
+        sh.put(r, CLUSTER_COL + 3, row.last_sync, sz=8.5, color=TEXT_SECONDARY, bg=CARD, halign="center")
+        sh.put(r, CLUSTER_COL + 4, row.sync_age, sz=8, bold=True, color=atxt, bg=abg, halign="center")
+        r += 1
+    return r - 1
+
+
 # Widening a column only helps up to a point -- some flagged-metric text (e.g. the Root DCs'
 # "reachable, but CPU/RAM/Disk have not been published yet..." note) runs well past what any
 # reasonable column width could hold on one line. Wrap instead, and grow the row to fit rather
@@ -780,7 +909,7 @@ def write_notes(sh, top, indent, title, notes, group, by_row) -> None:
 
     r = hdr + 1
     for n in notes:
-        color, italic = _flagged_style(n.flagged_metric, group)
+        color, italic = _flagged_style(n)
         sh.merge(r, nc, r, NOTES_FLAG_LAST, bg=CARD)
         sh.put(r, nc, f"  {n.flagged_metric}", sz=8, italic=italic, color=color,
                bg=CARD, halign="left", valign="top", wrap=True)
@@ -830,8 +959,8 @@ def _section_span(group: DeviceGroup) -> int:
     gap between node sections. Keep in sync with write_section/write_services if either
     changes shape."""
     top = 2
-    has_tables = any((group.services, group.cpu_ram, group.disks,
-                      group.cluster_storage, group.notes))
+    has_tables = any((group.services, group.cpu_ram, group.disks, group.cluster_storage,
+                      group.replication, group.ntp_sync, group.notes))
     if not has_tables:
         return top
     ends = [top]
@@ -849,6 +978,10 @@ def _section_span(group: DeviceGroup) -> int:
         ends.append(top + 2 + len(group.disks) - 1)
     if group.cluster_storage:
         ends.append(top + 2 + len(group.cluster_storage) - 1)
+    if group.replication:
+        ends.append(top + 2 + len(group.replication) - 1)
+    if group.ntp_sync:
+        ends.append(top + 2 + len(group.ntp_sync) - 1)
     ends.append(_notes_content_end(top, group.notes) if group.notes else top)
     by_row = max(ends) + 1
     return by_row + 2
@@ -859,8 +992,8 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
     write_title_bar(sh, row, indent, group)
     top = row + 2
 
-    has_tables = any((group.services, group.cpu_ram, group.disks,
-                      group.cluster_storage, group.notes))
+    has_tables = any((group.services, group.cpu_ram, group.disks, group.cluster_storage,
+                      group.replication, group.ntp_sync, group.notes))
     if has_tables:
         notes_title = _notes_title(group.title, indent)
         notes_content_end = (_notes_content_end(top, group.notes)
@@ -875,6 +1008,10 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
             ends.append(write_disk(sh, top, group.disks))
         if group.cluster_storage:
             ends.append(write_cluster_storage(sh, top, group.cluster_storage))
+        if group.replication:
+            ends.append(write_replication(sh, top, group.replication))
+        if group.ntp_sync:
+            ends.append(write_ntp_sync(sh, top, group.ntp_sync))
         ends.append(notes_content_end)
         by_row = max(ends) + 1
         write_notes(sh, top, indent, notes_title, group.notes, group, by_row)
@@ -970,18 +1107,37 @@ COL_WIDTHS = {
     "E": 19.6, "F": 10.5, "G": 10.5, "H": 9.1, "I": 9.1,   # CPU / RAM (shifts by indent) -- E/F/G fit e.g. "HRE-HCIHOST-01"
     "J": 10.5,                                             # guaranteed gap: CPU/RAM <-> Disk -- see the equations above
     "K": 14, "L": 8, "M": 8, "N": 8.43, "O": 8,            # Disk (fixed)
-    "P": 3,                                                # gap
-    "Q": 12, "R": 7, "S": 8, "T": 7,                       # Cluster Storage (fixed)
-    "U": 3,                                                # gap (absorbs config variance)
-    "V": 36, "W": 12, "X": 12,                             # Notes: Flagged metric (V:X)
-    "Y": 13, "Z": 13,                                      # Notes: Fix needed? / Resolved
+    # P was 3 -- much narrower than F/J (both 10.5, the Services<->CPU/RAM and CPU/RAM<->Disk
+    # gaps the equations above already keep equal at indent 2). Matched to 10.5 here too
+    # (2026-09-11, on request: "equal distance between these tables Services / CPU·RAM / Disk
+    # / AD Replication") so all three gaps at the level these four tables actually coexist
+    # (a DC's own per-host card, indent 2) read as genuinely the same width, not just the
+    # first two.
+    "P": 10.5,                                             # gap: Disk <-> Cluster Storage/Replication/NTP
+    # Q-T do double duty (same "widest role each column can take" rule as D-J above):
+    # Cluster Storage (Pool/Used%/Size GB/Free GB) and Replication (Partner/Status/Last
+    # Success/Failures) both fit comfortably in the original, narrower sizing, but NTP / Time
+    # Sync Status (write_ntp_sync's own DC/Stratum/Source/Last Sync) needs real room for a
+    # full hostname, an NTP source name ("0.pool.ntp.org"), and a full datetime ("11 Sep
+    # 2026, 06:52:18") -- widened here for that, 2026-09-11. Cluster Storage/Replication's own
+    # short values just sit in a more generous column than they strictly need; nothing there
+    # was sized to fit exactly, so there's no risk of clipping the other direction.
+    "Q": 14, "R": 7, "S": 16, "T": 20,                     # Cluster Storage / Replication / NTP
+    "U": 9,                                                # gap for Cluster Storage/Replication;
+                                                            # NTP's own "Sync Age" (e.g. "0h 5m")
+                                                            # when NTP is the table rendering
+    "V": 3,                                                # gap, ALWAYS -- see NOTES_COL's own
+                                                            # comment; never absorbed as data by
+                                                            # any table, so Notes never touches one
+    "W": 36, "X": 12, "Y": 12,                             # Notes: Flagged metric (W:Y)
+    "Z": 13, "AA": 13,                                     # Notes: Fix needed? / Resolved
 }
 
 
 def build_report(data: ReportData, out_path: str) -> None:
     wb = Workbook()
     ws = wb.active
-    ws.title = "Infrastructure Admin Report"
+    ws.title = data.report_title.title()   # "INFRASTRUCTURE ADMIN REPORT" -> "Infrastructure Admin Report"
     ws.sheet_view.showGridLines = False
     sh = Sheet(ws)
 
@@ -1053,6 +1209,8 @@ def load_data(path: str) -> ReportData:
             disks=[DiskRow(**d) for d in g.get("disks", [])],
             cluster_storage=[ClusterStorageRow(**s)
                              for s in g.get("cluster_storage", [])],
+            replication=[ReplicationRow(**s) for s in g.get("replication", [])],
+            ntp_sync=[NtpSyncRow(**s) for s in g.get("ntp_sync", [])],
             notes=[NoteRow(**n) for n in g.get("notes", [])],
             critical=g.get("critical", 0),
             warning=g.get("warning", 0),

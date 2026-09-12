@@ -68,6 +68,11 @@ class Snapshot:
     _store: object = None
     _systems: object = None
     _cfg: object = None
+    # folder-monitoring Flags computed in capture_snapshot (see its own comment), carried
+    # forward so build_report can hand them to gr.build_report_bytes's extra_flags_by_system --
+    # without this the xlsx would silently recompute flags from scratch and never see them,
+    # even though this same Snapshot's own .systems (the web preview) already does.
+    _folder_flags: Dict[str, list] = field(default_factory=dict)
 
     @property
     def grafana_url(self) -> str:
@@ -140,6 +145,25 @@ def build_overview(store, systems, cfg) -> dict:
     warn = lambda n: "good" if not n else "warn"
     web_state = "good" if n_http == 0 else ("bad" if n_http > n_https else "warn")
 
+    # Queue folders drained (2026-09-08, on request) -- T24's payment/interface message queues
+    # (see webapp/reports/folders.py's own "Payment & interface queues" watch group), scoped to
+    # whichever systems THIS report actually covers (the same "don't leak systems outside the
+    # scope" discipline every other tile above already follows) rather than the whole estate.
+    # Degrades to 0 | 0 (a neutral "good" reading, not a false alarm) if Folder Watch itself
+    # can't be reached this run -- a second live-data source going down must not also break
+    # this report's own overview tiles.
+    from . import folders as folder_watch
+    try:
+        fw_data = folder_watch.snapshot()
+    except folder_watch.FolderWatchUnavailable:
+        fw_data = None
+    sysnames = {s.name for s in systems}
+    queue_folders_here = ([f for f in fw_data["folders"]
+                           if f["watch_type"] == "queue" and f.get("system") in sysnames]
+                          if fw_data else [])
+    n_queue = len(queue_folders_here)
+    n_drained = sum(1 for f in queue_folders_here if f["state"] == "idle")
+
     linux_pct, win_pct = gr.platform_host_pcts(systems)
     glance = [
         {"label": "Systems", "value": len(systems), "state": "info"},
@@ -164,6 +188,16 @@ def build_overview(store, systems, cfg) -> dict:
          "sub": "down | total", "state": bad(down)},
         {"label": "Expired certs", "value": f"{len(cert_expired)} | {gr.cert_monitored(store)}",
          "sub": "expired | total", "state": bad(len(cert_expired))},
+        # 2026-09-08, on request -- a stuck payment/interface queue is exactly as real a fault
+        # as any other tile in this section; "drained | total" (not "stuck | total") because a
+        # drained queue is the healthy steady state this tile is checking FOR, matching the
+        # positive framing "Backup tracking"/"Web encryption" already use elsewhere on this
+        # same overview. `warn`, not `bad`: the finer red/amber verdict already happens once,
+        # correctly, via the flagged-metric mechanism (reports.alerting.
+        # undrained_folder_flags_by_system) -- this tile is a glance-level count, not a second
+        # independently-computed severity judgement.
+        {"label": "Queue folders drained", "value": f"{n_drained} | {n_queue}",
+         "sub": "drained | total", "state": warn(n_queue - n_drained)},
     ]
     watch = [
         # Every tile reads "affected | total" so a count can never be mistaken for the whole
@@ -325,6 +359,29 @@ def list_systems(*, infra: bool = False) -> List[dict]:
             for s in systems]
 
 
+def live_prom_client(*, infra: bool = False):
+    """cfg + a connected gr.Prometheus client + topology, WITHOUT capturing a single metric --
+    the same first few lines capture_snapshot always pays for, split out on its own for callers
+    that only need to run their OWN live query_range calls (report_charts.resource_percent_
+    series, 2026-09-08: "shouldn't it be the percentage reading... wouldn't it be easier to
+    read" -- the Hourly Activity chart's per-system RAM/CPU/Disk lines need a live historical %
+    reading, not a fresh full capture() of every metric across every system).
+
+    Returns (prom, cfg, systems). No ping() -- unlike capture_snapshot, a caller here runs its
+    own query_range per chart and can fail that one chart gracefully (see resource_percent_
+    series' own try/except) rather than refusing the whole report over one slow ping."""
+    cfg = gr.load_config()
+    from .models import SystemConfig
+    sc = SystemConfig.get()
+    if sc.prometheus_url:
+        cfg.prom = sc.prometheus_url
+    if sc.grafana_url:
+        cfg.grafana = sc.grafana_url
+    systems = gr.load_topology(cfg.prometheus_yml, scope="infra" if infra else "business")
+    prom = gr.Prometheus(cfg.prom, cfg.http_timeout, cfg.verify_tls)
+    return prom, cfg, systems
+
+
 def _scope_links_to_systems(store, systems) -> None:
     """Web links (blackbox HTTP probes) are captured GLOBALLY by the engine, independent of the
     systems list. When a report is scoped to a subset, drop every link not owned by one of those
@@ -364,10 +421,36 @@ def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = Fa
     if only is not None:
         _scope_links_to_systems(store, systems)
 
+    # Folder-monitoring issues (2026-09-07, on request: "a lot of folder issues fly under the
+    # radar admins need to answer for those errors and warnings as well") -- reuses the EXACT
+    # SAME transformation reports.alerting's own alert-poller uses (folder_size_flags_by_system/
+    # undrained_folder_flags_by_system/backup_uncleared_folder_flags_by_system), so a folder
+    # issue reads identically whether it triggered an e-mail or is being seen here for the
+    # first time. generate_report.py itself can't do this (it has no Django dependency, and
+    # reports.folders -- which these three functions read -- is Django-side; see alerting.py's
+    # own module docstring for the same reasoning), so it happens at this integration seam
+    # instead, same as alerting.py's own run_alert_cycle does it.
+    #
+    # Business scope only: folders.py's own system-eligibility functions
+    # (folder_watch_systems/backup_drainage_systems) are business-system concepts --
+    # Infrastructure Admin's estate (infra=True) has no folder-watch equivalent.
+    folder_flags_by_sys: Dict[str, list] = {}
+    if not infra:
+        from . import alerting
+
+        all_names = {s.name for s in systems}
+        for sysname, flags in alerting.folder_size_flags_by_system(store, systems).items():
+            folder_flags_by_sys.setdefault(sysname, []).extend(flags)
+        for sysname, flags in alerting.undrained_folder_flags_by_system(cfg, all_names).items():
+            folder_flags_by_sys.setdefault(sysname, []).extend(flags)
+        for sysname, flags in alerting.backup_uncleared_folder_flags_by_system(cfg, all_names).items():
+            folder_flags_by_sys.setdefault(sysname, []).extend(flags)
+
     svms: List[SystemVM] = []
     for sysm in systems:
         flags = [FlagVM(f.key, f.text, f.band, f.category)
-                 for f in gr.flagged_for_system(store, sysm, cfg)]
+                 for f in gr.flagged_for_system(store, sysm, cfg)
+                 + folder_flags_by_sys.get(sysm.name, [])]
         notes = (gr.backup_policy_notes_for_system(store, sysm) + gr.cob_policy_notes_for_system(sysm)
                  + gr.ram_policy_notes_for_system(sysm))
         if not flags and not notes:   # nothing flagged, nothing policy-explained -- see NO_ISSUES_COMMENT
@@ -383,6 +466,7 @@ def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = Fa
         _store=store,
         _systems=systems,
         _cfg=cfg,
+        _folder_flags=folder_flags_by_sys,
     )
 
 
@@ -396,6 +480,7 @@ def build_report(snapshot: Snapshot, *, theme: str, author: str,
         author=author,
         annotations=annotations,
         summary_comment=summary_comment,
+        extra_flags_by_system=snapshot._folder_flags,
     )
 
 

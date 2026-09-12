@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Scheduled Report</title></head>
+<body style="margin:0;padding:0;background:#F0EEE7;font-family:Segoe UI,Arial,sans-serif;color:#16233A">
+{% comment %}
+  The xlsx-report family's own bundle e-mail (2026-09-12, on request: "we want to eventually
+  have all infrastructure reports be mailed once... as we attach different xlsx reports we
+  will need to show their dashboard in the mailing template"). Same visual language as
+  automated_report_email.html (masthead navy #16233A, gold accent #B8935A, card #FFFFFF on
+  #F0EEE7, Georgia serif for numbers, Consolas uppercase labels) so the two report families
+  read as one console's mail, but a FRESH, separate file -- that template is monolithic and
+  narrative-report-specific (no {% include %} points, bound to sections/classifications/
+  anomalies), not something a second report family can slot into.
+
+  The one thing this template is built around from day one: `reports` is a LIST. Today it is
+  always exactly one entry (Active Directory) -- see xlsx_report_mail.send_xlsx_report_bundle's
+  own docstring for why only reports[0] is actually attached right now -- but the loop below is
+  written so that adding a second xlsx report type later to the SAME e-mail is just one more
+  dict appended to that list; this file will not need to change.
+
+  Each `report` dict's `overview` is the exact {"glance": [...], "immediate": [...],
+  "watch": [...], "banners": [...]} shape reports/network.py's own overview-builders produce
+  and reports/templates/submission_detail.html already renders on-screen for History -- same
+  field names, just hand-written inline styles here instead of that screen's .dt/.chip/.dot
+  CSS classes (mail clients don't load app-wide CSS).
+{% endcomment %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F0EEE7;padding:24px 0">
+  <tr><td align="center">
+    <table role="presentation" width="640" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border:1px solid #DAD4C6">
+      <tr><td style="background:#16233A;padding:22px 28px">
+        <div style="font-family:Consolas,monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#B8935A">RBZ Monitoring Console &middot; Reporting</div>
+        <div style="font-size:22px;color:#FFFFFF;margin-top:6px;font-family:Georgia,serif">Scheduled Report{{ reports|length|pluralize }}</div>
+      </td></tr>
+
+      {% for report in reports %}
+      <tr><td style="padding:20px 28px 6px;{% if not forloop.first %}border-top:1px solid #DAD4C6;{% endif %}">
+        <div style="font-family:Georgia,serif;font-size:16px;color:#16233A">{{ report.title }}</div>
+      </td></tr>
+
+      {% if report.overview.glance %}
+      <tr><td style="padding:0 28px 16px">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+          {% for kpi in report.overview.glance %}
+          <td align="center" style="{% if not forloop.last %}border-right:1px solid #DAD4C6;{% endif %}padding:4px 6px">
+            <div style="font-family:Georgia,serif;font-size:19px;color:#16233A">{{ kpi.value }}</div>
+            <div style="font-family:Consolas,monospace;font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:#6B6558;margin-top:2px">{{ kpi.label }}</div>
+          </td>
+          {% endfor %}
+        </tr></table>
+      </td></tr>
+      {% endif %}
+
+      {% if report.overview.immediate %}
+      <tr><td style="padding:0 28px 4px;font-family:Consolas,monospace;font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;color:#B3261E">
+        Immediate attention ({{ report.overview.immediate|length }})
+      </td></tr>
+      {% for item in report.overview.immediate %}
+      <tr><td style="padding:2px 28px;font-size:13px;color:#16233A">
+        {{ item.label }}: <b>{{ item.value }}</b>{% if item.sub %} <span style="color:#6B6558">({{ item.sub }})</span>{% endif %}
+      </td></tr>
+      {% endfor %}
+      {% endif %}
+
+      {% if report.overview.watch %}
+      <tr><td style="padding:10px 28px 4px;font-family:Consolas,monospace;font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;color:#B8790A">
+        Watch list ({{ report.overview.watch|length }})
+      </td></tr>
+      {% for item in report.overview.watch %}
+      <tr><td style="padding:2px 28px;font-size:13px;color:#16233A">
+        {{ item.label }}: <b>{{ item.value }}</b>{% if item.sub %} <span style="color:#6B6558">({{ item.sub }})</span>{% endif %}
+      </td></tr>
+      {% endfor %}
+      {% endif %}
+
+      <tr><td style="padding:14px 28px 20px;font-family:Consolas,monospace;font-size:11px;color:#6B6558">
+        Full report attached: {{ report.filename }}
+      </td></tr>
+      {% endfor %}
+
+      <tr><td style="padding:16px 28px;background:#F6F4EF;font-family:Consolas,monospace;font-size:11px;color:#6B6558">
+        Generated automatically by the RBZ Monitoring Console.
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>

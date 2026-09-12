@@ -230,7 +230,8 @@ def palette(name: str):
 #  PROMETHEUS CLIENT
 # ============================================================================ #
 class Prometheus:
-    """Minimal read-only client for the Prometheus HTTP API (instant queries)."""
+    """Minimal read-only client for the Prometheus HTTP API (instant queries, plus range
+    queries for time-series charts -- see query_range)."""
 
     def __init__(self, base: str, timeout: int = 20, verify_tls: bool = True):
         self.base = base.rstrip("/")
@@ -247,6 +248,22 @@ class Prometheus:
         if payload.get("status") != "success":
             raise RuntimeError(f"query failed: {payload.get('error', 'unknown error')}")
         return [{"labels": s["metric"], "value": float(s["value"][1])}
+                for s in payload["data"]["result"]]
+
+    def query_range(self, expr: str, start: float, end: float, step: str) -> List[dict]:
+        """`/api/v1/query_range` -- a MATRIX of (timestamp, value) points per series, not one
+        instant reading. `start`/`end` are unix timestamps (seconds), `step` is Prometheus's
+        own duration syntax ("1h", "5m", ...). Used for genuinely continuous data (Prometheus's
+        own scraped/evaluated metrics, e.g. ALERTS) -- not a fit for this app's own report-
+        generation-triggered data, which has no such continuous cadence to range-query."""
+        body = urllib.parse.urlencode({"query": expr, "start": start, "end": end, "step": step}).encode()
+        req = urllib.request.Request(self.base + "/api/v1/query_range", data=body)
+        with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_context) as resp:
+            payload = json.loads(resp.read().decode())
+        if payload.get("status") != "success":
+            raise RuntimeError(f"query_range failed: {payload.get('error', 'unknown error')}")
+        return [{"labels": s["metric"],
+                "values": [(float(t), float(v)) for t, v in s["values"]]}
                 for s in payload["data"]["result"]]
 
     def scalar(self, expr: str) -> Optional[float]:
@@ -299,7 +316,20 @@ class System:
 def win_service(name: str, inst: str) -> str:
     # keep `display` in the aggregation so the row self-attributes to its host/component
     # (the sub-group under SYSTEM SERVICES); the value is unchanged since display is constant here.
-    return f'max by (name, display) (windows_service_state{{name="{name}", instance="{inst}"}})'
+    #
+    # state="running" is NOT optional (fixed 2026-09-04, found investigating a real miss --
+    # T24's MSSQLSERVER "down" during a COB run raised no alert at any poll interval, which a
+    # SHORTER poll couldn't have fixed since the query itself was blind, not the cadence).
+    # windows_exporter's own service collector emits windows_service_state as a STATE SET: one
+    # series per (name, instance, state) -- running/stopped/paused/start pending/stop pending/
+    # continue pending/pause pending -- value=1 for whichever ONE state is current, 0 for
+    # every other state of that SAME service. Without the state filter, `max by (name,
+    # display)` takes the max ACROSS those state series, and since exactly one of them is
+    # always 1 (a service is always in some state), the aggregate is ALWAYS 1 regardless of
+    # WHICH state that is -- "stopped" contributes a 1 just as readily as "running" does. This
+    # made every win_service() check in this app structurally incapable of ever reporting a
+    # real stop, silently, since whenever it was first written.
+    return f'max by (name, display) (windows_service_state{{name="{name}", instance="{inst}", state="running"}})'
 
 
 def systemd(inst: str, name: str, type_: Optional[str] = None) -> str:
@@ -797,6 +827,34 @@ LDAP_DEPENDENTS = {"GCMS", "GMS", "Attendance System"}
 # grows. Extend as more logging-role folders are watched.
 FOLDER_EXPECTED_PCT: Dict[str, Tuple[str, float]] = {"T24 Log File": ("F:", 0.80)}
 
+# Overridable at runtime via the webapp's Alert type configuration screen (Configuration ->
+# Alerts -> Alert type configuration) rather than only by editing the dict above and
+# redeploying -- the same mechanism BACKUP_POLICY_PATH already uses for backup frequency.
+# FOLDER_SIZE_POLICY_PATH sits next to config.ini -- a per-deployment file, same as
+# config.ini/backup_policy.json themselves, not one this repo tracks -- and
+# reload_folder_expected_pct() re-reads it fresh at the top of every capture() (see below),
+# so an admin's edit takes effect on the very next report with no restart. Absent or
+# unparseable: FOLDER_EXPECTED_PCT simply stays at the hardcoded default above.
+FOLDER_SIZE_POLICY_PATH = HERE / "folder_size_policy.json"
+
+
+def reload_folder_expected_pct() -> None:
+    """Repopulate FOLDER_EXPECTED_PCT from FOLDER_SIZE_POLICY_PATH if it exists and parses --
+    called at the top of every capture() so a policy edit takes effect on the very next
+    report. Never raises: a missing or broken file just leaves the current values in place.
+    Stored on disk as a 0-100 percentage (matching how the config screen talks about it);
+    kept in memory as the 0-1 fraction folder_expected_gb's own math expects."""
+    global FOLDER_EXPECTED_PCT
+    try:
+        raw = json.loads(FOLDER_SIZE_POLICY_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError):
+        return
+    FOLDER_EXPECTED_PCT = {name: (fields["mount"], float(fields["pct"]) / 100)
+                           for name, fields in raw.items()
+                           if isinstance(fields, dict) and "mount" in fields and "pct" in fields}
+
 
 def folder_expected_gb(store: "Store", instance: Optional[str], name: str) -> Optional[float]:
     """Expected size for a watched folder (see FOLDER_EXPECTED_PCT) -- computed fresh, every
@@ -822,7 +880,17 @@ def folder_expected_gb(store: "Store", instance: Optional[str], name: str) -> Op
 # alongside the real one. (DR/staging role components -- Eagle's "dr", LMS's "staging", etc. --
 # are left alone: those are real infrastructure belonging to a real system, not test systems in
 # their own right, so excluding them here would be wrong.)
-SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest", "root domain controllers"}
+# "domain controllers" (the Child DC job's own `system` label — RBZHQ-DC-203/BYO-AD-DC-01,
+# 2026-09-10) and "ad sync & authentication" (RBZ-HQ-ADS-01/RBZ-ADAPT-01, also 2026-09-10) are
+# the SAME situation as "root domain controllers" just above, just missed when the child DCs
+# were first added (this report kept reading them as a real business system the whole time,
+# nobody had noticed until now) and newly introduced by the AD Sync/BYO-DC additions -- both
+# already have their own proper home in the Infrastructure Admin Report's "Active Directory"
+# group (see network.py's DEVICES list), where the flags that actually make sense for them
+# (services/CPU/RAM/disk/replication) already live; the System Admin Report's own "UNTRACKED
+# (no backup check)" framing never meant anything for AD/DC infrastructure to begin with.
+SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest", "root domain controllers",
+                "domain controllers", "ad sync & authentication"}
 
 # `system` label values that ARE real systems, but belong to Infrastructure Admin's own
 # estate (hyper-converged clusters, standalone DB hosts — the underlying hardware) rather
@@ -1041,6 +1109,29 @@ class Store:
     # `disk` directly. Rendered in its own Folders table instead (see _system_card), each
     # entry judged against FOLDER_EXPECTED_PCT rather than banded like a real volume.
     log_files: Dict[str, List[Tuple[str, float, str]]] = field(default_factory=dict)
+    # lower(system name) -> [(target_label, observed_today, currently_waiting, source_ip), ...]
+    # -- T24's payment/interface message queues (ALLIANCE.IN_MT, EFIN.IN, PAYNET.IN, ...), the
+    # same folder_exporter targets webapp/reports/folders.py's own "Payment & interface queues"
+    # watch group already tracks and alerts on (see
+    # reports.alerting.undrained_folder_flags_by_system) -- this field is purely for VISIBILITY
+    # (2026-09-08, on request: "add transaction queue monitoring to the system admin report for
+    # the t24 system" -- the alert-on-breach half already existed and was confirmed working
+    # live, but a queue that's currently draining fine was invisible on this report entirely,
+    # only ever appearing the moment it actually broke).
+    #
+    # `observed_today` (2026-09-08, on request: "instead of Files Waiting have this one field
+    # be called Observed... the number of files that have flowed through") is throughput, not
+    # depth -- files that LEFT this folder since local midnight (increase() over
+    # folder_files_removed_total, the exact figure/window folders.py's own dashboard already
+    # calls "processed"), because a healthy queue folder sits at 0 files waiting almost all the
+    # time and a column that reads "0" all day says nothing about whether it's actually doing
+    # anything. `currently_waiting` (today's live depth) is kept alongside for the Drained/
+    # Waiting status chip's own judgement -- it just isn't rendered as its own column any more.
+    #
+    # Deliberately NOT banded/judged against a THRESHOLD here (only Drained-vs-not) -- that
+    # finer judgement already happens once, correctly, via the flagged-metric mechanism on the
+    # same card; duplicating it here risked the two silently disagreeing.
+    queue_folders: Dict[str, List[Tuple[str, int, int, str]]] = field(default_factory=dict)
     # instance -> total physical RAM in GB. A SEPARATE query from `ram` (which is already a
     # ratio computed server-side in Prometheus, not a raw value this app could derive a total
     # from) -- added so the Memory panel can show "82% of 32GB" instead of a bare "82%", which
@@ -1048,6 +1139,13 @@ class Store:
     # 128 GB one. Defaulted (not a positional field) so no existing Store(...) call needed
     # updating; a Store built before this existed just reads every host as no-data here.
     ram_total_gb: Dict[str, float] = field(default_factory=dict)
+    # instance -> {"reported": epoch_seconds, "offset": seconds (host's clock minus this
+    # server's own, signed), "timezone": str|None}. See capture_host_times' own docstring for
+    # what publishes this and why roughly half the Windows fleet doesn't (2026-09-10, on
+    # request: "just a clean way for us to know what time each host believes it is right
+    # now" -- a sanity check for clock skew / wrong-timezone misconfiguration, not a metric
+    # tied to any one system's own card, so it gets its own flat cross-estate table instead).
+    host_times: Dict[str, dict] = field(default_factory=dict)
 
 
 # filters reused across every node_filesystem / windows_logical_disk query
@@ -1078,6 +1176,7 @@ def _stable(expr: str, lookback: str = "6h") -> str:
 
 def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     reload_backup_policy()   # fresh on every report — see BACKUP_POLICY_PATH above
+    reload_folder_expected_pct()   # fresh on every report — see FOLDER_SIZE_POLICY_PATH above
     disk: Dict[str, Dict[str, dict]] = {}
     ram: Dict[str, float] = {}
     ram_total: Dict[str, float] = {}
@@ -1148,6 +1247,40 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
         if sysname:
             log_files.setdefault(sysname, []).append((target, r["value"], source_ip))
 
+    # ---- transaction queues: same folder_exporter job as the Folders table above, but the
+    # OTHER kind of watched folder -- a payment/interface message DROP folder (ALLIANCE.IN_MT,
+    # EFIN.IN, PAYNET.IN, ...), not a log. See Store.queue_folders' own docstring for why this
+    # exists (2026-09-08). `role="",kind=""` isolates exactly this folder type: the REMOTE
+    # folder_exporter.yml tags backup/log-shaped folders with a real role/kind (confirmed live
+    # -- role="backup" on BACKUP/BACKUP.LOGS, role="logging" + kind="logs" on T24 Log File),
+    # and leaves both labels absent on every payment/interface queue folder -- the exact same
+    # distinction webapp/reports/folders.py's own snapshot() already draws (its "queue"
+    # watch_type is everything NOT on a known backup-type host and NOT a log-file-by-name).
+    # `observed` is throughput since local midnight (increase() over folder_files_removed_total
+    # -- the exact figure/window folders.py's own dashboard already calls "processed"), not
+    # current depth -- see Store.queue_folders' own docstring for why (2026-09-08: "the number
+    # of files that have flowed through"). `waiting` (current depth, from folder_files) is kept
+    # only for the Drained/Waiting status judgement below, not rendered as its own column.
+    queue_folders: Dict[str, List[Tuple[str, int, int, str]]] = {}
+    _now_dt = datetime.datetime.now()
+    _since_midnight = max(15, _now_dt.hour * 3600 + _now_dt.minute * 60 + _now_dt.second)
+    queue_observed: Dict[Tuple[str, str], float] = {}
+    for r in prom.query(f'increase(folder_files_removed_total{{role="",kind=""}}[{_since_midnight}s])'):
+        target = r["labels"].get("target")
+        inst = r["labels"].get("instance") or ""
+        if target:
+            queue_observed[(inst, target)] = r["value"]
+    for r in prom.query('folder_files{role="",kind=""}'):
+        sysname = (r["labels"].get("system") or "").strip().lower()
+        target = r["labels"].get("target") or ""
+        inst = r["labels"].get("instance") or ""
+        source_ip = inst.split(":")[0]
+        if not (sysname and target):
+            continue
+        waiting = int(r["value"])
+        observed = max(0, round(queue_observed.get((inst, target), 0.0)))
+        queue_folders.setdefault(sysname, []).append((target, observed, waiting, source_ip))
+
     # ---- specials -------------------------------------------------------------
     cob = prom.scalar("cob_time")
     swift = prom.scalar("swift_transactions_total")
@@ -1211,8 +1344,12 @@ def capture(prom: Prometheus, systems: List[System], cfg: Config) -> Store:
     # ---- backups (textfile collector: backup_file / _count / _success / _ts) ----
     backups = capture_backups(prom)
 
+    # ---- host clocks (windows_exporter/node_exporter `time` collector) --------
+    host_times = capture_host_times(prom)
+
     return Store(disk, ram, cpu, cob, swift, services, up, links, backups, ldap_up=ldap_up,
-                log_files=log_files, ram_total_gb=ram_total)
+                log_files=log_files, ram_total_gb=ram_total, queue_folders=queue_folders,
+                host_times=host_times)
 
 
 def _is_url(inst: Optional[str]) -> bool:
@@ -1284,6 +1421,69 @@ def capture_backups(prom: Prometheus) -> Dict[str, dict]:
         d["files"] = sorted((ft for ft in d["files"] if ft[0]),
                             key=lambda ft: (0 if ft[1] == "today" else 1, ft[0]))
     return data
+
+
+def capture_host_times(prom: Prometheus) -> Dict[str, dict]:
+    """instance -> {"reported": epoch_seconds, "offset": seconds, "timezone": str|None} --
+    what a host's own exporter says its wall clock currently reads, straight off the `time`
+    collector windows_exporter/node_exporter both ship (2026-09-10, on request: "just a clean
+    way for us to know what time each host believes it is right now" -- catches a host whose
+    clock or timezone is misconfigured, which a busy admin would otherwise only notice by
+    accident, e.g. mismatched log timestamps during an incident).
+
+    `offset` is the host's reported time MINUS this report-generation server's own clock
+    (datetime.now(), the same "now" every other freshness check in this module already trusts
+    as ground truth, e.g. backup_cutoff) -- not a comparison against true UTC, since neither
+    side of that comparison is independently known to be correct; this server's own clock is
+    just the one fixed reference point every host can be judged against consistently. A large
+    offset near a round number of hours (e.g. ~7200s) usually means a timezone mix-up (local
+    time written where UTC was expected, or vice versa); a small, non-round offset usually
+    means genuine clock drift (NTP not syncing).
+
+    Deliberately a PLAIN query (not _stable's last_over_time) -- this is exactly the point-in-
+    time reading _stable's own docstring says never to wrap: a stale cached value would make a
+    perfectly healthy host look like it's lagging, defeating the one thing this exists to show.
+
+    windows_exporter's `time` collector also publishes windows_time_timezone (the box's own
+    configured TZ NAME, as a label on a fixed-value series) -- attached here when present, for
+    a direct answer to "is this on UTC" rather than only an inferred one from the offset alone.
+    node_exporter has no equivalent (a Linux host's system clock is unix epoch regardless of
+    its configured display timezone, so there's no separate TZ fact to read there).
+
+    NOT every windows_exporter host publishes this at all -- confirmed live 2026-09-10: exactly
+    half of this report's Windows fleet has no `time` collector enabled (an older or
+    differently-configured windows_exporter install, not something this function can fix) --
+    those hosts are simply absent from the returned dict rather than defaulted to a fabricated
+    reading, so the render side can say so plainly rather than going quiet (this module's own
+    "every requested metric appears, and every one carries its state" rule, see the top of this
+    file)."""
+    now = datetime.datetime.now().timestamp()
+    out: Dict[str, dict] = {}
+    try:
+        wrows = prom.query("windows_time_current_timestamp_seconds")
+    except Exception:
+        wrows = []
+    for r in wrows:
+        inst = r["labels"].get("instance")
+        if inst:
+            out[inst] = {"reported": r["value"], "offset": r["value"] - now, "timezone": None}
+    try:
+        lrows = prom.query("node_time_seconds")
+    except Exception:
+        lrows = []
+    for r in lrows:
+        inst = r["labels"].get("instance")
+        if inst:
+            out[inst] = {"reported": r["value"], "offset": r["value"] - now, "timezone": None}
+    try:
+        tzrows = prom.query("windows_time_timezone")
+    except Exception:
+        tzrows = []
+    for r in tzrows:
+        inst, tz = r["labels"].get("instance"), r["labels"].get("timezone")
+        if inst in out and tz:
+            out[inst]["timezone"] = tz
+    return out
 
 
 # ============================================================================ #
@@ -1642,13 +1842,33 @@ def backup_missing(store: "Store", systems: List["System"]) -> List[Tuple[str, s
        own backup policy (see backup_cutoff — daily for nearly all, wider for systems that
        don't run every day), exactly as the per-system Backups panel does, so a frozen
        check that stopped running correctly reads as missing. Hosts that don't run the
-       backup check at all are skipped (they produce no row)."""
+       backup check at all are skipped (they produce no row).
+
+       Gated on the checker's own timestamp having rolled to today (2026-09-10 fix — see
+       flagged_for_system's identical gate, added 2026-09-04, for the full reasoning: the
+       check itself must have actually RUN today before its silence can mean anything). This
+       function was missed when that gate was added — confirmed live 2026-09-10 against a
+       real report (Rumbi Chakumarani's, generated 04:56 UTC, a few minutes before the
+       shared 05:00:01 UTC daily backup-checker run for CRB/CSD/LMS/Paytyme/RTGS): at that
+       moment `flagged_for_system`'s own Notes-table backup flags correctly stayed silent
+       (checked_today was False, gated as designed), but this function had no such gate, so
+       the freshest file it could see was still yesterday's-checker-run's file (one day
+       older than the "genuinely missing" case looks like) — reading as NO BACKUP on the
+       MISSING BACKUPS tile/section (and the same section in the daily e-mail) even though
+       the backup was, as reported, genuinely present. The two backup views disagreeing
+       within the same report — Notes silent, MISSING BACKUPS not — was the actual bug
+       Rumbi's comment described ("the system sees them as absent"), not a genuinely
+       missing backup on any of the five systems she listed."""
     now = datetime.datetime.now()
     missing: List[Tuple[str, str, str]] = []
     for s in systems:
         for c in s.components:
             d = store.backups.get(c.instance)
             if d is None:
+                continue
+            ts = d.get("ts")
+            checked_today = ts is not None and datetime.datetime.fromtimestamp(ts).date() == now.date()
+            if not checked_today:
                 continue
             cutoff = backup_cutoff(c.instance, now)
             fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
@@ -1753,6 +1973,19 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
         d = store.backups.get(c.instance)
         if d is None:
             continue
+        # The check itself must have actually RUN today before its silence can mean anything
+        # (2026-09-04, on request: "the no-backup alert should only fire once the backup
+        # checker metric time stamp has rolled forward to today's date"). backup_check_
+        # timestamp_seconds (d["ts"]) is stamped by the checker script on every run it makes
+        # (see reports/script_templates/backup_windows.ps1's own $now); if that run is still
+        # dated YESTERDAY, the check simply has not had its next scheduled look at this host's
+        # backup folder yet today, and "no fresh file" would just mean "too early to tell",
+        # not "genuinely missing" — flagging it now would be a false alarm that clears itself
+        # the moment the check's own next run happens to land after local midnight.
+        ts = d.get("ts")
+        checked_today = ts is not None and datetime.datetime.fromtimestamp(ts).date() == now.date()
+        if not checked_today:
+            continue
         cutoff = backup_cutoff(c.instance, now)
         fresh = any(mt and mt >= cutoff for _n, _day, mt in (d.get("files") or []))
         if not fresh and not backup_gap_expected_any(c.instance, d.get("ok"), now):
@@ -1789,8 +2022,10 @@ def backup_policy_notes_for_system(store: "Store", sysm: "System",
        development, ...) rather than an unexplained monitoring gap. Returned alone, since
        there's nothing else to check on a system with zero tracked components.
 
-    Mirrors flagged_for_system's own backup freshness check (same cutoff) so this and the
-    xlsx Backups panel never disagree about which components are in either state."""
+    Mirrors flagged_for_system's own backup freshness check (same cutoff, AND the same
+    checked_today timestamp gate — added here 2026-09-10, see backup_missing's own docstring
+    for the real report this discrepancy was caught against) so this and the xlsx Backups
+    panel never disagree about which components are in either state."""
     now = now or datetime.datetime.now()
     reason = BACKUP_UNTRACKED_EXEMPT.get(sysm.name)
     if reason and not any(c.instance in store.backups for c in sysm.components):
@@ -1800,6 +2035,10 @@ def backup_policy_notes_for_system(store: "Store", sysm: "System",
     for c in sysm.components:
         d = store.backups.get(c.instance)
         if d is None:
+            continue
+        ts = d.get("ts")
+        checked_today = ts is not None and datetime.datetime.fromtimestamp(ts).date() == now.date()
+        if not checked_today:
             continue
         files = d.get("files") or []
         cutoff = backup_cutoff(c.instance, now)
@@ -1858,21 +2097,39 @@ class ReportBuilder:
     WIDTHS = {"A": 6.43, "B": 22, "C": 9, "D": 8.140625, "E": 14, "F": 15,
               "G": 8, "H": 7.5703125, "I": 14, "J": 20, "K": 7, "L": 7,   # G = Memory·CPU's CPU % column
               "M": 11, "N": 7.85546875, "O": 30, "P": 13, "Q": 11,   # O-Q = Backups (File | Generated | Status)
-              "R": 2,                                        # gap before Notes
-              "S": 13, "T": 11, "U": 11, "V": 11, "W": 9}  # S-W = notes column
+              "R": 7.85546875,                               # gap before Clock -- same width as
+              # every other inter-TABLE gap (D/H/N), not the old narrower gap-before-Notes (2):
+              # Notes isn't a table (see V below), so its own gap was never the right template.
+              "S": 14, "T": 14, "U": 9,                      # S-U = Clock (Host | Time | Offset)
+              "V": 2,                                        # gap before Notes -- narrower, on
+              # purpose: Notes is not one of the tables the D/H/N/R spacing rule applies to.
+              "W": 13, "X": 11, "Y": 11, "Z": 11, "AA": 9}  # W-AA = notes column (Notes is the
+              # outermost/rightmost table on the card, same as before Clock existed -- Clock
+              # sits between Backups and Notes, not past Notes' own right edge.
     CARD_GROUPS = [(2, 4), (5, 7), (8, 9), (10, 12)]   # 4 overview cards across the width
 
     def __init__(self, cfg: Config, *, author: Optional[str] = None,
-                 annotations: Optional[dict] = None, summary_comment: Optional[str] = None):
+                 annotations: Optional[dict] = None, summary_comment: Optional[str] = None,
+                 extra_flags_by_system: Optional[Dict[str, list]] = None):
         self.cfg = cfg
         # admin-supplied inputs from the web form (all optional — CLI runs leave them blank):
         #   author           -> the master "By" name, mirrored across every card
         #   summary_comment  -> free text in the Summary Notes box
         #   annotations      -> {system_name: {"flags": {flag_key: "Yes"|"No"},
         #                                       "comment": str}}  pre-fills each card's Notes
+        #   extra_flags_by_system -> {system_name: [Flag, ...]} merged onto whatever
+        #     flagged_for_system() itself computes (see self._flagged_for) -- 2026-09-07, on
+        #     request: "add folder issues to the system admin report... a lot of folder issues
+        #     fly under the radar". This engine has no Django dependency and folder-monitoring
+        #     data lives Django-side (webapp/reports/folders.py), so it can't compute these
+        #     itself the way it computes disk/ram/cpu -- the caller (webapp/reports/services.py,
+        #     the same integration seam reports.alerting already uses for the identical
+        #     transformation) supplies them instead. `None`/omitted keeps every existing CLI
+        #     caller (this file's own __main__, the standalone script) working unchanged.
         self.author = (author or "").strip() or None
         self.summary_comment = (summary_comment or "").strip() or None
         self.annotations = annotations or {}
+        self.extra_flags_by_system = extra_flags_by_system or {}
         self.wb = openpyxl.Workbook()
         self.ws = self.wb.active
         self.ws.title = "System Admin Report"
@@ -1881,6 +2138,13 @@ class ReportBuilder:
         self._thin = Side(style="thin", color=Theme.BORDER)
         self._first_by = None        # the master "By" cell; later systems mirror it via a formula
         self._link_owner: Dict[str, Optional[str]] = {}   # url -> normalised owning system (or None)
+
+    def _flagged_for(self, store: "Store", sysm: "System") -> List[Flag]:
+        """flagged_for_system(store, sysm, self.cfg) plus this system's own
+        self.extra_flags_by_system, if any -- the ONE place both call sites below go through,
+        so a folder-monitoring flag (see __init__'s own comment) reaches every table that
+        reads a system's flags, not just whichever call site happened to be updated first."""
+        return flagged_for_system(store, sysm, self.cfg) + self.extra_flags_by_system.get(sysm.name, [])
 
     # -- primitive helpers ----------------------------------------------------
     # bg defaults to None (NOT Theme.BG) so the *current* palette is read at call time — a
@@ -1981,6 +2245,25 @@ class ReportBuilder:
         if days is None:
             return None
         return "red" if days < 7 else ("amber" if days < 24 else "green")  # thresholds from the links dashboard
+
+    @staticmethod
+    def _offset_band(offset: float) -> str:
+        """green under 2 minutes (scrape/network lag, not a real problem) · amber under an
+           hour (genuine drift worth a look) · red an hour or more (the timezone-mix-up
+           range this table exists to catch, per the admin's own framing: "sense of whether
+           server is on UTC time")."""
+        a = abs(offset)
+        return "red" if a >= 3600 else ("amber" if a >= 120 else "green")
+
+    @staticmethod
+    def _fmt_offset(offset: float) -> str:
+        sign = "+" if offset >= 0 else "-"
+        a = abs(offset)
+        if a < 60:
+            return f"{sign}{a:.0f}s"
+        if a < 3600:
+            return f"{sign}{a / 60:.1f}m"
+        return f"{sign}{a / 3600:.1f}h"
 
     @staticmethod
     def _link_status(d: dict, url: str) -> Tuple[Optional[str], Optional[str]]:
@@ -2143,6 +2426,18 @@ class ReportBuilder:
         # days are a silent-failure risk to renew (attention/banner below).
         cert_expired, cert_expiring = cert_rollup(store)
 
+        # Queue folders drained (2026-09-08, on request) -- T24's payment/interface message
+        # queues (see Store.queue_folders' own docstring), scoped to whichever systems THIS
+        # report actually covers, the same "don't leak systems outside the scope" discipline
+        # every other tile here already follows -- store.queue_folders itself is captured
+        # unconditionally from Prometheus (not pre-filtered by `systems`), so this filters it
+        # down here rather than showing e.g. Temenos's own queues on an RTGS-only report.
+        sysnames_lower = {sy.name.lower() for sy in systems}
+        queue_entries = [e for sn, entries in store.queue_folders.items()
+                        if sn in sysnames_lower for e in entries]
+        n_queue_folders = len(queue_entries)
+        n_queue_drained = sum(1 for (_, _, waiting, _) in queue_entries if waiting <= 0)
+
         imm_tiles = [
             # missing out of TRACKED hosts (an untracked host isn't judged either way —
             # see backup_tracked_hosts / the separate BACKUP TRACKING tile for those).
@@ -2156,6 +2451,14 @@ class ReportBuilder:
              "good" if down == 0 else "bad"),
             ("panel", "EXPIRED CERTS", [("EXPIRED", len(cert_expired)), ("TOTAL", cert_monitored(store))],
              "good" if not cert_expired else "bad"),
+            # "DRAINED", not "STUCK", out of TOTAL -- the positive framing every affected-out-
+            # of-total tile on this row already uses. "warn", not "bad"/"critical": the finer
+            # red/amber verdict already happens once, correctly, via the flagged-metric
+            # mechanism (see reports.alerting.undrained_folder_flags_by_system) -- this tile is
+            # a glance-level count, not a second independently-computed severity judgement.
+            ("panel", "QUEUE FOLDERS DRAINED",
+             [("DRAINED", n_queue_drained), ("TOTAL", n_queue_folders)],
+             "good" if n_queue_drained == n_queue_folders else "warn"),
         ]
         # This tile counts EVERY high disk (>= thr) — elevated and near-full together —
         # so it can never read 0 while the DISK NEAR-FULL banner below lists disks; those
@@ -2319,6 +2622,40 @@ class ReportBuilder:
                 "missing or fresh — it simply isn't being watched. Add the check before this becomes "
                 "a real gap nobody caught."))
 
+        # 1d) transaction/payment-interface queue folders currently NOT draining -- always
+        #     Critical, no grace period (2026-09-11, on request: "folder drainage should be
+        #     treated as critical... a critical banner for folder drainage for a transaction
+        #     queue folder that did not drain"). A queue folder is expected to drain itself
+        #     automatically within minutes, so any backlog at all is a genuine, immediate
+        #     problem -- the same "Critical only, no grace period" framing reports.alerting.
+        #     undrained_folder_flags_by_system's own docstring already uses for this exact
+        #     category's ALERT severity; this banner just gives the xlsx report the same
+        #     always-critical treatment, regardless of whether that flag's own band happens
+        #     to read amber or red (folders.verdict's amber/red split is a "how overdue"
+        #     detail, not a "is this actually fine" one for a queue that should never sit for
+        #     more than minutes in the first place).
+        #
+        #     Reuses undrained_folder_flags_by_system's OWN verdict (already computed once,
+        #     merged into extra_flags_by_system and feeding each system's own Notes table)
+        #     rather than re-judging store.queue_folders' Drained/Waiting column a second time
+        #     here -- exactly the "two independently-computed judgements risk silently
+        #     disagreeing" trap the Transaction Queues table's own docstring already warns
+        #     against avoiding.
+        undrained_queue = [(sysname, flag.text) for sysname, flags in self.extra_flags_by_system.items()
+                          for flag in flags if flag.category == "undrained_folders"]
+        if undrained_queue:
+            bysys: Dict[str, List[str]] = {}
+            for s, text in undrained_queue:
+                bysys.setdefault(s, []).append(text)
+            banners.append((
+                "critical",
+                f"TRANSACTION QUEUE NOT DRAINED  —  {len(undrained_queue)} folder(s) on "
+                f"{len(bysys)} system(s)",
+                [(s, "   ".join(v)) for s, v in sorted(bysys.items())],
+                "A payment/interface queue folder is expected to drain itself automatically "
+                "within minutes — any backlog here is a genuine, immediate problem. Investigate "
+                "the queue processor for these systems now."))
+
         # 2) components Prometheus can no longer reach — the highest-severity finding on
         #    this report: every other red banner is at least still being measured, this one
         #    means we've lost visibility entirely. "critical" band + an explicit label (not
@@ -2479,7 +2816,7 @@ class ReportBuilder:
         groups: List[Tuple[str, List[str]]] = []
         seen: Dict[str, int] = {}
         for sysm in systems:
-            flagged_s = flagged_for_system(store, sysm, self.cfg)
+            flagged_s = self._flagged_for(store, sysm)
             text = system_comment_text(store, sysm, flagged_s, self.annotations)
             if not text:
                 continue
@@ -2626,6 +2963,9 @@ class ReportBuilder:
                             if c.instance in store.ram else (c.label, "nodata", None, None, c.instance))
                 cpus.append((c.label, "ok", store.cpu[c.instance]) if c.instance in store.cpu
                             else (c.label, "nodata", None))
+        # one Clock row per host, same order as mems/cpus -- see capture_host_times' own
+        # docstring for what "reported"/"offset" mean and why some hosts have no reading.
+        clocks = [(c.label, store.host_times.get(c.instance)) for c in sysm.components]
         disks = [(c.label, mp, dd)
                  for c in sysm.components
                  for mp, dd in sorted(store.disk.get(c.instance, {}).items(),
@@ -2646,6 +2986,16 @@ class ReportBuilder:
                         sysm.components[0] if sysm.components else None)
             host = owner.label if owner else sysm.name
             folders.append((host, name, gb, owner.instance if owner else None))
+        # transaction queues (see Store.queue_folders) -- same host-attribution-by-IP as the
+        # Folders block just above, for the same reason (T24's queue folders live on T24 App,
+        # confirmed via source_ip, not guessed from the folder name).
+        queues = []
+        for name, observed, waiting, source_ip in store.queue_folders.get(sysm.name.lower(), []):
+            owner = next((c for c in sysm.components
+                         if c.instance.split(":")[0] == source_ip),
+                        sysm.components[0] if sysm.components else None)
+            host = owner.label if owner else sysm.name
+            queues.append((host, name, observed, waiting))
         nd = sum(1 for _, st, _, _, _ in mems if st == "down")      # hosts Prometheus can't reach
         nc = sum(1 for *_, dd in disks if dd.get("used", 0) >= self.cfg.chip_red) + \
              sum(1 for _, st, v, _, inst in mems
@@ -2665,6 +3015,19 @@ class ReportBuilder:
             d = store.backups.get(c.instance)
             if d is None:
                 continue                         # host doesn't run the backup check -> no row
+            # checked_today (2026-09-10 fix -- same gate as flagged_for_system/backup_missing/
+            # backup_policy_notes_for_system; this was the 4th and most visible place missing
+            # it, the actual per-system Backups panel row shown on the card itself). Confirmed
+            # live against a real report generated a few minutes before the shared daily
+            # backup-checker run -- see backup_missing's own docstring for the full incident.
+            # Deliberately gates ONLY the negative "NO BACKUP" verdict below, not the whole
+            # host: a real file that's genuinely on disk is real information regardless of
+            # whether today's checker run has happened yet, so `fresh`/bk_expected_off still
+            # show normally either way -- only the unqualified "nothing found" conclusion is
+            # untrustworthy before the check has actually looked today (that's the one claim
+            # this gate exists to hold back).
+            _ts = d.get("ts")
+            _checked_today = _ts is not None and datetime.datetime.fromtimestamp(_ts).date() == _now.date()
             _cutoff = backup_cutoff(c.instance, _now)   # daily for most hosts; wider where policy says so
             fresh = []
             for name, _day, mtime in (d.get("files") or []):
@@ -2679,6 +3042,8 @@ class ReportBuilder:
                 # else: past the policy window -> stale, does NOT count as a fresh backup
             if fresh:
                 bk_files.extend(fresh)
+            elif not _checked_today:
+                continue   # too early to tell -- not yet confirmed missing, so no row at all
             elif backup_gap_expected_any(c.instance, d.get("ok"), _now):
                 # policy says this host isn't expected to have a fresh file today -- either a
                 # single off-day (RTGS/CSD, Sundays) or a fixed weekly cadence (FRS, Fridays
@@ -2725,10 +3090,10 @@ class ReportBuilder:
         # name/summary bar reads as one solid strip rather than showing a hole the wrong
         # colour where the gap column crosses it (the bug in the first attempt at this).
         self._cell(y, 8, bg=Theme.CARD)
-        # Right-aligned at 23 -- Notes' own right edge, always (see nl/nr below), not
-        # Disk's -- so the summary sits flush with where the whole card actually ends,
-        # the same edge the name panel's own bar now reaches.
-        self._merge(y, 9, 23, "  ·  ".join(segs), Theme.font(9, False, summary_color),
+        # Right-aligned at 27 -- Notes' own right edge, always (see nl/nr below; Notes stays
+        # the outermost/rightmost table on the card, with Clock inserted between Backups and
+        # it rather than past it), so the summary sits flush with where the whole card ends.
+        self._merge(y, 9, 27, "  ·  ".join(segs), Theme.font(9, False, summary_color),
                     bg=Theme.CARD, al="right")
         y += 1
         for c in range(2, 14):           # spacer between the name and the tables
@@ -2747,6 +3112,17 @@ class ReportBuilder:
         else:                                          # nothing tracked here -- a plain gap,
             for c in range(14, 19):                     # not Notes creeping in to fill it
                 self._cell(y, c, bg=Theme.BG)
+        # Host Clock (2026-09-10, on request: "add it as one of each system's own tables...
+        # small, no need for a whole consolidated large table" -- reworked from an earlier,
+        # rejected standalone cross-estate table into this small, always-present, per-system
+        # panel instead, INSIDE Notes rather than past it: "the outermost thing should be
+        # Notes" -- so Clock sits between Backups and Notes (cols S-U), Notes stays the
+        # rightmost table, and its own nl/nr below moved from 19/23 to 23/27 to make room.
+        # Unconditional, unlike Backups -- see capture_host_times' own docstring for why
+        # roughly half the Windows fleet has no reading; that's a per-HOST "no reading" cell
+        # below, not a reason to hide the whole panel for the system.
+        self._merge(y, 19, 21, "Clock", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+        self._cell(y, 22, bg=Theme.BG)
         y += 1
         # column headers
         self._cell(y, 2, "Service Name", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
@@ -2768,6 +3144,10 @@ class ReportBuilder:
         else:                                          # plain gap, not Notes creeping in
             for c in range(14, 19):
                 self._cell(y, c, bg=Theme.BG)
+        self._cell(y, 19, "Host", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, border=True)
+        self._cell(y, 20, "Time", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+        self._cell(y, 21, "Offset", Theme.font(8, True, Theme.GREY), bg=Theme.HDR, al="center", border=True)
+        self._cell(y, 22, bg=Theme.BG)
 
         top = y + 1
         rows = max(len(svc_rows), len(mems), len(disks), len(bk_rows), 1)
@@ -2896,6 +3276,21 @@ class ReportBuilder:
             else:                                        # plain gap, not Notes creeping in
                 for c in range(14, 19):
                     self._cell(r, c, bg=Theme.BG)
+            # clock (between Backups and Notes; same one-row-per-host order as Memory · CPU)
+            if k < len(clocks):
+                label, ht = clocks[k]
+                self._cell(r, 19, label, Theme.font(9, False, Theme.GREY), border=True)
+                if ht is None:
+                    self._cell(r, 20, "—", Theme.font(9, False, Theme.SUB), al="center", border=True)
+                    self._cell(r, 21, "no reading", Theme.font(8, False, Theme.SUB), al="center", border=True)
+                else:
+                    reported = datetime.datetime.fromtimestamp(ht["reported"]).strftime("%d %b %H:%M:%S")
+                    self._cell(r, 20, reported, Theme.font(9, False, Theme.WHITE), al="center", border=True)
+                    self._chip(r, 21, self._fmt_offset(ht["offset"]), self._offset_band(ht["offset"]), sz=8)
+            else:
+                for c in range(19, 22):
+                    self._cell(r, c, bg=Theme.BG)
+            self._cell(r, 22, bg=Theme.BG)
 
         # ---- Folders table: watched folders (e.g. T24 Log File), directly under Disk,
         #      same columns (9-13) so it reads as part of the same block. Only rendered when
@@ -2951,22 +3346,78 @@ class ReportBuilder:
                     self._cell(r, c, bg=Theme.BG)
             folders_bottom = ftop + len(folders) - 1
 
-        # ---- notes panel to the far right (cols S-W, 19-23) -- ALWAYS this width, backups
-        #      or not, so Notes doesn't stretch wider just because there's nothing tracked to
-        #      show in 14-18. An untracked system leaves that as a plain gap instead (see the
-        #      title/header/data rows above), the same shape as "no backups" reads everywhere
-        #      else in this report -- an absence, not free real estate for the next table.
-        #      Three stacked parts: a table of THIS RUN's flagged metrics (critical +
-        #      warning) for the admin to triage, a free-text comment box, then the author
-        #      line. Regenerated fresh each run. ----
-        nl, nr = 19, 23
-        tn_row, last_data = top - 2, max(top + rows - 1, folders_bottom)
+        # ---- Transaction Queues table: T24's payment/interface message queues (see
+        #      Store.queue_folders), stacked directly under Folders (or under Disk if this
+        #      system has no log-file folder) using the same columns 9-13 -- 2026-09-08, on
+        #      request: "add transaction queue monitoring to the system admin report for the
+        #      t24 system". "Observed" is throughput (files processed today), not current
+        #      depth -- see Store.queue_folders' own docstring for why a depth column reads as
+        #      "0" nearly all the time and says nothing about whether the queue is actually
+        #      doing anything. Status is Drained (green chip, like every other verdict cell in
+        #      this report) or Waiting (plain, unbanded) -- deliberately NOT judged against a
+        #      THRESHOLD here; that finer verdict already happens once, correctly, in the
+        #      Flagged metric panel on the same card (see reports.alerting.
+        #      undrained_folder_flags_by_system, merged in via extra_flags_by_system), so a
+        #      second, independently-computed judgement here could only ever drift from it,
+        #      never improve on it. Column 13 stays a blank, styled spacer -- same reserved-
+        #      gap-column approach the Infrastructure report's own CPU-column removal used --
+        #      so this table keeps the identical 9-13 footprint Folders/Disk above it use. ----
+        queues_bottom = folders_bottom
+        if queues:
+            qy = folders_bottom + 1
+            for c in range(2, 19):                     # gap row, full card width
+                self._cell(qy, c, bg=Theme.BG)
+            qy += 1
+            for c in range(2, 9):
+                self._cell(qy, c, bg=Theme.BG)
+            self._merge(qy, 9, 13, "Transaction Queues", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
+            for c in range(14, 19):
+                self._cell(qy, c, bg=Theme.BG)
+            qy += 1
+            for c in range(2, 9):
+                self._cell(qy, c, bg=Theme.BG)
+            for c, t in zip((9, 10, 11, 12, 13), ("Host", "Queue", "Observed", "Status", "")):
+                self._cell(qy, c, t, Theme.font(8, True, Theme.GREY), bg=Theme.HDR,
+                           al=("left" if c <= 10 else "center"), border=True)
+            for c in range(14, 19):
+                self._cell(qy, c, bg=Theme.BG)
+            qtop = qy + 1
+            for i, (host, name, observed, waiting) in enumerate(queues):
+                r = qtop + i
+                for c in range(2, 9):
+                    self._cell(r, c, bg=Theme.BG)
+                self._cell(r, 9, host, Theme.font(9, False, Theme.GREY), border=True)
+                self._cell(r, 10, name, Theme.font(9, False, Theme.GREY), border=True)
+                self._cell(r, 11, str(observed), Theme.font(9, False, Theme.WHITE),
+                          al="center", border=True)
+                if waiting <= 0:
+                    self._chip(r, 12, "Drained", "green", sz=9)
+                else:
+                    self._cell(r, 12, "Waiting", Theme.font(9, False, Theme.SUB),
+                              al="center", border=True)
+                self._cell(r, 13, "", bg=Theme.CARD, border=True)
+                for c in range(14, 19):
+                    self._cell(r, c, bg=Theme.BG)
+            queues_bottom = qtop + len(queues) - 1
+
+        # ---- notes panel to the far right (cols W-AA, 23-27) -- the OUTERMOST table on the
+        #      card, always (2026-09-10, on request: "the outermost thing should be notes" --
+        #      Clock lives at cols S-U, between Backups and here, never past Notes' own right
+        #      edge). ALWAYS this width, backups or not, so Notes doesn't stretch wider just
+        #      because there's nothing tracked to show in 14-18. An untracked system leaves
+        #      that as a plain gap instead (see the title/header/data rows above), the same
+        #      shape as "no backups" reads everywhere else in this report -- an absence, not
+        #      free real estate for the next table. Three stacked parts: a table of THIS RUN's
+        #      flagged metrics (critical + warning) for the admin to triage, a free-text
+        #      comment box, then the author line. Regenerated fresh each run. ----
+        nl, nr = 23, 27
+        tn_row, last_data = top - 2, max(top + rows - 1, folders_bottom, queues_bottom)
         field = Border(left=self._thin, right=self._thin, top=self._thin, bottom=self._thin)
         self._merge(tn_row, nl, nr, f"{sysm.name} Notes", Theme.font(9, True, Theme.CYAN), bg=Theme.CARD)
 
         # flagged metrics — the SAME list the web form asks about (shared source of truth),
         # so an admin's answers marry back to these exact rows by their stable `key`.
-        flagged = flagged_for_system(store, sysm, self.cfg)
+        flagged = self._flagged_for(store, sysm)
         ann = self.annotations.get(sysm.name, {}) if self.annotations else {}
         ann_flags = ann.get("flags", {}) if isinstance(ann, dict) else {}
 
@@ -3206,13 +3657,18 @@ class ReportBuilder:
 def build_report_bytes(store: "Store", systems: List[System], cfg: Config, *,
                        theme: str = "dark", author: Optional[str] = None,
                        annotations: Optional[dict] = None,
-                       summary_comment: Optional[str] = None) -> bytes:
+                       summary_comment: Optional[str] = None,
+                       extra_flags_by_system: Optional[Dict[str, list]] = None) -> bytes:
     """Render the report in the chosen theme ('dark'|'light') with the admin's inputs baked
        in, and return the .xlsx as bytes (nothing touches disk). `store`/`systems` come from
-       capture(); `annotations` marries the form's answers to each card's flagged rows."""
+       capture(); `annotations` marries the form's answers to each card's flagged rows.
+       `extra_flags_by_system` carries Flags synthesized outside this module (e.g. folder
+       monitoring, which lives in Django-side alerting.py) into every table that reads a
+       system's flags -- see ReportBuilder._flagged_for."""
     with palette(theme):
         builder = ReportBuilder(cfg, author=author, annotations=annotations,
-                                summary_comment=summary_comment)
+                                summary_comment=summary_comment,
+                                extra_flags_by_system=extra_flags_by_system)
         workbook = builder.build(store, systems)
     buffer = io.BytesIO()
     workbook.save(buffer)
