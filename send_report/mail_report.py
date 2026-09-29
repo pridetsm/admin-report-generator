@@ -50,8 +50,9 @@ import sys
 import tempfile
 import time
 from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "config.ini"
@@ -141,9 +142,9 @@ def analyse(store, systems, cfg=None):
                 critical.append((sysm.name, cls, where, "DOWN"))
         for comp in sysm.components:
             if engine.is_unreachable(store, comp.instance):
-                unreach.append((sysm.name, comp.label, "host",
-                                "exporter unreachable — host down / network?"))
-                continue            # host is down: skip its metric-level "no data"
+                unreach.append((sysm.name, comp.label, "device",
+                                "exporter unreachable — device down / network?"))
+                continue            # device is down: skip its metric-level "no data"
             ram = store.ram.get(comp.instance)
             if ram is None:
                 nodata.append((sysm.name, comp.label, "memory", "no data — exporter up, metric missing"))
@@ -198,7 +199,7 @@ def _rows(items: List[Finding], color: str) -> str:
             "<tr>"
             f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;font-weight:600;color:{NAVY};">{html.escape(sysn)}</td>'
             f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(comp)}</td>'
-            f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;font-family:Consolas,monospace;">{html.escape(item)}</td>'
+            f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:#1f2733;">{html.escape(item)}</td>'
             f'<td style="padding:7px 12px;border-bottom:1px solid #eef0f2;color:{color};font-weight:600;white-space:nowrap;">{html.escape(detail)}</td>'
             "</tr>"
         )
@@ -222,24 +223,34 @@ def _section(title: str, items: List[Finding], color: str, tint: str) -> str:
     )
 
 
-def _kpi(label: str, value: str, color: str) -> str:
+def _kpi(label: str, value: str, color: str, font_family: str = "") -> str:
+    """`font_family` (2026-09-14, on request: "return the smoth font that you had in your
+    original design but only the font") -- empty (every existing caller since 2026-09-17,
+    when the whole template's base font became Times New Roman on request) means inherit the
+    surrounding table's own font, byte-identical to before; a caller wanting a DIFFERENT font
+    just for the KPI numbers passes its own font_family -- see render_html's own `number_font`
+    param, which threads this through without touching any of its many _kpi()/_kpi_panel() call
+    sites individually."""
     tint = TINT.get(color, NAVY_T)
+    font_style = f"font-family:{font_family};" if font_family else ""
     return (
         '<td align="center" valign="top" style="padding:4px;">'
         f'<div style="background:{tint};border-radius:8px;padding:13px 6px;">'
-        f'<div style="font-size:22px;font-weight:700;color:{color};line-height:1;">{html.escape(value)}</div>'
+        f'<div style="font-size:17px;font-weight:700;color:{color};line-height:1;{font_style}">{html.escape(value)}</div>'
         f'<div style="font-size:10px;letter-spacing:.4px;color:{MUTED};text-transform:uppercase;margin-top:6px;">{label}</div>'
         "</div></td>"
     )
 
 
-def _kpi_panel(title: str, cols, color: str) -> str:
-    """A titled KPI tile split into sub-columns: cols = [(sublabel, value), ...]."""
+def _kpi_panel(title: str, cols, color: str, font_family: str = "") -> str:
+    """A titled KPI tile split into sub-columns: cols = [(sublabel, value), ...].
+    `font_family` -- same as _kpi's own, see that function's own docstring."""
     tint = TINT.get(color, NAVY_T)
+    font_style = f"font-family:{font_family};" if font_family else ""
     def half(v: int, lbl: str, border: str) -> str:
         return (
             f'<td align="center" valign="top" style="padding:0 8px;{border}">'
-            f'<div style="font-size:22px;font-weight:700;color:{color};line-height:1;">{v}</div>'
+            f'<div style="font-size:17px;font-weight:700;color:{color};line-height:1;{font_style}">{v}</div>'
             f'<div style="font-size:9px;letter-spacing:.3px;color:{MUTED};text-transform:uppercase;margin-top:3px;">{lbl}</div>'
             "</td>"
         )
@@ -274,7 +285,7 @@ def _unreachable_block(unreach: List[Finding]) -> str:
         f'<div style="background:{RED_T};border-left:4px solid {CRITICAL};border-radius:4px;padding:12px 16px;">'
         f'<div style="font-size:15px;font-weight:700;color:{CRITICAL};">&#9888;&nbsp; IMMINENT &mdash; {len(unreach)} component(s) unreachable</div>'
         f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">Prometheus can no longer scrape these targets &mdash; '
-        "the host is down, the exporter has stopped, or there is a network / connectivity issue. "
+        "the device is down, the exporter has stopped, or there is a network / connectivity issue. "
         "<b>Treat as urgent.</b></div>"
         f"{lines}</div></td></tr>"
     )
@@ -307,9 +318,16 @@ def _services_down_block(store, systems) -> str:
     )
 
 
-def _disk_nearfull_block(store, systems) -> str:
-    """A prominent callout listing the volumes that are almost full (>= CRIT%)."""
-    nearfull = engine.disk_near_full(store, systems, CRIT)
+def _nearfull_disks_render(nearfull, threshold: int) -> str:
+    """The actual banner markup for "volumes almost full" -- pulled out of
+    _disk_nearfull_block (2026-09-17, on request: "copy and reuse one of the banner templates
+    from the system admin report's mailing template") so a SECOND estate (Cluster Health, a
+    completely different engine/shape from generate_report.py's own Store/System) can reuse
+    the exact same banner instead of a hand-copied duplicate -- one template, two callers, see
+    _cluster_storage_critical_block below. `nearfull` is the same (system, host, mount, used%)
+    shape engine.disk_near_full returns; `threshold` is just for the headline/body wording,
+    since the two callers filter at different %'s (AD/System Admin's own CRIT=90 vs Cluster
+    Health's own Storage Critical tile at >=95 -- see that caller's own comment)."""
     if not nearfull:
         return ""
     byhost: dict = {}
@@ -325,12 +343,29 @@ def _disk_nearfull_block(store, systems) -> str:
         '<tr><td style="padding:18px 24px 2px;">'
         f'<div style="background:{RED_T};border-left:4px solid {RED};border-radius:4px;padding:12px 16px;">'
         f'<div style="font-size:15px;font-weight:700;color:{RED};">&#9888;&nbsp; CRITICAL &mdash; '
-        f'{len(nearfull)} disk(s) near-full on {len(byhost)} host(s)</div>'
+        f'{len(nearfull)} disk(s) near-full on {len(byhost)} device(s)</div>'
         f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These volumes are almost full '
-        f'(&#8805;{CRIT}%) &mdash; an imminent outage that can take the service down. '
+        f'(&#8805;{threshold}%) &mdash; an imminent outage that can take the service down. '
         "<b>Free space or extend the disk now.</b></div>"
         f"{lines}</div></td></tr>"
     )
+
+
+def _disk_nearfull_block(store, systems) -> str:
+    """A prominent callout listing the volumes that are almost full (>= CRIT%)."""
+    return _nearfull_disks_render(engine.disk_near_full(store, systems, CRIT), CRIT)
+
+
+def _cluster_storage_critical_block(nearfull) -> str:
+    """Cluster Health's own equivalent of _disk_nearfull_block, same banner template
+    (2026-09-17, on request: the "Storage critical" tile had a count but no banner naming
+    which disk/node it actually was -- "copy and reuse one of the banner templates from the
+    system admin report's mailing template"). `nearfull` is built by the caller from
+    network.py's own FlagVM disk-high flags (category="disk", text ending "at N% used"),
+    filtered to >=95% to match the Storage critical tile's OWN threshold exactly -- reusing
+    AD/System Admin's own CRIT=90 here would list MORE disks than that tile claims, a mismatch
+    between the banner and the number it's meant to explain, not a fix for one."""
+    return _nearfull_disks_render(nearfull, 95)
 
 
 def _backup_missing_block(store, systems) -> str:
@@ -353,9 +388,9 @@ def _backup_missing_block(store, systems) -> str:
         '<tr><td style="padding:18px 24px 2px;">'
         f'<div style="background:{RED_T};border-left:4px solid {RED};border-radius:4px;padding:12px 16px;">'
         f'<div style="font-size:15px;font-weight:700;color:{RED};">&#9888;&nbsp; CRITICAL &mdash; '
-        f'{len(miss)} host(s) missing a fresh backup</div>'
-        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These hosts run the backup check '
-        "but have nothing fresh within policy &mdash; if the host is lost today, there is no recent "
+        f'{len(miss)} device(s) missing a fresh backup</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">These devices run the backup check '
+        "but have nothing fresh within policy &mdash; if the device is lost today, there is no recent "
         "backup to restore from. <b>Confirm the backup job and re-run it.</b></div>"
         f"{lines}</div></td></tr>"
     )
@@ -374,7 +409,7 @@ def _backups_untracked_block(store, systems) -> str:
     lines = "".join(
         f'<div style="margin:3px 0;font-size:13px;">'
         f'<b style="color:{NAVY};">{html.escape(s)}</b>'
-        f'<span style="color:#555;"> &mdash; no backup check on any host</span></div>'
+        f'<span style="color:#555;"> &mdash; no backup check on any device</span></div>'
         for s in sorted(untracked)
     )
     return (
@@ -382,7 +417,7 @@ def _backups_untracked_block(store, systems) -> str:
         f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
         f'<div style="font-size:15px;font-weight:700;color:{AMBER};">&#9888;&nbsp; WARNING &mdash; '
         f'{len(untracked)} system(s) with no backup check at all</div>'
-        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">No host on these systems reports '
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">No device on these systems reports '
         "the backup check, so nothing here can be judged missing or fresh &mdash; it simply isn't being "
         "watched. <b>Add the check before this becomes a real gap nobody caught.</b></div>"
         f"{lines}</div></td></tr>"
@@ -460,6 +495,53 @@ def _ldap_block(store, systems) -> str:
         f'<div style="font-size:12px;color:{MUTED};margin:5px 0 0;">Users cannot sign in to: '
         f'<b>{html.escape(", ".join(present))}</b>. <b>Treat as urgent.</b></div>'
         "</div></td></tr>"
+    )
+
+
+def _stale_metrics_block(stale: list) -> str:
+    """WARNING callout when one or more of the data sources this report's own estate depends
+    on have gone stale (2026-09-21, on request: "stale metrics warning not showing up in a
+    warning banner in mailing template") -- reports.system_alerts' FreshnessCheck/
+    SystemAlertFinding is a COMPLETELY SEPARATE notification family (its own e-mail, own
+    purple styling, own reminder schedule -- see that module's own docstring) that never fed
+    into this report before; a reader here had no way to know a number they were looking at
+    might be frozen at an old reading unless they separately noticed and read that other
+    e-mail too. This surfaces the SAME underlying finding here as well, not a second
+    computation of it -- the caller queries SystemAlertFinding directly and passes through
+    already-open findings scoped to whatever systems THIS report covers.
+
+    `stale`: [(label, detail), ...] -- label is "system · check name" (or a device name for a
+    network.py-sourced relay staleness flag, see below), detail is an already-human-readable
+    line the CALLER formats (2026-09-21, broadened on request: an identical-shaped
+    win_stale_but_pinging flag -- "RBZHQ-DC-204 is reachable (ping OK), but its own metrics-
+    collection script has not reported in 3.8d via RBZHQ-DC-203" -- turned out to be the SAME
+    "a data source has gone stale, and this report never said so" gap for a SECOND, unrelated
+    staleness mechanism: network.py's own relay-based reachability for DC-204-shaped devices
+    with no windows_exporter of their own (see that module's own _windows_device_flags), a
+    completely different code path from FreshnessCheck/SystemAlertFinding but the identical
+    complaint from a reader's perspective. Pushing formatting to the caller, rather than this
+    function assuming every entry is a raw FreshnessCheck age in seconds, is what lets both
+    sources share one banner without one of them needing to be shoehorned into the other's
+    shape). Amber, not red -- this says "some of what follows may be out of date", not
+    "something is confirmed broken"; the underlying stale checker/exporter is its own,
+    separately-notified (or, for the relay case, separately-flagged) problem."""
+    if not stale:
+        return ""
+    rows = "".join(
+        f'<div style="margin:3px 0;font-size:13px;">'
+        f'<b style="color:{NAVY};">{html.escape(label)}</b>'
+        f'<span style="color:#555;"> &mdash; {html.escape(detail)}</span></div>'
+        for label, detail in stale
+    )
+    return (
+        '<tr><td style="padding:18px 24px 2px;">'
+        f'<div style="background:{AMBER_T};border-left:4px solid {AMBER};border-radius:4px;padding:12px 16px;">'
+        f'<div style="font-size:15px;font-weight:700;color:{AMBER};">&#9888;&nbsp; WARNING &mdash; '
+        f'{len(stale)} metrics source(s) reporting stale data</div>'
+        f'<div style="font-size:12px;color:{MUTED};margin:5px 0 9px;">Some readings in this report may '
+        "be frozen at an old value rather than current until the checker/exporter behind them is "
+        "restored. <b>See System Alerts for detail.</b></div>"
+        f"{rows}</div></td></tr>"
     )
 
 
@@ -552,25 +634,43 @@ def _folder_over_expected_block(store, systems) -> str:
 
 
 def _attachment_block(mail) -> str:
-    """Callout naming the XLSX report attached to this e-mail. Only rendered when one is
-       actually attached — it sits ABOVE the Report Generator call-to-action, which stays
-       either way (the attachment is today's snapshot, the link builds one on demand)."""
-    name = mail.get("attachment_name")
-    if not name:
-        return ""
-    theme = mail.get("attachment_theme")
-    tag = f" &nbsp;&middot;&nbsp; {html.escape(theme)} theme" if theme else ""
-    return (
-        '<tr><td style="padding:20px 24px 0;">'
-        f'<div style="background:{GREEN_T};border-left:4px solid {GREEN};border-radius:4px;padding:13px 16px;">'
-        f'<div style="font-size:14px;font-weight:700;color:{GREEN};margin-bottom:5px;">'
-        "&#128206;&nbsp; The full report is attached</div>"
-        f'<div style="font-size:13px;color:#1f2733;line-height:1.6;">'
-        f'<b>{html.escape(name)}</b>{tag} &mdash; the complete System Admin Report '
-        "(Services / Memory / Disk / Backups per system, plus web links and SSL certs) "
-        "for the same snapshot summarised above.</div>"
-        "</div></td></tr>"
-    )
+    """Callout naming the XLSX report(s) attached to this e-mail. Only rendered when at least
+       one is actually attached — it sits ABOVE the Report Generator call-to-action, which
+       stays either way (the attachment is today's snapshot, the link builds one on demand).
+
+       `mail["attachments"]` (2026-09-17, on request: the scheduled Active Directory Report
+       send now attaches a fresh Cluster Health Report alongside it) is the general shape --
+       a list of {"name", "theme", "label", "detail"} dicts, one callout per attached file, so
+       a second (or third) report describes itself instead of inheriting the first one's text.
+       Falls back to the original single `attachment_name`/`attachment_theme` keys, describing
+       it as the System Admin Report exactly as before -- every existing caller (System Admin
+       Report, the Reporting test-fire tools) sets only those two keys and never `attachments`,
+       so this produces byte-identical HTML for all of them."""
+    attachments = mail.get("attachments")
+    if not attachments:
+        name = mail.get("attachment_name")
+        if not name:
+            return ""
+        attachments = [{
+            "name": name, "theme": mail.get("attachment_theme"),
+            "label": "the complete System Admin Report",
+            "detail": ("(Services / Memory / Disk / Backups per system, plus web links "
+                      "and SSL certs)"),
+        }]
+    blocks = []
+    for a in attachments:
+        theme = a.get("theme")
+        tag = f" &nbsp;&middot;&nbsp; {html.escape(theme)} theme" if theme else ""
+        blocks.append(
+            f'<div style="background:{GREEN_T};border-left:4px solid {GREEN};border-radius:4px;'
+            f'padding:13px 16px;{"margin-top:10px;" if blocks else ""}">'
+            f'<div style="font-size:14px;font-weight:700;color:{GREEN};margin-bottom:5px;">'
+            "&#128206;&nbsp; The full report is attached</div>"
+            f'<div style="font-size:13px;color:#1f2733;line-height:1.6;">'
+            f'<b>{html.escape(a["name"])}</b>{tag} &mdash; {a.get("label", "the full report")} '
+            f'{a.get("detail", "")} for the same snapshot summarised above.</div>'
+            "</div>")
+    return f'<tr><td style="padding:20px 24px 0;">{"".join(blocks)}</td></tr>'
 
 
 def _report_generator_cta(mail) -> str:
@@ -604,7 +704,173 @@ def _report_generator_cta(mail) -> str:
     )
 
 
-def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
+def render_html(store, systems, unreach, crit, warn, nodata, mail,
+                title: str = "SYSTEM ADMIN REPORT", system_label: str = "Systems",
+                show_backups: bool = True, show_web_links: bool = True,
+                show_swift: bool = True, show_cob: bool = True, show_certs: bool = True,
+                show_queues: bool = True, number_font: str = "",
+                extra_estate: Optional[dict] = None,
+                stale_metrics: Optional[list] = None) -> str:
+    """`title` (2026-09-14, on request: "create the data model for domain controllers and
+    model it after the systems domain" -- once the AD estate became a real, capturable
+    System list via load_topology(scope="ad"), this became the ONE hardcoded thing left
+    stopping this exact function from also rendering the Active Directory Report's own
+    e-mail unmodified) -- same "one parameter, default unchanged" fix build_infrastructure_
+    report's own report_title already used for the identical problem (network.py sharing one
+    renderer between the Infrastructure Admin and Active Directory Reports). Every existing
+    caller keeps getting "SYSTEM ADMIN REPORT" with zero code changes; a new caller passes
+    its own.
+
+    The five params below are the SAME "default preserves every existing caller exactly, new
+    caller opts in" shape as `title`, added the same day once the Active Directory Report's
+    own e-mail (built from this same function, see generate_active_directory_report) turned
+    out to carry several tiles/callouts that only ever mean something for the business
+    estate -- none of these are things the System Admin Report itself should ever lose:
+      system_label   -- "Systems" (unchanged) vs. "Devices" (on request: "rename systems to
+          devices") for the glance tile only; nothing else in this function says "system".
+      show_backups   -- gates "Missing backups"/"Backup tracking" KPIs and both backup
+          finding blocks (on request: "remove... backups, not checked for these systems" --
+          AD/DC hosts have no backup_file textfile check configured, so these always render
+          a meaningless zero rather than a real finding).
+      show_web_links -- gates "Web encryption" KPI and the HTTP/HTTPS finding block (on
+          request: "no https or http check either" -- same reasoning, no web links are
+          monitored on domain controllers).
+      show_swift     -- gates the "SWIFT txns" glance KPI and its own finding block (on
+          request: "swift transactions also useless in this report, deactivate and remove
+          that tile" -- SWIFT throughput has nothing to do with Active Directory).
+      show_cob       -- gates the "COB &middot; T24" glance KPI, its own finding block, and
+          the "COB may not have run" banner headline (2026-09-17, on request: "cob time panel
+          should also be removed from this mailing report" -- same reasoning as show_swift,
+          T24 close-of-business has nothing to do with Active Directory either).
+      show_certs     -- gates the "Expired certs" KPI and its own finding block (2026-09-17,
+          on request: "remove expired certs tile" -- same reasoning again: SSL certificate
+          expiry is a web-endpoint concept, domain controllers don't serve any of the sites
+          this tracks).
+      show_queues    -- gates the "Queue folders drained" KPI (2026-09-17, on request:
+          "remove folder drainage tile" -- T24's payment/interface message queues are a
+          business-system concept, meaningless for Active Directory or an HCI/S2D cluster).
+      number_font    -- CSS font-family for every KPI tile's own big number, overriding the
+          template's own base font just for those (originally added on request: "return the
+          smoth font that you had in your original design but only the font" -- the AD
+          e-mail's own first draft used Georgia for these; restored as JUST the font, not the
+          rest of that draft's now-rejected reinterpretation. No longer used by any caller as
+          of 2026-09-17, when the base font itself became Times New Roman on request -- kept
+          as a hook, not removed, in case a future caller wants one tile's numbers to differ
+          from the rest again). Empty (every existing caller) inherits the surrounding base
+          font, unchanged.
+      stale_metrics  -- [(label, detail), ...], see _stale_metrics_block's own docstring for
+          the full shape and history (2026-09-21, on request: "stale metrics warning not
+          showing up in a warning banner in mailing template", then broadened the same day for
+          a second, unrelated staleness mechanism). None (every existing caller) renders
+          nothing new, same as every other opt-in parameter here.
+      extra_estate   -- {"cluster_count", "cluster_nodes", "total_devices"} (2026-09-17, on
+          request: "we have 8 nodes which essentially are devices from the cluster health
+          report" -- once the scheduled Active Directory Report started attaching a fresh
+          Cluster Health Report alongside itself, this e-mail's own AT A GLANCE tiles still
+          only ever counted the AD estate, silently leaving the second report's 8 nodes out of
+          every device/host count). None (every existing caller) leaves the glance row and
+          every "Total" exactly as before -- a caller covering a second estate passes:
+          cluster_count/cluster_nodes = CLUSTER devices/nodes only (network.py
+          len(snapshot._hci_nodes) for cluster_nodes, a count of `cluster: True` devices for
+          cluster_count -- NOT len(snapshot.systems)/snapshot.hosts_count, which also count
+          any non-cluster device the same estate might carry, see total_devices' own note
+          below for why that distinction turned out to matter), matching exactly what the
+          Cluster Health Report's own "Cluster count"/"Cluster nodes" glance tiles show, so the
+          two reports can never disagree on their own numbers; total_devices = EVERY device in
+          that estate regardless of shape (snapshot.hosts_count, cluster nodes AND any
+          standalone device both), for combined_hosts below. Swaps the "Hosts" glance tile for
+          two new ones ("Cluster count", "Cluster nodes") rather than just adding them --
+          "Hosts" on its own would undercount once a second estate exists, and a bare rename
+          would misdescribe the AD side's own real hosts -- and folds total_devices into the
+          `system_label` glance tile's own value and the "Total" of every other glance-level
+          tile whose Total is a device/host count (Unreachable components, High CPU usage,
+          High RAM usage) so those genuinely reflect the WHOLE estate this e-mail now
+          represents, not only the AD half of it.
+
+          cluster_count/cluster_nodes vs. total_devices were the SAME number until 2026-09-17,
+          when Standalone Servers joined the same infra estate as the clusters ("are you sure
+          device count and component count are not the same thing here[,] last i checked these
+          arnt systems that have multiple hosts or devices each") -- each standalone server is
+          one device with no sub-nodes, so it was never a cluster NODE, but len(snapshot.
+          systems)/snapshot.hosts_count (what cluster_count/cluster_nodes used to be computed
+          from directly) count it anyway, inflating "Cluster count"/"Cluster nodes" past their
+          own true numbers (was showing 6/13 once 3 standalone servers existed alongside 3
+          real clusters/10 real nodes) while total_devices genuinely needed the same 3 counted.
+          Two separate keys now, computed separately by the caller, so a future non-cluster
+          addition to this estate can't silently reintroduce the same conflation.
+
+          Tiles keyed to a different concept entirely (Services down, Expired certs, Queue folders, High
+          disk usage) are untouched -- their totals were never a host count to begin with.
+
+          A third optional key, "extra_down" (2026-09-17, "unreachable components and
+          components down can also be combined into a single tile... the philosophy is
+          simple[:] if one tile can represent both reports' findings then have one tile") --
+          the Cluster Health estate's own "Components down" count, folded straight into this
+          function's "Unreachable components" numerator (its Total was already combined_hosts
+          above, i.e. already the LARGER, whole-estate total -- "the number with the highest
+          total... gives more coverage" is what combined_hosts already is, so merging the
+          numerator into that same tile rather than keeping "Components down" as a second,
+          narrower-Total tile follows through on the same idea). The caller drops "Components
+          down" out of its own immediate_tiles list when passing extra_down, so it isn't shown
+          twice under two different names.
+
+          Two more, "extra_cpu"/"extra_ram" (2026-09-17, corrected the same day: "cpu and ram
+          are different metrics they still need different tiles i meant one tile for each
+          metric[,] remember there where multiple ram tiles" -- the actual duplication was the
+          Cluster Health estate's own "High CPU"/"High memory" watch tiles restating the SAME
+          metric this function's "High CPU usage"/"High RAM usage" tiles already track, just
+          over a different slice of the estate -- fold into THOSE tiles' own numerators
+          exactly like extra_down does for Unreachable components, one tile per metric, never
+          combining two different metrics into one). The caller drops "High CPU"/"High memory"
+          out of its own watch_tiles list the same way it drops "Components down".
+
+          Two more still, "extra_disk"/"extra_disk_total" (2026-09-17, "what about high disk
+          usage and storage critical tiles[,] can't they be merged" -- originally merged
+          Cluster Health's own WATCH-tier "Storage at capacity" tile (>=85%) into this
+          function's own "High disk usage" tile, into BOTH the numerator and the Total this
+          time since disk counts -- unlike device counts -- were never folded into
+          combined_hosts. That source tile is GONE as of 2026-09-18 though (on request:
+          "storage capacity and storage critical are the same metric... combine every
+          occurrence and remove this redundancy" -- it was computed as storage_amber +
+          storage_critical, i.e. ALWAYS including whatever Cluster Health's own separate
+          IMMEDIATE-band "Storage critical" tile (>=95%) already counted, unlike every other
+          watch/immediate pair here which stays mutually exclusive -- see network._infra_
+          overview's own comment on the removal). extra_disk/extra_disk_total now read
+          "Storage critical" directly instead -- so "High disk usage" here reflects the
+          stricter >=95% threshold, not the old >=85% one. "Storage critical" ALSO still gets
+          its own dedicated red banner (storage_critical_items, below) and is dropped from
+          immediate_tiles' own generic "others" list for the same reason -- it would otherwise
+          render a third time.
+
+          One more, "storage_critical_items" (2026-09-17, on request: "the report says there
+          is critical storage usage out of 31 disks[,] but no critical banner to tell us
+          exactly whats going on[,] copy and reuse one of the banner templates from the system
+          admin report's mailing template" -- the "Storage critical" tile had a count with no
+          detail anywhere naming which disk). A list of (system, host, mount, used%) tuples,
+          the SAME shape engine.disk_near_full returns, rendered through
+          _cluster_storage_critical_block -- literally the same banner template
+          _disk_nearfull_block already uses (_nearfull_disks_render, factored out for this),
+          not a hand-copied second one. Filtered by the caller to >=95% specifically, to match
+          the Storage critical tile's own threshold exactly (AD/System Admin's own CRIT=90
+          would list more disks than that tile claims).
+
+          Also takes two optional keys, "immediate_tiles" and "watch_tiles" (2026-09-17, on
+          request: "try to add tiles more useful to these two reports[,] storage critical for
+          example, they may be others" -- once Queue folders drained was removed as the last
+          AD-irrelevant tile, this e-mail's immediate/watch bands had room, and the Cluster
+          Health estate already computes several genuinely relevant ones of its own that
+          simply weren't surfaced here). Each is a list of {"label", "value", "sub", "state"}
+          dicts in EXACTLY the shape network.py's own _infra_overview/_network_overview
+          already build for their "immediate"/"watch" bands -- "value" and "sub" are each a
+          "X | Y" pair (e.g. value="3 | 8", sub="down | total"), "state" one of bad/warn/good/
+          info -- so a caller passes those overview dicts' own tiles straight through with no
+          reshaping, the same "can never disagree with the Cluster Health Report's own
+          numbers" guarantee cluster_count/cluster_nodes above already gives. Rendered as
+          ADDITIONAL two-column panels appended after this function's own AD-side tiles, not a
+          replacement for them -- the two estates' findings are both worth showing, not a
+          choice between them.
+    Commented out, not deleted, wherever a block simply isn't called under these flags -- "we
+    may need them as the report grows" (on request) once AD backup checks/web links exist."""
     today = datetime.date.today().strftime("%d %B %Y")
     prepared_by = (f" &nbsp;&middot;&nbsp; prepared by {html.escape(mail['author'])}"
                    if mail.get("author") else "")
@@ -621,20 +887,23 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     miss_color = GREEN if miss_band == "good" else (AMBER if miss_band == "warn" else RED)
     cob_missing = store.cob is None or (isinstance(store.cob, float) and math.isnan(store.cob))
     cob = "N/A" if cob_missing else f"{store.cob/60:.1f} min"
-    cob_alert = cob_missing and datetime.date.today().weekday() != 0   # 0 = Monday (Sunday: no COB)
+    cob_alert = show_cob and cob_missing and datetime.date.today().weekday() != 0   # 0 = Monday (Sunday: no COB)
     swift = f"{store.swift:.0f}" if store.swift is not None else "N/A"
     cert_expired, _cert_expiring = engine.cert_rollup(store)
     n_https = sum(1 for u in store.links if u.lower().startswith("https"))
     n_http = sum(1 for u in store.links if u.lower().startswith("http://"))
     web_color = GREEN if n_http == 0 else (RED if n_http > n_https else AMBER)
 
-    # the closing note points at whichever full breakdown this e-mail actually carries
-    full_breakdown = ("see the attached report" if mail.get("attachment_name")
-                      else "generate the report from the RBZ Monitoring Console above")
+    # the closing note points at whichever full breakdown this e-mail actually carries --
+    # pluralized once there's a real second one to name (see _attachment_block's own docstring)
+    _n_attached = len(mail.get("attachments") or ([1] if mail.get("attachment_name") else []))
+    full_breakdown = ("see the attached reports" if _n_attached > 1 else
+                      "see the attached report" if _n_attached == 1 else
+                      "generate the report from the RBZ Monitoring Console above")
 
     if unreach:
         banner_bg, banner_fg = RED_T, CRITICAL
-        headline = f"IMMINENT — {len(unreach)} component(s) UNREACHABLE — possible host / network outage"
+        headline = f"IMMINENT — {len(unreach)} component(s) UNREACHABLE — possible device / network outage"
     elif crit:
         banner_bg, banner_fg, headline = RED_T, RED, f"CRITICAL — {len(crit)} item(s) need immediate attention"
     elif warn or cob_alert:
@@ -644,15 +913,48 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     else:
         banner_bg, banner_fg, headline = GREEN_T, GREEN, "All monitored systems are healthy"
 
+    # Local wrappers baking number_font into every _kpi()/_kpi_panel() call below without
+    # touching each one's own arguments -- see render_html's own docstring on number_font.
+    def _kpi_(label, value, color):
+        return _kpi(label, value, color, font_family=number_font)
+    def _kpi_panel_(panel_title, cols, color):
+        return _kpi_panel(panel_title, cols, color, font_family=number_font)
+
     linux_pct, win_pct = engine.platform_host_pcts(systems)
-    static_kpis = "".join([
-        _kpi("Systems", str(len(systems)), NAVY),
-        _kpi("Hosts", str(hosts), NAVY),
-        _kpi("Linux | Windows", f"{linux_pct}% | {win_pct}%", NAVY),
-        _kpi("Services", str(nsvc), NAVY),
-        _kpi("SWIFT txns", swift, NAVY),
-        _kpi("COB &middot; T24", cob, NAVY),
-    ])
+    # See render_html's own docstring on extra_estate for why combined_hosts folds
+    # total_devices into every device/host-count Total below, INCLUDING the system_label
+    # glance tile itself (2026-09-17, on request: "the device tile currently says 3 devices
+    # which is wrong considering there are 8 cluster nodes which are devices" -- len(systems)
+    # was counting AD's own TIER groups, not devices at all, so it undercounted the instant a
+    # second estate existed; combined_hosts is the real, whole-estate device count).
+    #
+    # total_devices, NOT cluster_nodes, for combined_hosts (fixed 2026-09-17, on request: "are
+    # you sure device count and component count are not the same thing here[,] last i checked
+    # these arnt systems that have multiple hosts or devices each" -- confirmed live: once
+    # Standalone Servers joined the same infra estate as the clusters, cluster_nodes (meant to
+    # be CLUSTER nodes only, for the "Cluster nodes" glance tile below) and total_devices
+    # (meant to be EVERY device regardless of shape, for combined_hosts/Devices) had been the
+    # exact same number by accident -- correct only while every infra device happened to be a
+    # cluster. Standalone servers each stayed one device but were getting counted as if they
+    # were cluster nodes too, inflating "Cluster count"/"Cluster nodes" past their own real
+    # numbers (was showing 6/13, really 3/10) while total_devices needed them counted
+    # regardless. Two separate keys now -- see render_html's own docstring.
+    combined_hosts = hosts + (extra_estate["total_devices"] if extra_estate else 0)
+    static_kpis_list = [_kpi_(system_label, str(combined_hosts if extra_estate else len(systems)), NAVY)]
+    if extra_estate:
+        static_kpis_list.append(_kpi_("Cluster count", str(extra_estate["cluster_count"]), NAVY))
+        static_kpis_list.append(_kpi_("Cluster nodes", str(extra_estate["cluster_nodes"]), NAVY))
+    else:
+        static_kpis_list.append(_kpi_("Devices", str(hosts), NAVY))
+    static_kpis_list += [
+        _kpi_("Linux | Windows", f"{linux_pct}% | {win_pct}%", NAVY),
+        _kpi_("Services", str(nsvc), NAVY),
+    ]
+    if show_swift:
+        static_kpis_list.append(_kpi_("SWIFT txns", swift, NAVY))
+    if show_cob:
+        static_kpis_list.append(_kpi_("COB &middot; T24", cob, NAVY))
+    static_kpis = "".join(static_kpis_list)
     # Queue folders drained (2026-09-08, on request) -- T24's payment/interface message queues
     # (see engine.Store.queue_folders' own docstring), scoped to whichever systems THIS e-mail
     # actually covers, the same "don't leak systems outside the scope" discipline every other
@@ -665,66 +967,129 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
     n_queue_folders = len(queue_entries)
     n_queue_drained = sum(1 for (_, _, waiting, _) in queue_entries if waiting <= 0)
 
-    immediate_kpis = [
+    immediate_kpis = []
+    if show_backups:
         # missing out of TRACKED hosts (an untracked host isn't judged either way — see the
         # separate Backup tracking tile for those).
-        _kpi_panel("Missing backups", [("Missing", nmiss), ("Tracked", engine.backup_tracked_hosts(store, systems))],
-                   miss_color),
+        immediate_kpis.append(_kpi_panel_(
+            "Missing backups", [("Missing", nmiss), ("Tracked", engine.backup_tracked_hosts(store, systems))],
+            miss_color))
+    # "Components down" folded in here, not shown as its own tile -- see render_html's own
+    # docstring on extra_estate's "extra_down".
+    total_unreachable = len(unreach) + (extra_estate.get("extra_down", 0) if extra_estate else 0)
+    immediate_kpis += [
         # unreachable/down out of the TOTAL we monitor, so the count never reads as if fewer
         # components/services exist just because some are currently failing.
-        _kpi_panel("Unreachable components", [("Unreachable", len(unreach)), ("Total", hosts)],
-                   CRITICAL if unreach else GREEN),
-        _kpi_panel("Services down", [("Down", down), ("Total", nsvc)],
-                   RED if down else GREEN),
-        _kpi_panel("Expired certs", [("Expired", len(cert_expired)), ("Total", engine.cert_monitored(store))],
-                   RED if cert_expired else GREEN),
-        # "Drained", not "Stuck", out of Total -- the positive framing every affected-out-of-
-        # total tile here already uses. AMBER, not RED: the finer verdict already happens once,
-        # correctly, via the flagged-metric mechanism (reports.alerting.
-        # undrained_folder_flags_by_system) -- this tile is a glance-level count, not a second
-        # independently-computed severity judgement.
-        _kpi_panel("Queue folders drained", [("Drained", n_queue_drained), ("Total", n_queue_folders)],
-                   GREEN if n_queue_drained == n_queue_folders else AMBER),
+        _kpi_panel_("Unreachable components", [("Unreachable", total_unreachable), ("Total", combined_hosts)],
+                    CRITICAL if total_unreachable else GREEN),
+        _kpi_panel_("Services down", [("Down", down), ("Total", nsvc)],
+                    RED if down else GREEN),
     ]
+    if show_certs:
+        immediate_kpis.append(
+            _kpi_panel_("Expired certs", [("Expired", len(cert_expired)), ("Total", engine.cert_monitored(store))],
+                       RED if cert_expired else GREEN))
+    if show_queues:
+        immediate_kpis.append(
+            # "Drained", not "Stuck", out of Total -- the positive framing every affected-out-
+            # of-total tile here already uses. AMBER, not RED: the finer verdict already
+            # happens once, correctly, via the flagged-metric mechanism (reports.alerting.
+            # undrained_folder_flags_by_system) -- this tile is a glance-level count, not a
+            # second independently-computed severity judgement.
+            _kpi_panel_("Queue folders drained", [("Drained", n_queue_drained), ("Total", n_queue_folders)],
+                       GREEN if n_queue_drained == n_queue_folders else AMBER))
     _disk_high_h, disk_high_d, disk_high_state = engine.disk_high(store, systems, thr, CRIT)
     disk_high_color = {"good": GREEN, "warn": AMBER, "bad": RED}[disk_high_state]
+    # extra_disk/extra_disk_total (2026-09-17, on request: "what about high disk usage and
+    # storage critical tiles[,] can't they be merged" -- originally merged Cluster Health's
+    # own WATCH-tier "Storage at capacity" tile, the SAME 85% `thr` AD's own disk_high()
+    # already uses. That source tile is GONE as of 2026-09-18 though ("storage capacity and
+    # storage critical are the same metric... combine every occurrence" -- it double-counted
+    # against Cluster Health's own separate "Storage critical" tile, see network._infra_
+    # overview's own comment on the removal), so extra_disk/extra_disk_total now come from
+    # "Storage critical" (>=95%) instead. This tile's own numerator is therefore now AD's own
+    # 85%+ count PLUS Cluster Health's stricter 95%+ count -- two different thresholds folded
+    # into one number, a real change from the "same metric, same threshold" merge this used to
+    # be -- accepted deliberately rather than dropping disk coverage from this combined tile
+    # entirely. "Storage critical" ALSO still gets its own dedicated banner (storage_critical_
+    # items, below), unlike Components down/High CPU/High memory above which are ONLY ever
+    # folded in, never shown a second way.
+    total_disk_count = disk_high_d + (extra_estate.get("extra_disk", 0) if extra_estate else 0)
+    disk_high_color = (AMBER if (disk_high_d == 0 and extra_estate and extra_estate.get("extra_disk", 0))
+                       else disk_high_color)
     n_untracked = len(engine.backup_untracked_unexplained(store, systems))
     n_tracked = len(systems) - n_untracked
     # Every tile reads affected-out-of-TOTAL, matching the xlsx and the webapp: a bare count
     # can't be judged (3 is alarming out of 5 hosts, unremarkable out of 56).
+    # CPU and RAM stay as TWO tiles -- different metrics (2026-09-17, corrected on request:
+    # "cpu and ram are different metrics they still need different tiles i meant one tile for
+    # each metric"). What actually needed merging was the DUPLICATION within each metric --
+    # the AD side's own "High CPU usage"/"High RAM usage" and the Cluster Health estate's own
+    # "High CPU"/"High memory" watch tiles were two separate tiles measuring the SAME metric
+    # over two different slices of the one estate ("remember there where multiple ram tiles
+    # etc"). extra_cpu/extra_ram fold the Cluster Health estate's own affected-node counts
+    # into these SAME two tiles' numerators instead, same pattern as extra_down above -- one
+    # CPU tile, one RAM tile, each covering every device in both reports.
+    total_cpu = cpu_hosts + (extra_estate.get("extra_cpu", 0) if extra_estate else 0)
+    total_ram = ram_hosts + (extra_estate.get("extra_ram", 0) if extra_estate else 0)
     watch_kpis = [
-        _kpi_panel("High CPU usage", [("Hosts", cpu_hosts), ("Total", hosts)],
-                   AMBER if cpu_hosts else GREEN),
-        _kpi_panel("High RAM usage", [("Hosts", ram_hosts), ("Total", hosts)],
-                   AMBER if ram_hosts else GREEN),
+        _kpi_panel_("High CPU usage", [("CPU", total_cpu), ("Total", combined_hosts)],
+                    AMBER if total_cpu else GREEN),
+        _kpi_panel_("High RAM usage", [("RAM", total_ram), ("Total", combined_hosts)],
+                    AMBER if total_ram else GREEN),
         # Disks/Total only — matches the xlsx (see generate_report.py's HIGH DISK USAGE tile),
         # which dropped the separate Hosts/Total pair so Backup tracking below could keep its
         # own Total instead of every tile in the row fighting over the same fixed column budget.
-        _kpi_panel(f"High disk usage &middot; &#8805;{thr}%",
-                   [("Disks", disk_high_d), ("Total", engine.total_disks(store, systems))],
-                   disk_high_color),
+        _kpi_panel_(f"High disk usage &middot; &#8805;{thr}%",
+                    [("Disks", total_disk_count),
+                     ("Total", engine.total_disks(store, systems)
+                              + (extra_estate.get("extra_disk_total", 0) if extra_estate else 0))],
+                    disk_high_color),
+    ]
+    if show_web_links:
         # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
         # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
-        _kpi_panel("Web encryption", [("HTTPS", n_https), ("Total", n_https + n_http)], web_color),
-        _kpi_panel("Backup tracking", [("Tracked", n_tracked), ("Total", len(systems))],
-                   AMBER if n_untracked else GREEN),
-    ]
+        watch_kpis.append(_kpi_panel_("Web encryption", [("HTTPS", n_https), ("Total", n_https + n_http)], web_color))
+    if show_backups:
+        watch_kpis.append(_kpi_panel_("Backup tracking", [("Tracked", n_tracked), ("Total", len(systems))],
+                                      AMBER if n_untracked else GREEN))
+    if extra_estate:
+        # See render_html's own docstring on extra_estate's "immediate_tiles"/"watch_tiles".
+        _tile_state_color = {"bad": RED, "warn": AMBER, "good": GREEN, "info": NAVY}
+        def _extra_tile_panel(tile: dict) -> str:
+            vparts = str(tile.get("value", "")).split(" | ")
+            sparts = str(tile.get("sub", "")).split(" | ")
+            cols = (list(zip(sparts, vparts)) if len(vparts) == 2 and len(sparts) == 2
+                   else [("", tile.get("value", ""))])
+            return _kpi_panel_(tile.get("label", ""), cols,
+                               _tile_state_color.get(tile.get("state", "info"), NAVY))
+        immediate_kpis += [_extra_tile_panel(t) for t in extra_estate.get("immediate_tiles", [])]
+        watch_kpis += [_extra_tile_panel(t) for t in extra_estate.get("watch_tiles", [])]
     immediate_kpis = "".join(immediate_kpis)
     watch_kpis = "".join(watch_kpis)
     # banner order mirrors generate_report.py's SEVERITY rank: IMMINENT (LDAP, unreachable)
     # first, then CRITICAL (near-full disks, expired certs), then WARNING (expiring certs,
-    # COB, SWIFT) -- highest-consequence first.
+    # COB, SWIFT, stale metrics) -- highest-consequence first. Stale metrics sits LAST of the
+    # named warnings, right before the generic tables -- "some data here may be stale" is
+    # useful context once you've already seen what's actually being reported, not something
+    # that should bury the real findings underneath it.
     body = (_ldap_block(store, systems)
             + _unreachable_block(unreach)
             + _services_down_block(store, systems)
             + _disk_nearfull_block(store, systems)
-            + _backup_missing_block(store, systems)
-            + _backups_untracked_block(store, systems)
-            + _cert_block(store)
-            + _http_links_block(store, systems)
+            + (_cluster_storage_critical_block(extra_estate.get("storage_critical_items", []))
+              if extra_estate else "")
+            # Backup/web-link findings -- commented out via show_backups/show_web_links, not
+            # deleted, "we may need them as the report grows" (on request) once AD backup
+            # checks/web links exist; see render_html's own docstring.
+            + (_backup_missing_block(store, systems) if show_backups else "")
+            + (_backups_untracked_block(store, systems) if show_backups else "")
+            + (_cert_block(store) if show_certs else "")
+            + (_http_links_block(store, systems) if show_web_links else "")
             + _folder_over_expected_block(store, systems)
-            + _cob_block(store, unreach)
-            + _swift_block(store, unreach)
+            + (_cob_block(store, unreach) if show_cob else "")
+            + (_swift_block(store, unreach) if show_swift else "")
+            + _stale_metrics_block(stale_metrics or [])
             + _section("Critical", crit, RED, RED_T)
             + _section("Warning", warn, AMBER, AMBER_T)
             + _section("No data (check exporters)", nodata, MUTED, "#f1f2f4"))
@@ -734,12 +1099,12 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
                 "thresholds at snapshot time.</div></td></tr>")
 
     return f"""<!doctype html><html><body style="margin:0;padding:0;background:#eef0f3;">
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#eef0f3;font-family:'Segoe UI',Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#eef0f3;font-family:'Times New Roman',Times,serif;">
 <tr><td align="center" style="padding:24px 12px;">
 <table width="660" cellpadding="0" cellspacing="0" style="max-width:660px;width:100%;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.12);">
 
   <tr><td style="background:{NAVY};padding:22px 24px;">
-    <div style="font-size:20px;font-weight:700;color:{GOLD};letter-spacing:.5px;">SYSTEM ADMIN REPORT</div>
+    <div style="font-size:20px;font-weight:700;color:{GOLD};letter-spacing:.5px;">{title}</div>
     <div style="font-size:12px;color:#aebfd1;margin-top:3px;">Reserve Bank of Zimbabwe &nbsp;&middot;&nbsp; live snapshot &nbsp;&middot;&nbsp; {today}{prepared_by}</div>
   </td></tr>
 
@@ -790,7 +1155,11 @@ def render_html(store, systems, unreach, crit, warn, nodata, mail) -> str:
 
 def plain_summary(unreach, crit, warn, nodata, report_url=None, attachment_name=None) -> str:
     """The text/plain alternative. `report_url` and `attachment_name` are optional so
-       in-process callers (the webapp) can ask for the findings alone."""
+       in-process callers (the webapp) can ask for the findings alone.
+
+       `attachment_name` accepts a plain string (unchanged, every existing caller) or a list
+       of names (2026-09-17: the scheduled Active Directory Report now attaches a fresh
+       Cluster Health Report alongside it) -- one "Full report attached" line per name."""
     lines = ["System Admin Report — summary", ""]
     for title, items in (("UNREACHABLE", unreach), ("CRITICAL", crit),
                          ("WARNING", warn), ("NO DATA", nodata)):
@@ -801,7 +1170,9 @@ def plain_summary(unreach, crit, warn, nodata, report_url=None, attachment_name=
     if not (unreach or crit or warn or nodata):
         lines.append("All systems healthy.")
     if attachment_name:
-        lines.append(f"Full report attached: {attachment_name}")
+        names = [attachment_name] if isinstance(attachment_name, str) else list(attachment_name)
+        for name in names:
+            lines.append(f"Full report attached: {name}")
     if report_url:
         lines.append(f"Build an annotated report at the RBZ Monitoring Console: {report_url}")
     return "\n".join(lines)
@@ -826,10 +1197,12 @@ _SMTP_TIMEOUT = 45                    # was 30s; the observed slow-but-working l
 
 
 def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
-               text_body: str, attachment: Optional[Path] = None,
+               text_body: str, attachment: Optional[Union[Path, List[Path]]] = None,
                inline_images: Optional[dict] = None) -> None:
-    """Send the multipart/alternative e-mail, optionally with the XLSX report attached.
-       `attachment` is a path — its file NAME becomes the attachment name.
+    """Send the multipart/alternative e-mail, optionally with the XLSX report(s) attached.
+       `attachment` is a path, or a list of paths (2026-09-17, on request: the scheduled
+       Active Directory Report send now attaches a fresh Cluster Health Report alongside it)
+       -- each file's own NAME becomes its attachment name.
 
        `inline_images`, if given, is {cid: png_bytes} for images the HTML references via
        `<img src="cid:...">` or a table `background="cid:..."` attribute (reports/
@@ -845,7 +1218,15 @@ def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
        reporting a real, non-transient failure."""
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = f'{mail["from_name"]} <{mail["from_address"]}>'
+    # formataddr(), not a raw f-string (fixed 2026-09-22, confirmed live: a from_name
+    # containing "[" / "]" -- e.g. author="[SYNTHETIC TEST]" -- produces a From header Outlook
+    # cannot parse at all (square brackets are RFC 5322 domain-literal syntax outside quotes);
+    # combined with this from_name's own "·" forcing RFC 2047 encoding, the encoded word
+    # SWALLOWED the trailing "<from_address>" entirely, leaving no parseable address and
+    # Outlook showing the sender as "Unknown"). formataddr quotes/escapes the display name
+    # correctly for ANY input, the same way it already would for e.g. an admin's own name
+    # containing a comma or parenthesis via --author.
+    msg["From"] = formataddr((mail["from_name"], mail["from_address"]))
     msg["To"] = ", ".join(recipients)
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
@@ -854,9 +1235,11 @@ def send_email(mail: dict, recipients: List[str], subject: str, html_body: str,
         for cid, png_bytes in inline_images.items():
             html_part.add_related(png_bytes, maintype="image", subtype="png", cid=f"<{cid}>")
     if attachment is not None:
-        path = Path(attachment)
-        maintype, subtype = _ATTACHMENT_MIME.get(path.suffix.lower(), ("application", "octet-stream"))
-        msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
+        paths = [attachment] if isinstance(attachment, (str, Path)) else list(attachment)
+        for a in paths:
+            path = Path(a)
+            maintype, subtype = _ATTACHMENT_MIME.get(path.suffix.lower(), ("application", "octet-stream"))
+            msg.add_attachment(path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name)
     ctx = ssl.create_default_context()
     if mail["skip_verify"]:
         ctx.check_hostname = False

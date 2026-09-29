@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}My Alert Groups{% endblock %}
+
+{% comment %}
+  A narrow alternative to the full Alerting hub (config_alerts.html), for a Sub-Admin-shaped
+  role: just the groups list, filtered server-side to the ones the signed-in user actually
+  belongs to (see views.my_alert_groups' own docstring). Row markup is deliberately copied
+  from config_alerts.html's own "Alert groups" section rather than sharing an include, since
+  that section also has to coexist with the hub's collapsible-section chrome this page has no
+  use for.
+{% endcomment %}
+
+{% block body %}
+<style>
+  .ag-type-row td { background:var(--panel-2); font-weight:700; font-size:13px; padding:8px 10px; }
+  .ag-subtype-row td { font-weight:600; font-size:11.5px; opacity:.7; padding:6px 10px 6px 22px; }
+  .cfg-scroll-list { max-height: 420px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+  .cfg-scroll-list table { margin: 0; }
+</style>
+<div class="container" style="max-width:1040px">
+
+  <div class="section-label">My Alert Groups</div>
+  <p class="cfg-note" style="margin-top:0">
+    {% if is_full_admin %}
+      Every alert group — as an Administrator you can open and fully edit any of them.
+    {% else %}
+      The alert group(s) you're a stakeholder on. You can edit systems, categories, severity
+      and schedule, and add new stakeholders — but not remove an existing one or delete the
+      group itself.
+    {% endif %}
+  </p>
+
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if grouped_alert_groups %}
+    <input type="text" class="cfg-search" data-table-search="#my-alertgroups-table" placeholder="Search groups, systems…" autocomplete="off" aria-label="Search alert groups">
+    <div class="cfg-scroll-list" style="margin-top:10px">
+    <table class="hist" id="my-alertgroups-table">
+      <thead><tr><th>Name</th><th>Systems</th><th>Stakeholders</th><th></th><th></th></tr></thead>
+      <tbody>
+      {% for type_block in grouped_alert_groups %}
+        <tr class="ag-type-row" data-search-group-prefix="{{ type_block.key }}:"><td colspan="5">{{ type_block.label }}</td></tr>
+        {% for sub in type_block.subtypes %}
+          {% if sub.label %}
+          <tr class="ag-subtype-row" data-search-group="{{ sub.key }}"><td colspan="5">{{ sub.label }}</td></tr>
+          {% endif %}
+          {% for g in sub.groups %}
+          <tr class="rowlink" data-search-row data-search-group="{{ sub.key }}" data-href="{% url 'config_alert_group_edit' g.pk %}">
+            <td><b>{{ g.name }}</b></td>
+            <td style="color:var(--muted)">
+              {% if g.systems %}{{ g.systems|length }}{% else %}<span class="chip amber">none yet</span>{% endif %}
+            </td>
+            <td style="color:var(--muted)">{{ g.stakeholder_count }}</td>
+            <td>{% if not g.active %}<span class="chip amber">paused</span>{% endif %}</td>
+            <td style="text-align:right"><a class="btn ghost" style="padding:5px 11px"
+                 href="{% url 'config_alert_group_edit' g.pk %}">Open</a></td>
+          </tr>
+          {% endfor %}
+        {% endfor %}
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+      <p style="margin:0;color:var(--muted);font-size:13px">You're not a stakeholder on any alert group yet.</p>
+    {% endif %}
+  </div></div>
+
+</div>
+{% endblock %}

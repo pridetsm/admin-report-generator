@@ -1,10 +1,12 @@
-{# One host row on the Topology screen.
+{% comment %}
+  One host row on the Topology screen.
 
-   Addressed by (job index, group index) exactly as the Prometheus screen addresses it, so the
-   two screens post identical field names and one parser reads both. The job is shown but not
-   editable: moving a host between jobs changes HOW it is scraped (Windows vs Linux exporter),
-   which is a different decision from which system it belongs to — and getting it wrong would
-   silently stop the host being scraped at all. #}
+  Addressed by (job index, group index) exactly as the Prometheus screen addresses it, so the
+  two screens post identical field names and one parser reads both. The job is shown but not
+  editable: moving a host between jobs changes HOW it is scraped (Windows vs Linux exporter),
+  which is a different decision from which system it belongs to — and getting it wrong would
+  silently stop the host being scraped at all.
+{% endcomment %}
 <div class="cfg-group" data-group="{{ row.g.i }}">
   <div class="cfg-group-head">
     <b>{{ row.g.known.display|default:row.g.targets_text|default:"Host" }}</b>

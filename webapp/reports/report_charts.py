@@ -46,6 +46,7 @@ own script block.
 from __future__ import annotations
 
 import base64
+import datetime
 import io
 
 import matplotlib
@@ -74,6 +75,36 @@ _BLUE_SOFT = "#7fa8d1"   # a lighter tint of the same blue, for a second "neutra
 # elsewhere in this module, here they're just the warm end of one continuous scale, with no
 # threshold where "amber" or "red" starts meaning something categorically different.
 _HEATMAP_CMAP = LinearSegmentedColormap.from_list("issue_heat", ["#FFFFFF", _AMBER, _RED])
+
+#: Fixed-DATE Zimbabwe public holidays only (2026-09-18, on request: "put a shaded area in
+#: the graphs to show a sunday or holiday period" -- a flat/zero patch on SWIFT/COB is
+#: EXPECTED on these, not an anomaly). Easter Friday/Saturday/Monday and Heroes'/Defence
+#: Forces Day (2nd Monday of August + the day after) move every year and need checking
+#: against an actual calendar before being added here -- deliberately left OUT rather than
+#: guessed, since getting one wrong on a report this console's own audience actually reads
+#: would be worse than shading one fewer real holiday. Add/edit dates as needed.
+HOLIDAYS = {
+    datetime.date(2026, 1, 1),    # New Year's Day
+    datetime.date(2026, 4, 18),   # Independence Day
+    datetime.date(2026, 5, 1),    # Workers' Day
+    datetime.date(2026, 5, 25),   # Africa Day
+    datetime.date(2026, 12, 22),  # Unity Day
+    datetime.date(2026, 12, 25),  # Christmas Day
+    datetime.date(2026, 12, 26),  # Boxing Day
+}
+
+
+def _shade_label(dt: datetime.datetime) -> str:
+    """"Sunday", "Holiday", or "" (falsy -- not shaded) -- Sunday takes priority over a date
+    that's coincidentally also in HOLIDAYS, since it's always true regardless. The label
+    itself is what the template's weekendShade plugin prints across the shaded band (2026-09-
+    18, on request: "put test on the area saying sunday"), not just a bool -- so a viewer
+    reads WHY a patch is flat/blank without having to work it out from the calendar."""
+    if dt.weekday() == 6:
+        return "Sunday"
+    if dt.date() in HOLIDAYS:
+        return "Holiday"
+    return ""
 
 plt.rcParams.update({
     "font.family": "sans-serif",
@@ -479,27 +510,28 @@ def _percent_expr(category: str, instance: str, mount: str | None) -> str | None
 
 
 def resource_percent_series(system: str, flag_key: str, category: str, days: int = 7) -> dict | None:
-    """A system's own historical RAM/CPU/Disk % reading over the window, straight off Prometheus
-    (query_range) -- the actual magnitude a percentage-bearing category's Hourly Activity chart
-    should show (2026-09-08, on request), not a count of how many distinct incidents were open
-    (which for one system+component can only ever read 0 or 1 and says nothing about how bad
-    the reading got).
+    """A system's own historical RAM/CPU/Disk % reading over the window -- the actual magnitude
+    a percentage-bearing category's Hourly Activity chart should show (2026-09-08, on request),
+    not a count of how many distinct incidents were open (which for one system+component can
+    only ever read 0 or 1 and says nothing about how bad the reading got).
 
     `flag_key` is generate_report.Flag.key ("ram:{label}" / "cpu:{label}" /
     "disk:{label}:{mount}", the same convention unacknowledged_table already parses) -- used to
-    find which Component's instance to query and, for disk, which mount.
+    find which Component's instance this is (and, for disk, which mount), so the right
+    MetricSample.metric_key can be looked up.
 
-    Computed fresh against LIVE Prometheus (services.live_prom_client -- cfg + topology + a
-    connected client, without paying for a full metrics capture()). Returns
-    {"hours":, "values":, "red": red_threshold_pct} or None -- never raises -- if the category
-    isn't a percentage one, the system/component/mount can no longer be found in the current
-    topology, or Prometheus can't be reached, so one unreachable chart never breaks the rest of
-    the report. `red` is this exact reading's own red threshold (RAM_THRESHOLD_OVERRIDES-aware
-    for ram, cfg.chip_red otherwise) -- the same boundary flagged_for_system itself used to
-    raise this issue in the first place, so a point crossing it on the chart is marked using the
-    identical definition of "red" the rest of this report already uses, not a second,
-    independently-chosen one (e.g. the statistical mean+2stdev spike_mask the count-based chart
-    uses, which has no meaning for a threshold-defined reading like this)."""
+    Reads MetricSample (2026-09-18, on request: "store this data in the database... so we can
+    have a much longer retention window") -- captured hourly by metric_history.capture_now,
+    independent of Prometheus's own retention. `days` can now genuinely mean 30+ without
+    Prometheus ever being asked for it; a fresh topology lookup is still needed each call to
+    resolve label->instance and to compute the red threshold (RAM_THRESHOLD_OVERRIDES-aware for
+    ram, cfg.chip_red otherwise) -- the same boundary flagged_for_system itself used to raise
+    this issue in the first place, so a point crossing it on the chart is marked using the
+    identical definition of "red" the rest of this report already uses.
+
+    Returns {"hours":, "values":, "red": red_threshold_pct} or None -- never raises -- if the
+    category isn't a percentage one, the system/component/mount can no longer be found in the
+    current topology, or there's no history captured yet for this exact series."""
     if category not in PERCENT_CATEGORIES:
         return None
     # maxsplit=2, NOT a plain split(":") -- a Windows drive-letter mount ("D:") carries its OWN
@@ -513,9 +545,9 @@ def resource_percent_series(system: str, flag_key: str, category: str, days: int
     if not label or (category == "disk" and not mount):
         return None
 
-    import time as _time
-
     from . import services
+    from .metric_history import _metric_key
+    from .models import MetricSample
 
     try:
         import generate_report as gr
@@ -525,25 +557,25 @@ def resource_percent_series(system: str, flag_key: str, category: str, days: int
         comp = next((c for c in sysm.components if c.label == label), None) if sysm else None
         if not comp:
             return None
-        expr = _percent_expr(category, comp.instance, mount)
-        if not expr:
-            return None
-        end = _time.time()
-        start = end - days * 24 * 3600
-        rows = prom.query_range(expr, start, end, "1h")
         red = (gr.ram_thresholds(comp.instance, cfg.chip_amber, cfg.chip_red)[1]
               if category == "ram" else cfg.chip_red)
     except Exception:
         return None
-    if not rows or not rows[0]["values"]:
-        return None
 
     import datetime as _dt
 
-    points = rows[0]["values"]
+    from django.utils import timezone as dj_timezone
+
+    end = dj_timezone.now()
+    start = end - _dt.timedelta(days=days)
+    key = _metric_key(category, comp.instance, mount)
+    rows = list(MetricSample.objects.filter(metric_key=key, taken_at__gte=start, taken_at__lte=end)
+               .order_by("taken_at").values_list("taken_at", "value"))
+    if not rows:
+        return None
     return {
-        "hours": [_dt.datetime.fromtimestamp(t) for t, _v in points],
-        "values": [v for _t, v in points],
+        "hours": [_dt.datetime.fromtimestamp(t.timestamp()) for t, _v in rows],
+        "values": [v for _t, v in rows],
         "red": red,
     }
 
@@ -619,28 +651,26 @@ def swift_transaction_series(days: int = 7) -> dict | None:
     wanting. Plotting the raw value directly reproduces that shape exactly, and needs no
     reset-handling of its own -- the reset back to 0 IS the point being shown.
 
-    Computed fresh against LIVE Prometheus, same as resource_percent_series. Returns
-    {"hours":, "values":} or None -- never raises -- if Prometheus can't be reached or the
-    metric doesn't exist, so this one chart can't take the rest of the report down with it."""
+    Reads MetricSample (2026-09-18, on request: "store this data in the database... so we can
+    have a much longer retention window") -- captured hourly by metric_history.capture_now,
+    same as resource_percent_series, no longer bounded by Prometheus's own retention. Returns
+    {"hours":, "values":} or None -- never raises -- if there's no history captured yet, so
+    this one chart can't take the rest of the report down with it."""
     import datetime as _dt
-    import time as _time
 
-    from . import services
+    from django.utils import timezone as dj_timezone
 
-    try:
-        prom, cfg, systems = services.live_prom_client()
-        end = _time.time()
-        start = end - days * 24 * 3600
-        rows = prom.query_range("swift_transactions_total", start, end, "1h")
-    except Exception:
+    from .models import MetricSample
+
+    end = dj_timezone.now()
+    start = end - _dt.timedelta(days=days)
+    rows = list(MetricSample.objects.filter(metric_key="swift", taken_at__gte=start, taken_at__lte=end)
+               .order_by("taken_at").values_list("taken_at", "value"))
+    if not rows:
         return None
-    if not rows or not rows[0]["values"]:
-        return None
-
-    points = rows[0]["values"]
     return {
-        "hours": [_dt.datetime.fromtimestamp(t) for t, _v in points],
-        "values": [max(0.0, v) for _t, v in points],
+        "hours": [_dt.datetime.fromtimestamp(t.timestamp()) for t, _v in rows],
+        "values": [max(0.0, v) for _t, v in rows],
     }
 
 
@@ -650,15 +680,32 @@ def swift_transaction_line_data(days: int = 7) -> dict | None:
     automated_report_download.html's existing Chart.js wiring needs no changes to render this
     too. No spike marking (2026-09-09) -- mean+2stdev over a series that legitimately ramps to a
     daily peak and resets to 0 every single day would flag most of every afternoon as a
-    "spike", which isn't a real anomaly, just this metric's normal daily shape."""
+    "spike", which isn't a real anomaly, just this metric's normal daily shape.
+
+    "shaded" (2026-09-18, on request: "put a shaded area in the graphs to show a sunday or
+    holiday period") -- "Sunday"/"Holiday"/"" (falsy) per point, read by the template's own
+    weekendShade Chart.js plugin to background-shade + label those stretches and break the
+    line across them (on request: "all graph lines must disappear on entry and reappear from
+    exiting this area"), so a flat patch there reads as expected, not an unexplained gap.
+
+    "hours_iso" (2026-09-19, on request, diagnosing "the shaded areas for sunday keep
+    disappearing... to leave a blank space") -- real ISO timestamps alongside the display
+    "labels" strings, so the web view's own Range buttons/default window can pick "the last 7
+    REAL days" by wall-clock time instead of "the last 168 points". Those aren't the same thing
+    now that MetricSample mixes a dense one-time Prometheus backfill (points every ~20-40 min)
+    with the ongoing hourly capture job going forward -- 168 points currently lands well under
+    7 real days, short enough to miss the most recent Sunday entirely, which read as shading
+    that had vanished rather than a default window that just doesn't reach back far enough yet."""
     series = swift_transaction_series(days=days)
     if not series:
         return None
     values = series["values"]
     return {
         "labels": [h.strftime("%d %b %H:%M") for h in series["hours"]],
+        "hours_iso": [h.isoformat() for h in series["hours"]],
         "datasets": [{"label": "SWIFT", "color": _BLUE, "values": values,
-                     "spikes": [False] * len(values)}],
+                     "spikes": [False] * len(values),
+                     "shaded": [_shade_label(h) for h in series["hours"]]}],
     }
 
 
@@ -687,6 +734,71 @@ def swift_transaction_chart(days: int = 7, title: str | None = None) -> str | No
         ax.set_title(title, fontsize=10, fontweight="bold", color=_INK, loc="left")
     fig.tight_layout()
     return _to_data_uri(fig)
+
+
+def cob_time_series(days: int = 7) -> dict | None:
+    """T24's own close-of-business duration (cob_time, seconds -- generate_report.py's Store.
+    cob, the same scalar the System Admin Report's own "COB · T24" reading uses) as an hourly
+    trend -- 2026-09-18, on request: "add the superimposed one for cob time same style" as the
+    SWIFT chart already has.
+
+    Unlike SWIFT's daily-running-total ramp/reset shape, cob_time is a step function: it holds
+    the PREVIOUS night's finished duration constant all day, then jumps to the new value once
+    that day's close-of-business run completes -- reads straight off MetricSample, same as
+    swift_transaction_series, so plotting the raw value needs no special handling here either.
+
+    Reads MetricSample (captured hourly by metric_history.capture_now, metric_key "cob") --
+    not bounded by Prometheus's own retention. Returns {"hours":, "values":} or None -- never
+    raises -- if there's no history captured yet."""
+    import datetime as _dt
+
+    from django.utils import timezone as dj_timezone
+
+    from .models import MetricSample
+
+    end = dj_timezone.now()
+    start = end - _dt.timedelta(days=days)
+    rows = list(MetricSample.objects.filter(metric_key="cob", taken_at__gte=start, taken_at__lte=end)
+               .order_by("taken_at").values_list("taken_at", "value"))
+    if not rows:
+        return None
+    return {
+        "hours": [_dt.datetime.fromtimestamp(t.timestamp()) for t, _v in rows],
+        "values": [v for _t, v in rows],
+    }
+
+
+def cob_time_line_data(days: int = 30) -> dict | None:
+    """COB's own duration, ONE POINT PER CALENDAR DAY (2026-09-18, on request: "one solid bar
+    per day" -- the template renders this as a bar chart, not a line, despite the function's
+    own name staying as-is to avoid touching every call site for a data-shape change).
+
+    cob_time_series is hourly, but the metric itself is a step function -- it holds the
+    PREVIOUS night's finished duration constant all day, then jumps once when THAT night's own
+    run completes, so 24 hourly points a day just repeat the same two numbers. The LAST sample
+    captured each calendar day is that day's own settled duration (the jump has already
+    happened by then in every real case observed) -- the one honest "daily value" to bar-chart,
+    rather than an arbitrary hourly slice or an average that would blend two different nights'
+    numbers together.
+
+    Same {label, color, values, spikes, shaded} shape as swift_transaction_line_data, just one
+    entry per day. `shaded` (see _shade_label) is still meaningful at day granularity -- Sunday/
+    holiday for that WHOLE day, not per hour."""
+    series = cob_time_series(days=days)
+    if not series:
+        return None
+    by_day: dict = {}
+    for dt, v in zip(series["hours"], series["values"]):
+        by_day[dt.date()] = (dt, v)   # overwritten every hour seen that day -> ends up
+                                      # holding the LAST one, since series["hours"] is ascending
+    ordered = sorted(by_day.items())
+    values = [dtv[1] for _d, dtv in ordered]
+    return {
+        "labels": [d.strftime("%d %b") for d, _dtv in ordered],
+        "datasets": [{"label": "COB", "color": _BLUE, "values": values,
+                     "spikes": [False] * len(values),
+                     "shaded": [_shade_label(dtv[0]) for _d, dtv in ordered]}],
+    }
 
 
 def spike_line_data_single(system: str, category: str, days: int = 7) -> dict | None:

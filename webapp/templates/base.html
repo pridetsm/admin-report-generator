@@ -175,7 +175,10 @@
     <a href="{% url 'reports' %}"{% if current_page == 'reports' %} class="is-current" aria-current="page"{% elif 'reports' in current_ancestors %} class="is-ancestor"{% endif %}>Reports</a>
     {% if is_network_admin %}
     <div class="drawer-children">
-      <a href="{% url 'network_report' %}" class="drawer-child{% if current_page == 'network_report' %} is-current{% endif %}"{% if current_page == 'network_report' %} aria-current="page"{% endif %}>Core Switch</a>
+      <a href="{% url 'core_switches_report' %}" class="drawer-child{% if current_page == 'core_switches_report' %} is-current{% endif %}"{% if current_page == 'core_switches_report' %} aria-current="page"{% endif %}>Core Switches</a>
+      <a href="{% url 'routers_report' %}" class="drawer-child{% if current_page == 'routers_report' %} is-current{% endif %}"{% if current_page == 'routers_report' %} aria-current="page"{% endif %}>Routers</a>
+      <a href="{% url 'wireless_controller_report' %}" class="drawer-child{% if current_page == 'wireless_controller_report' %} is-current{% endif %}"{% if current_page == 'wireless_controller_report' %} aria-current="page"{% endif %}>Wireless Controller</a>
+      <a href="{% url 'access_switches_report' %}" class="drawer-child{% if current_page == 'access_switches_report' %} is-current{% endif %}"{% if current_page == 'access_switches_report' %} aria-current="page"{% endif %}>Access Switches</a>
       <a href="{% url 'network_sod' %}" class="drawer-child{% if current_page == 'network_sod' %} is-current{% endif %}"{% if current_page == 'network_sod' %} aria-current="page"{% endif %}>SOD Checklist</a>
     </div>
     {% endif %}
@@ -189,6 +192,15 @@
     {% endcomment %}
     {% if connect_in_scope %}
     <a href="{% url 'connect' %}"{% if current_page == 'connect' %} class="is-current" aria-current="page"{% elif 'connect' in current_ancestors %} class="is-ancestor"{% endif %}>Connect</a>
+    {% endif %}
+    {% comment %}
+      Sub Admin's own screen (2026-09-18) -- shown to anyone whose active role opted into
+      RoleScope.can_edit_own_alert_groups and is a stakeholder on at least one group, OR a
+      full Administrator (who reaches the same groups via Configuration > Alerting too, but
+      the direct link works sensibly for them as well -- see roles.can_reach_my_alert_groups).
+    {% endcomment %}
+    {% if can_reach_my_alert_groups %}
+    <a href="{% url 'my_alert_groups' %}"{% if current_page == 'my_alert_groups' %} class="is-current" aria-current="page"{% elif 'my_alert_groups' in current_ancestors %} class="is-ancestor"{% endif %}>My Alert Groups</a>
     {% endif %}
     {% comment %}
       Folder Watch is a parent: one child today (Temenos), more as other hosts start
@@ -250,6 +262,21 @@
       <a href="{% url 'system_settings' %}" class="drawer-child{% if current_page == 'system_settings' %} is-current{% endif %}"{% if current_page == 'system_settings' %} aria-current="page"{% endif %}>Data sources</a>
       <a href="{% url 'config_alerts' %}" class="drawer-child{% if current_page == 'config_alerts' %} is-current{% elif 'config_alerts' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_alerts' %} aria-current="page"{% endif %}>Alerts</a>
       <a href="{% url 'config_events' %}" class="drawer-child{% if current_page == 'config_events' %} is-current{% elif 'config_events' in current_ancestors %} is-ancestor{% endif %}"{% if current_page == 'config_events' %} aria-current="page"{% endif %}>Events</a>
+    </div>
+    {% endif %}
+    {% comment %}
+      Management's own three screens (2026-09-16, Full; 2026-09-19, Analytical -- the former
+      Focused page, preserved under its own URL when Focused itself was redesigned into a plain
+      2x2 domain grid) -- Executive - Focused is its LANDING page (see ROLE_HOME), the same
+      role Configuration plays for Administrator, so it's the top-level entry here; Full and
+      Analytical hang off it as children, the same shape SOD Checklist/Temenos/Roles hang off
+      their own parent entries above.
+    {% endcomment %}
+    {% if is_management %}
+    <a href="{% url 'management_dashboard_focused' %}"{% if current_page == 'management_dashboard_focused' %} class="is-current" aria-current="page"{% elif 'management_dashboard_focused' in current_ancestors %} class="is-ancestor"{% endif %}>Executive Dashboard</a>
+    <div class="drawer-children">
+      <a href="{% url 'management_dashboard_full' %}" class="drawer-child{% if current_page == 'management_dashboard_full' %} is-current{% endif %}"{% if current_page == 'management_dashboard_full' %} aria-current="page"{% endif %}>Executive - Full</a>
+      <a href="{% url 'management_dashboard_analytical' %}" class="drawer-child{% if current_page == 'management_dashboard_analytical' %} is-current{% endif %}"{% if current_page == 'management_dashboard_analytical' %} aria-current="page"{% endif %}>Executive - Analytical</a>
     </div>
     {% endif %}
   </nav>

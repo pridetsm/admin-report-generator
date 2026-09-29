@@ -1,23 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Network Device Picker{% endblock %}
+{% block title %}Core Switches Device Picker{% endblock %}
 
 {% comment %}
-  The network admin's landing screen — a structural mirror of reports/select.html.
+  The Core Switches Report's own picker (2026-09-23, split out of the old combined
+  Switches & Routers picker -- see network.core_switches_device_keys' own comment).
 
-  Same header card, same stat pills, same "…to include" section, same toolbar (select-all,
-  filter, running count), same tile anatomy (monogram, name, sub-line, optional badge, tick),
-  same sticky action bar, same submit guard. Only the inventory and its nouns differ: systems
-  and hosts there, devices and interfaces here.
-
-  Kept as a separate file rather than branching select.html because the two screens read the
-  same but do not share a data shape — select.html speaks of hosts and recency, this one of
-  interfaces and reachability. A single template carrying both would be a thicket of {% if %}
-  for the sake of avoiding a file.
+  Every device here is SNMP-kind (Switch/Router/WLC), never "windows" — so unlike
+  network_select.html this template has no windows-kind branch to carry.
 {% endcomment %}
 
 {% block body %}
 <style>
-  
   .badge-state {
     display: inline-flex; align-items: center; gap: 5px; margin-top: 5px;
     font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
@@ -25,15 +18,20 @@
   }
   .badge-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .badge-state.unk { background: var(--panel-2); color: var(--muted); }
+  .badge-kind {
+    display: inline-flex; align-items: center; margin-left: 6px;
+    font-size: 10.5px; font-weight: 650; padding: 1px 7px; border-radius: 999px;
+    background: var(--panel-2); color: var(--muted); text-transform: uppercase; letter-spacing: .3px;
+  }
 </style>
 
-<form method="post" action="{% url 'network_report' %}" id="selectForm">
+<form method="post" action="{% url 'core_switches_report' %}" id="selectForm">
 {% csrf_token %}
 
 <div class="container">
   <div class="snap" style="align-items:flex-start">
     <div style="min-width:0">
-      <h1>Network Device Picker</h1>
+      <h1>Core Switches Device Picker</h1>
       <div class="meta">Choose the devices for this report — live metrics are captured only for what you pick.</div>
       <div class="sys-stats">
         <span class="sys-stat">{{ devices|length }} device{{ devices|length|pluralize }}</span>
@@ -44,18 +42,12 @@
   </div>
 
   {% if open_report %}
-  {% comment %}
-    A report is already open. This screen is the picker, so without this the only way forward
-    is to choose devices again — which clears the snapshot token and discards answers already
-    typed. Landing here throws nothing away; this makes the way back visible and says plainly
-    what starting again would cost.
-  {% endcomment %}
   <div class="resume-bar">
     <div class="resume-text">
       <b>You have a report open <span class="resume-cd" id="resumeCountdown" data-left="{{ open_seconds }}"></span></b>
       <span>{{ open_report|join:", " }} — your answers are still there.</span>
     </div>
-    <a class="btn primary" href="{% url 'network_report' %}">Continue that report</a>
+    <a class="btn primary" href="{% url 'core_switches_report' %}">Continue that report</a>
   </div>
   <p class="meta" style="margin:-4px 2px 14px">Choosing devices below starts a new report and
     discards the open one.</p>
@@ -63,9 +55,8 @@
 
   <div class="section-label">Devices to include</div>
   <div class="card"><div class="body" style="padding-top:14px">
-    <p class="meta" style="margin:0 0 4px;line-height:1.5">Only devices with SNMP enabled and
-      added as a Prometheus target appear here — the firewall, wireless controller and routers
-      each need onboarding before they can be reported on.</p>
+    <p class="meta" style="margin:0 0 4px;line-height:1.5">Only devices with SNMPv3 enabled and
+      added as a Prometheus target appear here.</p>
 
     <div class="sys-toolbar">
       <label class="chk-pill"><input type="checkbox" id="selectAll"><span>All devices</span></label>
@@ -81,22 +72,13 @@
 
     <div class="sys-grid" id="selectList">
       {% for d in devices %}
-      <label class="sys-tile" data-name="{{ d.name|lower }} {{ d.target }}">
+      <label class="sys-tile" data-name="{{ d.name|lower }} {{ d.target }} {{ d.kind|lower }}">
         <input type="checkbox" class="select-check" name="include_device" value="{{ d.key }}">
         <span class="sys-mono" style="--mono-h:{{ d.mono_hue }}">{{ d.name.0|upper }}</span>
         <span class="sys-body">
-          <span class="sys-name">{{ d.name }}</span>
-          {% if d.kind == "windows" %}
-          <span class="sys-sub">Windows host</span>
-          {% else %}
+          <span class="sys-name">{{ d.name }}<span class="badge-kind">{{ d.kind }}</span></span>
           <span class="sys-sub">{{ d.iface_count }} interface{{ d.iface_count|pluralize }}</span>
-          {% endif %}
           {% if not d.known %}
-          {% comment %}
-            No `up` series at all is a different answer from up == 0: one means Prometheus has
-            never scraped this target, the other that it tried and failed. Rendering them alike
-            sends someone to check a cable over a missing scrape config.
-          {% endcomment %}
           <span class="badge-state unk" title="Prometheus has no scrape for this target"><span class="dot"></span>not scraped</span>
           {% elif not d.reachable %}
           <span class="badge-state" title="The target is not answering SNMP"><span class="dot"></span>not responding</span>
@@ -105,7 +87,7 @@
         <span class="sys-tick" aria-hidden="true">✓</span>
       </label>
       {% empty %}
-      <div class="sys-empty"><span class="big">⌸</span>No network devices are being monitored yet.</div>
+      <div class="sys-empty"><span class="big">⌸</span>No core switches are being monitored yet.</div>
       {% endfor %}
     </div>
     <div class="sys-empty" id="sysNoResults" hidden><span class="big">⌕</span>No devices match your filter.</div>
@@ -197,12 +179,6 @@
 })();
 </script>
 
-{% comment %}
-  The open report expires on the same clock as its snapshot, so the widget counts down to the
-  moment it stops being true rather than offering to continue a report whose numbers went
-  stale hours ago. At zero the page reloads; the server has already dropped the session keys
-  by then, so the widget is simply gone.
-{% endcomment %}
 {% if open_seconds %}
 <script>
 (function () {

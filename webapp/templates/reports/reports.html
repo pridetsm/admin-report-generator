@@ -20,8 +20,12 @@
     <p>Choose the report to run. You pick which systems it covers on the next screen.</p>
   </div>
 
+  {% for g in groups %}
+  {% if g.category %}
+  <div class="section-label" style="margin-top:22px">{{ g.category }}</div>
+  {% endif %}
   <div class="rs-list">
-    {% for o in options %}
+    {% for o in g.items %}
     <a class="rs-btn" href="{{ o.url }}">
       {% if o.icon %}
       <span class="rs-icon" aria-hidden="true">
@@ -37,5 +41,6 @@
     </a>
     {% endfor %}
   </div>
+  {% endfor %}
 </div>
 {% endblock %}

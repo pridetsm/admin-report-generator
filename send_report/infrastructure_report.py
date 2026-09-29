@@ -47,6 +47,7 @@ Groups written into the workbook
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -159,6 +160,13 @@ ACCENT = "FF5BC0D4"
 CHIP_GREEN_BG, CHIP_GREEN_TXT = "FF14322B", "FF4CC9A4"
 CHIP_AMBER_BG, CHIP_AMBER_TXT = "FF3A2F14", "FFE8B04B"
 CHIP_RED_BG, CHIP_RED_TXT = "FF3A1A16", "FFEF6A5A"
+# NOTE tone (2026-09-21, on request: "make discards from cluster report a note banner instead
+# of a warning banner") -- Banner had no neutral severity at all before this; every banner was
+# hard-coded red or amber (see Banner.tone's own history). A dark neutral blue-grey (CARD-
+# adjacent background, the same ACCENT already used for section titles as the text) rather
+# than reusing green/amber/red -- a note isn't "healthy" (green would misread as an all-clear)
+# or "needs attention" (amber/red), it's background context worth knowing, not a finding.
+CHIP_NOTE_BG, CHIP_NOTE_TXT = "FF16222E", ACCENT
 
 # nesting cues -- neutral, on-theme.  Section title brightness AND size step down per
 # nesting level (color alone read as too subtle a cue once a 3rd level -- Active Directory >
@@ -183,8 +191,8 @@ def title_size(indent: int) -> float:
 def spine_color(indent: int) -> str:
     return SPINE.get(indent, SPINE[max(SPINE)])
 
-TONE_BG = {"green": CHIP_GREEN_BG, "amber": CHIP_AMBER_BG, "red": CHIP_RED_BG}
-TONE_TXT = {"green": CHIP_GREEN_TXT, "amber": CHIP_AMBER_TXT, "red": CHIP_RED_TXT}
+TONE_BG = {"green": CHIP_GREEN_BG, "amber": CHIP_AMBER_BG, "red": CHIP_RED_BG, "note": CHIP_NOTE_BG}
+TONE_TXT = {"green": CHIP_GREEN_TXT, "amber": CHIP_AMBER_TXT, "red": CHIP_RED_TXT, "note": CHIP_NOTE_TXT}
 
 FONT_NAME = "Times New Roman"
 
@@ -207,16 +215,24 @@ SENTINEL_NOTE = "No critical or warning metrics this run."
 
 
 def chip_colors(pct: float) -> tuple[str, str]:
+    # CPU/RAM/Disk usage chips throughout THIS module only -- Infrastructure Admin Report and
+    # Active Directory Report share this one renderer (see network.py's own
+    # build_infrastructure_report, reused for both -- report_title is the only thing that
+    # differs between them), so a change here covers exactly "the two infrastructure reports"
+    # and nothing else: the System Admin Report grades its own chips via a separate function
+    # in generate_report.py, untouched by this one. Bands widened 75->85 amber (2026-09-14, on
+    # request: "85-90 percent is amber and 90-100 is red") -- red stays >=90, unchanged.
+    #
     # A real percentage can never fall outside [0, 100] -- anything that does (e.g. a
     # negative CPU reading from a textfile counter that isn't actually monotonic, so rate()
-    # goes negative) is bad DATA, not a low reading. Falling through to the plain `< 75 ->
+    # goes negative) is bad DATA, not a low reading. Falling through to the plain `< 85 ->
     # green` case would then render it as the single most reassuring color available, exactly
     # backwards from what it means. Band it amber instead -- "look at this", not "all clear".
     if pct < 0 or pct > 100:
         return CHIP_AMBER_BG, CHIP_AMBER_TXT
     if pct >= 90:
         return CHIP_RED_BG, CHIP_RED_TXT
-    if pct >= 75:
+    if pct >= 85:
         return CHIP_AMBER_BG, CHIP_AMBER_TXT
     return CHIP_GREEN_BG, CHIP_GREEN_TXT
 
@@ -241,9 +257,16 @@ class ServiceRow:
 
 @dataclass
 class CpuRam:
+    """cpu_pct/ram_pct are each independently Optional -- a host can report one collector
+    without the other (confirmed live 2026-09-14: an HCI node's custom CPU textfile collector
+    went silent while its standard windows_exporter memory reading kept flowing fine). None
+    means "not reporting", not zero -- write_cpu_ram prints "-" for it rather than a
+    fabricated 0%, the same "no percentage to show" rule network.py's own
+    _infra_cpu_ram_disks docstring already states for the whole row; this just extends it to
+    each half of the row independently instead of only to the row as a whole."""
     node: str
-    cpu_pct: float
-    ram_pct: float
+    cpu_pct: Optional[float]
+    ram_pct: Optional[float]
     ram_size: Optional[str] = None
 
 
@@ -260,21 +283,28 @@ class DiskRow:
 
 
 @dataclass
-class ClusterStorageRow:
-    pool: str
-    used_pct: float
-    size_gb: int
-
-    @property
-    def free_gb(self) -> int:
-        return round(self.size_gb * (1 - self.used_pct / 100))
+class ClusterVolumeRow:
+    """One Cluster Shared Volume (2026-09-14) -- replaces the earlier ClusterStorageRow/
+    "Cluster Storage" table (one row, a single pool/volume figure averaged or borrowed from
+    whichever node happened to answer) now that the real per-CSV metrics
+    (windows_hci_csv_volume_size_bytes/_size_remaining_bytes/_used_percent) are available:
+    one row per ACTUAL volume, not one guessed-at aggregate. `band` ("green"/"amber"/"red",
+    < 70% / 70-85% / > 85%) is pre-computed by the capture layer (network.py), same split as
+    every other pre-graded row in this module (ReplicationRow.status, NtpSyncRow.
+    stratum_band, ...) -- thresholds are a policy decision, not a rendering one."""
+    volume: str
+    total_tb: float
+    remaining_tb: float
+    used_tb: float
+    used_pct: int
+    band: str = "green"
 
 
 @dataclass
 class ReplicationRow:
     """AD replication health with one partner, rolled up across every partition that partner
     replicates (see network.py's own _ad_replication_rows docstring for why partition-level
-    detail is collapsed rather than shown as separate rows). Reuses ClusterStorageRow's own
+    detail is collapsed rather than shown as separate rows). Reuses ClusterVolumeRow's own
     column slot (see write_replication) rather than a new column block -- a device group is
     never both a cluster host AND a domain controller, so the two tables never need to coexist
     on the same row."""
@@ -290,13 +320,14 @@ class ReplicationRow:
 class NtpSyncRow:
     """One domain controller's own w32time sync state (2026-09-11, on request, scoped to
     RBZHQ-ROOT-01 only -- the forest's primary time source). Reuses ReplicationRow/
-    ClusterStorageRow's own column slot, same reasoning: this device is never also a cluster
+    ClusterVolumeRow's own column slot, same reasoning: this device is never also a cluster
     host, and Root DCs (no `ad` collector enabled -- see network.py's own confirmation) never
     carry a Replication table either, so there is no real host where two of these three tables
-    would ever need to coexist on the same row. Five columns, one wider than Cluster Storage/
-    Replication's own four -- write_ntp_sync borrows the single gap column normally left before
-    Notes to fit `dc` as its own column (rather than folding it into the section title), since
-    that gap is unused on the one row this table ever actually renders on.
+    would ever need to coexist on the same row. Five columns, same width as Cluster Storage
+    Volumes and one wider than Replication's own four -- write_ntp_sync borrows the single gap
+    column normally left before Notes to fit `dc` as its own column (rather than folding it
+    into the section title), since that gap is unused on the one row this table ever actually
+    renders on.
     band/age_band are pre-computed by the capture layer (network.py), same split as
     ReplicationRow.status -- thresholds are a policy decision, not a rendering one."""
     dc: str
@@ -332,7 +363,7 @@ class DeviceGroup:
     services: list[ServiceRow] = field(default_factory=list)
     cpu_ram: list[CpuRam] = field(default_factory=list)
     disks: list[DiskRow] = field(default_factory=list)
-    cluster_storage: list[ClusterStorageRow] = field(default_factory=list)
+    cluster_volumes: list[ClusterVolumeRow] = field(default_factory=list)
     replication: list[ReplicationRow] = field(default_factory=list)
     ntp_sync: list[NtpSyncRow] = field(default_factory=list)
     notes: list[NoteRow] = field(default_factory=list)
@@ -378,7 +409,16 @@ class Banner:
 
     @property
     def tone(self) -> str:
-        return "red" if self.severity.upper() == "CRITICAL" else "amber"
+        # "NOTE" (2026-09-21, on request: "make discards from cluster report a note banner
+        # instead of a warning banner") -- the first non-red/amber severity this ever had;
+        # everything else still collapses to amber (matches every banner built before this,
+        # all of which pass "WARNING" or "CRITICAL" and nothing else).
+        sev = self.severity.upper()
+        if sev == "CRITICAL":
+            return "red"
+        if sev == "NOTE":
+            return "note"
+        return "amber"
 
     @property
     def heading(self) -> str:
@@ -760,6 +800,17 @@ def write_services(sh, top, scol, group) -> int:
     return end
 
 
+def _fmt_3sf(value: float) -> str:
+    """`value` rounded to 3 significant figures, ALWAYS showing all 3 -- plain `.3g`
+    formatting (2026-09-17, tried first) silently drops back to whole numbers whenever the
+    3rd figure lands on a trailing zero (e.g. 70.0 -> "70", 26.0 -> "26"), which for RAM% is
+    indistinguishable from the old 0-decimal display it was meant to replace."""
+    if value == 0:
+        return "0.00"
+    decimals = max(0, 2 - int(math.floor(math.log10(abs(value)))))
+    return f"{value:.{decimals}f}"
+
+
 def write_cpu_ram(sh, top, ccol, rows) -> int:
     sh.merge(top, ccol, top, ccol + 2, bg=CARD)
     sh.put(top, ccol, "CPU · RAM", sz=9, bold=True, color=ACCENT, bg=CARD,
@@ -769,13 +820,22 @@ def write_cpu_ram(sh, top, ccol, rows) -> int:
                bg=TABLE_HEADER_BG, halign="left")
     r = top + 2
     for cr in rows:
-        cbg, ctxt = chip_colors(cr.cpu_pct)
-        rbg, rtxt = chip_colors(cr.ram_pct)
-        ram = (f"{cr.ram_pct:.0f}% · {cr.ram_size}" if cr.ram_size
-               else f"{cr.ram_pct:.0f}%")
+        # "-" (not a fabricated 0%) for a value this specific host isn't reporting -- see
+        # CpuRam's own docstring on why cpu_pct/ram_pct can each be independently None.
+        if cr.cpu_pct is None:
+            cpu_text, cbg, ctxt = "-", CARD, TEXT_SECONDARY
+        else:
+            cpu_text = f"{cr.cpu_pct:.0f}%"
+            cbg, ctxt = chip_colors(cr.cpu_pct)
+        if cr.ram_pct is None:
+            ram, rbg, rtxt = "-", CARD, TEXT_SECONDARY
+        else:
+            ram = (f"{_fmt_3sf(cr.ram_pct)}% · {cr.ram_size}" if cr.ram_size
+                   else f"{_fmt_3sf(cr.ram_pct)}%")
+            rbg, rtxt = chip_colors(cr.ram_pct)
         sh.put(r, ccol, cr.node, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
                halign="left")
-        sh.put(r, ccol + 1, f"{cr.cpu_pct:.0f}%", sz=8, bold=True, color=ctxt,
+        sh.put(r, ccol + 1, cpu_text, sz=8, bold=True, color=ctxt,
                bg=cbg, halign="center")
         sh.put(r, ccol + 2, ram, sz=8, bold=True, color=rtxt, bg=rbg,
                halign="center")
@@ -811,32 +871,39 @@ def write_disk(sh, top, rows) -> int:
     return r - 1
 
 
-def write_cluster_storage(sh, top, rows) -> int:
-    _fixed_table(sh, top, CLUSTER_COL, CLUSTER_LAST, "Cluster Storage",
-                 ("Pool", "Used %", "Size GB", "Free GB"))
+def write_cluster_volumes(sh, top, rows) -> int:
+    """One row per real Cluster Shared Volume (2026-09-14) -- see ClusterVolumeRow's own
+    docstring on why this replaced the old one-row-per-pool "Cluster Storage" table. Five
+    columns, the same CLUSTER_COL..CLUSTER_LAST+1 span NtpSyncRow already established as safe
+    to borrow (see that table's own docstring) -- never coexists with it on the same row
+    (a device group is never both an HCI cluster host and a domain controller)."""
+    _fixed_table(sh, top, CLUSTER_COL, CLUSTER_LAST + 1, "Cluster Storage Volumes",
+                 ("Volume", "Total Size", "Remaining", "Used", "Usage %"))
     r = top + 2
-    for s in rows:
-        ubg, utxt = chip_colors(s.used_pct)
-        sh.put(r, CLUSTER_COL, s.pool, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
+    for v in rows:
+        ubg, utxt = TONE_BG[v.band], TONE_TXT[v.band]
+        sh.put(r, CLUSTER_COL, v.volume, sz=8.5, color=TEXT_SECONDARY, bg=CARD,
                halign="left")
-        sh.put(r, CLUSTER_COL + 1, f"{s.used_pct:.0f}%", sz=8, bold=True,
+        sh.put(r, CLUSTER_COL + 1, f"{v.total_tb:.1f} TB", sz=8.5, color=TEXT_SECONDARY,
+               bg=CARD, halign="center")
+        sh.put(r, CLUSTER_COL + 2, f"{v.remaining_tb:.1f} TB", sz=8.5, color=TEXT_SECONDARY,
+               bg=CARD, halign="center")
+        sh.put(r, CLUSTER_COL + 3, f"{v.used_tb:.1f} TB", sz=8.5, color=TEXT_SECONDARY,
+               bg=CARD, halign="center")
+        sh.put(r, CLUSTER_COL + 4, f"{v.used_pct}%", sz=8, bold=True,
                color=utxt, bg=ubg, halign="center")
-        sh.put(r, CLUSTER_COL + 2, s.size_gb, sz=8.5, color=TEXT_SECONDARY,
-               bg=CARD, halign="center")
-        sh.put(r, CLUSTER_COL + 3, s.free_gb, sz=8.5, color=TEXT_SECONDARY,
-               bg=CARD, halign="center")
         r += 1
     return r - 1
 
 
 def write_replication(sh, top, rows) -> int:
-    """AD replication, at CLUSTER_COL -- the same 4-column slot write_cluster_storage uses
-    (Pool/Used%/Size GB/Free GB there vs. Partner/Status/Last Success/Failures here). Never
-    drawn for the same group as Cluster Storage (a domain controller is never also a cluster
-    host), so there is no real collision to design around -- reusing the slot avoids adding a
-    whole new fixed-column block (and the RIGHT_EDGE/MAX_COL renumbering that would require,
-    see this module's own GOLDEN RULE) for a table that's mutually exclusive with the one
-    already sitting there."""
+    """AD replication, at CLUSTER_COL -- the same 4-column-wide span Cluster Storage Volumes
+    starts from (that table spills one column further, into CLUSTER_LAST+1 -- see
+    write_cluster_volumes). Never drawn for the same group as Cluster Storage Volumes (a
+    domain controller is never also an HCI cluster host), so there is no real collision to
+    design around -- reusing the slot avoids adding a whole new fixed-column block (and the
+    RIGHT_EDGE/MAX_COL renumbering that would require, see this module's own GOLDEN RULE) for
+    a table that's mutually exclusive with the one already sitting there."""
     _fixed_table(sh, top, CLUSTER_COL, CLUSTER_LAST, "AD Replication",
                  ("Partner", "Status", "Last Success", "Failures"))
     r = top + 2
@@ -959,7 +1026,7 @@ def _section_span(group: DeviceGroup) -> int:
     gap between node sections. Keep in sync with write_section/write_services if either
     changes shape."""
     top = 2
-    has_tables = any((group.services, group.cpu_ram, group.disks, group.cluster_storage,
+    has_tables = any((group.services, group.cpu_ram, group.disks, group.cluster_volumes,
                       group.replication, group.ntp_sync, group.notes))
     if not has_tables:
         return top
@@ -976,8 +1043,8 @@ def _section_span(group: DeviceGroup) -> int:
         ends.append(top + 2 + len(group.cpu_ram) - 1)
     if group.disks:
         ends.append(top + 2 + len(group.disks) - 1)
-    if group.cluster_storage:
-        ends.append(top + 2 + len(group.cluster_storage) - 1)
+    if group.cluster_volumes:
+        ends.append(top + 2 + len(group.cluster_volumes) - 1)
     if group.replication:
         ends.append(top + 2 + len(group.replication) - 1)
     if group.ntp_sync:
@@ -992,7 +1059,7 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
     write_title_bar(sh, row, indent, group)
     top = row + 2
 
-    has_tables = any((group.services, group.cpu_ram, group.disks, group.cluster_storage,
+    has_tables = any((group.services, group.cpu_ram, group.disks, group.cluster_volumes,
                       group.replication, group.ntp_sync, group.notes))
     if has_tables:
         notes_title = _notes_title(group.title, indent)
@@ -1006,8 +1073,8 @@ def write_section(sh: Sheet, row: int, indent: int, group: DeviceGroup) -> int:
             ends.append(write_cpu_ram(sh, top, cpuram_col(indent), group.cpu_ram))
         if group.disks:
             ends.append(write_disk(sh, top, group.disks))
-        if group.cluster_storage:
-            ends.append(write_cluster_storage(sh, top, group.cluster_storage))
+        if group.cluster_volumes:
+            ends.append(write_cluster_volumes(sh, top, group.cluster_volumes))
         if group.replication:
             ends.append(write_replication(sh, top, group.replication))
         if group.ntp_sync:
@@ -1055,6 +1122,20 @@ def write_footer(sh: Sheet, row: int) -> None:
 
 # Some columns do double duty -- a gap at one nesting level, a data column at
 # another -- so widths are sized for the widest role each column can take.
+# 2026-09-17: replaced with the exact widths from a hand-resized reference file ("fix.xlsx",
+# on request: "the columns have been resized for some tables so as to not [hide/cut off] side
+# data so copy the column widths from fix xlsx") -- opened, adjusted in Excel to stop specific
+# tables' data clipping, and handed back as the new source of truth. The gap-consistency
+# algebra below (D=H+I+J etc.) was this dict's ORIGINAL derivation, kept as historical context
+# for why B through V exist and roughly why they're sized as they are, but the literal values
+# now come from fix.xlsx, not from re-solving those equations -- if a future clipping report
+# comes in, resize in Excel again and re-copy, the same way this fix did, rather than hand-
+# tuning the algebra back to life.
+#
+# G, I, M, Y, AA carried NO explicit width in fix.xlsx (Excel's own default, ~8.43, applies)
+# -- confirmed deliberate, not an export gap: dropped here too, rather than kept at their old
+# explicit values, since the reference file is the authority on what actually stopped the
+# clipping.
 COL_WIDTHS = {
     "A": 6.43,                                             # gutter / nesting spine
     # D through J are gap columns at SOME indent, real content at others -- Services/CPU-RAM
@@ -1066,54 +1147,53 @@ COL_WIDTHS = {
     # per-column, not per-row, so whatever value a column has here is what EVERY indent that
     # reuses it gets, whether that indent needs it as a gap or as real content.
     #
-    # Solved for 3 indent levels (0/1/2 -- Active Directory > Root/Child Domain Controllers >
-    # each DC, or any group nested that deep) so that, AT EACH indent, the Services<->CPU/RAM
-    # gap equals that same indent's own CPU/RAM<->Disk gap (the "table spacing consistent
-    # within a section" rule from earlier still has to hold at every depth, not just 0 and 1):
+    # ORIGINALLY solved for 3 indent levels (0/1/2 -- Active Directory > Root/Child Domain
+    # Controllers > each DC, or any group nested that deep) so that, AT EACH indent, the
+    # Services<->CPU/RAM gap equalled that same indent's own CPU/RAM<->Disk gap:
     #   indent 0: Gap1 = D            Gap2 = H + I + J        -> D = H+I+J
     #   indent 1: Gap1 = E            Gap2 = I + J            -> E = I+J
     #   indent 2: Gap1 = F            Gap2 = J                -> F = J
-    # F, G, H, I carry real minimum widths from whichever indent actually uses them as data
-    # (node/cpu/ram values, hostnames) -- F=15 and H=13 were already sized for that at indents
-    # 0/1; G widened 13->15 so indent 2's own "node" column (a full hostname, not a bare %)
-    # fits as comfortably as indent 0/1's already do; I=13 fits indent 2's "ram" column the
-    # same way G/H already fit theirs. J is NEVER real content at any indent actually in use
-    # (only ever the deepest gap) so it's free -- set to 15 to keep F a real, comfortable
-    # width, which then fixes E=I+J=28 and D=H+I+J=41 by the equations above.
+    # See this dict's own 2026-09-17 header comment: the literal values below now come from
+    # fix.xlsx rather than these equations, which may no longer hold exactly -- kept only as
+    # background on the shape of the layout, not as the current derivation.
+    # C/F/K widened for real, MEASURED text (2026-09-17, confirmed via a second screenshot:
+    # "Hyper-V Virtual Machine Ma[nagement]", the CPU/RAM node name, AND the Disk host name all
+    # STILL clipping on "DR Cluster Node 1" -- matching B's own width, the previous attempt,
+    # was still a guess, and wrong: B's own reference string ("DFSR (SYSVOL replication)
+    # (RBZ-HQ-ROOT-02)") doesn't actually fit in 19.57 either by real pixel measurement, it was
+    # never tested, just asserted. This time measured directly -- rendered every candidate
+    # string in this workbook's actual font (Times New Roman, FONT_NAME) at its actual cell
+    # size via PIL, converted px -> Excel width units using the workbook's own default-style
+    # basis (Calibri 11, MDW=7px, the standard `(px+5)/7` formula) -- NOT eyeballed again:
+    #   "Hyper-V Virtual Machine Management" @ 8.5pt (Services name)      -> needs ~26.9 units
+    #   "Bulawayo Cluster Node 1 (10.200.246.2)" @ 8pt (CPU/RAM node name) -> needs ~28.1 units
+    #   same string @ 8pt (Disk host name)                                -> needs ~28.1 units
+    # Set C/F/K a few units past each, not exactly at it, so the NEXT longest real name (this
+    # estate keeps growing -- Bulawayo Cluster and Standalone Servers both arrived today) has
+    # headroom too.
     #
-    # B:J scaled by 0.7 (indentation 30% narrower, on request) AFTER solving the equations
-    # above -- a uniform scale preserves every equality exactly (0.7*D = 0.7*H+0.7*I+0.7*J
-    # still holds whenever D = H+I+J did), so the gap-consistency work doesn't need re-solving,
-    # just resizing. K onward (Disk/Cluster/Notes) intentionally NOT scaled -- those are fixed
-    # regardless of indent, so they carry no "indentation" to reduce.
+    # This also exposed a genuine column mis-ID in the PREVIOUS attempt: the CPU/RAM node name
+    # is column F, not E (confirmed directly via openpyxl: 'DR Cluster Node 1 (...)' cells sit
+    # at F96) -- E is the pure GAP between Services and CPU/RAM at indent 1 (see the ORIGINAL
+    # equations above: "indent 1: Gap1 = E"), never real content there, so widening it would
+    # have done nothing for this specific clipping regardless.
     #
-    # B further reduced by 10% on top of that (20.16 = 22.4*0.9), then another 3% (19.5552):
-    # B is what actually produces the level-1 step -- indent 1's title starts right after it --
-    # and, unlike D/E/.../J, it never appears in the gap-consistency equations above (it's
-    # purely indent 0's own Services "name" column, no gap or indent-2 role to protect), so it
-    # can move on its own without touching anything those equations depend on.
-    #
-    # C cut 20% (11.2 -> 8.96): the step that produces level 2 (indent 2's title starts right
-    # after it), same reasoning as B -- C is indent 0's own Services "status" column and
-    # indent 1's "name" column, neither a gap role, so it's equally free to move alone. Content
-    # risk worth flagging though, unlike B: indent 1's OWN Services table (HCI Cluster Node's
-    # service names -- "Hyper-V Virtual Machine Management" is 34 characters) uses C as its
-    # NAME column, with D (a real Status chip, never blank) immediately to its right -- Excel
-    # only lets text overflow into a truly EMPTY neighbor, so a name longer than ~9 characters
-    # will visibly clip here, not just overflow harmlessly. B never hit this because indent 0's
-    # own equivalent long names (HCI Cluster Host's rolled-up "Cluster Service (HRE-HCIHOST-01)")
-    # sit at a still-generous 19.56 wide.
-    "B": 19.5552, "C": 8.96, "D": 28.7,                    # Services (name/status, shifts by indent) -- B widened for names like "DFSR (SYSVOL replication) (RBZ-HQ-ROOT-02)"
-    "E": 19.6, "F": 10.5, "G": 10.5, "H": 9.1, "I": 9.1,   # CPU / RAM (shifts by indent) -- E/F/G fit e.g. "HRE-HCIHOST-01"
-    "J": 10.5,                                             # guaranteed gap: CPU/RAM <-> Disk -- see the equations above
-    "K": 14, "L": 8, "M": 8, "N": 8.43, "O": 8,            # Disk (fixed)
-    # P was 3 -- much narrower than F/J (both 10.5, the Services<->CPU/RAM and CPU/RAM<->Disk
-    # gaps the equations above already keep equal at indent 2). Matched to 10.5 here too
-    # (2026-09-11, on request: "equal distance between these tables Services / CPU·RAM / Disk
-    # / AD Replication") so all three gaps at the level these four tables actually coexist
-    # (a DC's own per-host card, indent 2) read as genuinely the same width, not just the
-    # first two.
-    "P": 10.5,                                             # gap: Disk <-> Cluster Storage/Replication/NTP
+    # KNOWN TRADEOFF, not an oversight: F ALSO plays "the gap before CPU/RAM" at indent 2 (same
+    # equations: "indent 2: Gap1 = F"), where it was previously tuned to equal J and P (10.5
+    # each, "equal distance between these tables", on request 2026-09-11) -- one shared column
+    # can't be both "just wide enough to gap" at indent 2 and "wide enough for a full node name"
+    # at indent 1 at the same time. Widening F for the real clipping bug breaks that indent-2
+    # equal-gap match (indent 2 tables now show a wider Services<->CPU/RAM gap than CPU/RAM<->
+    # Disk) -- a cosmetic regression, chosen deliberately over leaving real production data
+    # clipped. Splitting indent-1's content role and indent-2's gap role onto two dedicated
+    # columns (instead of reusing one for both) would fix both at once, at the cost of shifting
+    # every column after it -- not done here without being asked for that bigger change.
+    "B": 19.5703125, "C": 28.0, "D": 28.7109375,           # Services (name/status, shifts by indent)
+    "E": 19.5703125, "F": 30.0,                            # CPU / RAM (shifts by indent)
+    "H": 9.140625,                                         # CPU / RAM (shifts by indent)
+    "J": 10.42578125,                                      # guaranteed gap: CPU/RAM <-> Disk
+    "K": 30.0, "L": 8.0, "N": 8.42578125, "O": 8.0,        # Disk (fixed)
+    "P": 10.42578125,                                      # gap: Disk <-> Cluster Storage/Replication/NTP
     # Q-T do double duty (same "widest role each column can take" rule as D-J above):
     # Cluster Storage (Pool/Used%/Size GB/Free GB) and Replication (Partner/Status/Last
     # Success/Failures) both fit comfortably in the original, narrower sizing, but NTP / Time
@@ -1122,15 +1202,15 @@ COL_WIDTHS = {
     # 2026, 06:52:18") -- widened here for that, 2026-09-11. Cluster Storage/Replication's own
     # short values just sit in a more generous column than they strictly need; nothing there
     # was sized to fit exactly, so there's no risk of clipping the other direction.
-    "Q": 14, "R": 7, "S": 16, "T": 20,                     # Cluster Storage / Replication / NTP
-    "U": 9,                                                # gap for Cluster Storage/Replication;
+    "Q": 14.0, "R": 7.0, "S": 16.0, "T": 20.0,             # Cluster Storage / Replication / NTP
+    "U": 9.0,                                              # gap for Cluster Storage/Replication;
                                                             # NTP's own "Sync Age" (e.g. "0h 5m")
                                                             # when NTP is the table rendering
-    "V": 3,                                                # gap, ALWAYS -- see NOTES_COL's own
+    "V": 3.0,                                              # gap, ALWAYS -- see NOTES_COL's own
                                                             # comment; never absorbed as data by
                                                             # any table, so Notes never touches one
-    "W": 36, "X": 12, "Y": 12,                             # Notes: Flagged metric (W:Y)
-    "Z": 13, "AA": 13,                                     # Notes: Fix needed? / Resolved
+    "W": 36.0, "X": 12.0,                                  # Notes: Flagged metric (W:Y)
+    "Z": 13.0,                                             # Notes: Fix needed? / Resolved
 }
 
 
@@ -1207,8 +1287,8 @@ def load_data(path: str) -> ReportData:
             services=[_service_row(s) for s in g.get("services", [])],
             cpu_ram=[CpuRam(**c) for c in g.get("cpu_ram", [])],
             disks=[DiskRow(**d) for d in g.get("disks", [])],
-            cluster_storage=[ClusterStorageRow(**s)
-                             for s in g.get("cluster_storage", [])],
+            cluster_volumes=[ClusterVolumeRow(**s)
+                             for s in g.get("cluster_volumes", [])],
             replication=[ReplicationRow(**s) for s in g.get("replication", [])],
             ntp_sync=[NtpSyncRow(**s) for s in g.get("ntp_sync", [])],
             notes=[NoteRow(**n) for n in g.get("notes", [])],

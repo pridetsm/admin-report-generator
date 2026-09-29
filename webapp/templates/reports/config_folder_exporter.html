@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Folder Exporter · Configuration{% endblock %}
+
+{% comment %}
+  folder_exporter's own status/mapping screen (2026-09-12, on request: "I also dont see the
+  folder exporter config in administrator role"). Superuser-only (views.py's own
+  _SUPERUSER_ONLY_CHILDREN), same reasoning as Users -- the service this reports on is what
+  every one of this app's OWN scheduled jobs (alert/event pollers, automated reports) runs
+  through.
+
+  Deliberately READ-ONLY throughout: unlike Prometheus/SNMP/Grafana this is not a DB-versioned
+  editor (it never writes folder_exporter.yml, just reflects what's on disk/running right
+  now), and there is no install/upgrade BUTTON anywhere on this page -- folder_exporter has no
+  releases/tags/signing, so automating "fetch + build + install" would mean running unverified
+  code from a public GitHub repo as a privileged Windows service. The guidance block below
+  shows the exact commands to run by hand instead.
+{% endcomment %}
+
+{% block body %}
+<div class="container" style="max-width:1040px">
+
+  <div class="section-label">Folder Exporter</div>
+
+  <div class="cfg-bar">
+    <span class="cfg-bar-state">
+      {% if installed %}
+        Installed · version <b>{{ version|default:"unknown" }}</b>
+      {% else %}
+        <span class="chip red">Not installed</span>
+      {% endif %}
+      &nbsp;·&nbsp; Service:
+      {% if service_status == "running" %}<span class="chip green">running</span>
+      {% elif service_status == "stopped" %}<span class="chip amber">stopped</span>
+      {% elif service_status == "not installed" %}<span class="chip red">not installed</span>
+      {% else %}<span class="chip">unknown</span>
+      {% endif %}
+    </span>
+    <span class="spacer"></span>
+    <a class="btn ghost" href="{{ repo_url }}" target="_blank" rel="noopener">Source repository ↗</a>
+  </div>
+
+  {% if installed %}
+  <div class="section-label sub">Installed binary</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <table class="hist">
+      <tbody>
+        <tr><td style="color:var(--muted);width:180px">Version</td><td>{{ version|default:"—" }}</td></tr>
+        <tr><td style="color:var(--muted)">File date</td><td>{{ mtime|date:"d M Y, H:i"|default:"—" }}</td></tr>
+        <tr><td style="color:var(--muted)">Service status</td><td>{{ service_status }}</td></tr>
+      </tbody>
+    </table>
+  </div></div>
+  {% endif %}
+
+  <div class="section-label sub">Latest on GitHub</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if latest.ok %}
+      <p class="cfg-note" style="margin:0 0 8px">
+        {% if latest.version and version and latest.version == version %}
+          <span class="chip green">Up to date</span>
+        {% elif latest.version and version %}
+          <span class="chip amber">Update available</span>
+        {% else %}
+          <span class="chip">See commit below</span>
+        {% endif %}
+      </p>
+      <table class="hist">
+        <tbody>
+          <tr><td style="color:var(--muted);width:180px">Latest commit</td><td>{{ latest.subject }}</td></tr>
+          <tr><td style="color:var(--muted)">Date</td><td>{{ latest.date }}</td></tr>
+          <tr><td style="color:var(--muted)">Commit</td><td><code>{{ latest.sha }}</code></td></tr>
+          {% if latest.version %}
+          <tr><td style="color:var(--muted)">Version found</td><td>{{ latest.version }}</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="cfg-note" style="margin:0">Couldn't reach GitHub to check for updates ({{ latest.error }}).</p>
+    {% endif %}
+  </div></div>
+
+  {% if not installed or latest.ok and latest.version and version and latest.version != version %}
+  <div class="section-label sub">{% if not installed %}Install{% else %}Update{% endif %} — run on this server</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <p class="cfg-note" style="margin:0 0 10px">
+      No download/install button here on purpose — this project publishes no signed releases,
+      so building and installing it is left to a human running these commands in an elevated
+      PowerShell console, not this app fetching and executing code unattended. Stopping this
+      service briefly stops every scheduled job it runs (alert/event pollers, automated
+      reports), so pick a quiet moment.
+    </p>
+    <pre style="background:var(--panel-2);padding:12px 14px;border-radius:8px;overflow-x:auto;font-size:12.5px;margin:0"><code># 1. Get the latest source
+{% if installed %}cd C:\folder_exporter_src ; git pull{% else %}git clone {{ repo_url }} C:\folder_exporter_src{% endif %}
+cd C:\folder_exporter_src
+
+# 2. Build (uses the C# compiler already in Windows — no SDK/internet needed for this step)
+.\build.ps1
+
+# 3. Install/replace the service (stops it first if already running)
+cd .\releases
+.\install-service.bat</code></pre>
+  </div></div>
+  {% endif %}
+
+  <div class="section-label sub">Jobs {% if jobs %}({{ jobs|length }}){% endif %}</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if not jobs %}
+      <p class="cfg-note" style="margin:0">{% if installed %}No jobs configured.{% else %}Not installed — no config to read.{% endif %}</p>
+    {% else %}
+    <table class="hist">
+      <thead><tr><th>Name</th><th>Schedule</th><th>Command</th></tr></thead>
+      <tbody>
+      {% for j in jobs %}
+        <tr>
+          <td>{{ j.name }}</td>
+          <td><code>{{ j.cron }}</code></td>
+          <td style="color:var(--muted);font-size:12px;word-break:break-all">{{ j.command }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div></div>
+
+  <div class="section-label sub">Monitored folders {% if folders %}({{ folders|length }}){% endif %}</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    {% if not folders %}
+      <p class="cfg-note" style="margin:0">{% if installed %}No folders configured.{% else %}Not installed — no config to read.{% endif %}</p>
+    {% else %}
+    <table class="hist">
+      <thead><tr><th>Name</th><th>Path</th><th>Scan interval</th></tr></thead>
+      <tbody>
+      {% for f in folders %}
+        <tr>
+          <td>{{ f.name }}</td>
+          <td style="color:var(--muted);font-size:12px;word-break:break-all">{{ f.path }}</td>
+          <td>{% if f.scan_interval_seconds %}{{ f.scan_interval_seconds }}s{% else %}default{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div></div>
+
+</div>
+{% endblock %}

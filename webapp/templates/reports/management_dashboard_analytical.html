@@ -1,0 +1,907 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Executive Dashboard — Analytical{% endblock %}
+
+{% comment %}
+  Exception-based Executive Dashboard (2026-09-14, on request: "go into the executive
+  dashboard zip file and execute this" -- rbz_executive_dashboard.zip's own design_prompt.md/
+  exec_dashboard.html, a from-scratch redesign brief: lead with what's wrong, push "clean"
+  into the background, one card per domain instead of a flat KPI wall). CSS/markup below is a
+  direct port of that prototype's own styling -- every NUMBER is still pulled verbatim from
+  each report's own overview.glance/immediate/watch tiles (views.py's own domain_cards/
+  exceptions/donut/banner_tier are pure regrouping of those same tiles, never a new metric --
+  the same non-negotiable rule the original version of this page was built under, 2026-09-12:
+  "pull all tiles as is... clearly labelled where they came from", after an earlier version
+  that invented its own estate-health score was rejected).
+
+  Two domains have no real data source at all (Security -- no monitoring source yet;
+  Government Systems -- excluded entirely) and are shown as such, per design_prompt.md's own
+  explicit instruction, not silently omitted or given a fabricated "clean" reading.
+{% endcomment %}
+
+{% block body %}
+<style>
+:root {
+  --ehink:#16233A; --ehink-soft:#3A4A63; --ehpaper:#F6F4EF; --ehsurface:#FFFFFF;
+  --ehgold:#B8935A; --ehgold-soft:#F0E6D6; --ehline:#DAD4C6; --ehline-soft:#E8E4D9;
+  --ehmuted:#6B6558; --ehred:#d14a3a; --ehred-soft:#fdebea; --ehamber:#b8790a; --ehamber-soft:#fff6e0;
+  --ehgreen:#0e9c74; --ehgreen-soft:#e8f6f0; --ehblue:#1a6fc4; --ehblue-soft:#e6f0fb; --ehpurple:#7a5fc4;
+  --ehshadow:0 1px 2px rgba(22,35,58,0.06),0 8px 24px rgba(22,35,58,0.05);
+  --grad-red: linear-gradient(135deg, color-mix(in srgb, var(--ehred) 55%, var(--ehgold) 45%), color-mix(in srgb, var(--ehred) 88%, black 12%));
+  --grad-amber: linear-gradient(135deg, color-mix(in srgb, var(--ehamber) 55%, var(--ehgold) 45%), color-mix(in srgb, var(--ehamber) 88%, black 12%));
+  --grad-green: linear-gradient(135deg, color-mix(in srgb, var(--ehgreen) 60%, var(--ehblue) 30%), color-mix(in srgb, var(--ehgreen) 88%, black 12%));
+  --grad-purple: linear-gradient(135deg, color-mix(in srgb, var(--ehpurple) 55%, var(--ehblue) 30%), color-mix(in srgb, var(--ehpurple) 88%, black 12%));
+  --tier-critical: color-mix(in srgb, var(--ehred) 55%, var(--ehamber) 45%);
+}
+:root[data-theme="dark"], :root:not([data-theme="light"]) {
+  --ehink:#E9E4D8; --ehink-soft:#C7C0AF; --ehpaper:#14181F; --ehsurface:#1B212C;
+  --ehgold:#D2AC78; --ehgold-soft:#362C1E; --ehline:#333B48; --ehline-soft:#262D38;
+  --ehmuted:#9A9384; --ehred:#ef6a5a; --ehred-soft:#3a1a16; --ehamber:#e8b04b; --ehamber-soft:#3a2f14;
+  --ehgreen:#4cc9a4; --ehgreen-soft:#14322b; --ehblue:#2dc7e6; --ehblue-soft:#123a4f; --ehpurple:#b39ce8;
+  --ehshadow:0 1px 2px rgba(0,0,0,0.3),0 8px 24px rgba(0,0,0,0.35);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ehink:#16233A; --ehink-soft:#3A4A63; --ehpaper:#F6F4EF; --ehsurface:#FFFFFF;
+    --ehgold:#B8935A; --ehgold-soft:#F0E6D6; --ehline:#DAD4C6; --ehline-soft:#E8E4D9;
+    --ehmuted:#6B6558; --ehred:#d14a3a; --ehred-soft:#fdebea; --ehamber:#b8790a; --ehamber-soft:#fff6e0;
+    --ehgreen:#0e9c74; --ehgreen-soft:#e8f6f0; --ehblue:#1a6fc4; --ehblue-soft:#e6f0fb; --ehpurple:#7a5fc4;
+  }
+}
+:root[data-theme="light"] {
+  --ehink:#16233A; --ehink-soft:#3A4A63; --ehpaper:#F6F4EF; --ehsurface:#FFFFFF;
+  --ehgold:#B8935A; --ehgold-soft:#F0E6D6; --ehline:#DAD4C6; --ehline-soft:#E8E4D9;
+  --ehmuted:#6B6558; --ehred:#d14a3a; --ehred-soft:#fdebea; --ehamber:#b8790a; --ehamber-soft:#fff6e0;
+  --ehgreen:#0e9c74; --ehgreen-soft:#e8f6f0; --ehblue:#1a6fc4; --ehblue-soft:#e6f0fb; --ehpurple:#7a5fc4;
+}
+.exec2 * { box-sizing:border-box; }
+.exec2 { background:var(--ehpaper); color:var(--ehink); padding:0 0 40px; font-family:"Segoe UI",system-ui,sans-serif; font-size:15px; line-height:1.6; }
+.exec2 .wrap2 { max-width:min(96vw, 1920px); margin:0 auto; }
+.exec2 h1,.exec2 h2,.exec2 h3,.exec2 h4 { font-family:Georgia,serif; color:var(--ehink); font-weight:400; }
+
+.exec2 .masthead2 { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:28px; flex-wrap:wrap; }
+.exec2 .eyebrow2 { font-family:Consolas,monospace; font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ehmuted); display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+.exec2 .eyebrow2 .dot { width:5px; height:5px; border-radius:50%; background:var(--ehgold); }
+.exec2 h1.title2 { font-size:28px; margin:0 0 6px; }
+.exec2 .subtitle2 { color:var(--ehink-soft); font-size:14px; margin:0; }
+/* The generic app-chrome "back to role select" crest (base.html's .brand-back) sits in the
+   plain grey topbar above this page's own paper/gold masthead -- next to nothing else on this
+   screen (the exec dashboards hide the usual nav), it read as a small icon floating loose
+   above the real page rather than a control that belongs to it (2026-09-18, on request:
+   "position or redesign the back to role select button its floating on dashboard ui"). This
+   gives it a second, proper home INSIDE the masthead, themed like everything else here, rather
+   than trying to reposition the shared topbar crest (used on every other screen in the app,
+   where it already sits correctly). */
+.exec2 .masthead2-actions { display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
+.exec2 .back2 {
+  display:inline-flex; align-items:center; gap:4px; font-size:12.5px; font-weight:600;
+  color:var(--ehmuted); text-decoration:none; padding:5px 10px; border-radius:999px;
+  border:1px solid var(--ehline); background:var(--ehsurface);
+}
+.exec2 .back2:hover { color:var(--ehgold); border-color:var(--ehgold); text-decoration:none; }
+.exec2 .back2 .care2 { font-size:15px; line-height:1; margin-top:-1px; }
+.exec2 .refresh2 { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--ehmuted); }
+.exec2 .refresh2 select {
+  font:inherit; font-size:12px; color:var(--ehink); background:var(--ehsurface);
+  border:1px solid var(--ehline); border-radius:6px; padding:3px 6px; cursor:pointer;
+}
+.exec2 .refresh2 select:focus-visible { outline:2px solid var(--ehgold); outline-offset:1px; }
+
+.exec2 .banner2 { display:flex; align-items:center; gap:18px; padding:20px 24px; border-radius:10px; margin-bottom:20px; border:1px solid var(--ehline); box-shadow:var(--ehshadow); flex-wrap:wrap; }
+.exec2 .banner2 .content2 { flex:1 1 320px; min-width:0; }
+.exec2 .banner2 .stamp2 { flex:0 0 auto; }
+.exec2 .banner2 .dot-big { width:16px; height:16px; border-radius:50%; flex:0 0 auto; }
+.exec2 .banner2.bad, .exec2 .banner2.warn { border:none; }
+.exec2 .banner2.bad h2, .exec2 .banner2.warn h2,
+.exec2 .banner2.bad p, .exec2 .banner2.warn p { color:#fff; }
+.exec2 .banner2.bad p, .exec2 .banner2.warn p { opacity:0.88; }
+.exec2 .banner2.bad .stamp2, .exec2 .banner2.warn .stamp2 { color:rgba(255,255,255,0.75); }
+.exec2 .banner2.bad .dot-big, .exec2 .banner2.warn .dot-big { background:#fff; box-shadow:0 0 0 5px rgba(255,255,255,0.28); animation:eh-pulse-dot 1.6s ease-in-out infinite; }
+@keyframes eh-pulse-dot { 0%,100% { box-shadow:0 0 0 5px rgba(255,255,255,0.28); } 50% { box-shadow:0 0 0 9px rgba(255,255,255,0.12); } }
+.exec2 .banner2.bad { background:linear-gradient(135deg, color-mix(in srgb, var(--tier-critical) 80%, black 20%), color-mix(in srgb, var(--tier-critical) 55%, black 45%)); animation:eh-pulse-glow 2.1s ease-in-out infinite; }
+.exec2 .banner2.bad .dot-big { animation:eh-pulse-dot-big 2.1s ease-in-out infinite; }
+/* Smooth two-point pulse (2026-09-14, on request: "smoothen the alert banner animation use
+   the one we use for folders... that one is a lot cleaner this one is jittery") -- same
+   shape and timing as folders.html's own fwPulse (a plain 0%/50%/100% ease-in-out glow, no
+   multi-stage jumps), just box-shadow instead of drop-shadow since this banner already used
+   box-shadow for its glow. Replaces the earlier multi-keyframe "heartbeat" (lub-dub-rest)
+   design, which read as jittery rather than the smooth glow that design was going for. */
+@keyframes eh-pulse-glow {
+  0%,100% { box-shadow:0 0 3px 0 color-mix(in srgb, var(--ehred) 50%, transparent), var(--ehshadow); }
+  50%     { box-shadow:0 0 26px 6px color-mix(in srgb, var(--ehred) 70%, transparent), var(--ehshadow); }
+}
+@keyframes eh-pulse-dot-big {
+  0%,100% { box-shadow:0 0 0 5px rgba(255,255,255,0.22); transform:scale(1); }
+  50%     { box-shadow:0 0 0 9px rgba(255,255,255,0.12); transform:scale(1.08); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .exec2 .banner2.bad, .exec2 .banner2.bad .dot-big,
+  .exec2 .banner2.warn .dot-big { animation:none; }
+}
+/* Ambient glow on every diagram (donut svg, each bar track, the SWIFT canvas), STATIC rather
+   than animated (2026-09-16, on request: "dont add an animation just make it an ambient glow
+   that is color cogniscent" -- replaces an earlier pulsing version, see git history for that
+   attempt). "Color cognisant" means each glow uses that SAME diagram's own status colour
+   instead of one fixed hue for all of them -- the donut glows whichever of red/amber/green its
+   own ring is currently dominated by (banner_tier, the same tier the banner above uses), each
+   domain's bar track glows its OWN bar's colour (c.pill, set inline per row below since it
+   varies per domain), and the SWIFT canvas glows the same blue its line is already drawn in
+   (report_charts._BLUE) -- never gold, which had no relationship to any of these. `--eh-glow`
+   is a per-element custom property (set inline where the colour varies row to row) so one
+   shared rule below can read whichever colour that instance set, with gold only as a fallback
+   for the odd future spot that forgets to set it. */
+.exec2 .donut-row2 svg, .exec2 .bar-track2 {
+  box-shadow:0 0 8px 1px color-mix(in srgb, var(--eh-glow, var(--ehgold)) 38%, transparent);
+}
+.exec2 #swiftCompareLine2, .exec2 #cobCompareLine2 {
+  box-shadow:0 0 8px 1px color-mix(in srgb, var(--ehblue) 38%, transparent);
+}
+.exec2 .banner2.warn { background:linear-gradient(135deg, color-mix(in srgb, var(--ehamber) 80%, black 20%), color-mix(in srgb, var(--ehamber) 55%, black 45%)); }
+.exec2 .banner2.ok { background:var(--ehgreen-soft); border:1px solid var(--ehline); }
+.exec2 .banner2.ok h2, .exec2 .banner2.ok p { color:var(--ehink); }
+.exec2 .banner2.ok .dot-big { background:var(--grad-green); }
+.exec2 .banner2 h2 { margin:0; font-size:21px; }
+.exec2 .banner2 p { margin:5px 0 0; font-size:13px; color:var(--ehink-soft); }
+.exec2 .banner2 .stamp2 { margin-left:auto; text-align:right; font-family:Consolas,monospace; font-size:11px; color:var(--ehmuted); white-space:nowrap; }
+
+.exec2 section.sec2 { margin:0 0 34px; padding-top:24px; border-top:1px solid var(--ehline-soft); break-inside:avoid-column; }
+/* Needs Attention Now | Overview & Domain Health | Assurance & Compliance, side by side
+   (2026-09-14, on request: "make overview and domain health two sub sections of one section
+   and put it at the right hand side of needs attention now banner... put [assurance] at the
+   right hand side of the section with overview and domain health") -- replaces the old
+   col-main2/col-side2 two-column split, which stacked Overview and Domain Health as their own
+   full sections underneath Needs Attention Now instead of beside it. */
+/* flexbox with a fixed (0 0 <width>) basis per column, not `fr` tracks -- fr is defined as a
+   SHARE of the row's full width, so fr tracks always sum to exactly 100% no matter their
+   ratio, meaning narrowing one always grows the others to fill what it gave up. flexbox has
+   no such redistribution: unclaimed space after the last item just stays empty. Kept from the
+   attempt at narrowing col-b2 to "close the gap" to Assurance & Compliance (2026-09-16), since
+   that attempt was reverted right back to col-b2's ORIGINAL width on request ("restore the
+   width of overview and domain health section") -- col-a2/b2/c2 are back to the same
+   28.3/43.3/28.3 proportions the original 0.85fr/1.3fr/0.85fr grid had.
+   Plain X% bases (tried first) sum to 99.9% of the FULL row width, THEN the two 28px gaps get
+   added on top -- 56px more than the row actually has, which is exactly enough overflow to
+   force col-c2 onto its own line ("assurance and compliance has snapped to the row below").
+   Grid's own `fr` unit never has this problem because it divides up the width AFTER
+   subtracting gaps automatically; flexbox percentages don't, so it has to be done by hand here
+   via calc(): each basis is its share of (100% - 56px), not of the full 100%. */
+/* row-gap separate from column-gap (2026-09-16, on request: "look at section 02, 03 and 04
+   and tell me whether or not they are spaced vertically equidistant apart" -- measured at a
+   1440px viewport, the width my own earlier checks had been missing by forcing a 1920px
+   window: §02/§03 fit on one line there, §04 wraps to its own line below at a 28px gap (this
+   row's own column-gap), while every OTHER section-to-section transition on the page (§01 to
+   this row, this row to §05, §05 to §06) uses 34px -- the actual inconsistency. column-gap
+   (between side-by-side columns) stays 28px; row-gap (between wrapped lines) now matches the
+   page's own 34px rhythm. */
+/* wrap-content (`flex:0 0 auto`) tried and reverted for all three (2026-09-16, on request,
+   testing the fallback clause the same request gave: "if wrap-content causes [a section] to
+   visibly balloon or reflow... keep that bundle at current fixed width"). Measured at 1920px:
+   col-a2 grew 506px -> 742px, col-b2 grew 774px -> 1032px (grew, not the expected shrink --
+   Domain Health's own health-grid2, a repeat(3,1fr) grid, apparently has a wide max-content
+   contribution even with its 3rd track empty), and col-c2 ballooned to 1723px AND wrapped onto
+   its own line entirely, since col-a2+col-b2's new combined width no longer left room for it
+   on the same row. None of the three are a good fit for content-based sizing here -- nothing
+   in these bundles (wrapping tables, grid-of-cards, progress-bar tracks) has a small, stable
+   intrinsic width the way a button or a label does -- so all three keep the fixed-percentage
+   flex-basis that already matched every check (equal gaps, no shrinkage, no dead space). */
+/* col-b2 narrowed to match Domain Health's own REAL content width -- 2 populated cards + 1
+   gap, not the 3-column track it used to reserve -- while col-a2/col-c2 stay at their original
+   widths (2026-09-16, on request: "close the gap between domain health panels and assurance
+   and compliance section panels but without changing the size of these panels... the two
+   overview panels may shrink but only to align with domain health panels"). Domain Health's
+   own cards can't just shrink proportionally with a narrower col-b2 (health-grid2 was
+   `repeat(3,1fr)`, so a narrower container would shrink EVERY card, violating "without
+   changing the size of these panels") -- see health-grid2's own comment below for how its
+   cards are held at their exact current size via a container-query length instead.
+   `container-type:inline-size` here is what lets health-grid2, several levels of nesting
+   below, measure THIS row's own width directly (via `cqw` units) rather than col-b2's -- which
+   is exactly the narrower width being solved for, an unavoidable circular reference otherwise.
+   Overview's two-col2 has no width of its own (never re-added the cap removed earlier) so it
+   simply shrinks to match col-b2's new width for free -- the "overview panels may shrink to
+   align" part of the request, with no separate rule needed for it. */
+/* Executive - Focused (2026-09-16, on request: "completely remove the estate at a glance
+   section...remove section 04 and replace it with section 05...increase each section width by
+   20 percent...remove the action items panel"). Three columns now, not four: §01 Estate at a
+   Glance is gone outright (no col of its own to begin with -- it was always full-width, above
+   this row), and what was col-c2 (§04 Assurance & Compliance) now holds §05 Live Activity in
+   its place -- the old col-d2 is gone, its content moved in rather than kept as a 4th column.
+   Each factor below is the SAME base fraction Full still uses (0.2833/0.2889/0.2833, see
+   management_dashboard_full.html's own copy of this rule for that derivation) times 1.2 for
+   the requested 20% widening -- col-c2 reuses col-a2's own factor since it's stepping into a
+   slot that was already sized the same as col-a2.
+
+   col-a2/col-c2 grow (flex-grow:1), col-b2 doesn't (2026-09-16, on request: "arrange thing
+   better" -- measured at a real 1920px window, a+b fit on line 1 with ~592px left over past
+   col-b2's right edge, and col-c2 -- too wide to join them -- wraps alone onto line 2 with the
+   ~1236px past IT left empty too, both real dead space, not a display artifact). col-b2 can't
+   grow: its Domain Health cards are sized in PIXELS off this row's own cqw width tuned to
+   col-b2's exact CALCULATED box (see health-card2 below) -- growing col-b2 would widen its box
+   past what its cards fill, reopening the exact dead-space-inside-the-box bug the container-
+   query sizing was built to close in the first place. col-a2 (a plain table) and col-c2 (chart
+   + KPI tiles, and the one that ends up alone on its own line) have no such fixed relationship,
+   so letting THEM absorb the leftover space is free: on line 1 col-a2 stretches to take up
+   what's left after col-b2's fixed width, and on line 2 col-c2 -- the sole item on that line --
+   stretches to the line's full width, since flex-grow has nothing else on the line to share
+   with. */
+/* col-b2 widened back to 0.52 -- its ORIGINAL pre-2026-09-16 width, before that request
+   narrowed it down to fit only "2 cards + 1 gap" (see the long comment above health-card2's
+   own rule for that derivation) -- to fit 3 health-card2s + 2 gaps per row instead of 2 + 1
+   (2026-09-18, on request: "reduce the width of needs attention now... just enough so that
+   domain health section can be widened enough to allow 3 columns instead of two... preventing
+   the section from breaching the height of needs attention now" -- 3-per-row wraps to fewer
+   lines than 2-per-row for the same card count, which is what keeps col-b2 from growing
+   taller than col-a2 now). health-card2's own width formula is UNCHANGED: it was always
+   expressed as a 1/3 share of a 0.52-fraction box (see its own comment) -- only col-b2's own
+   CONTAINER needed to catch back up to that, not the cards themselves, so no card visibly
+   resizes, exactly like the narrowing this reverses left card size untouched too.
+   col-a2 needs no width change of its own to get narrower: it's the only flex-grow:1 item on
+   this line, so it already always renders at "whatever's left after col-b2's fixed box and
+   the 28px gap" regardless of its own basis number -- widening col-b2 by X automatically
+   narrows col-a2's rendered width by that same X for free. */
+.exec2 .top-row2 { display:flex; flex-wrap:wrap; column-gap:28px; row-gap:34px; align-items:flex-start; margin-bottom:34px; container-type:inline-size; }
+.exec2 .top-row2 .col-a2 { flex:1 1 calc((100% - 56px) * 0.34); min-width:336px; }
+.exec2 .top-row2 .col-b2 { flex:0 0 calc((100% - 56px) * 0.52); min-width:384px; }
+.exec2 .top-row2 .col-c2 { flex:1 1 calc((100% - 56px) * 0.34); min-width:336px; }
+.exec2 .top-row2 .sec2 { margin-bottom:0; border-top:none; padding-top:0; }
+@media (max-width:1500px) {
+  .exec2 .top-row2 .col-a2, .exec2 .top-row2 .col-b2 { flex:1 1 calc(50% - 14px); }
+  .exec2 .top-row2 .col-c2 { flex:1 1 100%; }
+}
+@media (max-width:1000px) {
+  .exec2 .top-row2 .col-a2, .exec2 .top-row2 .col-b2, .exec2 .top-row2 .col-c2 { flex:1 1 100%; }
+}
+.exec2 .sec2 h2 { font-size:16px; margin:0 0 2px; display:flex; align-items:center; gap:10px; }
+.exec2 .sec2 h2 .n { font-family:Consolas,monospace; font-size:12px; color:var(--ehgold); }
+.exec2 .sec2 .note2 { font-size:12px; color:var(--ehmuted); font-style:italic; margin:0 0 14px; }
+.exec2 .subsec2 { font-size:14px; margin:18px 0 8px; color:var(--ehink); font-weight:400; }
+.exec2 .subsec2:first-of-type { margin-top:2px; }
+/* Same small top margin for every subsubsec2, not just the first (2026-09-16, on request,
+   after a screenshot: "the first vertical space between sections is much smaller than the
+   second... i need the smaller space to be the one used" -- "No faults detected" (first-of-
+   type, 4px) sat noticeably closer to Domain Health's own heading than "Needs attention" (14px)
+   sat below the cards above it; nothing about the second gap needed to be bigger, so both now
+   use the smaller figure). */
+.exec2 .subsubsec2 { font-family:Consolas,monospace; font-size:10px; text-transform:uppercase; letter-spacing:0.04em; color:var(--ehmuted); margin:4px 0 8px; }
+
+/* Fixed-width cards via flexbox, not a `repeat(3,1fr)` grid (2026-09-16, on request: "close
+   the gap... without changing the size of these panels" -- see col-b2's own comment above for
+   the full context). 1fr grid columns divide up whatever width their container happens to
+   have, so a narrower col-b2 would have shrunk every card -- exactly the "changing the size of
+   these panels" the request rules out. `display:inline-grid` + `repeat(auto-fill, ...)` was
+   tried first and produced only ONE column: per spec, auto-fill/auto-fit repeats its track
+   list just once when the grid container's own inline size is indefinite (i.e. shrink-to-fit,
+   which inline-grid needs here) -- there's no item count to divide by yet, so it can't know
+   to make two. Flexbox has no such chicken-and-egg: `inline-flex` lays out however many
+   children exist, each at its own fixed width, and the container hugs their total -- no
+   pre-declared column count needed. Each card's width is the SAME formula col-b2's own
+   flex-basis always used (a share of the row, minus gaps, split 3 ways) -- via `cqw` (1% of
+   the nearest `container-type` ancestor, here .top-row2, set above) instead of `%` (which
+   inside a flex child always means a share of the FLEX CONTAINER's own box -- col-b2's box,
+   the very thing being made narrower, an unavoidable circular reference otherwise). Cards
+   render at their exact previous pixel size, unchanged; the row hugs exactly the cards
+   actually present instead of still reserving a 3rd, empty column's worth of space -- the
+   dead space this whole fix is about. */
+.exec2 .health-grid2 { display:inline-flex; flex-wrap:wrap; gap:12px; align-items:start; }
+/* Unchanged since 2026-09-16, and unchanged again now that col-b2's own box widened back to
+   0.52 (2026-09-18, on request: "widen domain health... 3 columns instead of two") -- this
+   formula was ALWAYS a 1/3 share of a 0.52-fraction box (col-b2's own ORIGINAL, pre-narrowing
+   width: 3 cards + 2 gaps exactly filled it), so no card resizes either time col-b2's own
+   container changes -- only how many of them fit on one line does, which is exactly what a
+   fixed-per-card-width flexbox row is FOR. See .top-row2 .col-b2's own comment for the
+   current width story. */
+.exec2 .health-card2 { flex:0 0 calc(((100cqw - 56px) * 0.52 - 24px) / 3); }
+/* Equal-height green cards only (2026-09-14, on request: "try to make the green banners the
+   same size height wise") -- the "issues" grid keeps align-items:start above since those
+   cards' own varying flag counts are real content, not something to pad flush. */
+.exec2 .health-grid2.stretch2 { align-items:stretch; }
+@media (max-width:820px) { .exec2 .health-grid2 { display:flex; } .exec2 .health-card2 { flex:0 0 calc(50% - 6px); } }
+@media (max-width:560px) { .exec2 .health-grid2 { display:flex; } .exec2 .health-card2 { flex:0 0 100%; } }
+.exec2 .health-card2 { background:var(--ehsurface); border:1px solid var(--ehline); border-top:3px solid var(--ehline); border-radius:8px; padding:14px 15px; box-shadow:var(--ehshadow); display:flex; flex-direction:column; cursor:pointer; text-decoration:none; }
+.exec2 .health-card2.ok { border-top-color:var(--ehgreen); }
+.exec2 .health-card2.warn { border-top-color:var(--ehamber); }
+.exec2 .health-card2.bad { border-top-color:var(--ehred); }
+.exec2 .health-card2 .name2 { font-family:Georgia,serif; font-size:13.5px; margin-bottom:8px; line-height:1.3; color:var(--ehink); }
+.exec2 .status-pill2 { display:inline-flex; align-items:center; gap:5px; font-family:Consolas,monospace; font-size:9.5px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; padding:3px 8px; border-radius:20px; width:fit-content; }
+.exec2 .status-pill2::before { content:""; width:6px; height:6px; border-radius:50%; }
+.exec2 .status-pill2.ok { background:var(--ehgreen-soft); color:var(--ehgreen); } .exec2 .status-pill2.ok::before { background:var(--grad-green); }
+.exec2 .status-pill2.warn { background:var(--ehamber-soft); color:var(--ehamber); } .exec2 .status-pill2.warn::before { background:var(--grad-amber); }
+.exec2 .status-pill2.bad { background:var(--ehred-soft); color:var(--ehred); } .exec2 .status-pill2.bad::before { background:var(--grad-red); }
+.exec2 .health-card2 .detail2 { font-size:11px; color:var(--ehink-soft); margin-top:9px; line-height:1.5; }
+.exec2 .health-card2 .mini-bar2 { display:flex; align-items:center; gap:9px; margin:6px 0 0; }
+/* Ambient glow here too -- Domain Health's own per-flag progress bars (2026-09-16, on
+   request: "scan the whole page make sure every diagram has ambient glow including domain
+   health panels"), same --eh-glow/color-mix mechanism as .bar-track2, set inline per bar
+   below from bar.band (bad/warn -- mini-bar2 is only ever rendered for one of those two, see
+   the template's own "if bar.pct" guard, so there's no "ok" case to color here). No
+   overflow:hidden (removed from the old rule) for the same reason .bar-track2 above dropped
+   it -- clipping would cut the glow's own outward box-shadow off; safe to drop because .seg2
+   now carries the SAME border-radius as its track, so it stays visually contained without a
+   clip the way .bar-track2's own inner fill already did. */
+.exec2 .health-card2 .mini-bar2 .track2 { flex:1 1 auto; height:11px; border-radius:6px; background:var(--ehline-soft); border:1px solid var(--ehline); box-shadow:inset 0 1px 2px rgba(0,0,0,0.12), 0 0 8px 1px color-mix(in srgb, var(--eh-glow, var(--ehgold)) 38%, transparent); }
+.exec2 .health-card2 .mini-bar2 .seg2 { height:100%; border-radius:6px; box-shadow:inset 0 1px 0 rgba(255,255,255,0.3), inset 0 -1px 1px rgba(0,0,0,0.18); }
+.exec2 .health-card2 .mini-bar2 .val2 { flex:0 0 auto; font-size:9.5px; color:var(--ehmuted); white-space:nowrap; }
+.exec2 .health-card2 .plain-flag2 { font-size:10.5px; color:var(--ehink-soft); margin-top:4px; }
+
+table.exceptions2 { width:100%; border-collapse:collapse; font-size:13px; }
+table.exceptions2 th { text-align:left; padding:8px 10px; font-family:Consolas,monospace; font-weight:600; color:var(--ehmuted); font-size:9.5px; letter-spacing:0.04em; text-transform:uppercase; border-bottom:1px solid var(--ehline); }
+table.exceptions2 td { padding:10px; border-bottom:1px solid var(--ehline-soft); vertical-align:middle; }
+table.exceptions2 tr:last-child td { border-bottom:none; }
+.exec2 .sev2 { display:inline-block; width:8px; height:8px; border-radius:50%; }
+.exec2 .sev2.bad { background:var(--grad-red); } .exec2 .sev2.warn { background:var(--grad-amber); }
+/* "ok" -- unlike bad/warn, a real state a standing row (e.g. Unreachable components) can be
+   in on a healthy day, not just an unused variant (2026-09-18). */
+.exec2 .sev2.ok { background:var(--grad-green); }
+.exec2 .exceptions2 .domain2 { font-family:Consolas,monospace; font-size:10px; color:var(--ehmuted); text-transform:uppercase; letter-spacing:0.03em; }
+.exec2 .exceptions2 .reading2 { font-family:Georgia,serif; font-size:15px; text-align:right; white-space:nowrap; }
+.exec2 .exceptions2 tr.bad .reading2 { color:var(--ehred); }
+.exec2 .exceptions2 tr.warn .reading2 { color:var(--ehamber); }
+.exec2 .exceptions2 tr.ok .reading2 { color:var(--ehgreen); }
+/* Click an exception to reveal the exact system/component behind it (2026-09-16, on request:
+   "clicking it should reveal the exact source of that error"). Only rows with a real
+   per-system match (views.py's own _exception_detail) get the pointer/chevron at all -- a row
+   with nothing to show underneath doesn't pretend otherwise. */
+.exec2 .exceptions2 tr.clickable2 { cursor:pointer; }
+.exec2 .exceptions2 tr.clickable2:hover { background:var(--ehline-soft); }
+.exec2 .detail-hint2 { color:var(--ehmuted); font-size:10px; margin-left:4px; }
+.exec2 .detail-row2 td { padding:0 10px 10px; border-bottom:1px solid var(--ehline-soft); }
+/* Scrollable once several items stack up, rather than growing the whole table forever
+   (2026-09-16, on request: "if there is too much data still you can make the boxes
+   scrollable"). Comfortably fits ~4 items before it starts scrolling. */
+.exec2 .detail-list2 { display:flex; flex-direction:column; gap:8px; background:var(--ehpaper); border:1px solid var(--ehline); border-radius:6px; padding:10px 12px; max-height:220px; overflow-y:auto; }
+/* Each finding is its own block -- a header line (system + headline + timestamp) with the
+   descriptive text wrapping under it, not squeezed into one flex row fighting a right-pushed
+   timestamp (2026-09-16, on request, after a screenshot showed ragged wrapping and cut-off
+   list items: "the lhs padding is a bit off and some bullet points are subsequently being
+   cut"). A long comma-separated tail (interface names, missing metrics) renders as its own
+   wrapped row of small tags below the header instead of run-on prose -- "can data be
+   tabulated, if so tabulate". */
+.exec2 .detail-item2 { font-size:12px; color:var(--ehink-soft); padding-left:2px; }
+.exec2 .detail-item2 + .detail-item2 { padding-top:8px; border-top:1px solid var(--ehline-soft); }
+.exec2 .detail-item-head2 { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px; }
+.exec2 .detail-item-head2 b { font-weight:600; color:var(--ehink); white-space:nowrap; }
+.exec2 .detail-time2 { color:var(--ehmuted); font-size:10.5px; white-space:nowrap; margin-left:auto; }
+.exec2 .detail-chips2 { display:flex; flex-wrap:wrap; gap:5px; margin:6px 0 0 16px; }
+.exec2 .detail-chip2 { font-family:Consolas,monospace; font-size:10.5px; color:var(--ehink-soft); background:var(--ehsurface); border:1px solid var(--ehline); border-radius:4px; padding:2px 6px; white-space:nowrap; }
+.exec2 .card2 { background:var(--ehsurface); border:1px solid var(--ehline); border-radius:8px; box-shadow:var(--ehshadow); padding:6px 16px; }
+/* Banner fused directly into its own breakdown (2026-09-14, on request: "fuse the two
+   display items, make the banner a part of the needs attention now section") -- one card,
+   banner as its coloured top strip flowing straight into the table below, not two separate
+   boxes stacked with a gap. overflow:hidden on the card clips the banner's own square
+   corners to the card's existing border-radius, rather than giving the banner its own
+   (now-redundant) border/shadow/radius. */
+.exec2 .fused-card2 { padding:0; }
+/* Rounded on the TOP only, matching the card's own 8px radius -- not overflow:hidden on
+   .fused-card2 (tried first, 2026-09-14: "the rest of the glow is being blocked by the box's
+   edges" -- overflow:hidden clips the pulse glow's own outward box-shadow just as surely as
+   it clips the corners it was meant to fix, since both are "content past the element's own
+   box"). Rounding the banner itself needs no clipping at all, so the glow keeps radiating
+   past the card same as it does everywhere else this animation is used. */
+.exec2 .fused-banner2 { margin:0; border:none; border-radius:8px 8px 0 0; box-shadow:none; }
+.exec2 .fused-body2 { padding:14px 16px; }
+
+/* Stacked (svg above, legend below), not side-by-side (2026-09-16, on request, after
+   measuring: "numbers are floating outside one of the overview panels" -- the donut's own
+   legend was overflowing chart-card2's right edge by 14.6px at a real 1920px window and by
+   58-68px at the 1500px breakpoint, where two-col2 halves this card to ~195-260px). Side by
+   side, the legend had to share its card's width with a fixed 120px svg + 22px gap, leaving as
+   little as ~25px for "Attention"/"Degraded" + a count -- less than the row's own min-content
+   width (the word "Attention" alone, un-splittable, already needs ~57px) no matter how far a
+   flex-shrink/min-width:0 fix pushes it (tried first: only shaved a few px off the overflow,
+   since the bottleneck is the WORD's own floor, not an implicit flex-item minimum). Stacking
+   removes the fixed-120px svg from the legend's own row entirely, so the legend gets this
+   card's FULL width to lay out in at every breakpoint, not a shrinking sliver next to the donut. */
+.exec2 .donut-row2 { display:flex; flex-direction:column; align-items:center; gap:14px; }
+.exec2 .donut-row2 svg { flex:0 0 auto; width:120px; height:120px; border-radius:50%; }
+/* The bar TRACK itself (the pill-shaped background each domain's count is drawn into), not
+   the row around it -- same "glow the diagram, not the panel" scoping as the donut svg above.
+   No overflow:hidden here (unlike its old inline style) -- same reason fused-banner2's own
+   comment gives further down: clipping would cut the glow's own outward box-shadow off just as
+   surely as it clips corners. Not needed for containment either: the inner fill bar has the
+   same 8px radius and never exceeds the track's own height/width, so it stays visually
+   contained without a clip. */
+.exec2 .bar-track2 { border-radius:8px; height:14px; }
+.exec2 .legend2 { display:flex; flex-direction:column; gap:10px; width:100%; }
+.exec2 .legend-item2 { display:flex; align-items:center; gap:9px; font-size:13px; color:var(--ehink-soft); }
+.exec2 .legend-item2 .dot { width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
+.exec2 .legend-item2 .count2 { margin-left:auto; font-family:Georgia,serif; font-size:16px; color:var(--ehink); padding-left:12px; }
+.exec2 .chart-card2 { background:var(--ehsurface); border:1px solid var(--ehline); border-radius:8px; padding:14px; box-shadow:var(--ehshadow); }
+.exec2 .diagram-note2 { font-size:11px; font-style:italic; color:var(--ehmuted); text-align:center; margin:6px 0 0; }
+.exec2 #swiftLine2 { border-radius:6px; }
+
+.exec2 .info-banner2 { display:flex; align-items:center; gap:16px; padding:13px 18px; border-radius:8px; margin-bottom:10px; border:1px solid var(--ehline); border-left:3px solid var(--ehgold); background:var(--ehsurface); box-shadow:var(--ehshadow); flex-wrap:wrap; }
+.exec2 .info-banner2 .tag2 { font-family:Georgia,serif; font-size:14px; color:var(--ehink); white-space:nowrap; flex:0 0 auto; min-width:150px; }
+.exec2 .info-banner2 .stats2 { display:flex; flex-wrap:wrap; gap:8px; flex:1 1 auto; }
+.exec2 .info-banner2.green2 { border-left-color:var(--ehgreen); }
+/* Each metric its own bordered tile (2026-09-14, on request: "just floating text with no
+   deliniation") -- same paper/line/Georgia-number language _kpi2 already established in §06's
+   Alert Activity tiles, just compact enough to sit several to a row. */
+.exec2 .stat-chip2 { display:inline-flex; align-items:baseline; gap:5px; background:var(--ehpaper); border:1px solid var(--ehline); border-radius:6px; padding:5px 10px; font-size:12px; color:var(--ehink-soft); white-space:nowrap; }
+.exec2 .stat-chip2 b { font-family:Georgia,serif; font-weight:400; font-size:14px; color:var(--ehink); }
+/* Estate at a Glance, horizontal (2026-09-14, on request: "stacked horizontally across the
+   dashboard length not vertically downward... at the very top... to take up less space") --
+   one column per domain instead of one full-width row per domain; auto-fit so it still wraps
+   sanely on a narrower screen rather than squeezing every column unreadably thin. */
+.exec2 .glance-row2 { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; }
+.exec2 .glance-col2 { background:var(--ehsurface); border:1px solid var(--ehline); border-left:3px solid var(--ehgold); border-radius:8px; padding:11px 14px; }
+.exec2 .glance-domain2 { font-family:Georgia,serif; font-size:13.5px; color:var(--ehink); margin-bottom:8px; }
+.exec2 .glance-col2 .stats2 { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+.exec2 .glance-col2 .stats2:last-child { margin-bottom:0; }
+/* A merged domain's own components, e.g. Infrastructure's "Clusters" + "Active Directory"
+   (2026-09-16, on request: "infrastructure is the domain... clusters" and Active Directory
+   are its components) -- only rendered when a card actually HAS more than one component
+   (domain_cards' own `components` list), so Systems/Network are untouched. */
+.exec2 .glance-component2 { font-family:Consolas,monospace; font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; color:var(--ehmuted); margin-bottom:5px; }
+
+/* table-layout:fixed (2026-09-16, on request, after measuring: the Oldest Unresolved table was
+   rendering 318px wide inside a ~213px-usable card, spilling past its own card's edge) --
+   default `table-layout:auto` sizes columns off their content's own min-content width and will
+   happily exceed a `width:100%` container to avoid going below that, which is exactly what was
+   overflowing here once the two-col2 fix above made this card genuinely narrower. `fixed` makes
+   the table actually respect its container's width; `overflow-wrap` on cells lets a single long
+   unbreakable word (a hostname, a run-on detail string) wrap mid-word rather than force the
+   column wider again. */
+.exec2 table.data2 { width:100%; table-layout:fixed; border-collapse:collapse; font-size:13px; margin:0; }
+.exec2 table.data2 th { text-align:left; padding:7px 9px; font-family:Consolas,monospace; font-weight:600; color:var(--ehmuted); font-size:9.5px; letter-spacing:0.04em; text-transform:uppercase; border-bottom:1px solid var(--ehline); }
+.exec2 table.data2 td { padding:8px 9px; border-bottom:1px solid var(--ehline-soft); vertical-align:top; overflow-wrap:break-word; }
+.exec2 .mono2 { font-family:Consolas,monospace; font-size:11px; color:var(--ehmuted); }
+.exec2 .pill2 { font-family:Consolas,monospace; font-size:9.5px; font-weight:700; padding:3px 7px; border-radius:4px; letter-spacing:0.03em; white-space:nowrap; }
+.exec2 .pill2.warn { background:var(--ehamber-soft); color:var(--ehamber); }
+/* Attention Items age colouring (2026-09-14, on request: "a splash of colour... as it relates
+   to how long the issues have remained open") -- ok/warn/bad bands from views.py's own
+   age_band, same <1 / 1-3 / 3+ day thresholds the backup/log drainage alerts already use. */
+.exec2 .pill2.ok { background:var(--ehgreen-soft); color:var(--ehgreen); }
+.exec2 .pill2.bad { background:var(--ehred-soft); color:var(--ehred); }
+/* Assurance & Compliance numbers, coloured when the ratio itself reads healthy (2026-09-14,
+   on request: "add a splash of alert colours... eg 0|13 can be green if this is healthy"). */
+.exec2 .ratio-ok2 { color:var(--ehgreen); }
+/* A domain's own clean_count/total header amber when only PART of its checks are clean
+   (2026-09-16, on request: "Network banner's 10/15 should be amber") -- every row here
+   already has at least one clean check by construction (rows.fully_clean's own `good` filter
+   builds compliance_rows in the first place), so "not fully clean" always means "some, not
+   all" here, never zero -- amber, not red, is the honest reading. */
+.exec2 .ratio-warn2 { color:var(--ehamber); }
+
+/* minmax(0,1fr), not plain 1fr (2026-09-16, on request, after measuring real numbers: "section
+   5's width varies the first two columns are wider and disrupt section width") -- a bare `1fr`
+   track has an IMPLICIT minimum of `auto`, i.e. its own content's min-content width, not 0. §05's
+   SWIFT chart canvas (no explicit width, so its browser-default 300px intrinsic size) and the
+   Attention Items table (an unbreakable word/pill setting a floor) were each pulling their own
+   column wider than an even 50/50 split -- measured 330px vs 160px in one row, 356px vs 134px in
+   the other, no two rows even agreeing with each other. `minmax(0,1fr)` removes that implicit
+   floor so both columns are genuinely equal, and the content (Chart.js is already
+   `responsive:true`, tables already wrap) fits itself into that width instead of dictating it. */
+.exec2 .two-col2 { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:16px; }
+@media (max-width:640px) { .exec2 .two-col2 { grid-template-columns:1fr !important; } }
+/* Attention Items stacked top-to-bottom, not side-by-side (2026-09-16, on request: "attention
+   items sub section should be top to bottom orientation not side to side") -- the Oldest
+   Unresolved table gets this card's full width instead of half of it, which also gives the
+   table a lot more room to breathe after the minmax(0,1fr) fix above made that half-width
+   literal. SWIFT/COB above it are untouched, still side-by-side (2026-09-18: the Alert
+   Activity card that used to sit beside SWIFT here was removed -- "remove the alert table
+   from both exec dashboards" -- COB's own comparison chart took its place instead). */
+.exec2 .two-col2.stacked2 { grid-template-columns:1fr; }
+/* No cap (2026-09-16, per layout-fix-prompt.md, correcting an earlier misreading of the same
+   symptom): the "gap before Assurance & Compliance" was never a container-level gap -- 02-03
+   and 03-04 measured 28px/28px both before AND after any of this, since a flex item's own box
+   size comes from its flex-basis, not from how much of it its children fill. The real issue is
+   narrower: this cap left ~290px of dead space INSIDE section 03's own box, between the donut/
+   stats row and section 03's real right edge, while Domain Health's own row below already
+   spans that full width. Dropping the cap makes the donut/stats row match Domain Health's
+   width, so section 03 reads as one consistent box top to bottom, without touching section
+   03's own outer box, or anything in §02/§04/the row container. */
+.exec2 .empty-note2 { font-size:12.5px; color:var(--ehmuted); font-style:italic; margin:4px 0; }
+.exec2 footer.footer2 { margin-top:36px; padding-top:16px; border-top:1px solid var(--ehline); font-size:11.5px; color:var(--ehmuted); font-family:Consolas,monospace; }
+</style>
+
+<div class="exec2">
+<div class="wrap2">
+
+<div class="masthead2">
+  <div>
+    <div class="eyebrow2"><span class="dot"></span> RBZ Monitoring Console</div>
+    <h1 class="title2">Executive Dashboard — Analytical</h1>
+    <p class="subtitle2">As of {{ generated_at|date:"d M Y, H:i" }} · <a href="{% url 'management_dashboard_focused' %}" style="color:var(--ehmuted)">Switch to Focused view ›</a> · <a href="{% url 'management_dashboard_full' %}" style="color:var(--ehmuted)">Switch to Full view ›</a></p>
+  </div>
+  <div class="masthead2-actions">
+    {% if can_switch_role %}
+    <a class="back2" href="{% url 'role_select' %}"><span class="care2" aria-hidden="true">‹</span> Back to role select</a>
+    {% endif %}
+    <div class="refresh2">
+      <label for="refreshRate2">Auto-refresh</label>
+      <select id="refreshRate2">
+        <option value="0">Off</option>
+        <option value="60000">1 min</option>
+        <option value="300000" selected>5 min</option>
+        <option value="900000">15 min</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+{% if not report_sections %}
+<div class="card2" style="padding:14px 18px;margin-bottom:20px">
+  <p class="empty-note2" style="margin:0">No tagged reports yet — System Admin, Network Admin,
+    Infrastructure Admin and Active Directory reports generated from today onward will appear
+    here automatically.</p>
+</div>
+{% else %}
+
+<div class="top-row2">
+<div class="col-a2">
+
+<section class="sec2">
+  <h2><span class="n">02</span> Needs Attention Now</h2>
+  <div class="card2 fused-card2">
+    {% if banner_tier == "bad" %}
+    <div class="banner2 bad fused-banner2">
+      <div class="dot-big"></div>
+      <div class="content2">
+        <h2>Critical — {{ exceptions|length }} exception{{ exceptions|length|pluralize }} flagged, at least one needs attention now</h2>
+      </div>
+      <div class="stamp2">Rolled up from {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}<br>+ live alert feed</div>
+    </div>
+    {% elif banner_tier == "warn" %}
+    <div class="banner2 warn fused-banner2">
+      <div class="dot-big"></div>
+      <div class="content2">
+        <h2>Warning — elevated issues across some domains</h2>
+      </div>
+      <div class="stamp2">Rolled up from {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}<br>+ live alert feed</div>
+    </div>
+    {% else %}
+    <div class="banner2 ok fused-banner2">
+      <div class="dot-big"></div>
+      <div class="content2">
+        <h2>All monitored domains are healthy</h2>
+        <p>No active exceptions across {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}.</p>
+      </div>
+      <div class="stamp2">Rolled up from {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}<br>+ live alert feed</div>
+    </div>
+    {% endif %}
+    <div class="fused-body2">
+    {% if not exceptions %}
+    <p class="empty-note2" style="margin:8px 0">No active exceptions right now.</p>
+    {% else %}
+    <table class="exceptions2">
+      <thead><tr><th></th><th>Domain</th><th>Issue</th><th style="text-align:right">Reading</th></tr></thead>
+      <tbody>
+        {% for e in exceptions %}
+        <tr class="{{ e.band }}{% if e.detail %} clickable2{% endif %}"{% if e.detail %} onclick="ehToggleDetail(this)"{% endif %}>
+          <td><span class="sev2 {{ e.band }}"></span></td>
+          <td class="domain2">{{ e.domain }}</td>
+          <td>{{ e.label }}{% if e.detail %} <span class="detail-hint2">&#9656;</span>{% endif %}</td>
+          <td class="reading2">{{ e.value }}</td>
+        </tr>
+        {% if e.detail %}
+        <tr class="detail-row2" style="display:none">
+          <td></td>
+          <td colspan="3">
+            <div class="detail-list2">
+              {% for d in e.detail %}
+              <div class="detail-item2">
+                <div class="detail-item-head2"><span class="sev2 {{ d.band }}"></span><b>{{ d.system }}</b> — {{ d.headline }}<span class="detail-time2">{{ e.generated_at|date:"d-m-Y, H:i" }} hrs</span></div>
+                {% if d.items %}
+                <div class="detail-chips2">{% for item in d.items %}<span class="detail-chip2">{{ item }}</span>{% endfor %}</div>
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+          </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    </div>
+  </div>
+</section>
+<script>
+function ehToggleDetail(row) {
+  "use strict";
+  var next = row.nextElementSibling;
+  if (!next || !next.classList.contains("detail-row2")) return;
+  var open = next.style.display !== "none";
+  if (row._ehTimer) { clearTimeout(row._ehTimer); row._ehTimer = null; }
+  next.style.display = open ? "none" : "table-row";
+  var hint = row.querySelector(".detail-hint2");
+  if (hint) hint.innerHTML = open ? "&#9656;" : "&#9662;";
+  if (!open) {
+    // Auto-close after a minute of no further clicks on this row (2026-09-16, on request:
+    // "a mechanism that automatically closes these boxes if no interaction after 1 minute").
+    row._ehTimer = setTimeout(function () {
+      next.style.display = "none";
+      if (hint) hint.innerHTML = "&#9656;";
+      row._ehTimer = null;
+    }, 60000);
+  }
+}
+
+(function () {
+  "use strict";
+  // The poller behind this page (reports.alerting.run_alert_cycle) refreshes its own cache
+  // every ~5 minutes regardless of how often this page reloads (2026-09-18, on request:
+  // "dashboard refresh rate feature... offering what is reasonable") -- so the choices offered
+  // are picked around THAT cadence: 1 min catches a poll landing quickly without hammering the
+  // server for data that hasn't changed, 5 min matches the poller's own interval exactly, 15
+  // min suits a screen left open and glanced at occasionally. Preference is per-browser
+  // (localStorage), not per-account, and defaults to 5 min -- the same "realtime-as-the-
+  // poller-allows" default the rest of this page's design already commits to.
+  var KEY = "execDashboardRefreshMs";
+  var sel = document.getElementById("refreshRate2");
+  if (!sel) return;
+  try {
+    var saved = localStorage.getItem(KEY);
+    if (saved !== null) sel.value = saved;
+  } catch (e) { /* private-browsing / blocked storage -- fall back to the page default */ }
+  var timer = null;
+  function schedule() {
+    if (timer) { clearInterval(timer); timer = null; }
+    var ms = parseInt(sel.value, 10) || 0;
+    if (ms > 0) timer = setInterval(function () { location.reload(); }, ms);
+  }
+  sel.addEventListener("change", function () {
+    try { localStorage.setItem(KEY, sel.value); } catch (e) { /* ignore */ }
+    schedule();
+  });
+  schedule();
+})();
+</script>
+
+</div>
+<div class="col-b2">
+
+<section class="sec2">
+  <h2><span class="n">03</span> Overview &amp; Domain Health</h2>
+
+  <h3 class="subsec2">Domain Health</h3>
+
+  <h4 class="subsubsec2">No faults detected</h4>
+  <div class="health-grid2 stretch2">
+    {% for c in domain_cards_ok %}
+    <div class="health-card2 ok">
+      <div class="name2">{{ c.name }}</div>
+      <span class="status-pill2 ok">Normal</span>
+      {% if c.components|length > 1 %}
+      {% for comp in c.components %}
+      <div class="detail2"><b>{{ comp.name }}:</b> {% for g in comp.glance|slice:":3" %}{{ g.label }}: {{ g.value }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>
+      {% endfor %}
+      {% else %}
+      <div class="detail2">
+        {% for g in c.glance|slice:":3" %}{{ g.label }}: {{ g.value }}{% if not forloop.last %} · {% endif %}{% endfor %}
+      </div>
+      {% endif %}
+      <div style="margin-top:8px;font-size:10px"><a href="{% url 'config_alerts' %}" style="color:var(--ehmuted)">View source report ›</a></div>
+    </div>
+    {% endfor %}
+    {% for nd in no_data_domains %}
+    <div class="health-card2 ok">
+      <div class="name2">{{ nd.name }}</div>
+      <span class="status-pill2 ok">Normal</span>
+      <div class="detail2">{{ nd.note }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if domain_cards_issues %}
+  <h4 class="subsubsec2">Needs attention</h4>
+  <div class="health-grid2">
+    {% for c in domain_cards_issues %}
+    <div class="health-card2 {{ c.pill }}">
+      <div class="name2">{{ c.name }}</div>
+      <span class="status-pill2 {{ c.pill }}">{% if c.pill == "bad" %}Degraded{% else %}Attention{% endif %}</span>
+      {% if c.components|length > 1 %}
+      {% for comp in c.components %}
+      <div class="detail2"><b>{{ comp.name }}:</b> {% for g in comp.glance|slice:":3" %}{{ g.label }}: {{ g.value }}{% if not forloop.last %} · {% endif %}{% endfor %}</div>
+      {% endfor %}
+      {% else %}
+      <div class="detail2">
+        {% for g in c.glance|slice:":3" %}{{ g.label }}: {{ g.value }}{% if not forloop.last %} · {% endif %}{% endfor %}
+      </div>
+      {% endif %}
+      {% for bar in c.bars %}
+        {% if bar.pct %}
+        <div class="mini-bar2"><div class="track2" style="--eh-glow:{% if bar.band == 'bad' %}var(--ehred){% else %}var(--ehamber){% endif %}"><div class="seg2" style="width:{{ bar.pct }}%;background:{% if bar.band == 'bad' %}var(--grad-red){% else %}var(--grad-amber){% endif %}"></div></div><div class="val2">{{ bar.label }}</div></div>
+        {% else %}
+        <div class="plain-flag2">● {{ bar.label }}: {{ bar.value }}</div>
+        {% endif %}
+      {% endfor %}
+      <div style="margin-top:8px;font-size:10px"><a href="{% url 'config_alerts' %}" style="color:var(--ehmuted)">View source report ›</a></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+</div>
+<div class="col-c2">
+
+<section class="sec2" style="margin-bottom:0">
+  <h2><span class="n">05</span> Live Activity</h2>
+  <div class="two-col2">
+    <div class="chart-card2">
+      {% if swift_chart %}
+        {{ swift_chart|json_script:"swift-data2" }}
+        <div class="note2" style="margin-bottom:6px">SWIFT Transaction History — This Week vs. Last Week</div>
+        <div style="height:160px"><canvas id="swiftCompareLine2"></canvas></div>
+      {% else %}
+        <p class="diagram-note2">SWIFT transaction data isn't available right now.</p>
+      {% endif %}
+    </div>
+    <div class="chart-card2">
+      {% if cob_chart %}
+        {{ cob_chart|json_script:"cob-data2" }}
+        <div class="note2" style="margin-bottom:6px">COB — this week vs. last week</div>
+        <div style="height:160px"><canvas id="cobCompareLine2"></canvas></div>
+      {% else %}
+        <p class="diagram-note2">COB duration data isn't available right now.</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+</div>
+</div>
+
+{% endif %}
+
+<footer class="footer2">RBZ Monitoring Console — Executive Dashboard · exception-based view · as of {{ generated_at|date:"d M Y, H:i" }}</footer>
+
+</div>
+</div>
+
+{% if swift_chart or cob_chart %}
+<script src="{% static 'js/vendor/chart.umd.min.js' %}"></script>
+<script src="{% static 'js/vendor/chartjs-plugin-zoom.min.js' %}"></script>
+<script>
+(function () {
+  "use strict";
+  // Compare-only on this page (2026-09-18, on request: "remove it from the smaller executive
+  // dashboard just leave the superimposed one... just the 7 day one in smaller dashboard") --
+  // no original scrollable chart, no Range buttons/scrollbar here at all; just the fixed
+  // week-over-week comparison, same visual style as the Full Dashboard/Weekly Trend report's
+  // own compare charts (see management_dashboard_full.html's buildMetricPair for the
+  // original+compare version this was trimmed down from).
+  var haveZoomPlugin = typeof ChartZoom !== "undefined";
+  if (haveZoomPlugin) Chart.register(ChartZoom);
+
+  // Sunday/holiday background shading + label (2026-09-18, on request: "put a shaded area in
+  // the graphs to show a sunday or holiday period... put test [text] on the area saying
+  // sunday") -- see automated_report_download.html's own weekendShadePlugin for the fuller
+  // write-up; identical plugin, just also registered here since this page's charts are built
+  // by a separate script.
+  var weekendShadePlugin = {
+    id: "weekendShade",
+    beforeDatasetsDraw: function (chart, args, opts) {
+      var shaded = opts && opts.shaded;
+      if (!shaded || !shaded.length) return;
+      var xScale = chart.scales.x, yScale = chart.scales.y;
+      if (!xScale || !yScale) return;
+      var lo = Math.max(0, Math.floor(xScale.min));
+      var hi = Math.min(shaded.length - 1, Math.ceil(xScale.max));
+      var ctx = chart.ctx;
+      ctx.save();
+      var i = lo;
+      while (i <= hi) {
+        if (!shaded[i]) { i++; continue; }
+        var start = i, label = shaded[i];
+        while (i <= hi && shaded[i]) i++;
+        var xStart = xScale.getPixelForValue(start - 0.5);
+        var xEnd = xScale.getPixelForValue(i - 1 + 0.5);
+        ctx.fillStyle = "rgba(209,74,58,0.18)";
+        ctx.fillRect(xStart, yScale.top, xEnd - xStart, yScale.bottom - yScale.top);
+
+        var bandWidth = xEnd - xStart;
+        var midX = (xStart + xEnd) / 2, midY = (yScale.top + yScale.bottom) / 2;
+        // A stroked halo (dark-red outline, white fill) reads clearly whichever theme is
+        // active -- a single flat colour can't guarantee contrast against both a light AND a
+        // dark chart background, but an outline around the opposite-toned fill always shows
+        // through (2026-09-18, on request: "visible no matter dark theme or light theme").
+        ctx.font = "bold 13px Segoe UI, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(140,30,20,0.95)";
+        ctx.fillStyle = "#ffffff";
+        if (bandWidth >= 58) {
+          ctx.strokeText(label, midX, midY);
+          ctx.fillText(label, midX, midY);
+        } else if (bandWidth >= 14) {
+          ctx.save();
+          ctx.translate(midX, midY);
+          ctx.rotate(-Math.PI / 2);
+          ctx.strokeText(label, 0, 0);
+          ctx.fillText(label, 0, 0);
+          ctx.restore();
+        }
+      }
+      ctx.restore();
+    },
+  };
+  Chart.register(weekendShadePlugin);
+
+  // Breaks a line across its own shaded (Sunday/holiday) stretches -- Chart.js already treats
+  // a `null` data point as a gap by default, so swapping the real value there for null IS
+  // "the line disappears on entry, reappears on exit" (2026-09-18, on request).
+  function withGaps(values, shaded) {
+    if (!shaded) return values;
+    return values.map(function (v, i) { return shaded[i] ? null : v; });
+  }
+
+  // Gradient area fill under a line (2026-09-18, on request: "beautify the swift transactions
+  // graph... add gradient shading underneath each graph from last week and from this week") --
+  // see automated_report_download.html's own areaGradient for the fuller write-up; identical
+  // helper, just also defined here since this page's charts are built by a separate script.
+  function hexToRgb(hex) {
+    var m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return m ? (parseInt(m[1], 16) + "," + parseInt(m[2], 16) + "," + parseInt(m[3], 16)) : "26,111,196";
+  }
+  function areaGradient(rgb) {
+    return function (ctx2) {
+      var area = ctx2.chart.chartArea;
+      if (!area) return "rgba(" + rgb + ",0.12)";
+      var g = ctx2.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+      g.addColorStop(0, "rgba(" + rgb + ",0.38)");
+      g.addColorStop(1, "rgba(" + rgb + ",0.02)");
+      return g;
+    };
+  }
+
+  function buildCompareOnly(dataElId, compareCanvasId) {
+    var dataEl = document.getElementById(dataElId);
+    var cmpEl = document.getElementById(compareCanvasId);
+    if (!dataEl || !cmpEl) return;
+    var d = JSON.parse(dataEl.textContent);
+    var allLabels = d.labels, allValues = d.datasets[0].values, color = d.datasets[0].color;
+    var allShaded = d.datasets[0].shaded || [];
+    var total = allLabels.length;
+    // COB is a vertical bar chart, ONE BAR PER DAY, SWIFT stays an hourly line (2026-09-18,
+    // on request: "for cob tile lets switch from line graph presentation to vertical bar
+    // graph"... "one solid bar per day") -- so COB's own "week" window is 7 daily points,
+    // not the 168 hourly points SWIFT's own week is.
+    var isBar = dataElId === "cob-data2";
+    var windowSize = isBar ? 7 : 168;
+    if (total < windowSize * 2) return;   // not enough history yet for a fair 2-week comparison
+    var curStart = total - windowSize, prevStart = total - windowSize * 2;
+    var curShaded = allShaded.slice(curStart, total);
+
+    new Chart(cmpEl, {
+      type: isBar ? "bar" : "line",
+      data: {
+        labels: allLabels.slice(curStart, total),
+        datasets: isBar ? [
+          { label: "This week", data: withGaps(allValues.slice(curStart, total), curShaded), borderColor: color,
+            backgroundColor: color, borderWidth: 1 },
+          { label: "Last week", data: withGaps(allValues.slice(prevStart, curStart), curShaded), borderColor: "#B8935A",
+            backgroundColor: "#B8935A", borderWidth: 1 },
+        ] : [
+          { label: "This week", data: withGaps(allValues.slice(curStart, total), curShaded), borderColor: color,
+            backgroundColor: areaGradient(hexToRgb(color)), fill: "origin",
+            borderWidth: 1.5, tension: 0.25, pointRadius: 1.5 },
+          { label: "Last week", data: withGaps(allValues.slice(prevStart, curStart), curShaded), borderColor: "#B8935A",
+            backgroundColor: areaGradient(hexToRgb("#B8935A")), fill: "origin",
+            borderWidth: 1.5, borderDash: [5, 3], tension: 0.25, pointRadius: 1.5 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: Object.assign(
+          { legend: { display: true, position: "bottom", labels: { boxWidth: 10, padding: 8, font: { size: 10 } } },
+            weekendShade: { shaded: curShaded } },
+          haveZoomPlugin ? { zoom: {
+            limits: { x: { min: "original", max: "original" } },
+            pan: { enabled: true, mode: "x" },
+            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: "x" },
+          } } : {}
+        ),
+        scales: { x: { ticks: { maxTicksLimit: 6 } }, y: { beginAtZero: true } },
+      },
+    });
+  }
+
+  buildCompareOnly("swift-data2", "swiftCompareLine2");
+  buildCompareOnly("cob-data2", "cobCompareLine2");
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -55,9 +55,12 @@ RATE_WINDOW = "5m"
 # which this app cannot read.
 SCRAPE_INTERVAL = 15
 
-# The device count is small today (one core switch) but the interface count is not, so the
-# tables show the busiest and the broken rather than all 311 rows.
-TOP_INTERFACES = 15
+# The device count used to be one (the core switch); now the Switches & Routers Report scopes
+# collect() across 38 more, so this is an estate-wide top-N, not one device's -- bumped from 15
+# (2026-09-22) so a couple of very busy devices don't crowd out the rest of the estate's own
+# busiest links. Still a cap, not a promise of completeness: tables show the busiest and the
+# broken rather than every interface across the whole estate.
+TOP_INTERFACES = 25
 
 
 # ---------------------------------------------------------------------------------------
@@ -94,20 +97,42 @@ CATALOGUE = [
          state="missing", oid="entPhySensorValue",
          needs="Confirmed live via ENTITY-SENSOR-MIB (entSensorType=8, celsius).",
          probe="entSensorValue"),
-    dict(section="Interface Performance & Bandwidth", name="Optical Tx/Rx power",
-         what="Per-interface transceiver signal strength — a slow decline warns of a "
-              "failing optic before the link actually drops.",
-         state="missing", oid="entPhySensorValue (entSensorType=14, dBm)",
-         needs="Confirmed live via the SAME ENTITY-SENSOR-MIB walk as Temperature above "
-               "(entSensorType=14 rather than 8) — no separate module needed, only "
-               "per-sensor-type filtering on the report side.",
-         probe="entSensorValue"),
+    # "Optical Tx/Rx power" entry retired (2026-09-23, on request: "leave out optic details
+    # entirely") -- the report no longer collects or shows it, so it no longer belongs in the
+    # catalogue of what this report tracks either.
+    dict(section="System & Hardware Health", name="Flash / storage",
+         what="How full each device's flash partitions are — running out stops a device "
+              "writing its own config, crashinfo, or a new IOS image.",
+         state="missing", oid="ciscoFlashPartitionTable",
+         needs="Confirmed live via CISCO-FLASH-MIB (HOST-RESOURCES-MIB::hrStorageTable is "
+               "not implemented on any device tested — 0 PDUs on a switch, the core "
+               "switch, or the router).",
+         probe='ciscoFlashPartitionRaw{ciscoFlashPartitionColumn="13"}'),
     dict(section="System & Hardware Health", name="Power supplies & fans",
          what="Whether redundant power sources and fans are working.",
          state="missing", oid="cefcFRUPowerOperStatus",
          needs="Confirmed live via CISCO-ENTITY-FRU-CONTROL-MIB (this platform does not "
                "populate the older CISCO-ENVMON-MIB).",
          probe="cefcFRUPowerOperStatus"),
+    dict(section="System & Hardware Health", name="PoE power draw",
+         what="How much Power-over-Ethernet each switch is delivering against its budget — "
+              "a PoE budget running out silently drops power to phones/APs/cameras "
+              "plugged in later. Routers and the WLC have no PoE ports; not applicable to "
+              "them.",
+         state="missing", oid="POWER-ETHERNET-MIB (pethPsePortPower) / "
+                              "CISCO-POWER-ETHERNET-EXT-MIB (cpeExtPsePortPwrAvailable)",
+         needs="Confirmed genuinely absent, not a scrape-config gap: neither OID tree "
+               "appears anywhere in snmp_exporter's own generated modules: section "
+               "(grepped directly). Closing this needs a new snmp_exporter module built "
+               "against one of those MIBs — the same kind of work that already closed the "
+               "CPU/RAM/temperature/PSU gaps above, just not done yet for PoE.",
+         probe="",
+         # Dropped from the Core Switches Report (2026-09-24, on request: "remove this
+         # metric for core switches PoE power draw") -- core/distribution switches (HQ/DR/
+         # BYO) don't power end devices directly, only access switches do; same reasoning
+         # already applied to BGP sessions/Active connections/Connected devices above. See
+         # measure_catalogue's own `report_kind` filtering.
+         skip_for={"core_switches"}),
 
     # ---- 2. Interface Performance & Bandwidth -----------------------------------------
     dict(section="Interface Performance & Bandwidth", name="Inbound traffic",
@@ -167,7 +192,12 @@ CATALOGUE = [
          needs="Confirmed NOT configured on this device (bgpLocalAs=0, walked directly via "
                "BGP4-MIB) — not a collection gap. Only relevant if a device that actually "
                "speaks BGP (e.g. an edge router) is added to the estate.",
-         probe="bgpPeerState"),
+         probe="bgpPeerState",
+         # Dropped from the Core Switches Report (2026-09-24, on request: "for the core
+         # switch report drop these metrics no need to check them") -- BGP is a routing
+         # concept, not a switching one; still shown on the Routers Report, where it's
+         # actually relevant. See measure_catalogue's own `report_kind` filtering.
+         skip_for={"core_switches"}),
     dict(section="Protocol & Network State", name="MAC / ARP table size",
          what="How full the switch's MAC address and ARP tables are, against their "
               "hardware limits — a table at capacity silently drops new entries.",
@@ -179,14 +209,22 @@ CATALOGUE = [
     dict(section="Protocol & Network State", name="Active connections",
          what="Firewall and VPN connection counts, to catch a device being overwhelmed.",
          state="missing", oid="vendor firewall MIB",
-         needs="A firewall is not in scope yet: only the core switch is polled. Needs the "
-               "firewall added as an SNMP target first.",
-         probe=""),
+         needs="A firewall is not in scope yet: no firewall device is onboarded to this "
+               "estate at all. Needs one added as an SNMP target first.",
+         probe="",
+         # Dropped from the Core Switches Report (2026-09-24, on request: "for the core
+         # switch report drop these metrics no need to check them") -- a core switch is not
+         # a firewall; this was never actually about it.
+         skip_for={"core_switches"}),
     dict(section="Protocol & Network State", name="Connected devices (Wi-Fi)",
          what="How many users are on each wireless access point.",
          state="missing", oid="vendor wireless MIB",
-         needs="No wireless controller is polled yet. Needs the WLC added as a target.",
-         probe=""),
+         needs="Relevant to the Wireless Controller Report, not the switch estate -- the WLC "
+               "(hre-wlc-02) is onboarded but this reading isn't collected from it yet.",
+         probe="",
+         # Dropped from the Core Switches Report (2026-09-24, same request as above) -- a
+         # core switch has no Wi-Fi clients of its own to count.
+         skip_for={"core_switches"}),
 ]
 
 
@@ -246,7 +284,7 @@ def _iface_label(labels: Dict[str, str]) -> str:
     return f"ifIndex {idx}"
 
 
-def measure_catalogue(q, wanted_targets=None) -> list:
+def measure_catalogue(q, wanted_targets=None, report_kind: Optional[str] = None) -> list:
     """The catalogue with each entry's state MEASURED, not declared.
 
     The states used to be written into the table by hand, which meant the report kept saying
@@ -256,9 +294,18 @@ def measure_catalogue(q, wanted_targets=None) -> list:
     Each entry names the metric that would prove it present; if the series exist for the
     devices in scope, it is live. `degraded` is reserved for the one case where the data is
     there but known-wrong: 32-bit octet counters standing in for the 64-bit pair.
+
+    `report_kind` (2026-09-24, on request: "for the core switch report drop these metrics no
+    need to check them") -- an entry whose own `skip_for` set contains this report's slug
+    (e.g. "core_switches") is left out of the returned list entirely, not just hidden: it was
+    never applicable to what THIS report covers, so it shouldn't count toward "N metrics not
+    collected" here either. None (the default) skips no entries -- every existing caller that
+    doesn't pass this keeps seeing the full catalogue, unchanged.
     """
     out = []
     for m in CATALOGUE:
+        if report_kind and report_kind in (m.get("skip_for") or ()):
+            continue
         probe = m.get("probe") or ""
         present = False
         if probe:
@@ -282,12 +329,16 @@ def measure_catalogue(q, wanted_targets=None) -> list:
     return out
 
 
-def collect(only: Optional[set] = None) -> dict:
+def collect(only: Optional[set] = None, report_kind: Optional[str] = None) -> dict:
     """Gather the report. `only` is a set of DEVICE KEYS, scoping it to the admin's choice.
 
     Scoping happens on the `instance` label rather than by filtering after the fact, so a
     report that says it covers the core switch cannot quietly include a second device that
     happens to share the SNMP job.
+
+    `report_kind` (2026-09-24) -- passed straight through to measure_catalogue() so a report
+    picker can drop CATALOGUE entries that don't apply to it (see that function's own
+    `report_kind` comment); it touches nothing else collect() does.
     """
     prom, prom_url = _prometheus()
     wanted = None
@@ -376,6 +427,88 @@ def collect(only: Optional[set] = None) -> dict:
     busiest = sorted((i for i in up if i["total_bps"]), key=lambda i: -i["total_bps"])[:TOP_INTERFACES]
     carrying = [i for i in up if i["total_bps"] > 0]
 
+    def _one(expr):
+        rows = q(expr)
+        if wanted is not None:
+            rows = [r for r in rows if r["labels"].get("instance") in wanted]
+        return rows
+
+    # ---- CDP neighbours (CISCO-CDP-MIB) -- moved ahead of saturated/erroring/etc below
+    # (2026-09-23, on request: "we only want to monitor these interfaces not all of
+    # them... uplink, accesspoint, links going to other switches (neighboar links)") so
+    # `monitored` (below) can scope every interface-shaped finding to just these ports,
+    # not every up port. A neighbour's reported platform string identifies what's actually
+    # plugged into a port far more reliably than guessing at a fixed port number --
+    # confirmed live via the "cisco_cdp" SNMP module (see prometheus.yml's own snmp_cdp job
+    # and snmp.yml's own comment on the module). cdpCacheDeviceId/DevicePort/Platform are
+    # three separate metric series sharing the same (instance, cdpCacheIfIndex,
+    # cdpCacheDeviceIndex) index -- joined here into one row per neighbour.
+    cdp_rows: Dict[Tuple[str, str, str], dict] = {}
+
+    def _cdp_key(lbl):
+        return (lbl.get("instance"), lbl.get("cdpCacheIfIndex"), lbl.get("cdpCacheDeviceIndex"))
+
+    for r in _one("cdpCacheDeviceId"):
+        cdp_rows.setdefault(_cdp_key(r["labels"]), {})["device_id"] = r["labels"].get("cdpCacheDeviceId", "")
+    for r in _one("cdpCacheDevicePort"):
+        cdp_rows.setdefault(_cdp_key(r["labels"]), {})["device_port"] = r["labels"].get("cdpCacheDevicePort", "")
+    for r in _one("cdpCachePlatform"):
+        cdp_rows.setdefault(_cdp_key(r["labels"]), {})["platform"] = r["labels"].get("cdpCachePlatform", "")
+
+    _iface_name_by_key = {(i["device"], str(i["index"])): i["name"] for i in interfaces}
+    cdp_neighbors = []
+    for (instance, if_index, _dev_index), fields in cdp_rows.items():
+        if not instance or not if_index:
+            continue
+        platform = fields.get("platform", "")
+        cdp_neighbors.append({
+            "instance": instance,
+            "if_index": if_index,
+            "local_port": _iface_name_by_key.get((instance, if_index), f"ifIndex {if_index}"),
+            "device_id": fields.get("device_id", ""),
+            "device_port": fields.get("device_port", ""),
+            "platform": platform,
+            "kind": _cdp_neighbor_kind(platform),
+        })
+
+    # The actual monitored scope now (2026-09-23) -- an interface counts only if it is BOTH
+    # up AND CDP-identifies as an access point, another switch, or a router (an uplink or a
+    # neighbour link to another switch is the same "kind" here -- see _cdp_neighbor_kind's
+    # own comment on why "switch" covers both an upstream and a lateral link equally). A
+    # host/phone/unknown-vendor neighbour, or a port with no CDP neighbour at all, is no
+    # longer part of "monitored" -- same reasoning the original up-only scope already
+    # applied to admin-disabled ports, narrowed further now that CDP can say WHY a port
+    # matters instead of just whether it is up.
+    _monitored_keys = {(n["instance"], n["if_index"]) for n in cdp_neighbors
+                       if n["kind"] in ("ap", "switch", "router")}
+
+    # Manually monitored interfaces (2026-09-24) -- see MANUAL_MONITORED_INTERFACES' own
+    # comment for why these can never be CDP-scoped. Resolved by NAME against this run's own
+    # `interfaces` (not a fixed ifIndex, which can renumber across a device reload) into the
+    # live (target, ifIndex) pairs both `_monitored_keys` and the exempt-from-regression set
+    # need. `_manual_exempt_keys` is a SUBSET of `_manual_keys` -- only the entries whose
+    # down_is_fault is False -- returned separately so capture_snapshot() can keep
+    # _update_interface_baseline() from ever raising a regression for one of them.
+    _target_by_dev_key = {d["key"]: d["target"] for d in DEVICES}
+    _manual_by_target_name = {
+        (_target_by_dev_key[dev_key], if_name): cfg
+        for (dev_key, if_name), cfg in MANUAL_MONITORED_INTERFACES.items()
+        if dev_key in _target_by_dev_key
+    }
+    _manual_keys = set()
+    _manual_exempt_keys = set()
+    for i in interfaces:
+        cfg = _manual_by_target_name.get((i["device"], i["name"]))
+        if cfg is None:
+            continue
+        key = (i["device"], str(i["index"]))
+        _manual_keys.add(key)
+        if not cfg.get("down_is_fault", True):
+            _manual_exempt_keys.add(key)
+    _monitored_keys |= _manual_keys
+
+    monitored = [i for i in up if (i["device"], str(i["index"])) in _monitored_keys]
+
     # Bar geometry belongs here, not in the template. Template arithmetic has bitten this
     # codebase before (a chart that rendered 1000px tall from `{{ rows|length }}00px`).
     #
@@ -418,25 +551,31 @@ def collect(only: Optional[set] = None) -> dict:
         # and shadowing it here emptied the traffic table on the report.
         heaviest = max(i["in_bps"] or 0, i["out_bps"] or 0)
         i["util_pct"] = round((heaviest / cap) * 100, 1) if cap else None
-    saturated = [i for i in interfaces if (i["util_pct"] or 0) >= 80]
+    # Scoped to `monitored` -- up AND CDP-identified as an AP/uplink/neighbour-link (2026-
+    # 09-23, on request: "we only want to monitor these interfaces not all of them... uplink,
+    # accesspoint, links going to other switches"; narrower than the previous `up`-only scope
+    # from 2026-09-22, kept here as the earlier step in the same direction -- a down port, or
+    # an up port with no CDP-identified purpose, is not counted, alerted on, or listed as a
+    # finding either way).
+    saturated = [i for i in monitored if (i["util_pct"] or 0) >= 80]
     # >=95% is not "worth watching", it is the point real links start dropping packets —
     # matches the systems report's disk_high()'s own near-full/full split (a WATCH-band tile
     # is still allowed to render red when the level itself demands it).
-    saturated_critical = [i for i in interfaces if (i["util_pct"] or 0) >= 95]
+    saturated_critical = [i for i in monitored if (i["util_pct"] or 0) >= 95]
 
-    erroring = [i for i in interfaces if sum(i["errors"].values() or [0]) > 0]
+    erroring = [i for i in monitored if sum(i["errors"].values() or [0]) > 0]
     # Errors (CRC/framing/etc.) are close to always a real physical fault — a cable, a
     # connector, a failing optic. Discards are frequently a POLICY decision (QoS dropping
     # excess traffic on purpose) and are not inherently a fault the same way, so the two are
     # graded separately rather than one combined "has some non-zero number" bucket.
-    err_only = [i for i in interfaces
+    err_only = [i for i in monitored
                if (i["errors"].get("in_err", 0) + i["errors"].get("out_err", 0)) > 0]
     # A high discard volume is still worth escalating even without a true error present —
     # the two thresholds below aren't a precise SLA, just a floor well above the handful of
     # discards a healthy, momentarily-busy link can show, and well below the 200k+/400k+
     # seen on a genuinely congested interface here.
     DISCARD_RED = 1000
-    discard_heavy = [i for i in interfaces
+    discard_heavy = [i for i in monitored
                      if (i["errors"].get("in_disc", 0) + i["errors"].get("out_disc", 0)) >= DISCARD_RED]
     # Whatever is left once true errors and heavy discards are accounted for — a light
     # discard count, on its own, worth a watch-band amber rather than red. Computed as its
@@ -446,24 +585,53 @@ def collect(only: Optional[set] = None) -> dict:
 
     # Hardware health, from the vendor module. Each is optional; a missing reading is None and
     # renders as "not collected" rather than as a zero, which would read as "cool and idle".
-    def _one(expr):
-        rows = q(expr)
-        if wanted is not None:
-            rows = [r for r in rows if r["labels"].get("instance") in wanted]
-        return rows
+
+    # Grouped by `instance` (== a device's `target`) so hardware health can be read PER
+    # DEVICE, not just once across the whole queried set -- see cpu_by_device/mem_by_device/
+    # uptime_by_device/temp_by_device below. Fixed 2026-09-22, confirmed live: with one device
+    # (the core switch) `cpu`/`mem_pct`/`uptime_days`/`temp_max` below were correct BY
+    # CONSTRUCTION (max()/sum() over a single-device set is that device's own value) -- but
+    # _device_flags() read those same four scalars identically for every device in `rows`,
+    # unlike PSU/OSPF/optics a few lines below it, which already filter by `dev["target"]`.
+    # Scaling DEVICES to more than one device would have silently given every device the
+    # busiest device's own CPU/RAM/temp/uptime. The aggregate scalars are kept too (estate-
+    # wide "worst" tiles still legitimately want them) -- only _device_flags' own per-device
+    # read needed fixing, not these.
+    def _by_device(rows: list) -> Dict[str, list]:
+        grouped: Dict[str, list] = {}
+        for r in rows:
+            grouped.setdefault(r["labels"].get("instance"), []).append(r)
+        return grouped
 
     cpu_rows = _one("cpmCPUTotal5minRev") or _one("cpmCPUTotal1minRev")
     cpu = max((r["value"] for r in cpu_rows), default=None)
-    mem_used = sum(r["value"] for r in _one("ciscoMemoryPoolUsed")) or None
-    mem_free = sum(r["value"] for r in _one("ciscoMemoryPoolFree")) or None
+    cpu_by_device = {inst: max(r["value"] for r in rs) for inst, rs in _by_device(cpu_rows).items()}
+
+    mem_used_rows = _one("ciscoMemoryPoolUsed")
+    mem_free_rows = _one("ciscoMemoryPoolFree")
+    mem_used = sum(r["value"] for r in mem_used_rows) or None
+    mem_free = sum(r["value"] for r in mem_free_rows) or None
     mem_pct = round(mem_used / (mem_used + mem_free) * 100, 1) if mem_used and mem_free else None
+    mem_used_by_device = {inst: sum(r["value"] for r in rs)
+                          for inst, rs in _by_device(mem_used_rows).items()}
+    mem_free_by_device = {inst: sum(r["value"] for r in rs)
+                          for inst, rs in _by_device(mem_free_rows).items()}
+    mem_by_device = {inst: round(u / (u + mem_free_by_device[inst]) * 100, 1)
+                     for inst, u in mem_used_by_device.items() if mem_free_by_device.get(inst)}
+
     up_rows = _one("sysUpTime")
     # sysUpTime is in hundredths of a second (TimeTicks), not seconds
     uptime_days = round(max(r["value"] for r in up_rows) / 100.0 / 86400.0, 1) if up_rows else None
+    uptime_by_device = {inst: round(max(r["value"] for r in rs) / 100.0 / 86400.0, 1)
+                        for inst, rs in _by_device(up_rows).items()}
+
     sensors = _one("entSensorValue")
     temps = [r["value"] for r in sensors
              if r["labels"].get("entSensorType") == "8" and 0 < r["value"] < 200]
     temp_max = max(temps) if temps else None
+    temp_rows = [r for r in sensors
+                if r["labels"].get("entSensorType") == "8" and 0 < r["value"] < 200]
+    temp_by_device = {inst: max(r["value"] for r in rs) for inst, rs in _by_device(temp_rows).items()}
 
     # ---- PSU / fan status (CISCO-ENTITY-FRU-CONTROL-MIB) --------------------------------
     # This module exposes cefcFRUPowerOperStatus as EnumAsStateSet: one row per
@@ -484,31 +652,75 @@ def collect(only: Optional[set] = None) -> dict:
     ospf_down = [r for r in ospf_rows if int(r["value"]) not in (4, 8)]
     ospf_total = len(ospf_rows)
 
-    # ---- optical Tx/Rx power (ENTITY-SENSOR-MIB, entSensorType 14 = dBm) -----------------
-    # Cisco's optical DOM sensors report centi-dBm regardless of what entSensorScale claims
-    # for them (a documented quirk, not a guess — dividing by the claimed scale here would
-    # produce numbers three orders of magnitude off a real reading).
-    optics = []
-    for r in sensors:
-        if r["labels"].get("entSensorType") != "14":
-            continue
-        name = r["labels"].get("entPhysicalName", "")
-        optics.append({
-            "name": name,
-            "instance": r["labels"].get("instance"),
-            "dbm": r["value"] / 100.0,
-            "direction": "Tx" if "Transmit" in name else ("Rx" if "Receive" in name else "?"),
+    # ---- Flash/storage partitions (CISCO-FLASH-MIB, ciscoFlashPartitionTable) ------------
+    # 2026-09-23, on request: "need to add storage table for all switches" -- HOST-RESOURCES-
+    # MIB::hrStorageTable is NOT implemented on any Cisco IOS/IOS-XE device tested (0 PDUs on
+    # an access switch, the core switch, and the router), so this reads CISCO-FLASH-MIB
+    # instead (see the "cisco_flash" snmp_exporter module and the "snmp_flash" prometheus.yml
+    # job). Confirmed empirically that declaring one snmp_exporter metric PER COLUMN against
+    # this table decodes nothing (0 PDUs every time); one raw catch-all metric walking the
+    # whole partition entry decodes every row correctly, with the real column number and
+    # partition index recovered as labels instead. Column 10 is the partition name (an OCTET
+    # STRING, hex-encoded on the wire -- decoded below); columns 13/14 are the 64-bit-safe
+    # size/free-space pair in bytes. Columns 4/5 carry the same figures but are the legacy
+    # 32-bit pair and wrap to 4294967295 on any partition over 4GB -- confirmed live on the
+    # core switch's own disk0:/bootflash: partitions, which is why 13/14 are used here.
+    def _flash_rows(column: str) -> Dict[Tuple[str, str], str]:
+        return {(r["labels"].get("instance"), r["labels"].get("ciscoFlashPartitionIndex")):
+                r["labels"].get("ciscoFlashPartitionRaw", "")
+                for r in _one(f'ciscoFlashPartitionRaw{{ciscoFlashPartitionColumn="{column}"}}')}
+
+    def _hex_to_text(raw: str) -> str:
+        if raw.startswith("0x"):
+            try:
+                return bytes.fromhex(raw[2:]).decode("ascii", errors="replace").strip()
+            except ValueError:
+                return raw
+        return raw
+
+    flash_names = _flash_rows("10")
+    flash_sizes = _flash_rows("13")
+    flash_frees = _flash_rows("14")
+    # Fallback for older platforms that don't implement the 64-bit pair at all (confirmed
+    # live: the 2951 ISR router only walks up to column 12, no 13/14) -- 4/5 carry the same
+    # figures and are exact below the 4GB wrap point, so they're a safe stand-in UNLESS the
+    # raw value IS the wrap sentinel itself (2**32-1), which means the true size is unknown,
+    # not 4294967295 bytes.
+    flash_sizes_32 = _flash_rows("4")
+    flash_frees_32 = _flash_rows("5")
+    _WRAP32 = str(2**32 - 1)
+
+    def _flash_value(primary: dict, fallback: dict, key) -> Optional[float]:
+        raw = primary.get(key)
+        if raw:
+            return float(raw)
+        raw = fallback.get(key)
+        if raw and raw != _WRAP32:
+            return float(raw)
+        return None
+
+    flash_partitions = []
+    for key in sorted(set(flash_names) | set(flash_sizes) | set(flash_frees)
+                       | set(flash_sizes_32) | set(flash_frees_32)):
+        instance, part_idx = key
+        size = _flash_value(flash_sizes, flash_sizes_32, key)
+        free = _flash_value(flash_frees, flash_frees_32, key)
+        used_pct = round((size - free) / size * 100, 1) if size and free is not None else None
+        flash_partitions.append({
+            "device": instance,
+            "index": part_idx,
+            "name": _hex_to_text(flash_names.get(key, "")) or f"partition {part_idx}",
+            "size_bytes": size,
+            "free_bytes": free,
+            "size_gb": round(size / 1024**3, 2) if size else None,
+            "free_gb": round(free / 1024**3, 2) if free is not None else None,
+            "used_pct": used_pct,
         })
-    # No MIB here states the vendor's actual receiver sensitivity floor — this is a
-    # conservative, industry-typical figure for SFP/SFP+ optics, not a per-optic vendor
-    # value, and is stated as such wherever it is shown.
-    OPTICS_RX_MIN_DBM = -20.0
-    # AT or below the assumed floor is not "approaching" a limit, it is a link the report
-    # believes is failing right now — same near-full/full split as the disk and saturation
-    # checks. "Low" (amber) is everything within 3 dB of it that is not already there.
-    optics_critical = [o for o in optics if o["direction"] == "Rx" and o["dbm"] <= OPTICS_RX_MIN_DBM]
-    optics_low = [o for o in optics
-                 if o["direction"] == "Rx" and OPTICS_RX_MIN_DBM < o["dbm"] <= OPTICS_RX_MIN_DBM + 3]
+    # Same 85%/95% warn/critical split the systems report's own disk_high() uses for
+    # near-full/full storage -- a partition with a size but no readable free-space value
+    # (used_pct is None) is left out rather than treated as 0% used.
+    flash_low = [p for p in flash_partitions if p["used_pct"] is not None and p["used_pct"] >= 85]
+    flash_critical = [p for p in flash_partitions if p["used_pct"] is not None and p["used_pct"] >= 95]
 
     # ---- MAC / ARP table size (BRIDGE-MIB / IP-MIB) --------------------------------------
     # Entry counts only — the platform's hardware MAX per table is a datasheet figure, not
@@ -523,7 +735,7 @@ def collect(only: Optional[set] = None) -> dict:
     peak_bps = max((max(i["in_bps"] or 0, i["out_bps"] or 0) for i in interfaces), default=0)
     wrap_seconds = (2 ** 32) / (peak_bps / 8) if peak_bps else None
 
-    catalogue = measure_catalogue(q, wanted)
+    catalogue = measure_catalogue(q, wanted, report_kind)
     live = sum(1 for m in catalogue if m["state"] == "live")
     degraded = sum(1 for m in catalogue if m["state"] == "degraded")
     missing = sum(1 for m in catalogue if m["state"] == "missing")
@@ -543,6 +755,23 @@ def collect(only: Optional[set] = None) -> dict:
         "interfaces": interfaces,
         "iface_count": len(interfaces),
         "up_count": len(up),
+        # Distinct from up_count (2026-09-23) -- up AND CDP-identified as an AP/uplink/
+        # neighbour link, see `monitored`'s own comment above. This is what "Interfaces
+        # monitored" and every per-interface finding actually count against now.
+        "monitored_count": len(monitored),
+        "monitored_interfaces": monitored,
+        # {(device, if_index), ...} CDP currently identifies as an AP/uplink/neighbour link,
+        # UNIONED with any manually monitored port (see MANUAL_MONITORED_INTERFACES) -- used
+        # by _update_interface_baseline() to (re)confirm MonitoredInterface.is_scoped; see
+        # that function's own comment on why regression detection reads the STORED sticky
+        # flag, not this run's own set, once a port has actually gone down.
+        "cdp_scoped_keys": _monitored_keys,
+        # {(device, if_index), ...} manually monitored ports whose down_is_fault is False --
+        # see MANUAL_MONITORED_INTERFACES' own comment. Passed to
+        # _update_interface_baseline() so it never raises interface_down_regression for one
+        # of these, and to build_report()'s Interface Detail so its Status column explains
+        # WHY a down reading here is expected rather than painting it red.
+        "manual_exempt_keys": _manual_exempt_keys,
         "down_count": len(down),
         "carrying_count": len(carrying),
         "busiest": busiest,
@@ -556,7 +785,7 @@ def collect(only: Optional[set] = None) -> dict:
         "count_live": live,
         "count_degraded": degraded,
         "count_missing": missing,
-        "count_total": len(CATALOGUE),
+        "count_total": len(catalogue),
         "peak_bps_text": _fmt_bps(peak_bps),
         "counters_are_64bit": counters_are_64bit,
         "saturated": saturated,
@@ -573,15 +802,24 @@ def collect(only: Optional[set] = None) -> dict:
         "mem_pct": mem_pct,
         "uptime_days": uptime_days,
         "temp_max": temp_max,
+        "cpu_by_device": cpu_by_device,
+        "mem_by_device": mem_by_device,
+        "uptime_by_device": uptime_by_device,
+        "temp_by_device": temp_by_device,
         "psu_failed": psu_failed,
         "psu_total": psu_total,
+        # psu_rows (2026-09-22, for a real PSU/Fan table per device in build_report) -- every
+        # component's own current state, not just the failed ones psu_failed already narrows
+        # to. Kept as its own key rather than asking a caller to re-derive it from psu_failed/
+        # psu_total, which can't reconstruct the healthy rows.
+        "psu_rows": psu_rows,
         "ospf_rows": ospf_rows,
         "ospf_down": ospf_down,
         "ospf_total": ospf_total,
-        "optics": optics,
-        "optics_low": optics_low,
-        "optics_critical": optics_critical,
-        "optics_rx_min_dbm": OPTICS_RX_MIN_DBM,
+        "cdp_neighbors": cdp_neighbors,
+        "flash_partitions": flash_partitions,
+        "flash_low": flash_low,
+        "flash_critical": flash_critical,
         "mac_count": mac_count,
         "arp_count": arp_count,
         "wrap_seconds": round(wrap_seconds) if wrap_seconds else None,
@@ -611,15 +849,153 @@ def collect(only: Optional[set] = None) -> dict:
 #  category error on the systems admin's screen.
 # ---------------------------------------------------------------------------------------
 DEVICES = [
-    {
-        "key": "core-switch",
-        "name": "Core Switch",
-        "kind": "Switch",
-        "target": "10.100.210.253",
-        "system": "RBZ Network",
-        "module": "if_mib_v3",
-        "report": "network_report",
-    },
+    # ---------------------------------------------------------------------------------
+    # Switches & Routers Report estate (2026-09-22) -- 39 SNMPv3 devices onboarded via the
+    # RBZ_v3 auth profile (see reports.snmp_admin), confirmed reachable and genuinely Cisco
+    # by direct probing of every one of them before this list was written (38 Catalyst
+    # 9200/9300-Lite/2960X switches -- including the core switch, folded in here 2026-09-22
+    # once RBZ_v3 was confirmed live against it too -- one 2951 ISR router, one C9800-CL WLC
+    # on IOS-XE). "report": "switches_routers_report" is the ONLY SNMP report family left --
+    # the old standalone "Network Report" (network_dashboard/network_report/network_generate,
+    # core-switch alone under RBZ_v2) was retired the same day this list grew to cover the
+    # rest of the estate; see git history for that removal if the old shape is ever needed
+    # for reference. 3 more devices probed at the same time (RBZ_MSASA 10.0.0.148, DRS-FTD-01
+    # 10.0.0.132, HRE-FTD-01 10.0.0.131) are deliberately NOT listed here: all three timed out
+    # under RBZ_v3 (no response at all, not a bad reading) -- pending the network team fixing
+    # on-device SNMPv3 config/ACLs. 9 further devices have no IP yet and are excluded the same
+    # way. Neither group gets a stub entry: an entry with no live target would misreport as
+    # "never scraped" instead of "not yet targeted", which is a different, more alarming claim
+    # than the truth.
+    # 3 core switches (2026-09-24, on request: "still see one core switch there are supposed
+    # to be 3" -- confirmed live via RBZ_v3: HQ 10.100.210.253 (this app's original, "Core
+    # Switch"), DR 10.100.210.251 (sysName RBZ-DR-CORE-SW-9300.rbz.co.zw), BYO 10.200.210.252
+    # (sysName RBZ-BYO-CORE-SW-9300) -- all three real Catalyst 9300 L3 switches. `role: "core"`
+    # is what is_access_switch()/core_switches_device_keys() actually key off (2026-09-24,
+    # replacing the old single hardcoded `key != "core-switch"` check, which could only ever
+    # recognise ONE core switch) -- tag any FUTURE core switch here, not a code change there.
+    {"key": "core-switch", "name": "Core Switch (HQ)", "kind": "Switch", "role": "core",
+     "target": "10.100.210.253", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "core-switch-dr", "name": "RBZ-DR-CORE-SW-9300.rbz.co.zw", "kind": "Switch", "role": "core",
+     "target": "10.100.210.251", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "core-switch-byo", "name": "RBZ-BYO-CORE-SW-9300", "kind": "Switch", "role": "core",
+     "target": "10.200.210.252", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "csw1-m5", "name": "CSW1-M5.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.88", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "hre-dr-swift-router", "name": "hre-dr-swift-router.rbz.co.zw", "kind": "Router",
+     "target": "10.0.0.145", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "hre-tor-m03", "name": "HRE-TOR-M03.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.206", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "hre-wlc-02", "name": "hre-wlc-02", "kind": "WLC",
+     "target": "10.0.0.142", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "level2-swift-sw2", "name": "Level2_Swift_Sw2.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.52", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-byo-level1-sw1", "name": "RBZ-BYO-LEVEL1-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.2.6", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-byo-level2-sw1", "name": "RBZ-BYO-LEVEL2-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.2.5", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-byo-upperbase-sw1", "name": "RBZ-BYO-UPPERBASE-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.2.17", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level18-sw1", "name": "RBZ-HRE-LEVEL18-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.18", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level20-sw1", "name": "RBZ-HRE-LEVEL20-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.20", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level3-sw1", "name": "RBZ-HRE-LEVEL3-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.3", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level9-sw1", "name": "RBZ-HRE-LEVEL9-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.9", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-pabxroom-sw1", "name": "RBZ-HRE-PABXROOM-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.30", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "hre-tor-m01", "name": "HRE-TOR-M01.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.204", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-byo-groundfl-sw1", "name": "RBZ-BYO-GROUNDFL-SW1", "kind": "Switch",
+     "target": "10.0.2.1", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-byo-groundfl-sw3", "name": "RBZ-BYO-GROUNDFL-SW3", "kind": "Switch",
+     "target": "10.0.2.19", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level10-sw1", "name": "RBZ-HRE-LEVEL10-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.10", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level11-sw1", "name": "RBZ-HRE-LEVEL11-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.11", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level12-sw1", "name": "RBZ-HRE-LEVEL12-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.12", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level13-sw1", "name": "RBZ-HRE-LEVEL13-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.13", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level14-sw1", "name": "RBZ-HRE-LEVEL14-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.14", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level15-sw1", "name": "RBZ-HRE-LEVEL15-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.15", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level16-sw1", "name": "RBZ-HRE-LEVEL16-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.16", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level17-sw1", "name": "RBZ-HRE-LEVEL17-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.17", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level19-sw1", "name": "RBZ-HRE-LEVEL19-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.19", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level21-sw1", "name": "RBZ-HRE-LEVEL21-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.21", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level22-sw1", "name": "RBZ-HRE-LEVEL22-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.22", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level2-sw1", "name": "RBZ-HRE-LEVEL2-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.2", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level3-sw2", "name": "RBZ-HRE-LEVEL3-SW2.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.53", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level8-sw1", "name": "RBZ-HRE-LEVEL8-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.8", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-pabxroom-sw2", "name": "RBZ-HRE-PABXROOM-SW2.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.35", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "csw2-m5", "name": "CSW2-M5.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.86", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "level3-switch-03", "name": "Level3_switch_03.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.95", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-byo-groundfl-sw2", "name": "RBZ-BYO-GROUNDFL-SW2.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.2.7", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level-1-rtl-sw2", "name": "RBZ-HRE-LEVEL-1-RTL-SW2.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.37", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-level9-sw2", "name": "RBZ-HRE-LEVEL9-SW2.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.85", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "rbz-hre-swift-hq-sw1", "name": "RBZ-HRE-SWIFT-HQ-SW1.rbz.co.zw", "kind": "Switch",
+     "target": "10.0.0.60", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
+    {"key": "swift-dr-switch", "name": "swift-dr-switch", "kind": "Switch",
+     "target": "10.0.0.147", "system": "RBZ Network", "module": "if_mib_v3",
+     "report": "switches_routers_report"},
     # HCI Cluster host — belongs to Infrastructure Admin too (see gr.INFRA_SYSTEMS), but is
     # windows_exporter (CPU/RAM/disk), not SNMP: no interfaces/OSPF/optics/PSU concepts apply
     # to it, so it is kept OUT of collect()'s SNMP-shaped machinery entirely and gathered by
@@ -633,6 +1009,56 @@ DEVICES = [
         "system": "HCI Cluster",
         "job": "hci_cluster",            # the prometheus.yml job this target's `up` lives under
         "report": "network_report",
+        "cluster": True,                 # see CLUSTER_DEVICE_KEYS' own comment below
+    },
+    # Disaster Recovery Cluster (2026-09-16) -- a second, independent HCI/S2D cluster, same
+    # shape as HCI Cluster above (4 windows_exporter nodes, its own prometheus.yml job), added
+    # once _hci_node_metrics/_hci_cluster_volumes/_infra_overview/build_infrastructure_report
+    # were generalized to loop over every `cluster: True` device instead of assuming exactly
+    # one. windows_hci_csv_volume_size_bytes (the real S2D CSV metrics) is present on all
+    # nodes, confirmed live.
+    #
+    # CPU: originally special-cased to the standard counter cluster-wide on request ("this
+    # cluster has all collectors for windows exporter across all nodes it does not use
+    # workaround script metrics"). Confirmed live 2026-09-17 that this was premature and only
+    # a partial rollout -- node1 (.111) and node2 (.112) now publish windows_hci_cpu_usage_
+    # percent (the same workaround gauge HCI Cluster uses, here via Get-ClusterPerf), reading
+    # well above the standard counter on both (node1: 9.6% gauge vs 3.8% standard; node2: 11.0%
+    # vs 2.7% at the same instant), while node3/node4 (.113/.114) still don't. No per-device
+    # override needed any more -- _hci_node_metrics() now checks per NODE, not per cluster:
+    # whichever instance publishes the gauge uses it, any instance without one falls back to
+    # the standard counter. See _hci_node_metrics' own comment for the merge.
+    {
+        "key": "dr-cluster",
+        "name": "Disaster Recovery Cluster",
+        "kind": "windows",
+        "target": "10.100.246.111:9182",
+        "system": "Disaster Recovery Cluster",
+        "job": "dr_cluster",
+        "report": "network_report",
+        "cluster": True,
+    },
+    # Bulawayo Cluster (2026-09-17) -- a THIRD independent HCI/S2D cluster, at the Bulawayo
+    # site (10.200.246.x, the same site-subnet convention BYO-AD-DC-01 already uses at
+    # 10.200.200.x -- see that device's own comment), 2 nodes rather than 4. node2
+    # (10.200.246.3, byo-vdihost-02) was live and reachable all along but had never actually
+    # been added to the bulawayo_cluster Prometheus job -- fixed 2026-09-29, on request ("one
+    # of the nodes in the byo cluster is missing from our reports"). Both nodes' hostnames are
+    # now confirmed (byo-vdihost-01/02) and prometheus.yml's own `display` label reflects them
+    # (the old bare-IP placeholder this comment used to describe is gone). This DEVICES entry
+    # itself only ever needed to exist ONCE, job-scoped, regardless of node count:
+    # _hci_node_metrics/_hci_cluster_volumes/_infra_overview/build_infrastructure_report all
+    # loop over every `cluster: True` device and query by JOB, not by node count -- adding
+    # node2 needed a prometheus.yml change only, zero code here.
+    {
+        "key": "bulawayo-cluster",
+        "name": "Bulawayo Cluster",
+        "kind": "windows",
+        "target": "10.200.246.2:9182",
+        "system": "Bulawayo Cluster",
+        "job": "bulawayo_cluster",
+        "report": "network_report",
+        "cluster": True,
     },
     # Root Domain Controllers (AD forest root, HQ) -- two independent standalone DCs, not a
     # cluster, so unlike HCI Cluster (whose real multi-node data comes from the bespoke,
@@ -662,6 +1088,48 @@ DEVICES = [
         "target": "10.100.249.201:9182",
         "system": "Root Domain Controllers",
         "job": "root_domain_controllers",
+        "report": "network_report",
+    },
+    # Standalone Servers (2026-09-17, on request: "added 3 standalone servers to be grouped
+    # under Standalone server group in cluster health report") -- 10.100.249.240/.252/.253,
+    # previously tracked as Linux "Oracle Hosts" (node_exporter, port 9100, a completely
+    # separate/unrelated job) -- confirmed live these three now run windows_exporter on 9182
+    # instead (the old node_exporter is gone on all three), i.e. repurposed to Windows. Not
+    # `cluster: True` (three independent standalone boxes, not one clustered resource) --
+    # picked up by build_infrastructure_report's own new "Standalone Servers" loop (grouped by
+    # this shared `system` label), not the cluster-specific one.
+    #
+    # Real hostnames confirmed live via nbtstat (no reverse DNS configured for these three):
+    # DRS-RTGS7DBH-01 / HRE-RTGS7DBH-01 / HRE-RTGS7DBH-02 -- `name`/`display` updated from
+    # bare-IP to these on request ("replace all ip mentions with hostnames"). The naming
+    # itself (RTGS7DBH = RTGS DB Host, HRE/DRS = Harare/DR site) suggests these are RTGS
+    # database hosts specifically, not generic standalone boxes -- flagged to the admin, group
+    # label ("Standalone Servers") deliberately left as-is for now pending their own call.
+    {
+        "key": "standalone-1",
+        "name": "DRS-RTGS7DBH-01",
+        "kind": "windows",
+        "target": "10.100.249.240:9182",
+        "system": "Standalone Servers",
+        "job": "standalone_servers",
+        "report": "network_report",
+    },
+    {
+        "key": "standalone-2",
+        "name": "HRE-RTGS7DBH-01",
+        "kind": "windows",
+        "target": "10.100.249.252:9182",
+        "system": "Standalone Servers",
+        "job": "standalone_servers",
+        "report": "network_report",
+    },
+    {
+        "key": "standalone-3",
+        "name": "HRE-RTGS7DBH-02",
+        "kind": "windows",
+        "target": "10.100.249.253:9182",
+        "system": "Standalone Servers",
+        "job": "standalone_servers",
         "report": "network_report",
     },
     # Child Domain Controllers (2026-09-09) -- these two are additional DCs, added under the
@@ -801,6 +1269,34 @@ DEVICES = [
     },
 ]
 
+# ---------------------------------------------------------------------------------------
+#  Manually monitored interfaces -- ports CDP can never scope on its own (2026-09-24, on
+#  request: "add span port in core switch... spanport is an interface that collects logs,
+#  it says that its down but its not, [the way] by which it collects those logs make it
+#  appear as if it is down... TwentyFiveGigE1/2/0/1 · LINK TO STELLAR CYBER SENSOR").
+#
+#  A SPAN/mirror destination port has no CDP neighbour at all -- the device plugged into it
+#  (here, a Stellar Cyber network sensor) is a passive traffic receiver, not a switch/router/
+#  AP running CDP, so _cdp_neighbor_kind() would never classify it and it would never become
+#  part of the CDP-derived "monitored" scope (see collect()'s own comment on that). Its
+#  ifOperStatus also reads unreliably "down" by the very nature of how it collects mirrored
+#  traffic (confirmed by the network team, not guessed at here) -- so even if it COULD be
+#  CDP-scoped, treating that "down" reading as a fault (the interface_down_regression flag
+#  every other scoped port earns) would be a permanent false alarm on every single report.
+#
+#  Keyed by (DEVICES key, interface name as SNMP reports it via ifDescr/ifName) -- name, not
+#  ifIndex, since that's what a human confirms and it survives an index renumber across a
+#  reload; collect() resolves it to the live (target, ifIndex) pair every run. `down_is_fault`
+#  False means: still list it in Interface Detail (scoped, like any monitored port), but never
+#  raise interface_down_regression for it and never paint its down status red -- see
+#  collect()'s own _manual_exempt_keys and build_report()'s Interface Detail status logic.
+MANUAL_MONITORED_INTERFACES = {
+    ("core-switch", "TwentyFiveGigE1/2/0/1"): {
+        "label": "Link to Stellar Cyber Sensor",
+        "down_is_fault": False,
+    },
+}
+
 # volume filter for windows_logical_disk queries -- mirrors generate_report.py's own _VOL
 # (kept as a local literal rather than importing gr._VOL: that name is a generate_report.py
 # implementation detail, not something this module should depend on staying named that).
@@ -854,9 +1350,31 @@ def _windows_metrics(only: Optional[set] = None) -> Dict[str, dict]:
     # Health Service Get-ClusterPerf", cluster-specific, no equivalent for a standalone DC) --
     # this one is "CPU load percent via WMI (perflib workaround)", the generic non-cluster
     # equivalent, which is why Root DCs need this metric instead of that one.
-    cpu = {r["labels"]["instance"]: r["value"]
-          for r in q("wmi_workaround_cpu_load_percent")
-          if r["labels"].get("instance")}
+    # Per-INSTANCE fallback (2026-09-17, on request: "how come we have no readings for cpu in
+    # stand alone servers" -- confirmed live: the 3 new Standalone Servers/RTGS DB hosts don't
+    # publish wmi_workaround_cpu_load_percent at all, and this function had no fallback for a
+    # host without it, unlike _hci_node_metrics' own per-node gauge/standard merge). Every
+    # instance still PREFERS the workaround gauge where published (Root DCs' own standard
+    # counter is confirmed broken there, see the comment above), but an instance without it
+    # now falls back to the plain standard counter instead of reading no data forever --
+    # confirmed live on these 3 hosts the standard counter reads a normal, plausible value
+    # (0.2-0.3%), so nothing here suggests THEIR counter is broken the way Root DCs' is.
+    workaround_cpu = {r["labels"]["instance"]: r["value"]
+                      for r in q("wmi_workaround_cpu_load_percent")
+                      if r["labels"].get("instance")}
+    # Same per-core/aggregate-series split and negative-reading guard as _hci_node_metrics'
+    # own "standard" path -- see that function's own comment for why both are needed.
+    std_per_core = {r["labels"]["instance"]: r["value"]
+                    for r in q(f'100 - (avg by (instance) (rate(windows_cpu_time_total'
+                              f'{{mode="idle", core!=""}}[{RATE_WINDOW}])) * 100)')
+                    if r["labels"].get("instance")}
+    std_aggregate = {r["labels"]["instance"]: r["value"]
+                     for r in q(f'100 - (avg by (instance) (rate(windows_cpu_time_total'
+                               f'{{mode="idle", core=""}}[{RATE_WINDOW}])) * 100)')
+                     if r["labels"].get("instance")}
+    standard_cpu = {**std_aggregate, **std_per_core}
+    standard_cpu = {inst: v for inst, v in standard_cpu.items() if v >= 0}
+    cpu = {**standard_cpu, **workaround_cpu}
     mem = {r["labels"]["instance"]: r["value"]
           for r in q("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)")
           if r["labels"].get("instance")}
@@ -1048,7 +1566,7 @@ _CLUSTER_RESOURCE_STATE = {-1: "unknown", 0: "inherited", 1: "initializing", 2: 
                           130: "offline pending"}
 
 
-def _hci_node_metrics() -> Dict[str, dict]:
+def _hci_node_metrics(job: str = "hci_cluster") -> Dict[str, dict]:
     """Per-node CPU/RAM/disk/network/latency for every HCI Cluster node -- queried by JOB
     ("hci_cluster" has 4 targets, see prometheus.yml), not by a single DEVICES target, so it
     naturally covers whichever nodes are actually reporting. up{job="hci_cluster"} names all
@@ -1076,26 +1594,64 @@ def _hci_node_metrics() -> Dict[str, dict]:
 
     up: Dict[str, float] = {}
     display: Dict[str, str] = {}
-    for r in q('up{job="hci_cluster"}'):
+    for r in q(f'up{{job="{job}"}}'):
         inst = r["labels"].get("instance")
         if not inst:
             continue
         up[inst] = r["value"]
         display[inst] = r["labels"].get("display", inst)
 
-    # windows_hci_cpu_usage_percent, NOT windows_cpu_time_total's rate() (2026-09-08, on
+    # Per-INSTANCE, not per-cluster (2026-09-17: was a per-cluster cpu_source switch on this
+    # function until confirmed live that Disaster Recovery Cluster is a partial rollout, not
+    # an all-or-nothing split -- node1/node2 (.111/.112) now publish windows_hci_cpu_usage_
+    # percent while node3/node4 (.113/.114) still don't). So every node that publishes the
+    # gauge uses it, and every node that doesn't falls back to the standard counter below --
+    # whichever a given instance actually has, checked at merge time, not decided in advance
+    # per device/cluster.
+    #
+    # windows_hci_cpu_usage_percent: NOT windows_cpu_time_total's rate() (2026-09-08, on
     # request, after confirming live: the idle-time counter reads garbage on these nodes --
     # 40.96% and even NEGATIVE values (-1.66%, -2.01%) on real nodes at the same instant this
-    # gauge read 23.03% -- a wmi_workaround_metrics.prom textfile collector now publishes CPU
-    # usage directly for HCI nodes specifically, sidestepping whatever breaks the standard
-    # counter in this clustered/virtualized context. A gauge, so read as-is, no rate() --
-    # unlike windows_cpu_time_total, this already IS the usage percentage. Rolling out node by
-    # node (only node2 publishing it at the time of this fix): `.get(inst)` -> None for a node
-    # that hasn't started publishing yet, same "no data" rather than a stale/fabricated
-    # reading every other None-on-absence value in this function already means.
-    cpu = {r["labels"]["instance"]: r["value"]
-          for r in q("windows_hci_cpu_usage_percent")
-          if r["labels"].get("instance")}
+    # gauge read 23.03% -- a wmi_workaround_metrics.prom textfile collector (HCI Cluster) or
+    # Get-ClusterPerf (Disaster Recovery Cluster, confirmed live 2026-09-17) publishes CPU
+    # usage directly, sidestepping whatever breaks the standard counter in this clustered/
+    # virtualized context. A gauge, so read as-is, no rate() -- unlike windows_cpu_time_total,
+    # this already IS the usage percentage. Preferred wherever present.
+    gauge = {r["labels"]["instance"]: r["value"]
+            for r in q("windows_hci_cpu_usage_percent")
+            if r["labels"].get("instance")}
+    # windows_cpu_time_total publishes in TWO shapes per instance on this cluster, confirmed
+    # live (2026-09-16, tracking down a node reading -23% CPU): 80 individual per-core series
+    # (core="0,0", core="0,1", ...) AND a separate aggregate series with an EMPTY core=""
+    # label (a WMI "_Total" pseudo-instance). Averaging across both shapes together, as a bare
+    # `mode="idle"` selector does, mixes two different measurements of the same thing, which is
+    # never correct even when (as tested) the numeric effect is usually small (the 80 per-core
+    # series heavily outnumber the one aggregate series). The negative reading itself turned
+    # out to be a separate, genuine counter-reset rate() artifact on a node that publishes ONLY
+    # the aggregate series (no per-core breakdown at all) -- re-querying minutes later, it had
+    # already resolved to a normal positive value. Prefer the per-core average (core!="") where
+    # a node publishes it; fall back to the aggregate (core="") only for a node like that one,
+    # which has nothing else.
+    #
+    # The per-core breakdown itself turned out to be INTERMITTENT, not just absent for one node
+    # (2026-09-16, re-checking the same instance minutes apart: 80 per-core series one query,
+    # zero the next) -- so the aggregate-series fallback above keeps getting exercised for a
+    # node that normally has per-core data too, precisely when that aggregate series is ALSO
+    # the one glitching negative. A negative CPU% is physically impossible regardless of which
+    # series produced it, so it's dropped here rather than shown -- "no reliable reading this
+    # cycle" (None, the same convention every other gap in this function already uses), not a
+    # fabricated number. Only used as a fallback for an instance with no gauge reading at all.
+    per_core = {r["labels"]["instance"]: r["value"]
+               for r in q(f'100 - (avg by (instance) (rate(windows_cpu_time_total'
+                         f'{{job="{job}", mode="idle", core!=""}}[{RATE_WINDOW}])) * 100)')
+               if r["labels"].get("instance")}
+    aggregate = {r["labels"]["instance"]: r["value"]
+                for r in q(f'100 - (avg by (instance) (rate(windows_cpu_time_total'
+                          f'{{job="{job}", mode="idle", core=""}}[{RATE_WINDOW}])) * 100)')
+                if r["labels"].get("instance")}
+    standard = {**aggregate, **per_core}   # per_core wins wherever both exist
+    standard = {inst: v for inst, v in standard.items() if v >= 0}
+    cpu = {**standard, **gauge}   # gauge wins wherever an instance publishes it
     mem = {r["labels"]["instance"]: r["value"]
           for r in q("100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)")
           if r["labels"].get("instance")}
@@ -1166,6 +1722,86 @@ def _hci_node_metrics() -> Dict[str, dict]:
             },
         }
     return out
+
+
+_TIB = 1024 ** 4   # 1099511627776 -- TiB, not decimal TB, matching windows_exporter's own
+                    # binary-byte convention everywhere else in this module (GB conversions
+                    # above all divide by 1024, not 1000).
+
+
+def _hci_cluster_volumes(job: str = "hci_cluster") -> list[dict]:
+    """One row per real Cluster Shared Volume (2026-09-14) -- the THIRD attempt at this same
+    table, corrected twice the same day:
+      1st: windows_hci_physicaldisk_capacity_total_bytes/_used_bytes -- wrong metric, the raw
+           PHYSICAL DISK POOL (includes resiliency/parity overhead), not what admins asked for.
+      2nd: windows_hci_volume_size_total_bytes/_available_bytes -- closer (a real volume-level
+           figure), but still only ONE aggregate row for what is actually several distinct
+           CSVs, hiding which specific volume is under pressure.
+      3rd (this one): windows_hci_csv_volume_size_bytes/_size_remaining_bytes/_used_percent,
+           keyed by the `volume` label (e.g. "HRE-HCI-VOL-01") -- one row per ACTUAL volume,
+           confirmed live: 4 distinct volumes, distinct sizes, distinct usage.
+
+    Queried by JOB, not by a specific instance (on request: "they are scraped from one HCI node
+    but apply cluster-wide") -- whichever node in THIS cluster's job currently answers speaks
+    for that whole cluster, the same reasoning _windows_cluster_metrics' own mscluster queries
+    already use. The job filter itself was added 2026-09-16, when a second cluster (Disaster
+    Recovery Cluster) started publishing the same CSV volume metrics -- an unscoped query would
+    have silently merged both clusters' volumes into one list with no way to tell them apart.
+
+    Rows enumerated from windows_hci_csv_volume_size_bytes' own `volume` label values (on
+    request), sorted by volume name ascending. used_percent is read directly from its own
+    metric, not derived from size/remaining (they're independent readings; using the metric
+    that's actually FOR this is more honest than a derived approximation), rounded to the
+    nearest integer per the requested display format. `band` (green <85% / amber 85-90% / red
+    >=90%, matching chip_colors' own bands -- on request, 2026-09-14: "thresholds not applied
+    to cluster storage" after chip_colors moved to this same 85/90 split but this table's own
+    separate band computation was missed) is decided here, not in the renderer -- see
+    ClusterVolumeRow's own docstring for why that split is used throughout this report.
+
+    Returns [] when the metric isn't published by anything reachable right now, same "don't
+    fabricate a row from data that isn't there" rule every other HCI table in this module
+    follows.
+
+    Excludes "ClusterPerformanceHistory" (2026-09-17, confirmed live on both clusters: ~16GB,
+    ~26% used) -- Failover Clustering's own hidden performance-history database, auto-created
+    on every S2D/HCI cluster, not a data volume anyone provisioned. Its real size is 3+ orders
+    of magnitude below the actual data volumes sitting next to it in this table, which at this
+    table's 1-decimal TB rounding reads as a confusing all-"0.0 TB" row -- not broken data, just
+    never a capacity-planning target, so it doesn't belong in an admin-facing storage table."""
+    _EXCLUDED_VOLUMES = {"ClusterPerformanceHistory"}
+    prom, _ = _prometheus()
+
+    def q(expr):
+        try:
+            return prom.query(expr)
+        except Exception:                   # noqa: BLE001
+            return []
+
+    size_by_vol = {r["labels"]["volume"]: r["value"]
+                  for r in q(f'windows_hci_csv_volume_size_bytes{{job="{job}"}}')
+                  if r["labels"].get("volume")}
+    remaining_by_vol = {r["labels"]["volume"]: r["value"]
+                       for r in q(f'windows_hci_csv_volume_size_remaining_bytes{{job="{job}"}}')
+                       if r["labels"].get("volume")}
+    used_pct_by_vol = {r["labels"]["volume"]: r["value"]
+                      for r in q(f'windows_hci_csv_volume_used_percent{{job="{job}"}}')
+                      if r["labels"].get("volume")}
+
+    rows = []
+    for vol in sorted(size_by_vol):
+        if vol in _EXCLUDED_VOLUMES:
+            continue
+        if vol not in remaining_by_vol or vol not in used_pct_by_vol:
+            continue
+        total_tb = size_by_vol[vol] / _TIB
+        remaining_tb = remaining_by_vol[vol] / _TIB
+        used_pct = round(used_pct_by_vol[vol])
+        band = "red" if used_pct >= 90 else "amber" if used_pct >= 85 else "green"
+        rows.append({
+            "volume": vol, "total_tb": total_tb, "remaining_tb": remaining_tb,
+            "used_tb": max(0.0, total_tb - remaining_tb), "used_pct": used_pct, "band": band,
+        })
+    return rows
 
 
 def _windows_cluster_metrics(only: Optional[set] = None) -> Dict[str, dict]:
@@ -1356,9 +1992,24 @@ def _windows_device_flags(dev: dict, m: dict, cluster: Optional[dict] = None,
                                     "red", "unreachable"))
             disc = net.get("disc_in", 0) + net.get("disc_out", 0)
             if disc >= _NODE_DISC_RED:
+                # band="note", not "amber" (2026-09-21, on request, after a screenshot showing
+                # this still reading as a "4 warning" badge on the interactive review screen --
+                # "cluster report generator still views the discards as warnings") -- the xlsx
+                # side of this (the NODE NETWORK DISCARDS banner, _infra_notes' own tally) was
+                # already fixed to treat this as a note, not a warning, but that fix worked by
+                # excluding the flag by KEY, leaving its band untouched -- so every OTHER
+                # consumer of a plain SystemVM (this review screen's own "N warning" chip and
+                # per-row colour, any dashboard tile that counts flags by band) never got the
+                # memo, since none of them go through _infra_notes at all. Fixing the band at
+                # the SOURCE instead of chasing every individual display is what actually makes
+                # this a note everywhere at once: SystemVM.red/.amber both check band by exact
+                # string match ("red"/"amber"), so "note" falls out of both automatically, no
+                # per-consumer special-casing needed. Confirmed harmless to alert eligibility --
+                # severity_meets() already returned False for this flag either way (category
+                # "unreachable" only ever qualifies via band=="red", never amber).
                 flags.append(FlagVM(f"node_net_disc:{target}",
                                     f"{label} · {disc:.0f} discard(s) in the last {RATE_WINDOW}",
-                                    "amber", "unreachable"))
+                                    "note", "unreachable"))
             lat = n.get("latency") or {}
             worst_ms = max((v for v in (lat.get("read_ms"), lat.get("write_ms")) if v is not None), default=None)
             if worst_ms is not None and worst_ms >= _NODE_LATENCY_AMBER_MS:
@@ -1535,6 +2186,100 @@ def device_inventory() -> list:
 #  band for a metric that is not polled — an amber row for "CPU unknown" would put a fault on
 #  screen that no measurement supports.
 # =======================================================================================
+def _update_interface_baseline(interfaces: list, scoped_keys: set,
+                               exempt_from_regression: Optional[set] = None, now=None) -> set:
+    """Upserts MonitoredInterface for every interface this collect() call just observed, and
+    returns {(device, if_index), ...} for interfaces that are baseline-monitored (have been
+    seen up before), SCOPED (see below), but are DOWN right now -- a genuine regression, not
+    just "currently down" (see MonitoredInterface's own docstring for the "seen up once ->
+    monitored for good" rule). Consumed by _device_flags() to turn a regression into a real
+    red finding.
+
+    `scoped_keys` -- {(device, if_index), ...} CDP currently identifies as an AP/uplink/
+    neighbour link (2026-09-23, on request: "we only want to monitor these interfaces not all
+    of them"), UNIONED with any manually monitored port (see MANUAL_MONITORED_INTERFACES,
+    2026-09-24). Sets MonitoredInterface.is_scoped=True (sticky, never unset -- see its own
+    field comment) the first time a port appears here; a port's own CDP entry disappearing
+    once it actually goes down is expected, not a reason to stop flagging it, so `regressed`
+    is filtered by the STORED is_scoped flag, not by membership in this run's own
+    `scoped_keys` (which would have already lost the very port that just failed).
+
+    `exempt_from_regression` (2026-09-24) -- {(device, if_index), ...} that must NEVER count
+    as a regression regardless of is_scoped/currently_up, e.g. a SPAN/mirror destination port
+    whose ifOperStatus reads unreliably "down" by design (see MANUAL_MONITORED_INTERFACES'
+    own comment) -- there is no fault to detect there, so raising one every single run would
+    be a permanent false alarm, not a real finding.
+
+    A manually scoped port that has NEVER been seen up (the SPAN-port case above -- its true
+    state cannot read as "up" the normal way) still gets its own MonitoredInterface row
+    created here, scoped, the first time it's observed -- otherwise it would never appear in
+    Interface Detail at all, silently contradicting "add span port" (see the `elif
+    newly_scoped:` branch below). A CDP-scoped port never hits that branch, because a CDP
+    neighbour only exists while its link is actually up.
+
+    A device/port collect() did not observe this run (e.g. the device was unreachable, so it
+    contributed no interface rows at all) is left untouched here -- absence means "we don't
+    know", not "it went down", which is exactly why an unreachable device already gets its own
+    snmp_down/snmp_unscraped flag instead of a wave of false interface-down regressions.
+    """
+    from django.utils import timezone
+
+    from .models import MonitoredInterface
+
+    now = now or timezone.now()
+    exempt_from_regression = exempt_from_regression or set()
+    rows = [i for i in interfaces if i.get("device") and i.get("index") is not None]
+    if not rows:
+        return set()
+
+    devices = {i["device"] for i in rows}
+    existing = {(m.device, m.if_index): m
+               for m in MonitoredInterface.objects.filter(device__in=devices)}
+
+    to_create, to_update, regressed = [], [], set()
+    for i in rows:
+        key = (i["device"], str(i["index"]))
+        row = existing.get(key)
+        newly_scoped = key in scoped_keys
+        if i["up"]:
+            if row is None:
+                to_create.append(MonitoredInterface(
+                    device=i["device"], if_index=str(i["index"]), if_name=i["name"],
+                    first_seen_up_at=now, last_seen_up_at=now, last_checked_at=now,
+                    currently_up=True, is_scoped=newly_scoped))
+            else:
+                row.currently_up = True
+                row.last_seen_up_at = now
+                row.last_checked_at = now
+                row.if_name = i["name"]
+                if newly_scoped and not row.is_scoped:
+                    row.is_scoped = True
+                to_update.append(row)
+        elif row is not None:
+            if newly_scoped and not row.is_scoped:
+                row.is_scoped = True
+            if row.is_scoped and key not in exempt_from_regression:
+                regressed.add(key)
+            row.currently_up = False
+            row.last_checked_at = now
+            to_update.append(row)
+        elif newly_scoped:
+            # A manually scoped port with no existing row, observed down (see the docstring's
+            # SPAN-port paragraph) -- create it scoped so it appears in Interface Detail, but
+            # never as a regression: there is no PRIOR "up" baseline for it to regress from.
+            to_create.append(MonitoredInterface(
+                device=i["device"], if_index=str(i["index"]), if_name=i["name"],
+                first_seen_up_at=now, last_seen_up_at=now, last_checked_at=now,
+                currently_up=False, is_scoped=True))
+
+    if to_create:
+        MonitoredInterface.objects.bulk_create(to_create)
+    if to_update:
+        MonitoredInterface.objects.bulk_update(
+            to_update, ["currently_up", "last_seen_up_at", "last_checked_at", "if_name", "is_scoped"])
+    return regressed
+
+
 def _device_flags(dev: dict, data: dict) -> list:
     """The flagged items for one device, worst first.
 
@@ -1544,7 +2289,6 @@ def _device_flags(dev: dict, data: dict) -> list:
     from .services import FlagVM
 
     flags = []
-    ifaces = [i for i in data["interfaces"] if i["device"] == dev["target"]]
 
     if not dev.get("known"):
         flags.append(FlagVM("snmp_unscraped", f"{dev['name']} has never been scraped by Prometheus",
@@ -1552,34 +2296,31 @@ def _device_flags(dev: dict, data: dict) -> list:
     elif not dev.get("reachable"):
         flags.append(FlagVM("snmp_down", f"{dev['name']} is not answering SNMP", "red", "unreachable"))
 
-    down = [i for i in ifaces if not i["up"]]
-    if down:
-        # With ifAdminStatus collected, a port an admin deliberately shut is no longer
-        # indistinguishable from one that failed — which is the whole point of the metric.
-        # Only the enabled-but-not-up ports are a fault; the shut ones are a decision, and
-        # reporting them as incidents daily is how a report teaches people to ignore it.
-        failed = [i for i in down if i["admin_up"] is True]
-        shut = [i for i in down if i["admin_up"] is False]
-        if failed:
-            flags.append(FlagVM(
-                "links_failed",
-                f"{len(failed)} interface(s) are enabled but not up — "
-                + ", ".join(i["name"] for i in failed[:6])
-                + ("…" if len(failed) > 6 else ""),
-                "red", "service"))
-        if shut and not failed:
-            flags.append(FlagVM(
-                "links_shut",
-                f"{len(shut)} of {len(ifaces)} interfaces are administratively shut "
-                f"(a deliberate decision, not a fault)",
-                "amber", "service"))
-        if not failed and not shut:
-            # admin status unknown for these — say so rather than guessing either way
-            flags.append(FlagVM(
-                "links_down",
-                f"{len(down)} of {len(ifaces)} interfaces are not up "
-                f"(admin status is not collected, so shut ports cannot be told from failed ones)",
-                "amber", "service"))
+    # A down port is NOT flagged just for being down (2026-09-22, on request: "don't manage/
+    # monitor all interfaces — only interfaces currently up... admin-disabled ports aren't a
+    # finding") -- an admin-disabled port (an unused wall jack, a spare uplink) is a decision,
+    # not a fault, and no reliable signal short of ifAdminStatus tells the two apart here (see
+    # the retired links_failed/links_shut/links_down flags this replaced -- ifAdminStatus is
+    # confirmed absent from this vendor's SNMP module, not just unread).
+    #
+    # A port that HAS been seen up before, though, and is down NOW, is a real regression
+    # (2026-09-23, on request: "take a snapshot of all currently on interfaces and monitor
+    # them... if any of these at any given point goes down now it's a problem"). The baseline
+    # that distinguishes the two -- MonitoredInterface, updated by _update_interface_baseline()
+    # every time collect() runs for this estate -- is looked up here, not re-derived: this is
+    # the one place that baseline turns into a finding, so the report, the banners, and the
+    # occurrence log it feeds the alert poller all agree on what counts as a regression.
+    dev_regressed = [idx for (tgt, idx) in (data.get("interface_regressions") or set())
+                     if tgt == dev["target"]]
+    if dev_regressed:
+        name_by_idx = {str(i["index"]): i["name"] for i in data.get("interfaces", [])
+                       if i["device"] == dev["target"]}
+        names = sorted(name_by_idx.get(idx, idx) for idx in dev_regressed)
+        flags.append(FlagVM(
+            "interface_down_regression",
+            f"{len(dev_regressed)} interface(s) that were previously up are now down — "
+            + ", ".join(names[:6]) + ("…" if len(names) > 6 else ""),
+            "red", "service"))
 
     # The counter-width problem is a defect in the MEASUREMENT, and belongs on the report as
     # one — an admin reading these numbers has to know they are a floor.
@@ -1592,20 +2333,29 @@ def _device_flags(dev: dict, data: dict) -> list:
             "amber", "untracked"))
 
     # ---- hardware, once the vendor module is scraped -------------------------------
-    if data.get("cpu_pct") is not None and data["cpu_pct"] >= 80:
-        flags.append(FlagVM("cpu_high", f"CPU at {data['cpu_pct']:.0f}% (5-minute average)",
-                            "red" if data["cpu_pct"] >= 90 else "amber", "cpu"))
-    if data.get("mem_pct") is not None and data["mem_pct"] >= 80:
-        flags.append(FlagVM("mem_high", f"Memory at {data['mem_pct']:.0f}% in use",
-                            "red" if data["mem_pct"] >= 90 else "amber", "ram"))
-    if data.get("temp_max") is not None and data["temp_max"] >= 60:
-        flags.append(FlagVM("temp_high", f"Hottest sensor reading {data['temp_max']:.0f}°C",
-                            "red" if data["temp_max"] >= 75 else "amber", "unreachable"))
-    if data.get("uptime_days") is not None and data["uptime_days"] < 1:
+    # Per-device dicts (cpu_by_device/mem_by_device/temp_by_device/uptime_by_device), keyed
+    # by dev["target"] -- NOT the old estate-wide cpu_pct/mem_pct/temp_max/uptime_days
+    # scalars, which are one number across every device collect() was asked about. Reading
+    # those scalars here was correct only by accident while there was exactly one device in
+    # scope; see collect()'s own comment on why (2026-09-22 fix).
+    dev_cpu = data.get("cpu_by_device", {}).get(dev["target"])
+    if dev_cpu is not None and dev_cpu >= 80:
+        flags.append(FlagVM("cpu_high", f"CPU at {dev_cpu:.0f}% (5-minute average)",
+                            "red" if dev_cpu >= 90 else "amber", "cpu"))
+    dev_mem = data.get("mem_by_device", {}).get(dev["target"])
+    if dev_mem is not None and dev_mem >= 80:
+        flags.append(FlagVM("mem_high", f"Memory at {dev_mem:.0f}% in use",
+                            "red" if dev_mem >= 90 else "amber", "ram"))
+    dev_temp = data.get("temp_by_device", {}).get(dev["target"])
+    if dev_temp is not None and dev_temp >= 60:
+        flags.append(FlagVM("temp_high", f"Hottest sensor reading {dev_temp:.0f}°C",
+                            "red" if dev_temp >= 75 else "amber", "unreachable"))
+    dev_uptime = data.get("uptime_by_device", {}).get(dev["target"])
+    if dev_uptime is not None and dev_uptime < 1:
         # A switch that has just rebooted is the single most useful thing on this page: it
         # explains every other anomaly on it.
         flags.append(FlagVM("recent_reboot",
-                            f"Device restarted {data['uptime_days'] * 24:.0f} hours ago",
+                            f"Device restarted {dev_uptime * 24:.0f} hours ago",
                             "red", "unreachable"))
     psu_failed = [r for r in data.get("psu_failed", [])
                  if r["labels"].get("instance") == dev["target"]]
@@ -1623,25 +2373,29 @@ def _device_flags(dev: dict, data: dict) -> list:
             f"{len(ospf_down)} of {data.get('ospf_total', 0)} OSPF neighbour(s) not Full "
             f"(stuck below the 2-Way/Full states)",
             "red", "service"))
-    optics_critical = [o for o in data.get("optics_critical", []) if o["instance"] == dev["target"]]
-    if optics_critical:
-        worst = min(optics_critical, key=lambda o: o["dbm"])
+    # Same 85%/95% split as the flash_low/flash_critical tiles below and the systems
+    # report's own disk_high() -- a storage partition running out is a real outage risk
+    # (a switch that cannot write its own crashinfo/config), not just a space nag.
+    dev_flash_critical = [p for p in data.get("flash_critical", []) if p["device"] == dev["target"]]
+    if dev_flash_critical:
+        worst = max(dev_flash_critical, key=lambda p: p["used_pct"])
         flags.append(FlagVM(
-            "optics_critical",
-            f"{len(optics_critical)} receive optic(s) AT or BELOW a typical SFP sensitivity "
-            f"floor ({data.get('optics_rx_min_dbm', 0):.0f} dBm) — worst {worst['name']} at "
-            f"{worst['dbm']:.2f} dBm — this link is expected to be dropping frames now",
-            "red", "service"))
-    optics_low = [o for o in data.get("optics_low", []) if o["instance"] == dev["target"]]
-    if optics_low:
-        worst = min(optics_low, key=lambda o: o["dbm"])
-        flags.append(FlagVM(
-            "optics_low",
-            f"{len(optics_low)} receive optic(s) within 3 dB of a typical SFP sensitivity "
-            f"floor ({data.get('optics_rx_min_dbm', 0):.0f} dBm) — worst {worst['name']} at "
-            f"{worst['dbm']:.2f} dBm",
-            "amber", "service"))
-
+            "flash_storage_critical",
+            f"{len(dev_flash_critical)} storage partition(s) at or above 95% used — worst "
+            f"{worst['name']} at {worst['used_pct']:.0f}%",
+            "red", "disk"))
+    else:
+        # Excludes anything already >=95% -- that's the critical branch above, not counted
+        # twice (same non-overlapping pattern err_only/discard_heavy/disc_light use above).
+        dev_flash_watch = [p for p in data.get("flash_low", []) if p["device"] == dev["target"]
+                          and p not in dev_flash_critical]
+        if dev_flash_watch:
+            worst = max(dev_flash_watch, key=lambda p: p["used_pct"])
+            flags.append(FlagVM(
+                "flash_storage_low",
+                f"{len(dev_flash_watch)} storage partition(s) at or above 85% used — worst "
+                f"{worst['name']} at {worst['used_pct']:.0f}%",
+                "amber", "disk"))
     # ---- interface health, once the counters are collected --------------------------
     # >=95% is not "worth watching" — it is where real links start dropping packets.
     sat_critical = [i for i in data.get("saturated_critical", []) if i["device"] == dev["target"]]
@@ -1691,11 +2445,12 @@ def _device_flags(dev: dict, data: dict) -> list:
             f"confirming rather than assuming a fault",
             "amber", "service"))
 
-    missing = [m["name"] for m in data.get("catalogue", CATALOGUE) if m["state"] == "missing"]
+    catalogue = data.get("catalogue", CATALOGUE)
+    missing = [m["name"] for m in catalogue if m["state"] == "missing"]
     if missing:
         flags.append(FlagVM(
             "metrics_missing",
-            f"{len(missing)} of {len(CATALOGUE)} requested metrics are not collected: "
+            f"{len(missing)} of {len(catalogue)} requested metrics are not collected: "
             + ", ".join(missing[:4]) + ("…" if len(missing) > 4 else ""),
             "amber", "untracked"))
     return flags
@@ -1844,12 +2599,15 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
                    "sub": f"across {len(reporting)} reporting node(s)",
                    "state": "bad" if avg_mem > 80 else "warn"}
             (cluster_immediate if avg_mem > 80 else cluster_watch).append(tile)
-        used_gb = sum(d.get("size", 0) * (d.get("used") or 0) / 100 for n in reporting for d in n.get("disks", [])
-                      if d.get("size") is not None)
-        total_gb = sum(d.get("size", 0) for n in reporting for d in n.get("disks", []) if d.get("size") is not None)
-        if total_gb:
-            cluster_glance.append({"label": "Cluster storage", "value": f"{used_gb:.0f} / {total_gb:.0f} GB",
-                                   "sub": "used | total, summed across nodes", "state": "info"})
+        # No dashboard tile for cluster/volume storage here (2026-09-14, on request: removed,
+        # not replaced with a tile) -- the real figures are now the per-volume "Cluster
+        # Storage Volumes" table in the Infrastructure Report (see build_infrastructure_
+        # report's own HCI section, fed by _hci_cluster_volumes). A single glance/immediate
+        # tile can't represent several independent CSVs without collapsing exactly the
+        # per-volume detail that table exists to show, and this screen is tiles-only by
+        # design (see this function's own module docstring) -- so this dashboard simply
+        # doesn't attempt a cluster storage figure any more, rather than showing another
+        # placeholder aggregate.
         total_in = sum((n.get("net") or {}).get("in_bps", 0) for n in reporting)
         total_out = sum((n.get("net") or {}).get("out_bps", 0) for n in reporting)
         cluster_glance.append({"label": "Cluster throughput in", "value": _fmt_bps(total_in),
@@ -1932,6 +2690,151 @@ def _network_overview(data: dict, devices: list, win_metrics: Optional[list] = N
     }
 
 
+def _switches_routers_overview(data: dict, devices: list) -> dict:
+    """The Switches & Routers Report's own dashboard tiles -- a separate function from
+    _network_overview (which stays exactly as it is, unchanged, for the long-standing Network
+    Report tile) for the same reason _infra_overview is its own function: a genuinely
+    different device set deserves tiles computed over THAT set, not a shared function
+    branching on estate. Unlike _infra_overview, though, the underlying DATA shape here is
+    identical to _network_overview's own (both read collect()'s SNMP-shaped dict) -- PSU/
+    OSPF/optics/saturation/errors/discards tiles below are lifted near-verbatim from
+    _network_overview, since data["psu_failed"]/["ospf_down"]/etc. already come back scoped
+    to exactly `devices` (collect() was called with only=switches_routers_device_keys()).
+
+    CPU/Memory/Temperature are the one place this deliberately does NOT mirror
+    _network_overview: that function's cpu_pct/mem_pct are a single scalar across whatever
+    collect() was asked about, correct only because the Network Report's own SNMP estate is
+    exactly one device. Here, with 38 devices, the per-device dicts collect() now also
+    returns (cpu_by_device/mem_by_device/temp_by_device -- see collect()'s own 2026-09-22
+    comment) are used instead, so "N devices over threshold" is a real per-device count.
+    """
+    unreachable = [d for d in devices if d.get("known") and not d.get("reachable")]
+    unscraped = [d for d in devices if not d.get("known")]
+    dev_total = len(devices)
+    iface_total = data["iface_count"]
+    # Every interface-shaped tile below reads "N | monitored_total", not "N | iface_total"
+    # (2026-09-23, on request: "we only want to monitor these interfaces not all of them...
+    # uplink, accesspoint, links going to other switches" -- narrower than the previous
+    # up-only scope from 2026-09-22, kept as the earlier step in the same direction). collect()
+    # itself now only populates saturated/err_only/discard_heavy/disc_light from `monitored`
+    # interfaces (see its own comment) -- up AND CDP-identified as an AP/uplink/neighbour
+    # link -- so this is just using the matching denominator: a port that's up but has no
+    # CDP-identified purpose was never a candidate for any of these findings in the first
+    # place, and counting it in the total would make a fully healthy monitored-interface
+    # estate read as though some fraction of it were unaccounted for.
+    monitored_total = data.get("monitored_count", 0)
+    # data["catalogue"] (not the bare global CATALOGUE) -- collect() already filtered it by
+    # report_kind (2026-09-24), so a report that drops entries via skip_for (e.g. Core
+    # Switches dropping BGP/Active connections/Connected devices) doesn't still count them
+    # toward "N metrics not collected" here.
+    catalogue = data.get("catalogue", CATALOGUE)
+    missing = sum(1 for m in catalogue if m["state"] == "missing")
+    psu_failed, psu_total = len(data.get("psu_failed", [])), data.get("psu_total", 0)
+    ospf_down_n, ospf_total = len(data.get("ospf_down", [])), data.get("ospf_total", 0)
+    flash_total = len(data.get("flash_partitions", []))
+    flash_critical_n = len(data.get("flash_critical", []))
+    # Non-overlapping with flash_critical_n -- same pattern _device_flags' own
+    # flash_storage_low/flash_storage_critical split uses.
+    flash_watch_n = len(data.get("flash_low", [])) - flash_critical_n
+    sat_n = len(data.get("saturated", []))
+    sat_critical_n = len(data.get("saturated_critical", []))
+    err_only_n = len(data.get("err_only", []))
+    discard_heavy_n = len(data.get("discard_heavy", []))
+    disc_light_n = len(data.get("disc_light", []))
+    bad = lambda n: "good" if not n else "bad"
+    warn = lambda n: "good" if not n else "warn"
+
+    targets = [d["target"] for d in devices]
+    cpu_by_device = data.get("cpu_by_device") or {}
+    mem_by_device = data.get("mem_by_device") or {}
+    temp_by_device = data.get("temp_by_device") or {}
+    cpu_vals = [cpu_by_device[t] for t in targets if t in cpu_by_device]
+    mem_vals = [mem_by_device[t] for t in targets if t in mem_by_device]
+    temp_vals = [temp_by_device[t] for t in targets if t in temp_by_device]
+    cpu_over = sum(1 for v in cpu_vals if v >= 80)
+    mem_over = sum(1 for v in mem_vals if v >= 80)
+    temp_over = sum(1 for v in temp_vals if v >= 60)
+    cpu_state = "bad" if any(v >= 90 for v in cpu_vals) else warn(cpu_over)
+    mem_state = "bad" if any(v >= 90 for v in mem_vals) else warn(mem_over)
+    temp_state = "bad" if any(v >= 75 for v in temp_vals) else warn(temp_over)
+
+    # Interfaces that were previously up (baseline-monitored) and are down right now -- a
+    # genuine regression, not just "currently down" (see _update_interface_baseline's own
+    # docstring and _device_flags' matching comment). monitored_total + regressed_n is this
+    # run's own view of "everything the baseline currently knows to be monitored" --
+    # currently-monitored plus currently-down-but-monitored, so the denominator reads as a
+    # real total, not a guess.
+    regressed_n = len(data.get("interface_regressions") or set())
+
+    fully_dark = dev_total > 0 and (len(unreachable) + len(unscraped)) >= dev_total
+    if fully_dark:
+        accuracy = {"label": "Throughput accuracy", "value": "No data",
+                   "sub": "every device unreachable — see above", "state": "info"}
+    else:
+        accuracy = {
+            "label": "Throughput accuracy",
+            "value": "Accurate" if data.get("counters_are_64bit") else "Understated",
+            "sub": ("64-bit counters" if data.get("counters_are_64bit")
+                    else "32-bit counters — wrap and lose data on a fast link"),
+            "state": "info" if data.get("counters_are_64bit") else "warn",
+        }
+
+    return {
+        "glance": [
+            {"label": "Devices", "value": dev_total, "state": "info"},
+            {"label": "Interfaces monitored", "value": f"{monitored_total} | {iface_total}",
+             "sub": "monitored | total", "state": "info"},
+            # ↓ IN / ↑ OUT (2026-09-22, on request: a clear visual distinction between
+            # inbound and outbound wherever the two appear together) -- the direction arrows
+            # are the marker; tile_band's own panel rendering keeps them in two separate
+            # sub-columns rather than one combined string, so they read as two numbers, not one.
+            {"label": "Throughput", "value": f"{data['total_in_text']} | {data['total_out_text']}",
+             "sub": "↓ IN | ↑ OUT", "state": "info"},
+            {"label": "MAC / ARP entries",
+             "value": f"{data.get('mac_count', 0)} | {data.get('arp_count', 0)}",
+             "sub": "entry count, not % of capacity", "state": "info"},
+        ],
+        "immediate": [
+            {"label": "Not responding", "value": f"{len(unreachable)} | {dev_total}",
+             "sub": "devices | total", "state": bad(len(unreachable))},
+            {"label": "Never monitored", "value": f"{len(unscraped)} | {dev_total}",
+             "sub": "devices | total", "state": bad(len(unscraped))},
+            {"label": "PSU / fan failed", "value": f"{psu_failed} | {psu_total}",
+             "sub": "failed | total", "state": bad(psu_failed)},
+            {"label": "OSPF adjacencies lost", "value": f"{ospf_down_n} | {ospf_total}",
+             "sub": "down | total", "state": bad(ospf_down_n)},
+            {"label": "Interfaces down (were up)",
+             "value": f"{regressed_n} | {monitored_total + regressed_n}",
+             "sub": "regressed | monitored total", "state": bad(regressed_n)},
+            {"label": "Interfaces with errors", "value": f"{err_only_n} | {monitored_total}",
+             "sub": "true errors | monitored", "state": bad(err_only_n)},
+            {"label": "Storage critical", "value": f"{flash_critical_n} | {flash_total}",
+             "sub": "partitions ≥95% used | total", "state": bad(flash_critical_n)},
+        ],
+        "watch": [
+            {"label": "High CPU", "value": f"{cpu_over} | {dev_total}",
+             "sub": "devices | total", "state": cpu_state},
+            {"label": "Storage low", "value": f"{flash_watch_n} | {flash_total}",
+             "sub": "partitions ≥85% used | total", "state": warn(flash_watch_n)},
+            {"label": "High Memory", "value": f"{mem_over} | {dev_total}",
+             "sub": "devices | total", "state": mem_state},
+            {"label": "High Temperature", "value": f"{temp_over} | {dev_total}",
+             "sub": "devices | total", "state": temp_state},
+            {"label": "At capacity", "value": f"{sat_n} | {monitored_total}",
+             "sub": "monitored ≥80% | monitored total",
+             "state": "bad" if sat_critical_n else warn(sat_n)},
+            {"label": "Heavy discards", "value": f"{discard_heavy_n} | {monitored_total}",
+             "sub": "monitored | monitored total", "state": bad(discard_heavy_n)},
+            {"label": "Some discards", "value": f"{disc_light_n} | {monitored_total}",
+             "sub": "monitored | monitored total", "state": warn(disc_light_n)},
+            {"label": "Metrics not collected", "value": f"{missing} | {len(catalogue)}",
+             "sub": "metrics | total requested", "state": warn(missing)},
+            accuracy,
+        ],
+        "banners": [],
+    }
+
+
 def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
                     hci_nodes: Dict[str, dict]) -> dict:
     """Infrastructure Admin's OWN dashboard tiles -- deliberately a separate function from
@@ -1954,7 +2857,7 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
     all_disks: List[float] = []
     components_total = components_down = 0
     for dev in win_devices:
-        if dev["key"] == "hci-cluster":
+        if dev.get("cluster"):
             continue
         m = wm.get(dev["target"], {"known": False, "reachable": False})
         components_total += 1
@@ -1971,10 +2874,11 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
                 if d.get("used") is not None:
                     all_disks.append(d["used"])
 
+    cluster_devices_here = [d for d in win_devices if d.get("cluster")]
     cluster_nodes = len(hci_nodes)
     cluster_nodes_down = sum(1 for n in hci_nodes.values() if not n.get("reachable"))
-    if hci_nodes or any(d["key"] == "hci-cluster" for d in win_devices):
-        components_total += cluster_nodes if cluster_nodes else 1
+    if hci_nodes or cluster_devices_here:
+        components_total += cluster_nodes if cluster_nodes else len(cluster_devices_here)
         components_down += cluster_nodes_down
     for n in hci_nodes.values():
         if not n.get("reachable"):
@@ -1992,7 +2896,6 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
             cres[k] += res.get(k, 0)
 
     storage_critical = sum(1 for u in all_disks if u >= 95)
-    storage_amber = sum(1 for u in all_disks if 85 <= u < 95)
     mem_critical = sum(1 for _, r in all_cpu_ram if r >= 95)
     mem_amber = sum(1 for _, r in all_cpu_ram if 80 <= r < 95)
     cpu_amber = sum(1 for c, _ in all_cpu_ram if c >= 80)
@@ -2008,14 +2911,15 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
     now = datetime.datetime.now()
 
     return {
-        # Same 6 inventory readings as the xlsx's own AT A GLANCE band, same formulas
-        # (devices_total/cluster_count/cluster_resources_total in build_infrastructure_report)
-        # -- informational, never a state color, so "info" throughout like _network_overview's
-        # own glance tiles use for the equivalent readings there.
+        # Cluster-only inventory readings (2026-09-16, on request: "remove the first 2 tiles in
+        # the at a glance section of this report and just leave cluster count cluster nodes
+        # etc." -- Devices/Components dropped). Same formulas as the xlsx's own AT A GLANCE
+        # band (devices_total/cluster_count/cluster_resources_total in
+        # build_infrastructure_report) for the readings that remain -- informational, never a
+        # state color, so "info" throughout like _network_overview's own glance tiles use for
+        # the equivalent readings there.
         "glance": [
-            {"label": "Devices", "value": len(win_devices), "state": "info"},
-            {"label": "Components", "value": components_total, "state": "info"},
-            {"label": "Cluster count", "value": 1 if hci_nodes else 0, "state": "info"},
+            {"label": "Cluster count", "value": len(cluster_devices_here), "state": "info"},
             {"label": "Cluster nodes", "value": cluster_nodes, "state": "info"},
             {"label": "Cluster resources", "value": sum(cres.values()), "state": "info"},
             {"label": "Last checked", "value": now.strftime("%H:%M"), "state": "info"},
@@ -2025,6 +2929,19 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
              "sub": "down | total", "state": _tone(components_down)},
             {"label": "Nodes down", "value": f"{cluster_nodes_down} | {cluster_nodes}",
              "sub": "down | total", "state": _tone(cluster_nodes_down)},
+            # "Storage critical" is now the ONE storage tile Infrastructure has, anywhere
+            # (2026-09-18, on request: "storage capacity and storage critical are the same
+            # metric... combine every occurrence and remove this redundancy", confirmed after
+            # a first pass only hid the duplicate on the exec dashboards: "infrastructure
+            # still views these as separate"). The watch-tier "Storage at capacity" tile that
+            # used to sit alongside this (>=85%, storage_amber + storage_critical -- i.e.
+            # ALWAYS including whatever's already counted here, unlike High memory's own
+            # amber-only, non-overlapping watch tile) is gone outright, not just re-scoped to
+            # exclude the overlap -- every caller that read "Storage at capacity" by name
+            # (the xlsx AT A GLANCE band, the AD+Cluster Health mailing template's own "High
+            # disk usage" merge) now reads "Storage critical" instead. The now-unused
+            # storage_amber (85-94% count) was dropped from this function entirely, not kept
+            # around -- nothing here reads it any more.
             {"label": "Storage critical", "value": f"{storage_critical} | {len(all_disks)}",
              "sub": "disks >=95% | total", "state": _tone(storage_critical)},
             {"label": "Memory critical", "value": f"{mem_critical} | {len(all_cpu_ram)}",
@@ -2035,9 +2952,6 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
              "sub": "nodes | total", "state": _watch_tone(cpu_amber + cpu_red, cpu_red)},
             {"label": "High memory", "value": f"{mem_amber} | {len(all_cpu_ram)}",
              "sub": "nodes | total", "state": _watch_tone(mem_amber, 0)},
-            {"label": "Storage at capacity", "value": f"{storage_amber + storage_critical} | {len(all_disks)}",
-             "sub": "disks >=85% | total",
-             "state": _watch_tone(storage_amber + storage_critical, storage_critical)},
             # Offline deliberately not tracked -- see _CLUSTER_RESOURCE_STATE's own comment
             # (mostly powered-off test/UAT/DR VMs, informational not a fault). Same reasoning
             # as the xlsx's own CLUSTER RESOURCES FAILED tile, kept in sync with it here.
@@ -2048,7 +2962,8 @@ def _infra_overview(wm: Dict[str, dict], win_devices: list, wc: Dict[str, dict],
     }
 
 
-def capture_snapshot(token: str, only: Optional[set] = None, infra: bool = False):
+def capture_snapshot(token: str, only: Optional[set] = None, infra: bool = False, *,
+                     mode: Optional[str] = None, report_kind: Optional[str] = None):
     """A Snapshot of the selected network devices, interchangeable with the systems one.
 
     SNMP devices (the switch) go through collect()'s machinery, which is SNMP-shaped
@@ -2057,20 +2972,39 @@ def capture_snapshot(token: str, only: Optional[set] = None, infra: bool = False
     _windows_metrics()/_windows_device_flags() and merged into the same systems list, so the
     report reads as one estate regardless of which mechanism actually measured each row.
 
-    `infra=True` swaps the dashboard tiles for _infra_overview's own set (matching the xlsx
-    Infrastructure Admin's report renders) instead of _network_overview's switch-oriented
-    ones -- Infrastructure Admin's own picker only ever offers windows-kind devices, so this
-    is always safe to pass from there; Network Admin's own call sites never pass it, so their
-    screen is completely unaffected.
+    `mode` picks which dashboard-tile function runs: `"network"` (default) is
+    _network_overview's own switch-oriented set (the long-standing Network Report tile),
+    `"infra"` is _infra_overview's (Infrastructure Admin's own windows-exporter estate),
+    `"switches_routers"` is _switches_routers_overview's (2026-09-22, the new Switches &
+    Routers Report -- correct per-device CPU/RAM/temperature over its own 38-device SNMP
+    estate, where _network_overview's single-scalar reading would be wrong -- see that
+    function's own docstring). `infra=True` is kept as a back-compat alias for `mode="infra"`
+    (every existing call site still passes the bool) -- new call sites should pass `mode=`.
+
+    `report_kind` (2026-09-24) -- passed straight through to collect() so a report picker can
+    drop CATALOGUE entries that don't apply to it (e.g. "core_switches" dropping BGP/Active
+    connections/Connected devices -- see CATALOGUE's own skip_for comment). None (the
+    default) keeps every existing call site's full catalogue unchanged.
 
     Raises NetworkUnavailable when Prometheus cannot be reached, mirroring
     services.capture_snapshot raising PrometheusUnavailable — the view handles them the same.
     """
+    if mode is None:
+        mode = "infra" if infra else "network"
     import datetime
 
     from .services import Snapshot, SystemVM
 
-    data = collect(only=only)
+    data = collect(only=only, report_kind=report_kind)
+    # Interface baseline (2026-09-23) -- updated on EVERY switches_routers capture (the alert
+    # poller's own cycle and any admin viewing the live report alike, see
+    # _update_interface_baseline's own docstring), before _device_flags() runs below so a
+    # freshly-detected regression is already visible on the SAME capture that found it. Other
+    # modes never touch MonitoredInterface -- it is specific to this estate's own interfaces.
+    data["interface_regressions"] = (
+        _update_interface_baseline(data.get("interfaces", []), data.get("cdp_scoped_keys", set()),
+                                   data.get("manual_exempt_keys", set()))
+        if mode == "switches_routers" else set())
     # excludes windows-kind here too: a windows device never produces ifOperStatus rows, so it
     # would otherwise slip into this SNMP fallback (used when device_rows comes back empty)
     # and get scored by _device_flags() against the SWITCH's data -- wrongly silent on its own
@@ -2090,18 +3024,32 @@ def capture_snapshot(token: str, only: Optional[set] = None, infra: bool = False
     win_keys = {d["key"] for d in win_devices}
     wm = _windows_metrics(win_keys) if win_devices else {}
     wc = _windows_cluster_metrics(win_keys) if win_devices else {}
-    # job-scoped (not per-DEVICES-target), so it naturally covers all 4 HCI Cluster nodes --
-    # only queried when the hci-cluster device is actually in scope for this report.
-    hci_nodes = _hci_node_metrics() if any(d["key"] == "hci-cluster" for d in win_devices) else {}
+    # job-scoped (not per-DEVICES-target), so each one naturally covers all of ITS OWN nodes --
+    # queried once per `cluster: True` device actually in scope (2026-09-16: generalized from a
+    # single hardcoded hci-cluster check to loop over every such device, when Disaster Recovery
+    # Cluster became a second one). Kept BOTH per-cluster dicts (for each cluster's own
+    # SystemVM.hosts count and its own xlsx section -- see build_infrastructure_report) and a
+    # merged dict/list across all clusters (for _infra_overview/_network_overview's own
+    # aggregate tile counts, which never needed to know which cluster a node belongs to).
+    cluster_devices = [d for d in win_devices if d.get("cluster")]
+    hci_nodes_by_key = {d["key"]: _hci_node_metrics(d.get("job", "hci_cluster"))
+                       for d in cluster_devices}
+    hci_volumes_by_key = {d["key"]: _hci_cluster_volumes(d.get("job", "hci_cluster")) for d in cluster_devices}
+    hci_nodes = {inst: n for nodes in hci_nodes_by_key.values() for inst, n in nodes.items()}
+    hci_volumes = [v for vols in hci_volumes_by_key.values() for v in vols]
     for dev in win_devices:
         m = wm.get(dev["target"], {"known": False, "reachable": False})
-        nodes = hci_nodes if dev["key"] == "hci-cluster" else None
+        nodes = hci_nodes_by_key.get(dev["key"]) if dev.get("cluster") else None
         svms.append(SystemVM(name=dev["name"], hosts=(len(nodes) if nodes else 1),
                              flags=_windows_device_flags(dev, m, wc.get(dev["target"]), nodes)))
 
-    overview = (_infra_overview(wm, win_devices, wc, hci_nodes) if infra else
-               _network_overview(data, list(inv.values()), win_metrics=list(wm.values()),
-                                 win_cluster=list(wc.values()), hci_nodes=hci_nodes))
+    if mode == "infra":
+        overview = _infra_overview(wm, win_devices, wc, hci_nodes)
+    elif mode == "switches_routers":
+        overview = _switches_routers_overview(data, list(inv.values()))
+    else:
+        overview = _network_overview(data, list(inv.values()), win_metrics=list(wm.values()),
+                                     win_cluster=list(wc.values()), hci_nodes=hci_nodes)
     snap = Snapshot(
         token=token,
         captured_at=datetime.datetime.now(),
@@ -2118,6 +3066,9 @@ def capture_snapshot(token: str, only: Optional[set] = None, infra: bool = False
     snap._store = data
     snap._systems = rows + win_devices
     snap._hci_nodes = hci_nodes
+    snap._hci_volumes = hci_volumes
+    snap._hci_nodes_by_key = hci_nodes_by_key
+    snap._hci_volumes_by_key = hci_volumes_by_key
     snap._wc = wc
     # Raw per-target CPU/RAM/disk (see _windows_metrics) -- stashed for the same reason
     # _hci_nodes/_wc are: build_infrastructure_report()'s tree-nested tables read exact
@@ -2135,8 +3086,44 @@ def network_report_filename(theme: str = "dark", when=None) -> str:
     return f"Infrastructure Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
 
 
+def switches_routers_report_filename(theme: str = "dark", when=None) -> str:
+    """Same family as network_report_filename just above, its own name (not "Infrastructure
+    Report") since this is a genuinely separate report/estate -- see DEVICES' own comment on
+    the 38-device block for why the two are kept apart. Kept for the alert poller's own use
+    of the combined estate (see switches_routers_device_keys' own comment) -- no report
+    picker generates this filename any more, see the four below."""
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Switches & Routers Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
+def core_switches_report_filename(theme: str = "dark", when=None) -> str:
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Core Switches Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
+def routers_report_filename(theme: str = "dark", when=None) -> str:
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Routers Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
+def wireless_controller_report_filename(theme: str = "dark", when=None) -> str:
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Wireless Controller Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
+def access_switches_report_filename(theme: str = "dark", when=None) -> str:
+    import datetime
+    when = when or datetime.datetime.now()
+    return f"Access Switches Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
 def build_report(snapshot, *, theme: str = "dark", author: str,
-                 annotations: dict, summary_comment: str) -> bytes:
+                 annotations: dict, summary_comment: str,
+                 title: str = "Infrastructure Report") -> bytes:
     """Render the network report as .xlsx, in the SAME theme as the systems report.
 
     Written directly rather than through gr.build_report_bytes: that builder reads the
@@ -2147,23 +3134,57 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
     The COLOURS, though, are not reinvented. They come from gr.PALETTES via gr.palette(), the
     same swap the systems build uses, so "dark" and "light" mean exactly one thing in this app
     and an adjustment to either palette reaches both reports without being copied across.
+
+    `title` (2026-09-22, for switches_routers_generate) -- this builder used to hardcode
+    "Infrastructure Report" as both the sheet title and the printed header, which was already
+    a bit of a misnomer for the core-switch-only Network Report (kept, unchanged, as the
+    default so that existing caller is unaffected) and would be flatly wrong for the new
+    Switches & Routers Report, which is not Infrastructure Admin's estate at all -- see
+    DEVICES' own comment on the 38-device block.
     """
     import io
 
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
 
     if theme not in gr.PALETTES:
         theme = "dark"
 
     with gr.palette(theme):
         T = gr.Theme
+
+        # Times New Roman (2026-09-22, on request: "look exactly in terms of formatting to
+        # the other reports... times new roman font") -- the System Admin Report's own
+        # gr.Theme.font() and the Cluster Health/AD Report's own FONT_NAME already both use
+        # it; this builder was the one report in the app still defaulting to openpyxl's bare
+        # Calibri, the actual source of the visual mismatch (colours already came from this
+        # same gr.Theme/gr.palette() the other two reports use -- see this function's own
+        # docstring). F() stands in for every bare Font(...) call in this function (all 26 of
+        # them, mechanically renamed) rather than repeating name="Times New Roman" at each
+        # call site.
+        def F(**kw):
+            kw.setdefault("name", "Times New Roman")
+            return Font(**kw)
+
         # openpyxl wants RRGGBB; the engine stores its colours as 00RRGGBB
         rgb = lambda c: str(c)[-6:]
         BG, CARD, HDR = rgb(T.BG), rgb(T.CARD), rgb(T.HDR)
         BORDER, INK, GREY = rgb(T.BORDER), rgb(T.WHITE), rgb(T.GREY)
         CYAN, SUB = rgb(T.CYAN), rgb(T.SUB)
         CHIP = {k: (rgb(v[0]), rgb(v[1])) for k, v in T.CHIP.items()}
+        # "good"/"bad"/"warn" aliased onto green/red/amber (2026-09-23 fix, confirmed live:
+        # "no normal warning and red coloring on panels and panel text"). _switches_routers_
+        # overview()'s own bad()/warn() lambdas (and cpu_state/mem_state/temp_state alongside
+        # them) return "good"/"bad"/"warn" -- CHIP's real keys are "green"/"amber"/"red"/
+        # "critical", so every tile state PALETTE.get(state, PALETTE["info"]) looked up was
+        # silently missing and falling back to the neutral info tint, regardless of whether
+        # the tile was actually a real finding. Every AT A GLANCE/NEEDS IMMEDIATE ATTENTION/
+        # NEEDS ATTENTION tile on this report has been rendering in the same blue "info"
+        # colour since the tile-band system was introduced, never red or amber.
+        PALETTE = dict(CHIP, info=(rgb(T.INFO[0]), rgb(T.INFO[1])),
+                      good=CHIP["green"], bad=CHIP["red"], warn=CHIP["amber"])
 
         edge = Side(style="thin", color=BORDER)
         box = Border(left=edge, right=edge, top=edge, bottom=edge)
@@ -2173,22 +3194,153 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
 
         wb = Workbook()
         ws = wb.active
-        ws.title = "Infrastructure Report"
+        ws.title = title[:31]   # openpyxl sheet-title limit
         ws.sheet_view.showGridLines = False
         ws.sheet_properties.tabColor = CYAN
-        for col, width in zip("BCDEFG", (34, 15, 62, 12, 34, 4)):
+        # REVERTED to the original widths (2026-09-23) -- two narrowing passes earlier the
+        # same day ("way too much horizontal space... shift tables closer to the LHS edge",
+        # then "narrow lhs gap by another 45 percent") shrank B-H by ~65% total, on the
+        # assumption these columns were pure gap before the first lane. They are not: B-H is
+        # ALSO the AT A GLANCE/banner dashboard's own content columns (FIRST..DASH_RIGHT).
+        # Narrowing them first broke two things at once, confirmed from screenshots: the crest
+        # image drifted into the title text (fixed separately -- see the title/subtitle block
+        # below, which now starts at column C, not B, so the logo's own column B no longer
+        # needs to double as text space), and dashboard tile labels ("PSU / FAN FAILED" etc)
+        # overflowed into neighbouring tiles once DASH_RIGHT was widened to compensate for the
+        # lost width by borrowing lane-system columns -- which include narrow, deliberately-3-
+        # wide GAP columns (K/N/Q/...) meant only for the per-device lane rows. That second
+        # problem is what's actually fixed now: _split_cols (above) divides by real column
+        # WIDTH, not raw column count, so a tile group can never land on nothing but a narrow
+        # gap column -- safe to widen DASH_RIGHT again (see its own comment) instead of
+        # reverting it, and safe to keep these columns narrow, restoring the LHS-gap request.
+        for col, width in zip("BCDEFGH", (12, 6, 22, 4, 12, 2, 3)):
             ws.column_dimensions[col].width = width
 
         FIRST, LAST = 2, 7
 
-        def paint(row):
+        # ---- side-by-side table lanes (2026-09-22) -----------------------------------------
+        # The System Admin Report (Services | Memory·CPU | Disk | Backups | Clock | Notes) and
+        # Cluster Health/AD Report (Services | CPU·RAM | Disk | Cluster Storage/Replication/
+        # NTP | Notes -- see infrastructure_report.py's own column-plan docstring) both lay
+        # several tables out SIDE BY SIDE at fixed columns on the SAME rows, not stacked one
+        # below another -- that's the actual visual signature "multiple tables per device"
+        # means here, not just "more than one table exists". table_at() (below) is this
+        # report's own equivalent: a fixed column LANE per table type, all starting at the
+        # same row for a given device, each independent of how tall its neighbours are (the
+        # Interfaces lane can run to 300+ rows while Hardware Health next to it is 4 rows --
+        # exactly how Disk sits next to the much shorter Memory·CPU table in the System Admin
+        # Report). Ends at column AA (27) -- the same shared right edge RIGHT_EDGE uses in
+        # infrastructure_report.py, not a coincidence: both reports' widest lane lands there.
+        # Every lane sits behind a fixed, EVEN 1-column gap (width 3, narrow) -- locked in
+        # 2026-09-23, on request: "fix and lock in [the lane] table spacing". Every lane below
+        # is positioned as COL_N-1's own right edge + 1 gap column, not a standalone literal,
+        # so shrinking or widening any one lane can never silently widen its own trailing gap.
+        HW_COL, HW_W = 9, 2          # I:J   Hardware health (Metric, Value)
+        OSPF_COL, OSPF_W = HW_COL + HW_W + 1, 2      # L:M   OSPF neighbours (Neighbour, State)
+        PSU_COL, PSU_W = OSPF_COL + OSPF_W + 1, 2    # O:P   Power / fan (Component, Status)
+        # Interface Totals (Metric, Value) -- 2026-09-22, replaces the old full per-port
+        # Interfaces (Port, Status, In, Out, Errors, Discards) table, which listed EVERY port
+        # including admin-down ones. Scoped to MONITORED interfaces now (2026-09-23: up AND
+        # CDP-identified as an access point, uplink, or neighbour link -- see collect()'s own
+        # `monitored` comment, narrower than the up-only scope this started as); the full
+        # breakdown of every interface, monitored or not, is still on its own "Interface
+        # Detail" sheet.
+        IFACE_COL, IFACE_W = PSU_COL + PSU_W + 1, 2  # R:S
+        # Optics retired entirely (2026-09-23, on request: "leave out optic details entirely")
+        # -- the Optics Totals lane, the "Optics Detail" sheet, and every optics-derived flag/
+        # tile/banner are gone, not just hidden; see collect()'s own removal of the optical
+        # Tx/Rx block for the data-layer half of this.
+        #
+        # Storage (Partition, Size GB, Free GB, Used %) -- 2026-09-23, on request: "need to
+        # add storage table for all switches" (every device, unlike the access-only CDP lane
+        # below) -- see collect()'s own flash_partitions (CISCO-FLASH-MIB; HOST-RESOURCES-MIB
+        # is not implemented on any device tested). A device's own partition count is small
+        # (3-6, confirmed live) so the full per-partition breakdown fits directly in the lane
+        # -- no separate "Storage Detail" sheet needed, unlike Interfaces/CDP.
+        STORAGE_COL, STORAGE_W = IFACE_COL + IFACE_W + 1, 4  # U:X
+        #
+        # AP / Uplink port totals (Metric, Value) -- 2026-09-23, on request: "specific
+        # monitoring on access switches not core switches... for access switches we want to
+        # monitor only accesspoint ports... then we also need to monitor uplink ports". Sourced
+        # from CDP neighbour discovery (see collect()'s own cdp_neighbors -- a new "cisco_cdp"
+        # SNMP module/job, confirmed live: a neighbour's reported platform string identifies an
+        # access point (Catalyst 9100-series, "C91xx"/"AIR-AP") or another switch/router (an
+        # uplink) far more reliably than guessing "usually port 47/48"). Only rendered for
+        # ACCESS switches (kind=="Switch" and not the one core-switch device) -- see
+        # is_access_switch(); the core switch and routers/WLC skip this lane entirely, same
+        # gating table_at's own `if dev_psu:` etc. already use for data that doesn't apply to
+        # every device.
+        CDP_COL, CDP_W = STORAGE_COL + STORAGE_W + 1, 2  # Z:AA
+        # Notes -- moved here (2026-09-23, on request: "move notes section to be the last
+        # section on the rhs") to become the OUTERMOST lane, matching generate_report.py's own
+        # Notes panel exactly ("the outermost thing should be notes"): same row as every other
+        # lane, not a separate narrow section stacked below them. metric spans the first 3
+        # columns (wide -- flag text runs to full sentences), then Fix needed?, then Resolved.
+        NOTES_COL, NOTES_W = CDP_COL + CDP_W + 1, 5  # AC:AG
+        PAINT_LAST = NOTES_COL + NOTES_W + 3   # margin past Notes' own right edge, same
+                                                # "+3 past the report's own right edge" golden
+                                                # rule infrastructure_report.py's MAX_COL uses
+        for col, width in zip(
+            ("I", "J", "K", "L", "M", "N", "O", "P", "Q",
+             "R", "S", "T", "U", "V", "W", "X", "Y",
+             "Z", "AA", "AB",
+             "AC", "AD", "AE", "AF", "AG"),
+            (16, 12, 3, 16, 10, 3, 28, 10, 3,
+             16, 12, 3, 18, 10, 10, 10, 3,
+             16, 12, 3,
+             34, 15, 62, 12, 12)):
+            ws.column_dimensions[col].width = width
+
+        def table_at(row0, col0, ncols, title, headers, rows):
+            """table()'s own twin, written at an explicit (row0, col0) instead of the shared
+            cursor `r`, so several tables can sit side by side on ONE starting row -- see the
+            lane comment above. Returns the row immediately past its own last line, so the
+            caller can take max() across every lane actually used on this device and continue
+            from there. Every row is painted/bordered out to col0+ncols only (not PAINT_LAST)
+            -- the gap columns between lanes are painted separately by the caller's own
+            paint(row, PAINT_LAST) pass over the whole row span first."""
+            y = row0
+            last = col0 + ncols
+            ws.cell(y, col0, title.upper()).font = F(bold=True, size=10, color=INK)
+            for c in range(col0, last):
+                ws.cell(y, c).fill = head
+                ws.cell(y, c).border = box
+            y += 1
+            cols = list(range(col0, col0 + len(headers)))
+            for h, c in zip(headers, cols):
+                cell = ws.cell(y, c, h)
+                cell.font = F(bold=True, size=9, color=SUB)
+                cell.fill = head
+                cell.border = box
+            y += 1
+            for row_vals in rows:
+                for c in range(col0, last):
+                    ws.cell(y, c).fill = card
+                    ws.cell(y, c).border = box
+                for (text, chip_band), c in zip(row_vals, cols):
+                    cell = ws.cell(y, c, text)
+                    if chip_band:
+                        fg, bgc = CHIP[chip_band]
+                        cell.font = F(bold=True, size=10, color=fg)
+                        cell.fill = PatternFill("solid", fgColor=bgc)
+                    else:
+                        cell.font = F(size=10, color=INK)
+                y += 1
+            return y
+
+        def paint(row, last=LAST):
             """Fill the row with the page colour.
 
             The canvas is painted rather than left to Excel's default white: on the dark
             theme an unpainted sheet frames the report in white and the whole thing reads as
             broken. The systems report paints for the same reason.
+
+            `last` defaults to the narrow header/KPI-band/Findings width (LAST=7) -- unchanged
+            for every existing caller. Rows carrying the wide side-by-side device tables pass
+            PAINT_LAST instead, so the gap columns between lanes (and past the widest lane)
+            still read as the same dark canvas rather than raw white Excel between tables.
             """
-            for c in range(1, LAST + 1):
+            for c in range(1, last + 1):
                 ws.cell(row, c).fill = page
 
         # ---- header: the same crest-then-title block the systems report opens with -------
@@ -2197,14 +3349,24 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
         # skipped with a note and the header renders without it.
         cfg = gr.load_config()
         for row in range(1, 9):
-            paint(row)
+            paint(row, PAINT_LAST)
         try:
             from openpyxl.drawing.image import Image as XLImage
             from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
             from openpyxl.drawing.xdr import XDRPositiveSize2D
             img = XLImage(cfg.logo)
+            # colOff nudged 10px left of the shared cfg value (2026-09-23, on request: "the
+            # logo also snapped out of place... move it about 10 pixels to the left") -- a
+            # LOCAL adjustment (9525 EMU/px at 96 DPI), not a change to cfg.logo_from_coloff
+            # itself, since that value is shared with generate_report.py/infrastructure_
+            # report.py's own headers and neither of those has this problem. Column B here has
+            # gone through several width changes of its own this session (see its own comment
+            # above the B-H width block); the logo's fixed-EMU offset into it never moved, but
+            # how much of column B is actually left for it to sit in without crossing into
+            # column C -- where the title now starts -- keeps changing as B's width does.
+            logo_coloff = max(0, cfg.logo_from_coloff - 9525 * 10)
             img.anchor = OneCellAnchor(
-                _from=AnchorMarker(col=cfg.logo_from_col, colOff=cfg.logo_from_coloff,
+                _from=AnchorMarker(col=cfg.logo_from_col, colOff=logo_coloff,
                                    row=cfg.logo_from_row, rowOff=cfg.logo_from_rowoff),
                 ext=XDRPositiveSize2D(cx=cfg.logo_cx, cy=cfg.logo_cy))
             ws.add_image(img)
@@ -2213,44 +3375,260 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             print(f"[!] logo not embedded ({exc})", file=_sys.stderr)
         for row, ht in {1: 6, 2: 18, 3: 26, 4: 15, 5: 20, 6: 34, 7: 18}.items():
             ws.row_dimensions[row].height = ht
-        # column A is the crest gutter, so the title block starts at B — as it does there
+        # column A is the crest gutter, and the logo itself (anchored INSIDE column B, see
+        # cfg.logo_from_col/coloff above) visually occupies column B too -- so the title block
+        # starts at C, not B (2026-09-23 fix, confirmed live: "look at how the logo image is
+        # sitting w[i]te on the report name" -- the crest was drawn directly over "SWITCHES &
+        # ROUTERS REPORT"'s own "WIT"). generate_report.py's own title starts at column 3 for
+        # exactly this reason ("self._merge(3, 3, 12, ...)"); infrastructure_report.py's does
+        # too ("sh.put(1, 3, data.report_title, ...)") -- this header's own text block had
+        # never actually matched either, despite the row-5 text/button comment below already
+        # (correctly) describing the reference's "cols 3-8" convention.
         ws.column_dimensions["A"].width = 9
 
-        ws.cell(3, 2, "INFRASTRUCTURE REPORT").font = Font(bold=True, size=22, color=INK)
-        ws.cell(4, 2, snapshot.captured_at.strftime(
-            "snapshot generated %d %b %Y  ·  %H:%M      •      Infrastructure Analyses Dashboard")).font =             Font(color=SUB, size=9)
-        ws.cell(5, 2, "Static snapshot.   Device telemetry captured by SNMP.").font = Font(color=GREY, size=9)
-        ws.cell(7, 2, f"By  {author}").font = Font(color=SUB, size=9)
+        # Byte-identical to before for the default title (the existing Network Report caller
+        # never passes `title`) -- only a caller passing a different `title` (e.g. Switches &
+        # Routers Report) gets a different subtitle, see build_report's own docstring.
+        dash_subtitle = ("Infrastructure Analyses Dashboard" if title == "Infrastructure Report"
+                         else f"{title} — Analyses Dashboard")
+        ws.cell(3, 3, title.upper()).font = F(bold=True, size=22, color=INK)
+        ws.cell(4, 3, snapshot.captured_at.strftime(
+            f"snapshot generated %d %b %Y  ·  %H:%M      •      {dash_subtitle}")).font = F(color=SUB, size=9)
+        ws.merge_cells(start_row=5, start_column=3, end_row=5, end_column=8)
+        ws.cell(5, 3, "Static snapshot.   For LIVE, auto-refreshing monitoring, click  →").font = F(
+            color=GREY, size=9)
+        # Text and button live in SEPARATE merged column ranges (not adjacent single cells) so
+        # a long row-5 text value can never visually run into the button -- the same structure
+        # generate_report.py (cols 3-8 text / 9-13 button) and infrastructure_report.py (cols
+        # 3-8 / 9-14) both use. No hyperlink target is wired here, on the same precedent
+        # infrastructure_report.py's own header already set: unlike generate_report.py's
+        # self.cfg.grafana (a real, configured URL), no live Switches & Routers dashboard URL
+        # exists to link to, and inventing one would be fabrication this module doesn't do.
+        dash_name = (title[: -len(" Report")] if title.endswith(" Report") else title).upper()
+        ws.merge_cells(start_row=5, start_column=HW_COL, end_row=5, end_column=HW_COL + 4)
+        btn = ws.cell(5, HW_COL, f"▸  OPEN LIVE {dash_name} DASHBOARD")
+        btn.font = F(bold=True, size=12, color=CYAN)
+        ws.cell(7, 3, f"By  {author}").font = F(color=SUB, size=9)
         r = 9
 
-        def band(title, rows):
+        # ---- grouped-column KPI tiles (2026-09-22, rescaled 2026-09-23) ---------------------
+        # Matches the System Admin/Cluster Health Report's own "AT A GLANCE" card row and
+        # "NEEDS IMMEDIATE ATTENTION"/"NEEDS ATTENTION" paired panel bands (see
+        # generate_report.py's own card()/panel()/caption()/band()) -- including their WIDTH,
+        # not just their shape. First set to DASH_RIGHT = HW_COL, matching
+        # infrastructure_report.py's own DASH_LEFT=2/DASH_RIGHT=9; widened here to the CDP
+        # lane's own right edge once B-H (this dashboard's own left portion) went narrow for
+        # the LHS-gap request and needed the width made up elsewhere. An earlier attempt at
+        # exactly this (borrowing columns J-S) broke tile labels -- confirmed from screenshots
+        # -- because J-S includes narrow (width 3) GAP columns the lane system uses between
+        # HW/OSPF/PSU/etc on per-device rows, and _split_cols back then divided by raw column
+        # COUNT, so a tile group could land on nothing but one of those. _split_cols (above)
+        # now divides by actual column WIDTH instead, so widening DASH_RIGHT through the same
+        # uneven columns is safe -- a narrow gap column just gets absorbed into whichever
+        # neighbouring tile's own boundary search prefers it, never stands alone.
+        DASH_RIGHT = CDP_COL + CDP_W - 1
+
+        def caption(row, text):
+            paint(row, PAINT_LAST)
+            ws.merge_cells(start_row=row, start_column=FIRST, end_row=row, end_column=DASH_RIGHT)
+            ws.cell(row, FIRST, "  " + text).font = F(bold=True, size=8, color=SUB)
+            ws.row_dimensions[row].height = 14
+
+        def _split_cols(n, first, last):
+            """Divide [first, last] into n contiguous groups by actual COLUMN WIDTH, not raw
+            column count (2026-09-23 fix, confirmed live: DASH_RIGHT's own span mixes wide
+            content columns with narrow (width 3) gap columns borrowed from the lane system --
+            the previous count-based split could hand an entire tile group nothing but a
+            narrow gap column, starving it of real width and overflowing its label into the
+            next tile).
+
+            Each internal boundary is the column whose CUMULATIVE width comes closest to that
+            boundary's ideal proportional share of the total (searched over every position
+            that still leaves at least one column for every remaining group) -- not a greedy
+            left-to-right walk. A greedy walk was tried first and still starves a group: if
+            that group's own first column happens to be a narrow gap column, the walk's own
+            "leave enough columns for what's left" cap can trip before a SECOND column is ever
+            considered, handing the group nothing but that one narrow column regardless of how
+            far short of its target that leaves it. Searching every valid boundary and picking
+            the closest avoids that -- a narrow column ends up absorbed into whichever
+            neighbouring group's boundary search prefers it, never forced to stand alone.
+            """
+            from openpyxl.utils import get_column_letter
+
+            n = max(n, 1)
+            idxs = list(range(first, last + 1))
+            widths = [ws.column_dimensions[get_column_letter(c)].width or 8.43 for c in idxs]
+            cum = [0.0]
+            for w in widths:
+                cum.append(cum[-1] + w)
+            total = cum[-1]
+            target = total / n
+
+            groups, start = [], 0
+            for g in range(1, n):
+                goal = target * g
+                lo = start + 1
+                hi = len(widths) - (n - g)   # must leave >= (n - g) columns for what's left
+                best_i, best_diff = lo, abs(cum[lo] - goal)
+                for i in range(lo, hi + 1):
+                    diff = abs(cum[i] - goal)
+                    if diff < best_diff:
+                        best_diff, best_i = diff, i
+                groups.append((idxs[start], idxs[best_i - 1]))
+                start = best_i
+            groups.append((idxs[start], idxs[-1]))
+            return groups
+
+        def stat_card(rtop, c1, c2, label, value, state):
+            # Always 3 rows tall, matching stat_panel's own height -- a band can now mix
+            # single-value cards with 2-sub-column panels (e.g. AAT A GLANCE's "Devices" card
+            # beside its "Interfaces"/"Throughput" panels), and Excel row height is whole-row,
+            # so a shorter card would either clip its neighbour's height or leave an unpainted
+            # gap below it. The value merges across the bottom TWO rows instead, bottom-heavy
+            # the same way generate_report.py's own card(vrow=...) bottom-aligns a short card
+            # next to a taller panel in the same band.
+            accent, tint = PALETTE.get(state, PALETTE["info"])
+            fill = PatternFill("solid", fgColor=tint)
+            bar = Border(left=Side(style="thick", color=accent))
+            ws.merge_cells(start_row=rtop, start_column=c1, end_row=rtop, end_column=c2)
+            lc = ws.cell(rtop, c1, label)
+            lc.font = F(bold=True, size=8, color=SUB)
+            lc.alignment = Alignment(horizontal="center")
+            ws.merge_cells(start_row=rtop + 1, start_column=c1, end_row=rtop + 2, end_column=c2)
+            vc = ws.cell(rtop + 1, c1, value)
+            vc.font = F(bold=True, size=18, color=accent)
+            vc.alignment = Alignment(horizontal="center", vertical="center")
+            for rr in (rtop, rtop + 1, rtop + 2):
+                for c in range(c1, c2 + 1):
+                    ws.cell(rr, c).fill = fill
+            for rr in (rtop, rtop + 1, rtop + 2):
+                ws.cell(rr, c1).border = bar
+            ws.row_dimensions[rtop + 2].height = 26
+
+        def stat_panel(rtop, c1, c2, title, subA, valA, subB, valB, state):
+            accent, tint = PALETTE.get(state, PALETTE["info"])
+            fill = PatternFill("solid", fgColor=tint)
+            bar = Border(left=Side(style="thick", color=accent))
+            div = Border(left=Side(style="thin", color=SUB))
+            ws.merge_cells(start_row=rtop, start_column=c1, end_row=rtop, end_column=c2)
+            tc = ws.cell(rtop, c1, title)
+            tc.font = F(bold=True, size=8, color=SUB)
+            tc.alignment = Alignment(horizontal="center")
+            mid = c1 + (c2 - c1 + 1) // 2
+            mid = min(max(mid, c1 + 1), c2) if c2 > c1 else c1
+            for (a, b), (sub, val) in (((c1, max(mid - 1, c1)), (subA, valA)), ((mid, c2), (subB, valB))):
+                ws.merge_cells(start_row=rtop + 1, start_column=a, end_row=rtop + 1, end_column=b)
+                sc = ws.cell(rtop + 1, a, sub)
+                sc.font = F(bold=True, size=8, color=SUB)
+                sc.alignment = Alignment(horizontal="center")
+                ws.merge_cells(start_row=rtop + 2, start_column=a, end_row=rtop + 2, end_column=b)
+                vc = ws.cell(rtop + 2, a, val)
+                vc.font = F(bold=True, size=16, color=accent)
+                vc.alignment = Alignment(horizontal="center")
+            for rr in (rtop, rtop + 1, rtop + 2):
+                for c in range(c1, c2 + 1):
+                    ws.cell(rr, c).fill = fill
+            if c2 > c1:
+                ws.cell(rtop + 1, mid).border = div
+                ws.cell(rtop + 2, mid).border = div
+            for rr in (rtop, rtop + 1, rtop + 2):
+                ws.cell(rr, c1).border = bar
+            ws.row_dimensions[rtop + 2].height = 26
+
+        # A panel needs at least 2 columns for its sub-column divider to mean anything -- capped
+        # at 4/row for readability regardless of how wide DASH_RIGHT is (width-aware _split_cols
+        # means more tiles COULD fit without starving any one of them, but a wider tile still
+        # reads better than a merely possible one). A band with more tiles than that wraps onto
+        # additional 3-row groups under the SAME caption, rather than squeezing narrower.
+        MAX_TILES_PER_ROW = 4
+
+        def tile_band(cap_row, title, tiles):
+            """A tile renders as a `panel` (2 sub-columns, e.g. "3 | 39") when its value
+            carries a " | " pair, and a plain `card` (one big number) otherwise -- auto-
+            detected per TILE, not fixed per band, so a band can mix the two (e.g. AT A
+            GLANCE's single-value "Devices" card beside its "Interfaces"/"Throughput" panels).
+            """
             nonlocal r
-            paint(r)
-            ws.cell(r, FIRST, title.upper()).font = Font(bold=True, size=10, color=INK)
-            for c in range(FIRST, LAST):
-                ws.cell(r, c).fill = head
-                ws.cell(r, c).border = box
+            if not tiles:
+                r = cap_row
+                return
+            caption(cap_row, title)
+            trow = cap_row + 1
+            for start in range(0, len(tiles), MAX_TILES_PER_ROW):
+                chunk = tiles[start:start + MAX_TILES_PER_ROW]
+                for rr in range(trow, trow + 3):
+                    paint(rr, PAINT_LAST)
+                for (c1, c2), item in zip(_split_cols(len(chunk), FIRST, DASH_RIGHT), chunk):
+                    state = item.get("state", "info")
+                    value = str(item["value"])
+                    if " | " in value:
+                        subs = (item.get("sub") or " | ").split(" | ")
+                        vals = value.split(" | ")
+                        subA = subs[0].upper() if subs else ""
+                        subB = subs[1].upper() if len(subs) > 1 else ""
+                        valA = vals[0] if vals else ""
+                        valB = vals[1] if len(vals) > 1 else ""
+                        stat_panel(trow, c1, c2, item["label"].upper(), subA, valA, subB, valB, state)
+                    else:
+                        stat_card(trow, c1, c2, item["label"].upper(), value, state)
+                trow += 3
+            r = trow
+            paint(r, PAINT_LAST)
             r += 1
-            for item in rows:
-                paint(r)
-                for c in range(FIRST, LAST):
-                    ws.cell(r, c).fill = card
-                ws.cell(r, FIRST, item["label"]).font = Font(color=GREY, size=10)
-                v = ws.cell(r, FIRST + 1, item["value"])
-                v.font = Font(bold=True, size=10,
-                              color={"bad": CHIP["red"][0], "warn": CHIP["amber"][0],
-                                     "good": CHIP["green"][0]}.get(item.get("state"), INK))
-                if item.get("sub"):
-                    ws.cell(r, FIRST + 2, item["sub"]).font = Font(color=SUB, size=9)
-                r += 1
-            paint(r)
-            r += 1
+
+        def banner_line(row, text, font, tint, accent):
+            paint(row, PAINT_LAST)
+            ws.merge_cells(start_row=row, start_column=FIRST, end_row=row, end_column=DASH_RIGHT)
+            cell = ws.cell(row, FIRST, "  " + text)
+            cell.font = font
+            cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+            cell.border = Border(left=Side(style="thick", color=accent))
+            fill = PatternFill("solid", fgColor=tint)
+            for c in range(FIRST, DASH_RIGHT + 1):
+                ws.cell(row, c).fill = fill
+            # Narrower merge now (FIRST..DASH_RIGHT, not FIRST..PAINT_LAST-1) wraps sooner --
+            # roughly half the old merge's total column width, so `per` is halved to match
+            # (erring generous: a row a little taller than strictly needed is harmless, a row
+            # too short clips text).
+            per = 75
+            ws.row_dimensions[row].height = max(1, (len(text) + per - 1) // per) * 14 + 6
+
+        def render_banner_summary(top, header, band_, count, anchor_row):
+            """A banner is now a 2-row SUMMARY -- the header line, then a single clickable
+            link line -- not the full per-device listing (2026-09-23, on request: "some
+            banners are way too large... should just summarise finding, introduce a button or
+            link on each banner that navigates to another sheet that has a breakdown of
+            everything"). The full per-device detail this banner used to list inline now lives
+            on the "Findings Detail" sheet, at `anchor_row` -- build_findings_detail_sheet()
+            builds that sheet FIRST and hands back exactly where each finding's own section
+            starts, so this link jumps straight to it, not just the top of the sheet.
+            """
+            accent, tint = CHIP["red" if band_ == "red" else "amber"]
+            banner_line(top, header, F(bold=True, size=10, color=accent), tint, accent)
+            link_row = top + 1
+            paint(link_row, PAINT_LAST)
+            ws.merge_cells(start_row=link_row, start_column=FIRST, end_row=link_row, end_column=DASH_RIGHT)
+            link = ws.cell(link_row, FIRST, f"  ▸  View all {count} — 'Findings Detail' sheet")
+            link.font = F(bold=True, size=9, color=CYAN, underline="single")
+            link.alignment = Alignment(horizontal="left", vertical="center")
+            link.hyperlink = f"#'Findings Detail'!A{anchor_row}"
+            link.border = Border(left=Side(style="thick", color=accent))
+            fill = PatternFill("solid", fgColor=tint)
+            for c in range(FIRST, DASH_RIGHT + 1):
+                ws.cell(link_row, c).fill = fill
+            return link_row
 
         def pct_band(v):
+            # Always green/amber/red for a KNOWN reading, never uncoloured (2026-09-23 fix,
+            # on request: "variable metrics are either green amber or red... look at all
+            # other reports... use this exact same design" -- a healthy 9% CPU reading used
+            # to render in the same plain ink colour as a purely descriptive count like
+            # "Up: 74 interfaces", giving no visual signal that it had even been judged.
+            # `None` is reserved for "not measured" (v is None), never "measured and fine".
             return None if v is None else ("red" if v >= cfg.chip_red else
-                                           "amber" if v >= cfg.chip_amber else None)
+                                           "amber" if v >= cfg.chip_amber else "green")
 
-        def table(title, headers, rows):
+        def table(title, headers, rows, last=None):
             """A real, multi-column data table -- header row + data rows -- for the detail
             that used to render as a banner (see _network_overview's docstring): who/what,
             not a passive summary. Same visual language the tile bands (`band`) and the
@@ -2258,19 +3636,26 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             data rows, thin borders throughout. `rows` is a list of rows, each a list of
             (text, chip_band_or_None) pairs, one per header -- chip_band colours that cell
             the same red/amber/green a percentage chip gets anywhere else in this app.
+
+            `last` defaults to LAST (the narrow HCI/DR table width, every existing caller's
+            behaviour unchanged) -- a caller sitting in the WIDE part of the sheet (e.g.
+            Summary Notes, between the full-width tile bands and the full-width per-device
+            blocks) passes PAINT_LAST instead, so the gap columns past its own content still
+            get the same dark canvas paint() gives every other wide row, not raw white Excel.
             """
             nonlocal r
-            paint(r)
-            ws.cell(r, FIRST, title.upper()).font = Font(bold=True, size=10, color=INK)
+            last = last or LAST
+            paint(r, last)
+            ws.cell(r, FIRST, title.upper()).font = F(bold=True, size=10, color=INK)
             for c in range(FIRST, LAST):
                 ws.cell(r, c).fill = head
                 ws.cell(r, c).border = box
             r += 1
-            paint(r)
+            paint(r, last)
             cols = list(range(FIRST, FIRST + len(headers)))
             for h, c in zip(headers, cols):
                 cell = ws.cell(r, c, h)
-                cell.font = Font(bold=True, size=9, color=SUB)
+                cell.font = F(bold=True, size=9, color=SUB)
                 cell.fill = head
                 cell.border = box
             for c in range(FIRST + len(headers), LAST):
@@ -2278,7 +3663,7 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
                 ws.cell(r, c).border = box
             r += 1
             for row_vals in rows:
-                paint(r)
+                paint(r, last)
                 for c in range(FIRST, LAST):
                     ws.cell(r, c).fill = card
                     ws.cell(r, c).border = box
@@ -2286,31 +3671,449 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
                     cell = ws.cell(r, c, text)
                     if chip_band:
                         fg, bg = CHIP[chip_band]
-                        cell.font = Font(bold=True, size=10, color=fg)
+                        cell.font = F(bold=True, size=10, color=fg)
                         cell.fill = PatternFill("solid", fgColor=bg)
                     else:
-                        cell.font = Font(size=10, color=INK)
+                        cell.font = F(size=10, color=INK)
                 r += 1
-            paint(r)
+            paint(r, last)
             r += 1
 
-        ov = snapshot.overview or {}
-        band("At a glance", ov.get("glance", []))
-        band("Immediate attention", ov.get("immediate", []))
-        band("Watch list", ov.get("watch", []))
+        def render_notes_lane(row0, sysvm):
+            """Notes as the OUTERMOST lane on a device's row (2026-09-23, on request: "move
+            notes section to be the last section on the rhs") -- Flagged metric / Fix needed?
+            / Resolved table, THEN a Comment box, THEN a "By {author}" line, at NOTES_COL,
+            same row0 every other lane uses, not a separate narrow section stacked below them
+            (matches generate_report.py's own Notes panel: "the outermost thing should be
+            notes"). `Resolved` is formula-derived from `Fix needed?`: no fix needed ->
+            resolved; fix needed -> still open; blank until the admin picks. Produces EXACTLY
+            the row count notes_h (computed by the caller, before row_max) predicts -- keep
+            the two in sync if this ever changes.
+            """
+            ann = annotations.get(sysvm.name, {})
+            ann_flags = ann.get("flags", {})
+            mcol = NOTES_COL + 2
+            fix_col, res_col = NOTES_COL + 3, NOTES_COL + 4
+            y = row0
+            if sysvm.flags:
+                ws.merge_cells(start_row=y, start_column=NOTES_COL, end_row=y, end_column=mcol)
+                h = ws.cell(y, NOTES_COL, "  Flagged metric")
+                h.font = F(bold=True, size=8, color=SUB)
+                for col, label in ((fix_col, "Fix needed?"), (res_col, "Resolved")):
+                    hc = ws.cell(y, col, label)
+                    hc.font = F(bold=True, size=8, color=SUB)
+                    hc.alignment = Alignment(horizontal="center", wrap_text=True)
+                for col in range(NOTES_COL, res_col + 1):
+                    ws.cell(y, col).fill = head
+                    ws.cell(y, col).border = box
+                y += 1
+                dv = DataValidation(type="list", formula1='"Yes,No"', allow_blank=True)
+                ws.add_data_validation(dv)
+                fix_letter = get_column_letter(fix_col)
+                for flag in sysvm.flags:
+                    fg = CHIP["red" if flag.band == "red" else "amber"][0]
+                    ws.merge_cells(start_row=y, start_column=NOTES_COL, end_row=y, end_column=mcol)
+                    d = ws.cell(y, NOTES_COL, "  " + flag.text)
+                    d.font = F(color=fg, size=9)
+                    d.alignment = Alignment(wrap_text=True, vertical="top")
+                    for col in range(NOTES_COL, mcol + 1):
+                        ws.cell(y, col).fill = card
+                        ws.cell(y, col).border = box
+                    answer = ann_flags.get(flag.key)
+                    fix = ws.cell(y, fix_col, answer if answer in ("Yes", "No") else "")
+                    fix.font = F(size=9, color=INK)
+                    fix.fill = card
+                    fix.border = box
+                    fix.alignment = Alignment(horizontal="center")
+                    dv.add(fix)
+                    res = ws.cell(y, res_col,
+                                 f'=IF({fix_letter}{y}="No","Yes",IF({fix_letter}{y}="Yes","No",""))')
+                    res.font = F(size=9, color=INK)
+                    res.fill = card
+                    res.border = box
+                    res.alignment = Alignment(horizontal="center")
+                    y += 1
+            else:
+                ws.merge_cells(start_row=y, start_column=NOTES_COL, end_row=y, end_column=res_col)
+                ws.cell(y, NOTES_COL, "  No critical or warning metrics this run.").font = F(
+                    color=SUB, size=9)
+                for col in range(NOTES_COL, res_col + 1):
+                    ws.cell(y, col).fill = card
+                    ws.cell(y, col).border = box
+                y += 1
 
+            ws.cell(y, NOTES_COL, "  Comment").font = F(bold=True, size=8, color=SUB)
+            for col in range(NOTES_COL, res_col + 1):
+                ws.cell(y, col).fill = card
+            y += 1
+            comment_text = (ann.get("comment") or "").strip()
+            if not comment_text and not sysvm.flags:
+                comment_text = "No issues identified."
+            ws.merge_cells(start_row=y, start_column=NOTES_COL, end_row=y, end_column=res_col)
+            cm = ws.cell(y, NOTES_COL, comment_text)
+            cm.font = F(color=INK, size=9)
+            cm.alignment = Alignment(wrap_text=True, vertical="top")
+            for col in range(NOTES_COL, res_col + 1):
+                ws.cell(y, col).fill = card
+                ws.cell(y, col).border = box
+            y += 1
+
+            by = ws.cell(y, NOTES_COL, f"By  {author}")
+            by.font = F(color=SUB, size=8)
+            by.alignment = Alignment(horizontal="right")
+            for col in range(NOTES_COL, res_col + 1):
+                ws.cell(y, col).fill = card
+            y += 1
+            return y
+
+        ov = snapshot.overview or {}
         # "N interfaces" describes the switch; a windows_exporter device (e.g. HCI Cluster)
         # has no interface count in this report's sense, so it gets the same "host(s)"
         # wording reports/form.html already uses for it on the live screen.
         win_names = {d["name"] for d in DEVICES if d.get("kind") == "windows"}
-        hci_nodes = getattr(snapshot, "_hci_nodes", None) or {}
+        # Per-cluster, not the merged snapshot._hci_nodes (2026-09-16, generalized: a second
+        # cluster device must get its OWN node table here, not have both clusters' nodes
+        # combined under whichever cluster row renders first).
+        cluster_key_by_name = {d["name"]: d["key"] for d in DEVICES if d.get("cluster")}
+        cluster_target_by_name = {d["name"]: d["target"] for d in DEVICES if d.get("cluster")}
+        hci_nodes_by_key = getattr(snapshot, "_hci_nodes_by_key", None) or {}
         wc = getattr(snapshot, "_wc", None) or {}
+        # target_by_name/data (2026-09-22, for the per-device switch/router/WLC tables below)
+        # -- snapshot._store is the SAME collect() output capture_snapshot already built for
+        # this exact run, never a fresh query.
+        target_by_name = {d["name"]: d["target"] for d in DEVICES if d.get("kind") != "windows"}
+        dev_by_name = {d["name"]: d for d in DEVICES if d.get("kind") != "windows"}
+        data = getattr(snapshot, "_store", None) or {}
+
+        # Computed early (2026-09-23), NOT where the Interface Detail sheet itself is actually
+        # built (way below, after the per-device loop) -- the per-device loop's own "Interface
+        # totals" pointer needs to know each device's own first row THERE before it writes its
+        # own link, and both this and the sheet-building code below share the exact same sort
+        # (by device name, then interface index), so the row numbers agree without the sheet
+        # having to exist yet.
+        #
+        # Interface Detail lists SCOPED interfaces only (2026-09-24, on request: "the
+        # interface breakdown still shows interfaces not monitored kindly remove these...
+        # the admins are adament they dont want to see these interfaces save for the few they
+        # specifically chose") -- MonitoredInterface.is_scoped is the same sticky "ever
+        # CDP-identified as an AP/uplink/neighbour link" flag _device_flags' own
+        # flash_storage_critical/interface_down_regression flags already trust (see that
+        # model's own docstring): True for a port currently up AND CDP-scoped, and STAYS True
+        # once a port is down too, so a genuine regression (a monitored port that just failed)
+        # still shows here -- only a port NEVER chosen is excluded, not one that is chosen but
+        # currently down. A per-device "not monitored" count for what's excluded is added at
+        # the end of the sheet itself, below the main table, so the exclusion isn't silently
+        # forgotten even though the ports themselves are gone from view.
+        from .models import MonitoredInterface as _MonitoredInterface
+        _interface_scoped_keys = set(_MonitoredInterface.objects.filter(
+            device__in=target_by_name.values(), is_scoped=True).values_list("device", "if_index"))
+        name_by_target_early = {t: n for n, t in target_by_name.items()}
+        _det_rows_sorted = sorted(
+            ((name_by_target_early[i["device"]], int(i["index"] or 0))
+             for i in data.get("interfaces", [])
+             if i["device"] in name_by_target_early
+             and (i["device"], str(i["index"])) in _interface_scoped_keys),
+            key=lambda pair: pair)
+        det_first_row_by_device: Dict[str, int] = {}
+        for _idx, (_dname, _ifidx) in enumerate(_det_rows_sorted):
+            det_first_row_by_device.setdefault(_dname, 6 + _idx)
+
+        # Same trick for the CDP Neighbors Detail sheet (2026-09-23) -- computed early so the
+        # per-device "AP / Uplink ports" lane's own pointer link can name a row before that
+        # sheet itself is actually built, sharing the exact same sort (device, then local
+        # port) the sheet-building code below uses.
+        _cdp_rows_sorted = sorted(
+            ((name_by_target_early[n["instance"]], n["local_port"])
+             for n in data.get("cdp_neighbors", []) if n["instance"] in name_by_target_early),
+            key=lambda pair: pair)
+        cdp_first_row_by_device: Dict[str, int] = {}
+        for _idx, (_dname, _lport) in enumerate(_cdp_rows_sorted):
+            cdp_first_row_by_device.setdefault(_dname, 6 + _idx)
+
+        # ---- Summary Notes (2026-09-22, repositioned 2026-09-23) ---------------------------
+        # Matches generate_report.py's own RHS "Summary Notes" panel exactly: it sits BESIDE
+        # the AT A GLANCE cards, its own title row level with row 9 (where the cards start),
+        # not stacked below the whole dashboard+banners block ("topmost summary section top
+        # edge must align with top edge of dashboard section"). Rendered here, before the
+        # dashboard/banners below, using its OWN row cursor at the exact row the dashboard is
+        # about to start from -- NOTES_COL sits far to the right of DASH_RIGHT (see both their
+        # own comments), so the two never collide column-wise even while sharing rows.
+        # `notes_col_bottom` is reconciled against the dashboard+banners' own bottom (`r`)
+        # further down, the same "take whichever side ran taller" pattern generate_report.py's
+        # own content_bottom/notes_bottom max() uses -- one comment further down explains why.
+        #
+        # One row per DISTINCT comment, grouped so several devices sharing the exact same note
+        # (most commonly "no issues") don't repeat it once per device. Sourced from the SAME
+        # annotations dict each device's own Comment box below reads, and the same flags list
+        # feeding the Findings table -- never a second, independently-worded summary.
+        note_groups: List[Tuple[str, List[str]]] = []
+        note_seen: Dict[str, int] = {}
         for sysvm in snapshot.systems:
-            paint(r)
-            ws.cell(r, FIRST, sysvm.name.upper()).font = Font(bold=True, size=12, color=CYAN)
-            sub = (f"{sysvm.hosts} host{'s' if sysvm.hosts != 1 else ''}" if sysvm.name in win_names
-                   else f"{sysvm.hosts} interfaces")
-            ws.cell(r, FIRST + 1, sub).font = Font(color=SUB, size=10)
+            if sysvm.name not in target_by_name:
+                continue
+            ann = annotations.get(sysvm.name, {})
+            text = (ann.get("comment") or "").strip()
+            if not text:
+                nc_ = sum(1 for f in sysvm.flags if f.band == "red")
+                nw_ = sum(1 for f in sysvm.flags if f.band == "amber")
+                text = "No issues identified." if not (nc_ or nw_) else f"{nc_} critical · {nw_} warning finding(s)."
+            if text in note_seen:
+                note_groups[note_seen[text]][1].append(sysvm.name)
+            else:
+                note_seen[text] = len(note_groups)
+                note_groups.append((text, [sysvm.name]))
+
+        # RHS-aligned, not the narrow header width (house rule: "the notes sections... even
+        # the main notes section that consolidates all comments... must all be aligned to the
+        # rhs edge of the report, regardless of whatever horizontal gap is created between the
+        # note section and closest neighbour table" -- notes sections are explicitly NOT
+        # tables for the "every gap must be equal" spacing rule; only their own right edge is
+        # fixed, to the same NOTES_COL..NOTES_COL+NOTES_W-1 span the per-device Notes lane
+        # uses, so every notes-shaped thing in this report shares one right edge). Matches
+        # generate_report.py's own placement too: the admin's freeform remark sits ABOVE its
+        # own Summary Notes table, same RHS columns as the table itself.
+        notes_right = NOTES_COL + NOTES_W - 1
+        nr = r   # Summary Notes' OWN cursor -- starts level with the dashboard, below
+        if summary_comment:
+            paint(nr, PAINT_LAST)
+            ws.merge_cells(start_row=nr, start_column=NOTES_COL, end_row=nr, end_column=notes_right)
+            sc = ws.cell(nr, NOTES_COL, summary_comment)
+            sc.font = F(color=INK, size=9)
+            sc.alignment = Alignment(wrap_text=True, vertical="top")
+            nr += 1
+        if note_groups:
+            num_col = NOTES_COL
+            dev_c1, dev_c2 = NOTES_COL + 1, NOTES_COL + 2
+            cmt_c1, cmt_c2 = NOTES_COL + 3, notes_right
+            paint(nr, PAINT_LAST)
+            ws.merge_cells(start_row=nr, start_column=num_col, end_row=nr, end_column=notes_right)
+            ws.cell(nr, num_col, "SUMMARY NOTES").font = F(bold=True, size=10, color=INK)
+            for c in range(num_col, notes_right + 1):
+                ws.cell(nr, c).fill = head
+                ws.cell(nr, c).border = box
+            nr += 1
+            paint(nr, PAINT_LAST)
+            hdr_cells = ((num_col, num_col, "#", "center"), (dev_c1, dev_c2, "Devices", "left"),
+                        (cmt_c1, cmt_c2, "Comment", "left"))
+            for c1, c2, label, al in hdr_cells:
+                if c2 > c1:
+                    ws.merge_cells(start_row=nr, start_column=c1, end_row=nr, end_column=c2)
+                hc = ws.cell(nr, c1, label)
+                hc.font = F(bold=True, size=9, color=SUB)
+                hc.alignment = Alignment(horizontal=al)
+                for c in range(c1, c2 + 1):
+                    ws.cell(nr, c).fill = head
+                    ws.cell(nr, c).border = box
+            nr += 1
+            for i, (text, names) in enumerate(note_groups):
+                paint(nr, PAINT_LAST)
+                ncell = ws.cell(nr, num_col, str(i + 1))
+                ncell.font = F(size=10, color=INK)
+                ncell.alignment = Alignment(horizontal="center")
+                ws.merge_cells(start_row=nr, start_column=dev_c1, end_row=nr, end_column=dev_c2)
+                dv = ws.cell(nr, dev_c1, ", ".join(names))
+                dv.font = F(size=9, color=INK)
+                dv.alignment = Alignment(wrap_text=True, vertical="top")
+                ws.merge_cells(start_row=nr, start_column=cmt_c1, end_row=nr, end_column=cmt_c2)
+                cv = ws.cell(nr, cmt_c1, text)
+                cv.font = F(size=9, color=INK)
+                cv.alignment = Alignment(wrap_text=True, vertical="top")
+                for c in range(num_col, notes_right + 1):
+                    ws.cell(nr, c).fill = card
+                    ws.cell(nr, c).border = box
+                nr += 1
+            paint(nr, PAINT_LAST)
+            nr += 1
+        notes_col_bottom = nr
+
+        tile_band(r, "AT A GLANCE  ·  inventory & readings", ov.get("glance", []))
+        tile_band(r, "NEEDS IMMEDIATE ATTENTION", ov.get("immediate", []))
+        tile_band(r, "NEEDS ATTENTION", ov.get("watch", []))
+
+        # ---- named CRITICAL/WARNING banners (2026-09-22) -----------------------------------
+        # Matches generate_report.py's own render_banner() -- a worded callout for findings
+        # that need who/what, not just a count, grouped by the SAME flag key _device_flags()
+        # already assigns (never a second, independently-computed judgement -- the tile bands
+        # above, these banners, and each device's own Findings table below all read the exact
+        # same flags list). Red-band flags become CRITICAL, amber-band become WARNING -- this
+        # report's own existing two-tier vocabulary, not the systems report's 3-tier
+        # imminent/critical/warning one (nothing here is scoped narrowly enough to need a
+        # third level). Rendered most-affected first within each level.
+        _BANNER_META = {
+            "snmp_unscraped": ("NOT RESPONDING", "device(s) have never been scraped by Prometheus"),
+            "snmp_down": ("NOT RESPONDING", "device(s) are not answering SNMP"),
+            # links_failed/links_shut/links_down retired (2026-09-22): a port down for no known
+            # reason is no longer flagged on its own -- see interface_down_regression below,
+            # which flags the one shape of "down" this report DOES treat as a fault: a
+            # regression from the baseline MonitoredInterface tracks (2026-09-23).
+            "interface_down_regression": ("INTERFACES DOWN (WERE UP)",
+                                          "device(s) have an interface that was previously up "
+                                          "and is now down"),
+            "counter_width": ("THROUGHPUT UNDER-REPORTED",
+                              "device(s) are on 32-bit counters, which wrap and understate throughput"),
+            "cpu_high": ("HIGH CPU", "device(s) are running hot on CPU"),
+            "mem_high": ("HIGH MEMORY", "device(s) are running hot on memory"),
+            "temp_high": ("HIGH TEMPERATURE", "device(s) are reporting elevated sensor temperatures"),
+            "recent_reboot": ("RECENT REBOOT",
+                              "device(s) restarted recently — likely explains other anomalies on it"),
+            "psu_fan_failed": ("POWER / FAN FAILED",
+                               "device(s) have a power or fan component not in a normal state"),
+            "ospf_adjacency_lost": ("OSPF ADJACENCY LOST",
+                                    "device(s) have an OSPF neighbour stuck below Full"),
+            "links_saturated_critical": ("LINKS AT CAPACITY",
+                                        "device(s) have a link at or above 95% of capacity"),
+            "links_saturated": ("LINKS APPROACHING CAPACITY",
+                                "device(s) have a link at or above 80% of capacity"),
+            "iface_errors": ("INTERFACE ERRORS",
+                             "device(s) are logging interface errors — almost always a physical fault"),
+            "iface_discards_heavy": ("HEAVY INTERFACE DISCARDS",
+                                     "device(s) are dropping significant traffic"),
+            "iface_discards": ("INTERFACE DISCARDS",
+                               "device(s) are dropping some traffic (often a QoS policy)"),
+            "metrics_missing": ("METRICS NOT COLLECTED", "device(s) are missing some requested metrics"),
+        }
+        by_key: Dict[Tuple[str, str], list] = {}
+        for sysvm in snapshot.systems:
+            if sysvm.name not in target_by_name:
+                continue
+            for flag in sysvm.flags:
+                by_key.setdefault((flag.key, flag.band), []).append((sysvm.name, flag.text))
+        banner_specs = sorted(by_key.items(), key=lambda kv: (0 if kv[0][1] == "red" else 1, -len(kv[1])))
+
+        def build_findings_detail_sheet(specs):
+            """One consolidated sheet holding every banner's full per-device breakdown -- the
+            detail that used to render inline in each main-sheet banner (2026-09-23, on
+            request: "some banners are way too large... should just summarise finding,
+            introduce a button or link on each banner that navigates to another sheet that has
+            a breakdown of everything"). Built BEFORE the main sheet's own short banners below,
+            so each one's link can jump straight to its own section here (the returned anchor
+            row), not just the top of the sheet. Empty when `specs` is (every device clean) --
+            still created, so a stale "Findings Detail" tab from a WORSE previous run's own
+            xlsx is never confused with this one having nothing to report.
+            """
+            fd = wb.create_sheet("Findings Detail")
+            fd.sheet_view.showGridLines = False
+            fd.sheet_properties.tabColor = CYAN
+            FD_LAST = 9
+            for col, width in zip("ABCDEFGHI", (4, 26, 62, 4, 4, 4, 4, 4, 4)):
+                fd.column_dimensions[col].width = width
+
+            def fd_paint(row, last=FD_LAST):
+                for c in range(1, last + 1):
+                    fd.cell(row, c).fill = page
+
+            fd_paint(1)
+            fd.row_dimensions[1].height = 6
+            fd_paint(2)
+            fd.cell(2, 2, "FINDINGS DETAIL").font = F(bold=True, size=18, color=INK)
+            fd_paint(3)
+            back = fd.cell(3, 2, f"← Back to {ws.title}")
+            back.font = F(bold=True, size=10, color=CYAN, underline="single")
+            back.hyperlink = f"#'{ws.title}'!A1"
+            fd_paint(4)
+            fd.cell(4, 2, "Full per-device breakdown behind every CRITICAL/WARNING banner on "
+                         "the main report — each banner there links straight to its own "
+                         "section below.").font = F(color=SUB, size=9)
+            fd.row_dimensions[4].height = 20
+            fd_paint(5)
+            fd.row_dimensions[5].height = 8
+
+            anchors = {}
+            rr = 6
+            if not specs:
+                fd_paint(rr)
+                fd.cell(rr, 2, "No CRITICAL or WARNING findings this run.").font = F(
+                    color=CHIP["green"][0], size=10)
+                rr += 1
+            for (key, band_), rows in specs:
+                topic, cond = _BANNER_META.get(key, (key.replace("_", " ").upper(), "device(s) flagged"))
+                level = "CRITICAL" if band_ == "red" else "WARNING"
+                header = f"{level}  —  {topic}  —  {len(rows)} {cond}"
+                anchors[(key, band_)] = rr
+                accent, tint = CHIP["red" if band_ == "red" else "amber"]
+                fill = PatternFill("solid", fgColor=tint)
+                fd_paint(rr)
+                fd.merge_cells(start_row=rr, start_column=2, end_row=rr, end_column=FD_LAST - 1)
+                hcell = fd.cell(rr, 2, "  " + header)
+                hcell.font = F(bold=True, size=11, color=accent)
+                hcell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                hcell.border = Border(left=Side(style="thick", color=accent))
+                for c in range(2, FD_LAST):
+                    fd.cell(rr, c).fill = fill
+                rr += 1
+                fd_paint(rr)
+                for c, h in zip((2, 3), ("Device", "Detail")):
+                    hc = fd.cell(rr, c, h)
+                    hc.font = F(bold=True, size=9, color=SUB)
+                    hc.fill = head
+                    hc.border = box
+                for c in range(4, FD_LAST):
+                    fd.cell(rr, c).fill = head
+                    fd.cell(rr, c).border = box
+                rr += 1
+                for device, detail in sorted(rows):
+                    fd_paint(rr)
+                    dc = fd.cell(rr, 2, device)
+                    dc.font = F(bold=True, size=9, color=INK)
+                    dc.border = box
+                    dtc = fd.cell(rr, 3, detail)
+                    dtc.font = F(size=9, color=INK)
+                    dtc.alignment = Alignment(wrap_text=True, vertical="top")
+                    dtc.border = box
+                    for c in range(4, FD_LAST):
+                        fd.cell(rr, c).fill = card
+                        fd.cell(rr, c).border = box
+                    fd.row_dimensions[rr].height = max(15, 14 * (1 + len(detail) // 90))
+                    rr += 1
+                fd_paint(rr)
+                rr += 1   # gap between sections
+            for _ in range(4):
+                fd_paint(rr)
+                rr += 1
+            return anchors
+
+        findings_anchor = build_findings_detail_sheet(banner_specs)
+        if banner_specs:
+            for (key, band_), rows in banner_specs:
+                topic, cond = _BANNER_META.get(key, (key.replace("_", " ").upper(), "device(s) flagged"))
+                level = "CRITICAL" if band_ == "red" else "WARNING"
+                header = f"{level}  —  {topic}  —  {len(rows)} {cond}"
+                anchor_row = findings_anchor[(key, band_)]
+                r = render_banner_summary(r, header, band_, len(rows), anchor_row) + 1
+            paint(r, PAINT_LAST)
+            r += 1
+
+        # Reconcile the two independent cursors -- the dashboard/banners' own `r` and Summary
+        # Notes' own `nr`, run side by side since Summary Notes' top edge above (on request:
+        # "topmost summary section top edge must align with top edge of dashboard section")
+        # -- whichever ran taller governs where the per-device rows below start, the same
+        # "take the max of both sides' own bottoms" pattern generate_report.py's own
+        # content_bottom/notes_bottom use for the exact same left-tiles/right-notes shape.
+        r = max(r, notes_col_bottom)
+
+        for sysvm in snapshot.systems:
+            nc = sum(1 for f in sysvm.flags if f.band == "red")
+            nw = sum(1 for f in sysvm.flags if f.band == "amber")
+            count_word = (f"{sysvm.hosts} host{'s' if sysvm.hosts != 1 else ''}" if sysvm.name in win_names
+                         else f"{sysvm.hosts} interface{'s' if sysvm.hosts != 1 else ''}")
+            segs = [f"{nc} critical", f"{nw} warning", count_word]
+            red_c, amber_c, green_c = CHIP["red"][0], CHIP["amber"][0], CHIP["green"][0]
+            summary_color = red_c if nc else (amber_c if nw else green_c)
+            paint(r, PAINT_LAST)
+            for c in range(FIRST, PAINT_LAST):
+                ws.cell(r, c).fill = card
+            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=LAST - 1)
+            ws.cell(r, FIRST, f"▌  {sysvm.name}").font = F(bold=True, size=13, color=CYAN)
+            # Right edge is NOTES_COL+NOTES_W-1 -- Notes' OWN right edge, not PAINT_LAST-1 (2026-
+            # 09-23 fix, on request: "the rhs edge of the section banner (switch name/title)
+            # should align with the rhs edge of the notes section" -- PAINT_LAST-1 sits 3
+            # columns past Notes' own content, inside the plain painted margin, so the badge
+            # used to overrun where Notes itself actually ends.
+            notes_right_edge = NOTES_COL + NOTES_W - 1
+            ws.merge_cells(start_row=r, start_column=HW_COL, end_row=r, end_column=notes_right_edge)
+            sm = ws.cell(r, HW_COL, "  ·  ".join(segs))
+            sm.font = F(color=summary_color, size=10)
+            sm.alignment = Alignment(horizontal="right")
             r += 1
 
             # HCI Cluster gets real tables here -- Nodes/Drives/Network/Cluster Resources --
@@ -2320,7 +4123,8 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             # snapshot the admin reviewed (snapshot._hci_nodes/_wc), not a fresh query, so
             # the xlsx can never disagree with what was on screen. Only rendered for the
             # device that actually has this data -- the switch's own card is untouched.
-            if sysvm.name == "HCI Cluster" and hci_nodes:
+            hci_nodes = hci_nodes_by_key.get(cluster_key_by_name.get(sysvm.name), {})
+            if sysvm.name in cluster_key_by_name and hci_nodes:
                 node_order = sorted(hci_nodes.items(), key=lambda kv: kv[1].get("display", kv[0]))
 
                 def _row(label, *cells):
@@ -2403,11 +4207,17 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
 
                 # Cluster state: node up/down and clustered resource (mostly VM) counts, plus
                 # WHICH resources are offline/failed, grouped by owning node -- the same join
-                # (resource -> group -> owner) the old banners used, now a table.
-                cnodes = [n for w in wc.values() for n in w.get("nodes", [])]
+                # (resource -> group -> owner) the old banners used, now a table. Scoped to
+                # THIS cluster's own target (2026-09-16, generalized) -- `wc` is keyed by
+                # device target across every cluster device, so an unscoped `wc.values()` would
+                # have shown the SAME combined data under every cluster's row once there was
+                # more than one.
+                this_wc = wc.get(cluster_target_by_name.get(sysvm.name))
+                wc_here = {cluster_target_by_name[sysvm.name]: this_wc} if this_wc else {}
+                cnodes = [n for w in wc_here.values() for n in w.get("nodes", [])]
                 cres = {"online": 0, "offline": 0, "failed": 0, "other": 0}
                 offline_pairs, failed_pairs, group_owner = [], [], {}
-                for w in wc.values():
+                for w in wc_here.values():
                     res = w.get("resources") or {}
                     for k in ("online", "offline", "failed", "other"):
                         cres[k] += res.get(k, 0)
@@ -2441,64 +4251,309 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
                     table("Cluster resources — Offline (informational, not a fault)",
                          ("Node", "Offline resources"), _by_node(offline_pairs))
 
-            paint(r)
-            for label, col in (("Finding", FIRST), ("Band", FIRST + 1), ("Detail", FIRST + 2),
-                               ("Fixed?", FIRST + 3), ("Comment", FIRST + 4)):
-                h = ws.cell(r, col, label)
-                h.font = Font(bold=True, size=9, color=SUB)
-                h.fill = head
-                h.border = box
-            r += 1
+            elif sysvm.name in target_by_name:
+                # Switch/router/WLC devices get real tables here too (2026-09-22, "redesign...
+                # to look exactly in terms of formatting to the other reports... using tables"
+                # -- HCI/DR/Bulawayo above already did; the switch estate's own card used to
+                # fall straight through to the generic Finding/Band/Detail list below with no
+                # tables of its own at all). Laid out SIDE BY SIDE in fixed column lanes (see
+                # table_at's own comment) -- "multiple tables per device" means matching the
+                # System Admin/Cluster Health/AD reports' own multi-table-per-card layout, not
+                # just having more than one table. Sourced from snapshot._store -- the SAME
+                # collect() output the admin's own screen and the Findings table below already
+                # read, never a fresh query.
+                target = target_by_name[sysvm.name]
+                ifaces = [i for i in data.get("interfaces", []) if i["device"] == target]
+                dev_ospf = [row for row in data.get("ospf_rows", [])
+                           if row["labels"].get("instance") == target]
+                dev_psu = [row for row in data.get("psu_rows", []) if row["labels"].get("instance") == target]
+                dev_flash = sorted((p for p in data.get("flash_partitions", []) if p["device"] == target),
+                                   key=lambda p: p["name"])
 
+                cpu = data.get("cpu_by_device", {}).get(target)
+                mem = data.get("mem_by_device", {}).get(target)
+                temp = data.get("temp_by_device", {}).get(target)
+                uptime = data.get("uptime_by_device", {}).get(target)
+                # Always green/amber/red for a KNOWN reading, never left plain (see pct_band's
+                # own comment) -- Temperature/Uptime are hand-rolled bands, not pct_band, so
+                # they need the same "green when healthy, not just uncoloured" fix applied
+                # here directly.
+                temp_band = (None if temp is None else
+                            "red" if temp >= 75 else "amber" if temp >= 60 else "green")
+                uptime_band = (None if uptime is None else
+                              "red" if uptime < 1 else "green")
+                hw_rows = [
+                    [("CPU", None), (f"{cpu:.0f}%" if cpu is not None else "—", pct_band(cpu))],
+                    [("Memory", None), (f"{mem:.0f}%" if mem is not None else "—", pct_band(mem))],
+                    [("Temperature", None), (f"{temp:.0f}°C" if temp is not None else "—", temp_band)],
+                    [("Uptime", None), (f"{uptime:.1f} days" if uptime is not None else "—", uptime_band)],
+                ]
+
+                # AP / Uplink port totals sourced from CDP neighbour discovery -- computed
+                # here, ABOVE Interface Totals, since 2026-09-23 the two are the same scope
+                # (see below). "switch" and "router" neighbour kinds both count as an uplink
+                # (either is the direction traffic goes UP toward, or a lateral link to
+                # another switch -- see _cdp_neighbor_kind's own comment).
+                dev_is_access = is_access_switch(dev_by_name.get(sysvm.name, {}))
+                dev_cdp = [n for n in data.get("cdp_neighbors", []) if n["instance"] == target]
+                ap_n = sum(1 for n in dev_cdp if n["kind"] == "ap")
+                uplink_n = sum(1 for n in dev_cdp if n["kind"] in ("switch", "router"))
+                _monitored_if_indexes = {n["if_index"] for n in dev_cdp
+                                        if n["kind"] in ("ap", "switch", "router")}
+
+                # Scoped to MONITORED interfaces (2026-09-23, on request: "we only want to
+                # monitor these interfaces not all of them... uplink, accesspoint, links going
+                # to other switches (neighboar links)") -- up AND CDP-identified as one of
+                # those three, not every up port (the 2026-09-22 "up-only" scope this started
+                # as). The full port-by-port breakdown (Device | Port | Status | In | Out |
+                # Errors | Discards, every interface regardless of monitored status) is still
+                # on its own "Interface Detail" sheet, built once at the end of this function.
+                ifaces_monitored = [i for i in ifaces
+                                    if i["up"] and str(i["index"]) in _monitored_if_indexes]
+                iface_err_n = sum(1 for i in ifaces_monitored
+                                  if (i["errors"].get("in_err", 0) + i["errors"].get("out_err", 0)) > 0)
+                iface_disc_n = sum(1 for i in ifaces_monitored
+                                   if (i["errors"].get("in_disc", 0) + i["errors"].get("out_disc", 0)) > 0)
+                # "Monitored"/"Total monitored" stay uncoloured -- estate counts, not a
+                # judgement (see this report's own "estate vs variable metric" distinction).
+                # "With errors"/"With discards" ARE variable/threshold metrics, so -- same fix
+                # as pct_band's own comment -- they're green, not plain, when genuinely 0.
+                iface_totals_rows = [
+                    [("Monitored", None), (str(len(ifaces_monitored)), None)],
+                    [("With errors", None), (str(iface_err_n), "red" if iface_err_n else "green")],
+                    [("With discards", None), (str(iface_disc_n), "amber" if iface_disc_n else "green")],
+                    [("Total monitored", None), (str(len(ifaces_monitored)), None)],
+                ]
+
+                ospf_rows_t = [[
+                    (row["labels"].get("ospfNbrIpAddr", "—"), None),
+                    ({4: "2-Way", 8: "Full"}.get(int(row["value"]), f"state {int(row['value'])}"),
+                     "green" if int(row["value"]) in (4, 8) else "red"),
+                ] for row in sorted(dev_ospf, key=lambda row: row["labels"].get("ospfNbrIpAddr", ""))]
+
+                psu_rows_t = [[
+                    (row["labels"].get("entPhysicalName", "—"), None),
+                    (row["labels"].get("cefcFRUPowerOperStatus", "—"),
+                     "green" if row["labels"].get("cefcFRUPowerOperStatus") == "on" else "red"),
+                ] for row in sorted(dev_psu, key=lambda row: row["labels"].get("entPhysicalName", ""))]
+                # Used % is a VARIABLE metric (this report's own "estate vs variable metric"
+                # distinction) -- always green/amber/red via pct_band, same as CPU/Memory
+                # above, never left plain just because a partition happens to be healthy.
+                storage_rows_t = [[
+                    (p["name"], None),
+                    (f"{p['size_gb']:.1f}" if p["size_gb"] is not None else "—", None),
+                    (f"{p['free_gb']:.1f}" if p["free_gb"] is not None else "—", None),
+                    (f"{p['used_pct']:.0f}%" if p["used_pct"] is not None else "—",
+                     pct_band(p["used_pct"])),
+                ] for p in dev_flash]
+                cdp_totals_rows = [
+                    [("AP ports", None), (str(ap_n), None)],
+                    [("Uplink ports", None), (str(uplink_n), None)],
+                    [("Other neighbours", None),
+                     (str(sum(1 for n in dev_cdp if n["kind"] == "other")), None)],
+                    [("Total CDP neighbours", None), (str(len(dev_cdp)), None)],
+                ]
+
+                # Notes' own row count, computed up front (2026-09-23, on request: "move notes
+                # section to be the last section on the rhs") so it counts toward row_max like
+                # every other lane -- render_notes_lane() below produces EXACTLY this many
+                # rows, always (flagged-metric header + N flag rows, or one "no findings" row;
+                # then Comment title; then the comment text; then the By line).
+                notes_flagged_rows = (1 + len(sysvm.flags)) if sysvm.flags else 1
+                notes_h = notes_flagged_rows + 3   # + Comment title + comment text + By line
+
+                # Every lane starts at the SAME row; each ends wherever its own row count
+                # takes it (2 title/header rows + its data rows). Paint the full wide span
+                # first, for every row any lane will occupy, so the gap columns between lanes
+                # -- and any lane shorter than its tallest neighbour -- read as the same dark
+                # canvas rather than raw white past where that lane's own table_at() call ends.
+                # +1 on the interface lane for its own pointer line below its table.
+                lane_heights = [2 + len(hw_rows), notes_h]
+                if ospf_rows_t: lane_heights.append(2 + len(ospf_rows_t))
+                if dev_psu:      lane_heights.append(2 + len(psu_rows_t))
+                if ifaces:       lane_heights.append(2 + len(iface_totals_rows) + 1)
+                if dev_flash:    lane_heights.append(2 + len(storage_rows_t))
+                if dev_is_access and dev_cdp:
+                    lane_heights.append(2 + len(cdp_totals_rows) + 1)
+                row0 = r
+                row_max = row0 + max(lane_heights)
+                for wide_row in range(row0, row_max):
+                    paint(wide_row, PAINT_LAST)
+
+                table_at(row0, HW_COL, HW_W, "Hardware health", ("Metric", "Value"), hw_rows)
+                if ospf_rows_t:
+                    table_at(row0, OSPF_COL, OSPF_W, "OSPF neighbours", ("Neighbour", "State"), ospf_rows_t)
+                if dev_psu:
+                    table_at(row0, PSU_COL, PSU_W, "Power / fan", ("Component", "Status"), psu_rows_t)
+                if ifaces:
+                    end = table_at(row0, IFACE_COL, IFACE_W, "Interface totals",
+                                   ("Metric", "Value"), iface_totals_rows)
+                    ws.merge_cells(start_row=end, start_column=IFACE_COL, end_row=end,
+                                  end_column=IFACE_COL + IFACE_W - 1)
+                    # Real hyperlink (2026-09-23, was plain text), jumping straight to THIS
+                    # device's own first row in Interface Detail, not just the top of the
+                    # sheet -- det_first_row_by_device is computed early, before this loop,
+                    # from the exact same sort the sheet itself is built with below. Falls
+                    # back to the HEADER row (5, not row 6) when this device has no scoped
+                    # interfaces at all (2026-09-24) -- landing on the column headers rather
+                    # than silently on whichever OTHER device's data happens to occupy row 6.
+                    ptr_row = det_first_row_by_device.get(sysvm.name, 5)
+                    ptr_label = ("↳ full breakdown: 'Interface Detail' tab" if sysvm.name in det_first_row_by_device
+                                else "↳ 'Interface Detail' tab (no monitored interfaces here)")
+                    ptr = ws.cell(end, IFACE_COL, ptr_label)
+                    ptr.font = F(size=8, color=CYAN, italic=True, underline="single")
+                    ptr.hyperlink = f"#'Interface Detail'!A{ptr_row}"
+                    for c in range(IFACE_COL, IFACE_COL + IFACE_W):
+                        ws.cell(end, c).fill = card
+                if dev_flash:
+                    table_at(row0, STORAGE_COL, STORAGE_W, "Storage",
+                            ("Partition", "Size GB", "Free GB", "Used %"), storage_rows_t)
+                if dev_is_access and dev_cdp:
+                    cend = table_at(row0, CDP_COL, CDP_W, "AP / Uplink ports",
+                                    ("Metric", "Value"), cdp_totals_rows)
+                    ws.merge_cells(start_row=cend, start_column=CDP_COL, end_row=cend,
+                                  end_column=CDP_COL + CDP_W - 1)
+                    cptr_row = cdp_first_row_by_device.get(sysvm.name, 6)
+                    cptr = ws.cell(cend, CDP_COL, "↳ full breakdown: 'CDP Neighbors' tab")
+                    cptr.font = F(size=8, color=CYAN, italic=True, underline="single")
+                    cptr.hyperlink = f"#'CDP Neighbors'!A{cptr_row}"
+                    for c in range(CDP_COL, CDP_COL + CDP_W):
+                        ws.cell(cend, c).fill = card
+                render_notes_lane(row0, sysvm)
+                # row_max itself is the one blank gap row after every lane, Notes included --
+                # paint it explicitly rather than just skipping past it, or it reads as raw
+                # white Excel before the next device's own row starts.
+                paint(row_max, PAINT_LAST)
+                r = row_max + 1
+                continue
+
+            # ---- Notes (fallback, narrow, stacked below): every switch/router/WLC device hit
+            # `continue` above and never reaches this -- see render_notes_lane() instead, which
+            # renders Notes as the outermost LANE on the same row (2026-09-23, on request:
+            # "move notes section to be the last section on the rhs"). This narrow version
+            # only still runs for a device that fell through the HCI/switch branches above
+            # without matching either (not reachable via switches_routers_generate's own
+            # capture_snapshot(mode="switches_routers"), which only ever selects switch/
+            # router/WLC devices -- kept as a safety net, not dead code removed outright, in
+            # case build_report() is ever called against a differently-scoped snapshot). Same
+            # Flagged metric / Fix needed? / Resolved table, THEN a Comment box, THEN a
+            # "By {author}" line -- matching generate_report.py's own _system_card() Notes
+            # panel structure. `Resolved` is formula-derived from `Fix needed?`: no fix needed
+            # -> resolved; fix needed -> still open; blank until the admin picks.
+            mcol = FIRST + 2
+            fix_col, res_col = FIRST + 3, FIRST + 4
             ann = annotations.get(sysvm.name, {})
-            if not sysvm.flags:
-                paint(r)
-                ws.cell(r, FIRST, "No findings — every collected metric is within limits").font = Font(
-                    color=CHIP["green"][0], size=10)
+            ann_flags = ann.get("flags", {})
+            paint(r, PAINT_LAST)
+            if sysvm.flags:
+                ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=mcol)
+                h = ws.cell(r, FIRST, "  Flagged metric")
+                h.font = F(bold=True, size=8, color=SUB)
+                for col, label in ((fix_col, "Fix needed?"), (res_col, "Resolved")):
+                    hc = ws.cell(r, col, label)
+                    hc.font = F(bold=True, size=8, color=SUB)
+                    hc.alignment = Alignment(horizontal="center", wrap_text=True)
+                for col in range(FIRST, res_col + 1):
+                    ws.cell(r, col).fill = head
+                    ws.cell(r, col).border = box
                 r += 1
-            for flag in sysvm.flags:
-                paint(r)
-                fg, bgc = CHIP["red" if flag.band == "red" else "amber"]
-                for col in range(FIRST, FIRST + 5):
-                    cell = ws.cell(r, col)
-                    cell.fill = card
-                    cell.border = box
-                ws.cell(r, FIRST, flag.key).font = Font(color=GREY, size=10)
-                b = ws.cell(r, FIRST + 1, "Immediate" if flag.band == "red" else "Watch")
-                b.font = Font(bold=True, size=10, color=fg)
-                b.fill = PatternFill("solid", fgColor=bgc)
-                d = ws.cell(r, FIRST + 2, flag.text)
-                d.font = Font(color=INK, size=10)
-                d.alignment = Alignment(wrap_text=True, vertical="top")
-                ws.cell(r, FIRST + 3, ann.get("flags", {}).get(flag.key, "")).font = Font(size=10, color=INK)
-                r += 1
-            if ann.get("comment"):
-                paint(r)
-                for col in range(FIRST, FIRST + 5):
+                dv = DataValidation(type="list", formula1='"Yes,No"', allow_blank=True)
+                ws.add_data_validation(dv)
+                fix_letter = get_column_letter(fix_col)
+                for flag in sysvm.flags:
+                    paint(r, PAINT_LAST)
+                    fg = CHIP["red" if flag.band == "red" else "amber"][0]
+                    ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=mcol)
+                    d = ws.cell(r, FIRST, "  " + flag.text)
+                    d.font = F(color=fg, size=9)
+                    d.alignment = Alignment(wrap_text=True, vertical="top")
+                    for col in range(FIRST, mcol + 1):
+                        ws.cell(r, col).fill = card
+                        ws.cell(r, col).border = box
+                    answer = ann_flags.get(flag.key)
+                    fix = ws.cell(r, fix_col, answer if answer in ("Yes", "No") else "")
+                    fix.font = F(size=9, color=INK)
+                    fix.fill = card
+                    fix.border = box
+                    fix.alignment = Alignment(horizontal="center")
+                    dv.add(fix)
+                    res = ws.cell(r, res_col,
+                                 f'=IF({fix_letter}{r}="No","Yes",IF({fix_letter}{r}="Yes","No",""))')
+                    res.font = F(size=9, color=INK)
+                    res.fill = card
+                    res.border = box
+                    res.alignment = Alignment(horizontal="center")
+                    r += 1
+            else:
+                ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=res_col)
+                ws.cell(r, FIRST, "  No critical or warning metrics this run.").font = F(
+                    color=SUB, size=9)
+                for col in range(FIRST, res_col + 1):
                     ws.cell(r, col).fill = card
-                ws.cell(r, FIRST, "Comment").font = Font(bold=True, size=9, color=SUB)
-                cm = ws.cell(r, FIRST + 2, ann["comment"])
-                cm.font = Font(color=INK, size=10)
-                cm.alignment = Alignment(wrap_text=True, vertical="top")
+                    ws.cell(r, col).border = box
                 r += 1
-            paint(r)
+
+            paint(r, PAINT_LAST)
+            ws.cell(r, FIRST, "  Comment").font = F(bold=True, size=8, color=SUB)
+            for col in range(FIRST, res_col + 1):
+                ws.cell(r, col).fill = card
+            r += 1
+            comment_text = (ann.get("comment") or "").strip()
+            if not comment_text and not sysvm.flags:
+                comment_text = "No issues identified."
+            paint(r, PAINT_LAST)
+            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=res_col)
+            cm = ws.cell(r, FIRST, comment_text)
+            cm.font = F(color=INK, size=9)
+            cm.alignment = Alignment(wrap_text=True, vertical="top")
+            for col in range(FIRST, res_col + 1):
+                ws.cell(r, col).fill = card
+                ws.cell(r, col).border = box
             r += 1
 
-        if summary_comment:
-            paint(r)
-            ws.cell(r, FIRST, "SUMMARY").font = Font(bold=True, size=10, color=INK)
+            paint(r, PAINT_LAST)
+            by = ws.cell(r, FIRST, f"By  {author}")
+            by.font = F(color=SUB, size=8)
+            by.alignment = Alignment(horizontal="right")
+            for col in range(FIRST, res_col + 1):
+                ws.cell(r, col).fill = card
             r += 1
+
+            paint(r, PAINT_LAST)
+            r += 1
+
+        # ---- footer: 3-line chip-key / legend / cross-reference note (2026-09-22) -----------
+        # Matches infrastructure_report.py's own FOOTER_LINES pattern exactly -- plain text
+        # lines, no table -- with a reciprocal cross-reference note (that module's own footer
+        # already points here; this points back). The switches/routers-specific SNMP caveats
+        # below ("HOW TO READ THESE NUMBERS") are KEPT as an additional block, not replaced --
+        # they document a real measurement limitation this report has and the reference
+        # reports don't, so folding them into this 3-line legend would either bury them or
+        # bloat every other report's footer with a caveat that doesn't apply to it.
+        for line in (
+            "chip key:  green under 80%   ·   amber 80-89%   ·   red 90% and over "
+            "(temperature: amber 60-74°C, red 75°C and over)      |      device status "
+            "UP / DOWN      |      live from SNMP",
+            "▌ badge:  N critical = red-band findings requiring action now   ·   "
+            "N warning = amber-band findings worth watching   ·   interfaces = ports "
+            "collected on that device",
+            "Servers, HCI/DR clusters and Active Directory hosts are tracked in the "
+            "separate Infrastructure Report and Active Directory Report, not here.",
+        ):
             paint(r)
-            sc = ws.cell(r, FIRST, summary_comment)
-            sc.font = Font(color=INK, size=10)
-            sc.alignment = Alignment(wrap_text=True, vertical="top")
-            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=FIRST + 4)
-            r += 2
+            fc = ws.cell(r, FIRST, line)
+            fc.font = F(color=SUB, size=8)
+            fc.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=PAINT_LAST - 1)
+            ws.row_dimensions[r].height = 20
+            r += 1
+        paint(r, PAINT_LAST)
+        r += 1
 
         # The caveats belong IN the artifact. A spreadsheet outlives the screen it was made on,
         # and these numbers are wrong in a specific, knowable way its reader has to be told.
-        paint(r)
-        ws.cell(r, FIRST, "HOW TO READ THESE NUMBERS").font = Font(bold=True, size=10, color=INK)
+        paint(r, PAINT_LAST)
+        ws.cell(r, FIRST, "HOW TO READ THESE NUMBERS").font = F(bold=True, size=10, color=INK)
         r += 1
         for line in (
             "Throughput is a FLOOR, not a measurement: only 32-bit octet counters are polled "
@@ -2506,21 +4561,303 @@ def build_report(snapshot, *, theme: str = "dark", author: str,
             "No percentage utilisation appears anywhere - port speed (ifHighSpeed) is not "
             "collected, so there is no capacity to compare against.",
             "Interfaces are identified by index because ifDescr is not collected.",
-            "Ports that are not up cannot be told apart from ports an admin deliberately shut "
-            "(ifAdminStatus is not collected).",
+            "This report's totals, banners and findings — and the 'Interface Detail' tab — "
+            "are scoped to MONITORED interfaces only: an access point, an uplink, or a "
+            "neighbour link (CDP-identified), whether currently up or down. A port never "
+            "chosen this way is excluded everywhere, not just hidden — see 'Interface "
+            "Detail's own 'Not monitored' count at the end of that tab for what's excluded, "
+            "per device.",
         ):
             paint(r)
             cell = ws.cell(r, FIRST, "• " + line)
-            cell.font = Font(color=SUB, size=9)
+            cell.font = F(color=SUB, size=9)
             cell.alignment = Alignment(wrap_text=True, vertical="top")
-            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=FIRST + 4)
+            ws.merge_cells(start_row=r, start_column=FIRST, end_row=r, end_column=PAINT_LAST - 1)
             ws.row_dimensions[r].height = 26
             r += 1
 
         # a painted margin below the content, so the themed canvas does not stop mid-page
         for _ in range(8):
-            paint(r)
+            paint(r, PAINT_LAST)
             r += 1
+
+        # ---- Interface Detail: breakdown of every SCOPED interface (2026-09-22, revised
+        # 2026-09-23, narrowed 2026-09-24) --------------------------------------------------
+        # The main sheet's own per-device "Interface totals" lane is a summary, scoped to
+        # MONITORED interfaces; this sheet used to list EVERY interface, up or down, monitored
+        # or not -- reverted (2026-09-24, on request: "the interface breakdown still shows
+        # interfaces not monitored kindly remove these... the admins are adament they dont
+        # want to see these interfaces save for the few they specifically chose") to list only
+        # SCOPED ones (MonitoredInterface.is_scoped -- see _interface_scoped_keys' own comment
+        # above, computed early). A down port still gets a real Status here: "down —
+        # regression" (red) when it is scoped but currently down -- the SAME fact that already
+        # earned it a red finding on the main sheet. A port never chosen is excluded outright,
+        # not shown as "not monitored" any more -- its EXISTENCE is still on record, as a
+        # per-device count in the "Not monitored" block at the end of this sheet, so the
+        # exclusion itself is never silently forgotten even though the port rows are gone. ONE
+        # shared sheet with a Device column, not one tab per device -- 39 devices would mean 39
+        # tabs, worse to scan and worse tooling fit than one sortable table here.
+        name_by_target = {t: n for n, t in target_by_name.items()}
+        det = wb.create_sheet("Interface Detail")
+        det.sheet_view.showGridLines = False
+        det.sheet_properties.tabColor = CYAN
+        DET_LAST = 9   # A margin, B..H content (Device..Discards), I margin
+        for col, width in zip("ABCDEFGHI", (4, 26, 20, 20, 16, 16, 10, 10, 4)):
+            det.column_dimensions[col].width = width
+
+        def det_paint(row, last=DET_LAST):
+            for c in range(1, last + 1):
+                det.cell(row, c).fill = page
+
+        det_paint(1)
+        det.row_dimensions[1].height = 6
+        det_paint(2)
+        det.cell(2, 2, "INTERFACE DETAIL").font = F(bold=True, size=18, color=INK)
+        back = det.cell(2, 5, f"← Back to {ws.title}")
+        back.font = F(bold=True, size=10, color=CYAN, underline="single")
+        back.hyperlink = f"#'{ws.title}'!A1"
+        det_paint(3)
+        det.cell(3, 2, "Every MONITORED interface across the full estate — an access point, "
+                      "an uplink, or a neighbour link, the same scope the main report's own "
+                      "findings use — up or down (a scoped port that has gone down still "
+                      "appears here as a regression). Ports never chosen as monitored are not "
+                      "listed; see the 'Not monitored' count at the end of this sheet for "
+                      "what's excluded per device.").font = F(color=SUB, size=9)
+        det.row_dimensions[3].height = 26
+        det_paint(4)
+        det.row_dimensions[4].height = 8
+
+        # Directional accents (2026-09-22, on request: "give inbound and outbound their own
+        # distinct visual treatment... so the two aren't just two plain adjacent numbers") --
+        # green for inbound, cyan for outbound: two hues this theme already carries that
+        # neither collide with the red/amber "problem" vocabulary used for Errors/Discards in
+        # the SAME rows, nor with each other. Arrow glyphs in the header text reinforce it for
+        # anyone reading in black-and-white.
+        in_accent, in_tint = CHIP["green"]
+        out_accent = CYAN
+        hdr_row = 5
+        headers = ("Device", "Port", "Status", "↓ In", "↑ Out", "Errors", "Discards")
+        det_paint(hdr_row)
+        for c, h in zip(range(2, 2 + len(headers)), headers):
+            cell = det.cell(hdr_row, c, h)
+            cell.fill = head
+            cell.border = box
+            if h == "↓ In":
+                cell.font = F(bold=True, size=9, color=in_accent)
+            elif h == "↑ Out":
+                cell.font = F(bold=True, size=9, color=out_accent)
+            else:
+                cell.font = F(bold=True, size=9, color=SUB)
+        for c in range(2 + len(headers), DET_LAST + 1):
+            det.cell(hdr_row, c).fill = head
+            det.cell(hdr_row, c).border = box
+        det.freeze_panes = det.cell(hdr_row + 1, 2).coordinate
+
+        rows_out = []
+        not_monitored_by_device: Dict[str, int] = {}
+        for i in data.get("interfaces", []):
+            dname = name_by_target.get(i["device"])
+            if dname is None:
+                continue
+            if (i["device"], str(i["index"])) in _interface_scoped_keys:
+                rows_out.append((dname, i))
+            else:
+                not_monitored_by_device[dname] = not_monitored_by_device.get(dname, 0) + 1
+        rows_out.sort(key=lambda pair: (pair[0], int(pair[1]["index"] or 0)))
+
+        _manual_exempt_keys = data.get("manual_exempt_keys", set())
+        rr = hdr_row + 1
+        for dname, i in rows_out:
+            det_paint(rr)
+            in_err = i["errors"].get("in_err", 0) + i["errors"].get("out_err", 0)
+            disc = i["errors"].get("in_disc", 0) + i["errors"].get("out_disc", 0)
+            # Every row here is scoped by construction (see the rows_out filter above), so a
+            # down one is normally a genuine regression -- EXCEPT a manually monitored port
+            # whose down_is_fault is False (2026-09-24, the SPAN/mirror destination case --
+            # see MANUAL_MONITORED_INTERFACES' own comment): its "down" reading is expected
+            # by design, not a fault, so it gets its own honest label instead of a red alarm.
+            if i["up"]:
+                status_text, status_band = "up", "green"
+            elif (i["device"], str(i["index"])) in _manual_exempt_keys:
+                status_text, status_band = "down — expected (SPAN destination)", None
+            else:
+                status_text, status_band = "down — regression", "red"
+            cells = [
+                (2, dname, None, INK), (3, i["name"], None, INK), (4, status_text, status_band, SUB),
+                (5, i["in_text"], None, in_accent), (6, i["out_text"], None, out_accent),
+                (7, f"{in_err:.0f}", "red" if in_err >= _NODE_ERR_RED else "green", INK),
+                (8, f"{disc:.0f}", "amber" if disc >= _NODE_DISC_RED else "green", INK),
+            ]
+            for c, text, chip_band, plain_color in cells:
+                cell = det.cell(rr, c, text)
+                cell.border = box
+                if chip_band:
+                    fg, bgc = CHIP[chip_band]
+                    cell.font = F(bold=True, size=9, color=fg)
+                    cell.fill = PatternFill("solid", fgColor=bgc)
+                else:
+                    cell.font = F(size=9, color=plain_color or INK)
+                    cell.fill = card
+            det.cell(rr, DET_LAST).fill = card
+            rr += 1
+
+        if not rows_out:
+            det_paint(rr)
+            det.cell(rr, 2, "No interfaces reported across this estate.").font = F(
+                color=SUB, size=9)
+            rr += 1
+
+        for _ in range(3):
+            det_paint(rr)
+            rr += 1
+
+        # ---- Not monitored: what got excluded above, by count only -- never full port rows
+        # (2026-09-24, on request: "just ad a note to lett us what isnt being monitores so we
+        # wont forget but the admins are adament they dont want to see these interfaces"). A
+        # port here was simply never CDP-identified as an access point, uplink, or neighbour
+        # link -- the administratively-normal case (an unused wall jack, a downstream host
+        # port), not a fault, so it earns a count, not a row of its own.
+        det_paint(rr)
+        det.cell(rr, 2, "NOT MONITORED").font = F(bold=True, size=10, color=INK)
+        rr += 1
+        total_not_monitored = sum(not_monitored_by_device.values())
+        det_paint(rr)
+        note = (f"{total_not_monitored} interface(s) across "
+                f"{len(not_monitored_by_device)} device(s) are not monitored -- never "
+                f"CDP-identified as an access point, uplink, or neighbour link -- and are "
+                f"excluded from the list above." if total_not_monitored else
+                "Every interface this estate reported is monitored -- nothing is excluded.")
+        cell = det.cell(rr, 2, note)
+        cell.font = F(color=SUB, size=9)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        det.merge_cells(start_row=rr, start_column=2, end_row=rr, end_column=DET_LAST - 1)
+        det.row_dimensions[rr].height = 26
+        rr += 1
+        if not_monitored_by_device:
+            rr += 1
+            det_paint(rr)
+            for c, h in ((2, "Device"), (3, "Not monitored")):
+                cell = det.cell(rr, c, h)
+                cell.font = F(bold=True, size=9, color=SUB)
+                cell.fill = head
+                cell.border = box
+            for c in range(4, DET_LAST + 1):
+                det.cell(rr, c).fill = head
+                det.cell(rr, c).border = box
+            rr += 1
+            for dname in sorted(not_monitored_by_device):
+                det_paint(rr)
+                nm_cell = det.cell(rr, 2, dname)
+                nm_cell.font = F(size=9, color=INK)
+                nm_cell.border = box
+                cnt_cell = det.cell(rr, 3, not_monitored_by_device[dname])
+                cnt_cell.font = F(size=9, color=INK)
+                cnt_cell.border = box
+                det.cell(rr, 2).fill = card
+                det.cell(rr, 3).fill = card
+                rr += 1
+
+        for _ in range(6):
+            det_paint(rr)
+            rr += 1
+
+        # ---- CDP Neighbors: full breakdown of everything CDP found plugged into this estate
+        # (2026-09-23) -- same treatment as Interface Detail: the per-device "AP /
+        # Uplink ports" lane above (access switches only) is a summary; this is the complete
+        # list its own pointer link sends the reader to, covering EVERY device with CDP data
+        # (not just access switches -- informative for the core switch and routers too, even
+        # though they don't get their own summary lane). "Type" is derived from the
+        # neighbour's own reported platform string (see _cdp_neighbor_kind's own comment) --
+        # AP and Uplink are colour-flagged since those are what this report actually monitors
+        # for; Phone/Other are informational only, never a finding.
+        cdpsheet = wb.create_sheet("CDP Neighbors")
+        cdpsheet.sheet_view.showGridLines = False
+        cdpsheet.sheet_properties.tabColor = CYAN
+        CDPS_LAST = 9
+        for col, width in zip("ABCDEFGHI", (4, 26, 20, 26, 20, 26, 12, 4, 4)):
+            cdpsheet.column_dimensions[col].width = width
+
+        def cdps_paint(row, last=CDPS_LAST):
+            for c in range(1, last + 1):
+                cdpsheet.cell(row, c).fill = page
+
+        cdps_paint(1)
+        cdpsheet.row_dimensions[1].height = 6
+        cdps_paint(2)
+        cdpsheet.cell(2, 2, "CDP NEIGHBORS").font = F(bold=True, size=18, color=INK)
+        cdpback = cdpsheet.cell(2, 5, f"← Back to {ws.title}")
+        cdpback.font = F(bold=True, size=10, color=CYAN, underline="single")
+        cdpback.hyperlink = f"#'{ws.title}'!A1"
+        cdps_paint(3)
+        cdpsheet.cell(3, 2, "Everything CDP discovered plugged into the Switches & Routers "
+                            "estate. Type is read from the neighbour's OWN reported platform "
+                            "string (an access point, another switch or router -- an uplink "
+                            "-- or an unrecognised device such as a phone), never guessed from "
+                            "a fixed port number. A device with nothing here either has no "
+                            "CDP-speaking neighbour on any port, or CDP itself is off on it.").font = F(
+            color=SUB, size=9)
+        cdpsheet.row_dimensions[3].height = 30
+        cdps_paint(4)
+        cdpsheet.row_dimensions[4].height = 8
+
+        cdps_headers = ("Device", "Local Port", "Neighbor", "Neighbor Port", "Platform", "Type")
+        cdps_hdr_row = 5
+        cdps_paint(cdps_hdr_row)
+        for c, h in zip(range(2, 2 + len(cdps_headers)), cdps_headers):
+            cell = cdpsheet.cell(cdps_hdr_row, c, h)
+            cell.font = F(bold=True, size=9, color=SUB)
+            cell.fill = head
+            cell.border = box
+        for c in range(2 + len(cdps_headers), CDPS_LAST + 1):
+            cdpsheet.cell(cdps_hdr_row, c).fill = head
+            cdpsheet.cell(cdps_hdr_row, c).border = box
+        cdpsheet.freeze_panes = cdpsheet.cell(cdps_hdr_row + 1, 2).coordinate
+
+        _CDPS_TYPE_LABEL = {"ap": "Access point", "switch": "Uplink (switch)",
+                            "router": "Uplink (router)", "other": "Other"}
+        _CDPS_TYPE_BAND = {"ap": "green", "switch": "amber", "router": "amber", "other": None}
+
+        cdps_rows_out = []
+        for n in data.get("cdp_neighbors", []):
+            dname = name_by_target.get(n["instance"])
+            if dname is None:
+                continue
+            cdps_rows_out.append((dname, n))
+        cdps_rows_out.sort(key=lambda pair: (pair[0], pair[1]["local_port"]))
+
+        crr = cdps_hdr_row + 1
+        for dname, n in cdps_rows_out:
+            cdps_paint(crr)
+            type_text = _CDPS_TYPE_LABEL.get(n["kind"], "Other")
+            type_band = _CDPS_TYPE_BAND.get(n["kind"])
+            cells = [
+                (2, dname, None), (3, n["local_port"], None), (4, n["device_id"] or "—", None),
+                (5, n["device_port"] or "—", None), (6, n["platform"] or "—", None),
+                (7, type_text, type_band),
+            ]
+            for c, text, chip_band in cells:
+                cell = cdpsheet.cell(crr, c, text)
+                cell.border = box
+                if chip_band:
+                    fg, bgc = CHIP[chip_band]
+                    cell.font = F(bold=True, size=9, color=fg)
+                    cell.fill = PatternFill("solid", fgColor=bgc)
+                else:
+                    cell.font = F(size=9, color=INK)
+                    cell.fill = card
+            for c in range(8, CDPS_LAST + 1):
+                cdpsheet.cell(crr, c).fill = card
+            crr += 1
+
+        if not cdps_rows_out:
+            cdps_paint(crr)
+            cdpsheet.cell(crr, 2, "No CDP neighbours reported across this estate.").font = F(
+                color=SUB, size=9)
+            crr += 1
+
+        for _ in range(6):
+            cdps_paint(crr)
+            crr += 1
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -2553,7 +4890,7 @@ def infrastructure_report_filename(theme: str = "dark", when=None) -> str:
     report this app produces for this estate sits together in a folder."""
     import datetime
     when = when or datetime.datetime.now()
-    return f"Infrastructure Admin Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+    return f"Cluster Health Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
 
 
 # `system` label values that make up the Active Directory estate -- Root/Child Domain
@@ -2565,6 +4902,119 @@ def infrastructure_report_filename(theme: str = "dark", when=None) -> str:
 AD_SYSTEMS = {"Root Domain Controllers", "Child Domain Controllers", "AD Sync & Authentication"}
 
 
+def infra_device_keys() -> set:
+    """DEVICES keys for Infrastructure Admin's own estate (HCI Clusters, Standalone Servers)
+    -- every windows-kind device EXCEPT the AD ones, the same filter infra_form's own picker
+    already applies to device_inventory(). Built straight from DEVICES (no live Prometheus
+    round trip), so it's cheap enough to call just to SCOPE a capture -- both views.py's
+    exec-dashboard live capture and alerting.run_alert_cycle's own broadened poll (2026-09-18)
+    share this one definition rather than each keeping their own copy to drift apart."""
+    return {d["key"] for d in DEVICES
+           if d.get("kind") == "windows" and d.get("system") not in AD_SYSTEMS}
+
+
+def ad_device_keys() -> set:
+    """DEVICES keys for Active Directory's own estate (Root/Child Domain Controllers, AD Sync
+    & Authentication) -- active_directory_form's own picker filter, reused here. See
+    infra_device_keys' own docstring on why this lives here, not in views.py or alerting.py."""
+    return {d["key"] for d in DEVICES if d.get("system") in AD_SYSTEMS}
+
+
+def switches_routers_device_keys() -> set:
+    """DEVICES keys for the WHOLE SNMP switch/router/WLC estate, core switch included --
+    39 devices. NOT a report picker's own scope any more (2026-09-23, on request: "report
+    not split as requested" -- the single combined Switches & Routers Report picker was
+    replaced by four narrower ones, see core_switches_device_keys/routers_device_keys/
+    wireless_controller_device_keys/access_switches_device_keys just below). Kept, unchanged,
+    for the alert poller and the Executive Dashboard's LiveEstateOverview (alerting.py's own
+    "switches_routers" poller entry) -- those want ONE combined view of the whole estate
+    regardless of which report screen an admin happens to be looking at, a different question
+    than "which devices does this report picker show"."""
+    return {d["key"] for d in DEVICES
+           if d.get("kind") in ("Switch", "Router", "WLC")
+           and d.get("report") == "switches_routers_report"}
+
+
+def is_access_switch(dev: dict) -> bool:
+    """True for every switch except a core one (2026-09-23, on request: "specific monitoring
+    on access switches not core switches"; generalized 2026-09-24 from a single hardcoded
+    `key != "core-switch"` check to DEVICES' own `role: "core"` tag, once a second and third
+    core switch -- DR, BYO -- joined the original HQ one). Everything else with kind "Switch"
+    is treated as access-tier. Routers and the WLC are neither: AP/uplink-port monitoring is a
+    switch-port concept, so build_report()'s own CDP lane (see its comment) is gated on this,
+    not just `kind == "Switch"` alone."""
+    return dev.get("kind") == "Switch" and dev.get("role") != "core"
+
+
+# ---------------------------------------------------------------------------------------
+#  The four report-picker estates (2026-09-23, on request: "create a seperate core switches
+#  report and a seperate routers report ... this current report rename it to Access
+#  switches" -- then, on clarifying WLC placement: "the one without poe wireless
+#  controller... put it in its own report called wireless controller"). Replaces the single
+#  combined Switches & Routers Report picker (switches_routers_form/_report/_generate in
+#  views.py) with four narrower ones, each reusing the SAME collect()/build_report() engine
+#  (mode="switches_routers") -- only the device scope and the report's own title differ.
+#  switches_routers_device_keys() above is untouched and still backs the alert poller's own
+#  combined view; these four are picker-only.
+# ---------------------------------------------------------------------------------------
+def core_switches_device_keys() -> set:
+    """DEVICES keys for the Core Switches Report -- today, three devices tagged `role: "core"`
+    (HQ 10.100.210.253, DR 10.100.210.251, BYO 10.200.210.252; see DEVICES' own comment on
+    them). Written as `not is_access_switch(d)` rather than a literal key match so another
+    core switch, if one is ever added, only needs its own DEVICES entry -- not a change here
+    too."""
+    return {d["key"] for d in DEVICES if d.get("kind") == "Switch" and not is_access_switch(d)}
+
+
+def routers_device_keys() -> set:
+    """DEVICES keys for the Routers Report -- today, exactly one device
+    (`hre-dr-swift-router`, the 2951 ISR)."""
+    return {d["key"] for d in DEVICES if d.get("kind") == "Router"}
+
+
+def wireless_controller_device_keys() -> set:
+    """DEVICES keys for the Wireless Controller Report -- today, exactly one device
+    (`hre-wlc-02`, a virtual C9800-CL with no PoE/PSU/fan of its own -- confirmed on request,
+    2026-09-23: "the one without poe wireless controller", kept out of Access Switches rather
+    than folded in, since it isn't a switch)."""
+    return {d["key"] for d in DEVICES if d.get("kind") == "WLC"}
+
+
+def access_switches_device_keys() -> set:
+    """DEVICES keys for the Access Switches Report -- every switch except the core one (see
+    is_access_switch's own comment); this is the renamed, narrowed successor to the old
+    combined Switches & Routers Report picker."""
+    return {d["key"] for d in DEVICES if is_access_switch(d)}
+
+
+# Cisco hardware platform prefixes CDP neighbours actually report on this estate (confirmed
+# live, 2026-09-23 -- see the cisco_cdp SNMP module's own comment in snmp.yml). "ap" and
+# "switch"/"router" prefixes never collide (Catalyst 9100-series ACCESS POINTS are C91xx;
+# Catalyst 9200/9300/9400-series SWITCHES are C92xx/C93xx/C94xx -- a different hundreds
+# digit, not a coincidence, Cisco's own model-number convention). Deliberately narrow and
+# observed, not a speculative full vendor catalogue: an unrecognised platform string (a
+# Yealink/Polycom phone, a Webex Touch10 panel, an unknown vendor) is left unclassified
+# ("other") rather than guessed into either bucket.
+_CDP_AP_PREFIXES = ("AIR-AP", "C91")
+_CDP_SWITCH_PREFIXES = ("C92", "C93", "C94", "WS-C", "N30")
+_CDP_ROUTER_PREFIXES = ("CISCO19", "CISCO29", "CISCO39", "ISR", "ASR")
+
+
+def _cdp_neighbor_kind(platform: str) -> str:
+    """'ap' / 'switch' / 'router' / 'other', from a CDP neighbour's own reported platform
+    string. 'switch' and 'router' are both "uplink" candidates from an access switch's own
+    point of view (either is the direction traffic goes UP toward, not a downstream host) --
+    callers that only care about "is this an uplink" check `kind in ("switch", "router")`."""
+    p = (platform or "").upper()
+    if any(tok in p for tok in _CDP_AP_PREFIXES):
+        return "ap"
+    if any(tok in p for tok in _CDP_SWITCH_PREFIXES):
+        return "switch"
+    if any(tok in p for tok in _CDP_ROUTER_PREFIXES):
+        return "router"
+    return "other"
+
+
 def active_directory_report_filename(theme: str = "dark", when=None) -> str:
     """Same family as infrastructure_report_filename just above -- its own report now, not a
     section of the combined Infrastructure Admin one, so it gets its own named file rather
@@ -2572,6 +5022,346 @@ def active_directory_report_filename(theme: str = "dark", when=None) -> str:
     import datetime
     when = when or datetime.datetime.now()
     return f"Active Directory Report - {when:%Y-%m-%d %H%M} ({theme}).xlsx"
+
+
+# ---- e-mail for this module's own Snapshot/SystemVM shape (Network/Infra/AD reports) ---------
+#
+# services.email_report (the System Admin report's own e-mail path) is built entirely on
+# generate_report.py's Store/System dataclasses via mail_report.analyse()/render_html() --
+# neither applies to a network.py Snapshot (SystemVM/FlagVM, windows-kind devices, the switch).
+# Rather than adapting Store/System to fake that shape, this is its own small, self-contained
+# renderer straight off SystemVM/FlagVM -- the same information views.py already turns into
+# each screen's `report_content` dict, just as HTML/plain text instead of JSON.
+#
+# Confirmed live 2026-09-17: network_generate/infra_generate/active_directory_generate never
+# actually sent e-mail at all -- none of the three read request.POST["action"], so clicking
+# "Generate & email" on any of those three screens (the button renders unconditionally, same
+# shared form.html as the System Admin report) silently downloaded the file instead and left
+# the page's "Sending…" button stuck forever, since no navigation or JS ever ran to reset it.
+# This is the actual send path all three were missing.
+def _overview_tiles_html(overview: dict) -> str:
+    """The same {label, value, sub, state} tiles _network_overview/_infra_overview hand the
+    web screen's own AT A GLANCE / NEEDS IMMEDIATE ATTENTION / WARNING bands -- rendered here
+    as a plain table (Outlook-safe: no CSS grid/flex), immediate first since that's the one an
+    admin scanning an inbox actually needs to see before anything else."""
+    import html as _html
+
+    from mail_report import RED, AMBER, GREEN, MUTED, RED_T, AMBER_T, GREEN_T, NAVY_T
+    tint = {"bad": (RED_T, RED), "warn": (AMBER_T, AMBER), "good": (GREEN_T, GREEN),
+            "info": (NAVY_T, MUTED)}
+    parts = []
+    for section in ("immediate", "watch", "glance"):
+        tiles = overview.get(section) or []
+        if not tiles:
+            continue
+        cells = []
+        for t in tiles:
+            bg, fg = tint.get(t.get("state", "info"), (NAVY_T, MUTED))
+            sub = f'<div style="font-size:9px;color:{MUTED};margin-top:2px;">{_html.escape(str(t.get("sub", "")))}</div>' if t.get("sub") else ""
+            cells.append(
+                '<td align="center" valign="top" style="padding:4px;">'
+                f'<div style="background:{bg};border-radius:8px;padding:12px 6px;">'
+                f'<div style="font-size:18px;font-weight:700;color:{fg};line-height:1;">{_html.escape(str(t.get("value", "")))}</div>'
+                f'<div style="font-size:10px;letter-spacing:.4px;color:{MUTED};text-transform:uppercase;margin-top:6px;">{_html.escape(str(t.get("label", "")))}</div>'
+                f"{sub}</div></td>")
+        rows = "".join(f'<tr>{"".join(cells[i:i + 4])}</tr>' for i in range(0, len(cells), 4))
+        parts.append(f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tbody>{rows}</tbody></table>')
+    return "".join(parts)
+
+
+def _flagged_systems_html(systems: list) -> str:
+    """One row per flagged SystemVM (name + its FlagVM texts, red/amber colour-coded) -- the
+    same information every xlsx section header already shows ("N critical / N warning"), just
+    listed instead of nested, since an e-mail body has no room for the xlsx's tree layout."""
+    import html as _html
+
+    from mail_report import RED, AMBER, MUTED
+    flagged = [s for s in systems if not s.healthy]
+    if not flagged:
+        return (f'<p style="color:{MUTED};font-size:13px;">'
+               "No flagged items this run — everything in this report is healthy.</p>")
+    rows = []
+    for s in flagged:
+        items = "".join(
+            f'<li style="color:{RED if f.band == "red" else AMBER};margin-bottom:2px;">{_html.escape(f.text)}</li>'
+            for f in s.flags)
+        rows.append(
+            f'<tr><td style="padding:8px 0;border-bottom:1px solid #e5e8ec;">'
+            f'<div style="font-weight:600;font-size:13px;color:#1a1a1a;">{_html.escape(s.name)}'
+            f'<span style="color:{MUTED};font-weight:400;font-size:11px;"> — {s.red} critical, {s.amber} warning</span></div>'
+            f'<ul style="margin:4px 0 0 18px;padding:0;font-size:12px;">{items}</ul></td></tr>')
+    return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tbody>{"".join(rows)}</tbody></table>'
+
+
+def _windows_report_email_bodies(snapshot, title: str, author: str) -> Tuple[str, str]:
+    """(html_body, text_body) for a network.py Snapshot -- see this section's own module-level
+    comment for why this exists instead of reusing mail_report.render_html()."""
+    import datetime
+
+    from mail_report import RED, AMBER, GREEN, RED_T, AMBER_T, GREEN_T, CRITICAL
+
+    red = sum(s.red for s in snapshot.systems)
+    amber = sum(s.amber for s in snapshot.systems)
+    if red:
+        banner_bg, banner_fg, headline = RED_T, CRITICAL, f"CRITICAL — {red} item(s) need immediate attention"
+    elif amber:
+        banner_bg, banner_fg, headline = AMBER_T, AMBER, f"WARNING — {amber} item(s) to keep an eye on"
+    else:
+        banner_bg, banner_fg, headline = GREEN_T, GREEN, "All monitored devices are healthy"
+
+    prepared_by = f" &middot; prepared by {author}" if author else ""
+    today = datetime.date.today().strftime("%d %B %Y")
+    html_body = f"""\
+<div style="font-family:'Segoe UI',Arial,sans-serif;max-width:640px;margin:0 auto;">
+  <div style="background:#1a1a1a;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+    <div style="font-size:16px;font-weight:700;letter-spacing:.3px;">{title}</div>
+    <div style="font-size:11px;color:#b5b8bd;margin-top:2px;">{today}{prepared_by}</div>
+  </div>
+  <div style="background:{banner_bg};color:{banner_fg};padding:10px 20px;font-size:13px;font-weight:600;">
+    {headline}
+  </div>
+  <div style="padding:16px 20px;background:#fff;border:1px solid #e5e8ec;">
+    {_overview_tiles_html(snapshot.overview)}
+    <div style="margin-top:16px;">
+      {_flagged_systems_html(snapshot.systems)}
+    </div>
+    <p style="font-size:11px;color:#6b7785;margin-top:16px;">
+      Full detail (per-node CPU/RAM/disk, services, storage volumes) is in the attached report.
+    </p>
+  </div>
+</div>"""
+
+    lines = [title, today, ""]
+    lines.append(headline)
+    lines.append("")
+    for s in snapshot.systems:
+        if s.healthy:
+            continue
+        lines.append(f"{s.name} — {s.red} critical, {s.amber} warning")
+        lines.extend(f"  - {f.text}" for f in s.flags)
+    if red == 0 and amber == 0:
+        lines.append("No flagged items this run — everything in this report is healthy.")
+    lines.append("")
+    lines.append("Full detail is in the attached report.")
+    text_body = "\n".join(lines)
+    return html_body, text_body
+
+
+_DISK_FLAG_RE = re.compile(r"^(?:(.+?) · )?(\S+) at (\d+)% used$")
+
+
+def critical_disk_items(snapshot, threshold: int = 95) -> list:
+    """[(system, host, mount, used%), ...] for every disk-high FlagVM at/over `threshold` in
+    this Snapshot -- the SAME (system, host, mount, used%) shape send_report/mail_report.py's
+    own engine.disk_near_full returns, so mail_report.py's existing near-full banner template
+    can render Cluster Health's own findings unchanged (2026-09-17, on request: "the report
+    says there is critical storage usage... but no critical banner to tell us exactly whats
+    going on[,] copy and reuse one of the banner templates from the system admin report's
+    mailing template" -- see mail_report.py's own _cluster_storage_critical_block).
+
+    A single, shared function rather than duplicated inline in each caller (the scheduled
+    command AND its own test-fire twin both need this) -- exactly the "kept in step by hand"
+    duplication that already drifted out of sync once this session (see
+    generate_active_directory_report.py's own module docstring on _send_xlsx_report_test);
+    this one lives in ONE place instead.
+
+    Parses FlagVM.text back apart rather than reading raw disk %s directly: category="disk"
+    flags are already computed once (by _windows_device_flags, the same code the interactive
+    report/xlsx use) in two text shapes -- "{node label} · {volume} at {used}% used" for a
+    cluster's own per-node disks, bare "{volume} at {used}% used" for a single-target device
+    (no node label to prefix) -- re-deriving from Prometheus here would be a second, parallel
+    computation that could disagree with the report's own numbers; reusing the flag text
+    guarantees this banner can never show a different disk or % than the report itself does.
+    Filters strictly at `threshold` (95 by default, matching _infra_overview's own "Storage
+    critical" tile) -- NOT band=="red" (that fires at >=90%, a wider net that would list more
+    disks than the tile it's meant to explain claims)."""
+    by_name = {d["name"]: d for d in DEVICES}
+    items = []
+    for s in snapshot.systems:
+        group_label = by_name.get(s.name, {}).get("system", s.name)
+        for f in s.flags:
+            if f.category != "disk":
+                continue
+            m = _DISK_FLAG_RE.match(f.text)
+            if not m:
+                continue
+            node_label, mount, pct = m.group(1), m.group(2), int(m.group(3))
+            if pct < threshold:
+                continue
+            items.append((group_label, node_label or s.name, mount, float(pct)))
+    items.sort(key=lambda t: -t[3])
+    return items
+
+
+def email_windows_report(snapshot, data: bytes, *, recipients: List[str], author: str,
+                         filename: str, title: str) -> str:
+    """E-mail an already-built report for a network.py Snapshot (Network/Infrastructure/
+    Active Directory) -- the send path those three screens never had, see this section's own
+    module-level comment. Mirrors services.email_report's contract exactly (same "send first,
+    only record on success" caller obligation, same exceptions): returns the subject on
+    success, raises EmailNotConfigured / the underlying SMTP error on failure."""
+    import datetime
+    import os
+    import pathlib
+    import tempfile
+
+    import mail_report as mr   # send_report/mail_report.py (on sys.path)
+
+    from .services import EmailNotConfigured
+
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    if not mailcfg.get("host"):
+        raise EmailNotConfigured("No SMTP host configured in send_report/config.ini ([smtp]).")
+    if author:
+        mailcfg["from_name"] = f"{author} · {title}"
+
+    red = sum(s.red for s in snapshot.systems)
+    amber = sum(s.amber for s in snapshot.systems)
+    sev = f"{red} critical" if red else (f"{amber} warning(s)" if amber else "all healthy")
+    subject = f"{title} — {datetime.date.today():%d %b %Y} — {sev}"
+    if author:
+        subject += f" — by {author}"
+
+    html_body, text_body = _windows_report_email_bodies(snapshot, title, author)
+
+    tmpdir = tempfile.mkdtemp(prefix="report_")
+    path = pathlib.Path(tmpdir) / filename
+    try:
+        path.write_bytes(data)
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body, path)
+    finally:
+        try:
+            path.unlink()
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+    return subject
+
+
+def email_network_reports_bundle(reports: list, *, recipients: List[str], author: str,
+                                 subject_prefix: str = "") -> str:
+    """One e-mail, N xlsx attachments -- for reports whose own snapshots are too many to send
+    as separate e-mails but too different in scope to merge into one Snapshot (2026-09-24, on
+    request: "wire them in in reporting config to send to the same people... at around the
+    same time" -- the Core Switches/Routers/Wireless Controller/Access Switches Report split,
+    see generate_network_reports.py).
+
+    `reports` -- [{"snapshot":, "data": bytes, "filename":, "title":}, ...], already built, in
+    the order they should appear. Each section reuses _overview_tiles_html/
+    _flagged_systems_html verbatim -- the SAME per-report rendering email_windows_report's own
+    single-report body already uses -- concatenated under one shared header/banner, not a new
+    rendering engine. Subject/banner severity is the WORST across every report here, same "one
+    critical thing must never hide behind an all-healthy headline" rule
+    generate_active_directory_report.py's own combined AD+Cluster Health severity uses.
+
+    Mirrors email_windows_report's own contract: returns the subject on success, raises
+    EmailNotConfigured / the underlying SMTP error on failure. A `reports` entry with no data
+    (a failed capture -- see generate_network_reports.py's own per-report isolation) must be
+    filtered out by the CALLER before this runs; this function assumes every entry it's given
+    is a real, already-built report.
+
+    `subject_prefix` -- see services.email_report's own docstring on why a test send's marker
+    belongs in the subject, never in `author`.
+    """
+    import datetime
+    import os
+    import pathlib
+    import tempfile
+
+    import mail_report as mr   # send_report/mail_report.py (on sys.path)
+
+    from .services import EmailNotConfigured
+
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    if not mailcfg.get("host"):
+        raise EmailNotConfigured("No SMTP host configured in send_report/config.ini ([smtp]).")
+    bundle_title = "Network Reports"
+    if author:
+        mailcfg["from_name"] = f"{author} · {bundle_title}"
+
+    from mail_report import RED, AMBER, GREEN, RED_T, AMBER_T, GREEN_T, CRITICAL
+
+    red = sum(sum(s.red for s in r["snapshot"].systems) for r in reports)
+    amber = sum(sum(s.amber for s in r["snapshot"].systems) for r in reports)
+    if red:
+        banner_bg, banner_fg, headline = (
+            RED_T, CRITICAL, f"CRITICAL — {red} item(s) across the network estate need immediate attention")
+    elif amber:
+        banner_bg, banner_fg, headline = AMBER_T, AMBER, f"WARNING — {amber} item(s) to keep an eye on"
+    else:
+        banner_bg, banner_fg, headline = GREEN_T, GREEN, "All monitored network devices are healthy"
+
+    sev = f"{red} critical" if red else (f"{amber} warning(s)" if amber else "all healthy")
+    subject = f"{bundle_title} — {datetime.date.today():%d %b %Y} — {sev}"
+    if author:
+        subject += f" — by {author}"
+    # subject_prefix (2026-09-24, for the "network_reports" test-fire branch of
+    # views._send_xlsx_report_test) -- same "[SYNTHETIC TEST]" marker in the SUBJECT only,
+    # never in `author`, matching services.email_report's own subject_prefix (see that
+    # function's own docstring for why author must stay the real value).
+    if subject_prefix:
+        subject = f"{subject_prefix} {subject}"
+
+    prepared_by = f" &middot; prepared by {author}" if author else ""
+    today = datetime.date.today().strftime("%d %B %Y")
+
+    sections, text_sections = [], []
+    for r in reports:
+        snap = r["snapshot"]
+        sections.append(f"""
+    <div style="margin-top:20px;padding-top:16px;border-top:1px solid #e5e8ec;">
+      <div style="font-size:14px;font-weight:700;color:#1a1a1a;">{r['title']}</div>
+      <div style="margin-top:8px;">{_overview_tiles_html(snap.overview)}</div>
+      <div style="margin-top:12px;">{_flagged_systems_html(snap.systems)}</div>
+    </div>""")
+        text_sections.append(r["title"])
+        text_sections.append("")
+        for s in snap.systems:
+            if s.healthy:
+                continue
+            text_sections.append(f"  {s.name} — {s.red} critical, {s.amber} warning")
+            text_sections.extend(f"    - {f.text}" for f in s.flags)
+        text_sections.append("")
+
+    html_body = f"""\
+<div style="font-family:'Segoe UI',Arial,sans-serif;max-width:640px;margin:0 auto;">
+  <div style="background:#1a1a1a;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0;">
+    <div style="font-size:16px;font-weight:700;letter-spacing:.3px;">{bundle_title.upper()}</div>
+    <div style="font-size:11px;color:#b5b8bd;margin-top:2px;">{today}{prepared_by}</div>
+  </div>
+  <div style="background:{banner_bg};color:{banner_fg};padding:10px 20px;font-size:13px;font-weight:600;">
+    {headline}
+  </div>
+  <div style="padding:16px 20px;background:#fff;border:1px solid #e5e8ec;">
+    {"".join(sections)}
+    <p style="font-size:11px;color:#6b7785;margin-top:16px;">
+      Full detail (per-device CPU/RAM/temperature/interfaces/storage) is in each attached report.
+    </p>
+  </div>
+</div>"""
+
+    text_body = "\n".join([bundle_title, today, "", headline, ""] + text_sections
+                          + ["Full detail is in each attached report."])
+
+    tmpdir = tempfile.mkdtemp(prefix="network_reports_")
+    paths = []
+    try:
+        for r in reports:
+            p = pathlib.Path(tmpdir) / r["filename"]
+            p.write_bytes(r["data"])
+            paths.append(p)
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body, paths)
+    finally:
+        for p in paths:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        try:
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+    return subject
 
 
 #: flag.text already carries its own label for these -- see _windows_device_flags: the "nodes"
@@ -2606,13 +5396,28 @@ def _infra_notes(sysvm, comment: str, flag_answers: dict) -> tuple:
 
     if not sysvm.flags:
         return [ir.NoteRow(ir.SENTINEL_NOTE, comment=comment)], 0, 0
-    rows, critical, warning = [], 0, 0
-    last = len(sysvm.flags) - 1
-    for i, flag in enumerate(sysvm.flags):
-        if flag.band == "red":
-            critical += 1
-        else:
-            warning += 1
+    # node_net_disc: flags get their own dedicated banner now (build_infrastructure_report's
+    # own "NODE NETWORK DISCARDS", added right before this) -- excluded from the per-device
+    # Notes rows here so the same finding doesn't ALSO repeat there (2026-09-16, on request:
+    # "remove these warnings and errors from notes boxes"), the same de-duplication precedent
+    # node_down's own notes already followed for multi-node clusters.
+    #
+    # ALSO excluded from critical/warning below as of 2026-09-21 (on request: "make discards
+    # from cluster report a note banner instead of a warning banner") -- that banner is now
+    # severity "NOTE" (see build_infrastructure_report's own comment), and a note that still
+    # silently counted toward this device's own warning tally/pill colour would still read as
+    # a real warning everywhere else in the report, undoing the whole point of downgrading it.
+    # Before this date it was deliberately STILL counted here even though hidden from Notes --
+    # that was correct while the banner itself was a real WARNING; it stopped being correct
+    # the moment the banner became informational.
+    notable = [f for f in sysvm.flags if not f.key.startswith("node_net_disc:")]
+    critical = sum(1 for f in notable if f.band == "red")
+    warning = len(notable) - critical
+    if not notable:
+        return [ir.NoteRow(ir.SENTINEL_NOTE, comment=comment)], critical, warning
+    rows = []
+    last = len(notable) - 1
+    for i, flag in enumerate(notable):
         text = (flag.text if flag.key.startswith(_INFRA_LABELED_FLAG_PREFIXES)
                else f"{sysvm.name} · {flag.text}")
         text = _infra_short_node(text)
@@ -2660,8 +5465,13 @@ def _infra_cpu_ram_disks(m: dict, label: str):
     cpu_ram = None
     if m.get("cpu_pct") is not None or m.get("mem_pct") is not None:
         mem_total = m.get("mem_total_gb")
+        # `or 0.0` here was the bug (2026-09-14, confirmed live): coerced a genuinely missing
+        # reading into a fabricated 0% the moment the OTHER of the pair was present (e.g. an
+        # HCI node whose CPU textfile collector went silent while its standard memory reading
+        # kept flowing) -- CpuRam.cpu_pct/ram_pct are each independently Optional now, and
+        # write_cpu_ram prints "-" for None instead of a false zero.
         cpu_ram = ir.CpuRam(
-            node=label, cpu_pct=m.get("cpu_pct") or 0.0, ram_pct=m.get("mem_pct") or 0.0,
+            node=label, cpu_pct=m.get("cpu_pct"), ram_pct=m.get("mem_pct"),
             ram_size=f"{mem_total:.0f}GB" if mem_total is not None else None)
     disks = [ir.DiskRow(host=label, used_pct=d["used"], size_gb=round(d["size"]), mount=d["volume"])
             for d in m.get("disks", []) if d.get("used") is not None and d.get("size") is not None]
@@ -2861,6 +5671,15 @@ _HCI_SERVICES = [
     ("HvHost", "Hyper-V Host Service"),
 ]
 
+#: CpuRam.node label for the synthetic cluster-average row build_infrastructure_report adds
+#: to the HCI parent group (2026-09-14, on request: "add average ram and cpu at the cluster
+#: level infered from the individual nodes"). A shared constant, not a literal repeated at
+#: both the append site and the all_cpu_ram exclusion filter -- this row is a DERIVED figure,
+#: not one more node, so it must never count toward "how many NODES are over threshold" in
+#: the HIGH CPU/MEMORY CRITICAL summary tiles (that would both double-count against the real
+#: per-node rows already in all_cpu_ram, and could fire its own redundant banner entry).
+_HCI_CLUSTER_AVERAGE_LABEL = "Cluster average"
+
 
 def _hci_service_states(targets: list) -> Dict[str, dict]:
     """{target: {service_key: running_bool}} for _HCI_SERVICES -- same query shape (and same
@@ -2877,6 +5696,53 @@ def _hci_service_states(targets: list) -> Dict[str, dict]:
     except Exception:                       # noqa: BLE001
         rows = []
     by_lower = {k.lower(): k for k, _ in _HCI_SERVICES}
+    out: Dict[str, dict] = {t: {} for t in targets}
+    for r in rows:
+        inst = r["labels"].get("instance")
+        key = by_lower.get(r["labels"].get("name", "").lower())
+        if inst in out and key:
+            out[inst][key] = r["value"] >= 1
+    return out
+
+
+# Standalone Servers' own service list (2026-09-17, on request: "can you pick services that may
+# be important" -- NOT a guess: confirmed live on all 3 hosts (windows_service_state, state=
+# "running") before picking anything, the same "never fabricate a check nobody asked for"
+# discipline this module uses everywhere else, just satisfied by evidence instead of an
+# admin naming them up front. Their "RTGS7DBH" hostnames suggested SQL Server, but no
+# MSSQLSERVER/SQLSERVERAGENT service exists on any of the three -- confirmed absent, not
+# assumed. What's actually running and role-defining on all three: vmms/vmcompute/HvHost (this
+# is a Hyper-V HOST, same role HCI Cluster's own _HCI_SERVICES checks, minus ClusSvc -- these
+# three are standalone, not clustered, and ClusSvc is confirmed NOT running on them) and
+# StorageReplica (Windows' block-level replication feature) -- running on all three INCLUDING
+# the DR-site host (DRS-RTGS7DBH-01), suggesting these three replicate storage with each other
+# despite "RTGS7DBH" reading like a plain DB host name. Everything else running on these hosts
+# (132 services on .252 alone) is generic OS/agent plumbing (BITS, EventLog, ManageEngine
+# agents, ...) no different from what every other Windows host in this estate already omits.
+_STANDALONE_SERVER_SERVICES = [
+    ("vmms", "Hyper-V Virtual Machine Management"),
+    ("vmcompute", "Hyper-V Host Compute Service"),
+    ("HvHost", "Hyper-V Host Service"),
+    ("StorageReplica", "Storage Replica"),
+]
+
+
+def _standalone_server_service_states(targets: list) -> Dict[str, dict]:
+    """{target: {service_key: running_bool}} for _STANDALONE_SERVER_SERVICES -- same query
+    shape (and same state="running" requirement) as _hci_service_states/_ad_service_states,
+    see either's own docstring."""
+    if not targets:
+        return {}
+    prom, _ = _prometheus()
+    names_re = "|".join(k for k, _ in _STANDALONE_SERVER_SERVICES)
+    targets_re = "|".join(targets)
+    try:
+        rows = prom.query(
+            f'windows_service_state{{state="running", '
+            f'name=~"(?i)^({names_re})$", instance=~"{targets_re}"}}')
+    except Exception:                       # noqa: BLE001
+        rows = []
+    by_lower = {k.lower(): k for k, _ in _STANDALONE_SERVER_SERVICES}
     out: Dict[str, dict] = {t: {} for t in targets}
     for r in rows:
         inst = r["labels"].get("instance")
@@ -3011,7 +5877,7 @@ def _ntp_sync_row(target: str, dc_name: str) -> Optional[dict]:
 
 def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                                 annotations: dict, summary_comment: str,
-                                report_title: str = "INFRASTRUCTURE ADMIN REPORT") -> bytes:
+                                report_title: str = "CLUSTER HEALTH REPORT") -> bytes:
     """Map the annotated Snapshot into a ReportData tree and render it via
     infrastructure_report.build_report(). See this section's module docstring above.
 
@@ -3024,7 +5890,6 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
     import infrastructure_report as ir
 
     wm = getattr(snapshot, "_wm", None) or {}
-    hci_nodes = getattr(snapshot, "_hci_nodes", None) or {}
     wc = getattr(snapshot, "_wc", None) or {}
     by_name = {d["name"]: d for d in DEVICES}
     # DEVICES' own declared order (root-dc-1 before root-dc-2) -- the intentional ordering
@@ -3201,8 +6066,20 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             ntp_sync=ntp_rows,
             notes=[ir.NoteRow(ir.SENTINEL_NOTE)] if ntp_rows else []))
 
-    hci_sysvm = next((s for s in snapshot.systems if by_name.get(s.name, {}).get("key") == "hci-cluster"), None)
-    if hci_sysvm is not None:
+    # Every `cluster: True` device gets its own section, not just HCI Cluster (2026-09-16,
+    # generalized when Disaster Recovery Cluster became a second one). Each cluster's own
+    # hci_nodes/hci_volumes come from snapshot._hci_nodes_by_key/_hci_volumes_by_key -- the
+    # PER-CLUSTER dicts capture_snapshot keeps precisely so two clusters' nodes/volumes are
+    # never merged together here the way _infra_overview's own aggregate tallies deliberately
+    # do merge them (see that function's own comment on why that's fine for a tile count but
+    # would be wrong for a device's own node list/CSV table).
+    cluster_sysvms = [s for s in snapshot.systems if by_name.get(s.name, {}).get("cluster")]
+    for hci_sysvm in cluster_sysvms:
+        cluster_dev = by_name[hci_sysvm.name]
+        cluster_key = cluster_dev["key"]
+        cluster_title = cluster_dev["name"]
+        hci_nodes = snapshot._hci_nodes_by_key.get(cluster_key, {})
+        hci_volumes = snapshot._hci_volumes_by_key.get(cluster_key, [])
         ann = annotations.get(hci_sysvm.name, {})
         notes, critical, warning = _infra_notes(hci_sysvm, ann.get("comment", ""), ann.get("flags", {}))
         # Cluster-level facts from _windows_cluster_metrics (snapshot._wc) -- fetched into this
@@ -3221,9 +6098,11 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         # missing is the positive case: flags only ever fire on a PROBLEM, so a fully healthy
         # cluster (today: all 4 members up) leaves no mention of node membership anywhere. Add
         # that proactively, queried via whichever node's own exporter actually answered the
-        # mscluster WMI call (only node 1 is reachable today) -- the CLUSTER's own view of
-        # every member, not just the one node Prometheus can scrape directly.
-        wc_target, wc_data = next(iter(wc.items()), (None, None))
+        # mscluster WMI call for THIS cluster's own representative target -- scoped per-cluster
+        # (2026-09-16) rather than grabbing whatever `wc` happened to have first, which was only
+        # ever correct while there was exactly one cluster to find.
+        wc_target = cluster_dev["target"]
+        wc_data = wc.get(wc_target)
         members = (wc_data or {}).get("nodes") or []
         if members:
             queried_via = hci_nodes.get(wc_target, {}).get("display", wc_target)
@@ -3281,36 +6160,133 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                     cpu_ram.append(cr)
                 disks += dk
                 parent_services += node_services
+        # Cluster-wide average CPU/RAM across reporting nodes, on the PARENT row (2026-09-14,
+        # on request: "add average ram and cpu at the cluster level infered from the
+        # individual nodes") -- multi-node only: the single-node case already puts that one
+        # node's own reading on the parent (see the `else` branch above), where "average of
+        # one" would be a redundant restatement, not new information. Reachable nodes only,
+        # and cpu_pct/mem_pct are each averaged independently over whichever nodes actually
+        # have THAT one reading -- a node reporting RAM but not CPU (a real gap, see
+        # _hci_node_metrics' own docstring) still legitimately contributes to the RAM average
+        # rather than an all-or-nothing per-node filter dropping it from both. Tagged with
+        # _HCI_CLUSTER_AVERAGE_LABEL so all_cpu_ram's own summary-tile counts below can
+        # exclude it -- a derived average is not one more node to flag as "over threshold".
+        if multi_node:
+            def _avg_reachable(key):
+                vals = [n.get(key) for _, n in node_order
+                        if n.get("reachable") and n.get(key) is not None]
+                return sum(vals) / len(vals) if vals else None
+            avg_cpu, avg_ram = _avg_reachable("cpu_pct"), _avg_reachable("mem_pct")
+            if avg_cpu is not None or avg_ram is not None:
+                cpu_ram.append(ir.CpuRam(node=_HCI_CLUSTER_AVERAGE_LABEL,
+                                         cpu_pct=avg_cpu, ram_pct=avg_ram))
+        # Cluster Storage Volumes on the PARENT row (2026-09-14): queried cluster-wide, not
+        # per node (see _hci_cluster_volumes' own docstring -- the metric is scraped from
+        # whichever node answers but describes the whole cluster's CSVs), so it belongs once
+        # on the cluster's own row, not repeated per node. Omitted entirely when nothing
+        # publishes it, same "don't fabricate a row from data that isn't there" rule this
+        # group used to justify not showing a storage table at all before these metrics
+        # existed.
+        cluster_volumes = [ir.ClusterVolumeRow(**v) for v in hci_volumes]
         groups.append(ir.DeviceGroup(
-            title="HCI Cluster Host", services=parent_services, cpu_ram=cpu_ram, disks=disks,
+            # Renamed from "HCI Cluster Host" (2026-09-14, on request) -- "Host" read as one
+            # more physical box among the Node children below it; the parent row is the
+            # CLUSTER itself, which is what its own Cluster Storage Volumes table (the
+            # cluster's shared CSVs, not a per-host figure) makes explicit now anyway.
+            # cluster_title (2026-09-16): each cluster device's own DEVICES["name"] ("HCI
+            # Cluster", "Disaster Recovery Cluster", ...) now that there's more than one.
+            title=cluster_title, services=parent_services, cpu_ram=cpu_ram, disks=disks,
+            cluster_volumes=cluster_volumes,
             notes=notes, children=children,
             critical=critical, warning=warning, count=max(1, len(node_order)),
             count_label="node" if len(node_order) == 1 else "nodes", signed_by=author))
 
+    # Standalone Servers (2026-09-17, on request: "added 3 standalone servers to be grouped
+    # under Standalone server group") -- any windows-kind device that's neither AD-tiered nor
+    # `cluster: True` was already being counted into the summary tiles below (components_total
+    # already has a generic `else` branch for exactly this), but never actually got a section
+    # of its own to appear in -- this loop is that missing section. Grouped by each device's
+    # own DEVICES `system` label, the same convention the AD tiers and every cluster already
+    # use, so a future second standalone group (a different `system` value) falls into its own
+    # section automatically rather than needing new code each time.
+    #
+    # Services (2026-09-17, on request: "can you pick services that may be important" -- see
+    # _STANDALONE_SERVER_SERVICES' own comment for what was actually confirmed running before
+    # picking these, not guessed) -- shared across the whole group the same way _HCI_SERVICES
+    # is shared across every HCI Cluster node, since all three standalone servers here were
+    # confirmed running the identical set.
+    standalone_hosts = [s for s in snapshot.systems
+                        if by_name.get(s.name, {}).get("kind") == "windows"
+                        and by_name[s.name].get("system") not in AD_SYSTEMS
+                        and not by_name[s.name].get("cluster")]
+    standalone_svc_states = _standalone_server_service_states(
+        [by_name[s.name]["target"] for s in standalone_hosts])
+    standalone_by_system: Dict[str, list] = {}
+    for s in standalone_hosts:
+        standalone_by_system.setdefault(by_name[s.name]["system"], []).append(s)
+    for sys_label, hosts in standalone_by_system.items():
+        hosts = sorted(hosts, key=lambda s: device_order.get(s.name, 0))
+        children = []
+        group_critical = group_warning = 0
+        for sysvm in hosts:
+            dev = by_name[sysvm.name]
+            m = wm.get(dev["target"], {"known": False, "reachable": False})
+            cr, dk = _infra_cpu_ram_disks(m, sysvm.name)
+            svc_state = standalone_svc_states.get(dev["target"], {})
+            host_services = [ir.ServiceRow(display_name, "RUNNING" if running else "DOWN")
+                             for key, display_name in _STANDALONE_SERVER_SERVICES
+                             for running in [svc_state.get(key)]
+                             if running is not None]
+            ann = annotations.get(sysvm.name, {})
+            rows, c, w = _infra_notes(sysvm, ann.get("comment", ""), ann.get("flags", {}))
+            group_critical += c
+            group_warning += w
+            children.append(ir.DeviceGroup(
+                title=sysvm.name, services=host_services, cpu_ram=[cr] if cr else [], disks=dk,
+                notes=rows, critical=c, warning=w, count=1, count_label="host", signed_by=author))
+        groups.append(ir.DeviceGroup(
+            title=sys_label, children=children,
+            critical=group_critical, warning=group_warning,
+            count=len(hosts), count_label="device" if len(hosts) == 1 else "devices",
+            signed_by=author))
+
     devices_total = len(snapshot.systems)
     all_disks = [d for g in groups for d in (g.disks + [dd for c in g.children for dd in c.disks])]
-    all_cpu_ram = [c for g in groups for c in (g.cpu_ram + [cc for ch in g.children for cc in ch.cpu_ram])]
-    cluster_nodes = len(hci_nodes)
-    cluster_nodes_down = sum(1 for n in hci_nodes.values() if not n.get("reachable"))
+    # Excludes the synthetic HCI cluster-average row (_HCI_CLUSTER_AVERAGE_LABEL) -- a derived
+    # figure, not one more node, so it must never count toward "how many NODES are over
+    # threshold" in the STORAGE/HIGH CPU/MEMORY CRITICAL summary tiles below (every real
+    # node's own reading is already in here via its own child group).
+    all_cpu_ram = [c for g in groups for c in (g.cpu_ram + [cc for ch in g.children for cc in ch.cpu_ram])
+                  if c.node != _HCI_CLUSTER_AVERAGE_LABEL]
+    # snapshot._hci_nodes (MERGED across every cluster), not the `hci_nodes` local the loop
+    # above left pointing at whichever cluster it last iterated (2026-09-16, generalized from a
+    # single-cluster assumption) -- this tally is the estate-wide "how many cluster nodes total,
+    # how many down", same as _infra_overview's own equivalent merge.
+    cluster_nodes = len(snapshot._hci_nodes)
+    cluster_nodes_down = sum(1 for n in snapshot._hci_nodes.values() if not n.get("reachable"))
     cres = {"online": 0, "offline": 0, "failed": 0, "other": 0}
     for w in wc.values():
         res = w.get("resources") or {}
         for k in cres:
             cres[k] += res.get(k, 0)
 
-    # Components are counted at the finest tracked granularity: a device with sub-nodes (the
-    # HCI Cluster Host) contributes one component PER NODE, not one for the whole device --
-    # everything else (Root DCs, ...) is a single component. "Devices down"/"components down"
-    # differ the same way: the HCI device counts as one down device even when several of its
-    # nodes are down, which understates the real down-count, so the tile below is measured in
-    # components (cluster_nodes_down, not a 0/1 per device) rather than devices.
-    hci_name = hci_sysvm.name if hci_sysvm is not None else None
+    # Components are counted at the finest tracked granularity: a device with sub-nodes (any
+    # `cluster: True` device) contributes one component PER NODE, not one for the whole device
+    # -- everything else (Root DCs, ...) is a single component. "Devices down"/"components
+    # down" differ the same way: a cluster device counts as one down device even when several
+    # of its nodes are down, which understates the real down-count, so the tile below is
+    # measured in components (each cluster's own node-down count, not a 0/1 per device) rather
+    # than devices. Each cluster contributes ITS OWN node count here (via
+    # _hci_nodes_by_key), not the merged estate-wide total above -- two clusters must each be
+    # counted by their own node count, not have the combined total double-attributed to both.
+    cluster_keys_by_name = {s.name: by_name[s.name]["key"] for s in cluster_sysvms}
     components_total = 0
     components_down = 0
     for s in snapshot.systems:
-        if s.name == hci_name:
-            components_total += cluster_nodes if cluster_nodes else 1
-            components_down += cluster_nodes_down
+        if s.name in cluster_keys_by_name:
+            this_nodes = snapshot._hci_nodes_by_key.get(cluster_keys_by_name[s.name], {})
+            components_total += len(this_nodes) if this_nodes else 1
+            components_down += sum(1 for n in this_nodes.values() if not n.get("reachable"))
         else:
             components_total += 1
             if any(f.key.startswith(("win_down", "win_unscraped")) for f in s.flags):
@@ -3323,12 +6299,21 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
         return "red" if red_count else ("amber" if count else "green")
 
     storage_critical = sum(1 for d in all_disks if d.used_pct >= 95)
-    storage_amber = sum(1 for d in all_disks if 85 <= d.used_pct < 95)
-    mem_critical = sum(1 for c in all_cpu_ram if c.ram_pct >= 95)
-    cpu_amber = sum(1 for c in all_cpu_ram if c.cpu_pct >= 80)
-    cpu_red = sum(1 for c in all_cpu_ram if c.cpu_pct >= 90)
-    mem_amber = sum(1 for c in all_cpu_ram if 80 <= c.ram_pct < 95)
+    # `c.ram_pct is not None and ...` (2026-09-14): cpu_pct/ram_pct can each now be genuinely
+    # None (a host reporting one but not the other -- see CpuRam's own docstring), so a bare
+    # `>=` here would raise TypeError the moment that host is in scope, not just render wrong.
+    mem_critical = sum(1 for c in all_cpu_ram if c.ram_pct is not None and c.ram_pct >= 95)
+    cpu_amber = sum(1 for c in all_cpu_ram if c.cpu_pct is not None and c.cpu_pct >= 80)
+    cpu_red = sum(1 for c in all_cpu_ram if c.cpu_pct is not None and c.cpu_pct >= 90)
+    mem_amber = sum(1 for c in all_cpu_ram if c.ram_pct is not None and 80 <= c.ram_pct < 95)
 
+    # "STORAGE AT CAPACITY >=85%" (used to sit in watch_list below, storage_amber +
+    # storage_critical -- ALWAYS including whatever STORAGE CRITICAL above already counts) is
+    # gone (2026-09-18, on request: "storage capacity and storage critical are the same
+    # metric... combine every occurrence and remove this redundancy", confirmed after a first
+    # pass only touched the exec dashboards: "infrastructure still views these as separate").
+    # STORAGE CRITICAL alone is this report's one storage tile now, matching every other
+    # caller of the same underlying idea (see network._infra_overview's own comment).
     needs_attention = [
         ir.SummaryMetric("COMPONENTS DOWN", components_down, f"down | {components_total} total",
                          _tone(components_down)),
@@ -3344,9 +6329,6 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                          _watch_tone(cpu_amber + cpu_red, cpu_red)),
         ir.SummaryMetric("HIGH MEMORY", mem_amber, f"nodes | {len(all_cpu_ram)} total",
                          _watch_tone(mem_amber, 0)),
-        ir.SummaryMetric("STORAGE AT CAPACITY >=85%", storage_amber + storage_critical,
-                         f"nodes | {len(all_disks)} total",
-                         _watch_tone(storage_amber + storage_critical, storage_critical)),
         # Offline is deliberately NOT tracked here (see _CLUSTER_RESOURCE_STATE's own comment:
         # most of this estate's Offline resources are powered-off test/UAT/DR VMs, informational
         # not a fault). Failed is the real signal -- a resource that has exhausted its restart
@@ -3428,7 +6410,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                  "service down. Free space or extend the disk now."))
 
     mem_critical_rows = [ir.BannerRow(c.node, f"RAM {c.ram_pct:.0f}%")
-                         for c in all_cpu_ram if c.ram_pct >= 95]
+                         for c in all_cpu_ram if c.ram_pct is not None and c.ram_pct >= 95]
     if mem_critical_rows:
         banners.append(ir.Banner(
             "CRITICAL", "MEMORY CRITICAL",
@@ -3438,7 +6420,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                  "investigate the top consumer or add memory."))
 
     cpu_hot_rows = [ir.BannerRow(c.node, f"CPU {c.cpu_pct:.0f}%")
-                   for c in all_cpu_ram if c.cpu_pct >= 80]
+                   for c in all_cpu_ram if c.cpu_pct is not None and c.cpu_pct >= 80]
     if cpu_hot_rows:
         banners.append(ir.Banner(
             "WARNING", "HIGH CPU",
@@ -3448,7 +6430,7 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
                  "watch for a runaway process or plan capacity."))
 
     mem_warn_rows = [ir.BannerRow(c.node, f"RAM {c.ram_pct:.0f}%")
-                     for c in all_cpu_ram if 80 <= c.ram_pct < 95]
+                     for c in all_cpu_ram if c.ram_pct is not None and 80 <= c.ram_pct < 95]
     if mem_warn_rows:
         banners.append(ir.Banner(
             "WARNING", "HIGH MEMORY",
@@ -3467,12 +6449,46 @@ def build_infrastructure_report(snapshot, *, theme: str = "dark", author: str,
             note="Not yet imminent, but these volumes are filling up -- plan space now "
                  "before they reach the near-full threshold."))
 
+    # NODE NETWORK DISCARDS (2026-09-16, on request: "warnings like those discards have a
+    # banner designed for them check system admin report" -- DR Cluster nodes' own
+    # node_net_disc flags, live since that cluster's own onboarding, had never had a banner
+    # here, unlike every other flagged category above). No SummaryMetric tile alongside it --
+    # `banners` is its own field on ReportData, independent of needs_attention/watch_list,
+    # which are ALREADY at the hard 4-tile-per-panel maximum DASH_LEFT:DASH_RIGHT's fixed
+    # 8-column span allows (see infrastructure_report.py's own DASH_RIGHT comment: deliberately
+    # matched to the System Admin Report's own dashboard band width, confirmed a 5th tile
+    # raises a real merge-range error) -- a banner needs no matching tile to exist, only a
+    # named detail list, exactly like every banner above already provides one.
+    #
+    # Downgraded WARNING -> NOTE (2026-09-21, on request: "make discards from cluster report a
+    # note banner instead of a warning banner") -- this banner's own text has always said a
+    # discard "is usually buffer/queue pressure, not a wire fault", i.e. background context,
+    # not a finding -- the WARNING severity/tone never actually matched what the banner itself
+    # was telling the reader. See _infra_notes' own comment for the matching change to how
+    # node_net_disc flags count toward a device's severity tally -- a note must not silently
+    # keep counting as a real warning there either, or nothing about "it's just a note" is true.
+    disc_warn_rows = []
+    for s in snapshot.systems:
+        for f in s.flags:
+            if not f.key.startswith("node_net_disc:"):
+                continue
+            lbl, _, detail = f.text.partition(" · ")
+            disc_warn_rows.append(ir.BannerRow(_infra_short_node(lbl) if detail else s.name,
+                                               detail or f.text))
+    if disc_warn_rows:
+        banners.append(ir.Banner(
+            "NOTE", "NODE NETWORK DISCARDS",
+            f"{len(disc_warn_rows)} node(s) dropping packets",
+            rows=disc_warn_rows,
+            note="A discarded packet is usually buffer/queue pressure, not a wire fault -- "
+                 "watch for it worsening or pairing with real network errors."))
+
     import datetime
     now = datetime.datetime.now()
     data = ir.ReportData(
         generated_at=now.strftime("%d %b %Y  ·  %H:%M"),
         nodes_total=devices_total,
-        cluster_count=1 if hci_nodes else 0,
+        cluster_count=len(cluster_sysvms),
         cluster_nodes=cluster_nodes,
         # Real count, not storage capacity: WSFC's own cluster resource objects (VM roles,
         # disks, IP addresses, network names, ...) -- the same `cres` totals already behind the

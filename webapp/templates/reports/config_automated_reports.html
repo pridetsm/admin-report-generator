@@ -19,7 +19,27 @@
   <div class="section-label">Reporting</div>
   <p class="cfg-note" style="margin-top:0">Who receives which scheduled report — estate-wide, not per-system.</p>
 
-  <div class="section-label sub">Groups</div>
+  {% if health_rows %}
+  <div class="section-label sub">Live status</div>
+  <div class="card"><div class="body" style="padding:14px 18px">
+    <div style="display:flex;flex-wrap:wrap;gap:10px">
+      {% for row in health_rows %}
+      <button type="button" class="live-chip {% if row.is_live %}is-live{% else %}is-broken{% endif %}"
+              data-detail="live-detail-{{ forloop.counter }}"
+              {% if not row.is_live %}data-href="{% url 'config_automated_report_group_edit' row.group.pk %}"{% endif %}>
+        {{ row.group.name }}
+      </button>
+      {% endfor %}
+    </div>
+    <div id="liveDetailBox" class="cfg-note" style="margin:12px 0 0;display:none"></div>
+    {% for row in health_rows %}
+    <template id="live-detail-{{ forloop.counter }}">{% if row.is_live %}This group is live — it's fully configured and will send.{% else %}Not live yet:{% for p in row.problems %} {{ p }}{% endfor %} Taking you to its config…{% endif %}</template>
+    {% endfor %}
+    <small class="cfg-hint" style="display:block;margin-top:10px">Green = fully configured and will send. Red = click it to see exactly what's missing, then jump straight to that group's config to fix it.</small>
+  </div></div>
+  {% endif %}
+
+  <div class="section-label sub" style="margin-top:16px">Groups</div>
   <div class="card"><div class="body" style="padding:14px 18px">
     {% if groups %}
     <table class="hist">
@@ -76,4 +96,25 @@
   </div></div>
 
 </div>
+
+<script>
+(function () {
+  "use strict";
+  var box = document.getElementById("liveDetailBox");
+  if (!box) { return; }
+  document.querySelectorAll(".live-chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      var tpl = document.getElementById(chip.getAttribute("data-detail"));
+      if (!tpl) { return; }
+      box.textContent = chip.textContent.trim() + " — " + tpl.textContent.trim();
+      box.style.display = "block";
+      // Same behaviour as the Alert groups' own Live status chips (config_alerts.html) -- a
+      // red chip names an actual problem to go fix, so it navigates straight to that group's
+      // config; a green chip has nothing to navigate to, so it just shows the confirmation text.
+      var href = chip.getAttribute("data-href");
+      if (href) { window.location.href = href; }
+    });
+  });
+})();
+</script>
 {% endblock %}

@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 from typing import Tuple
 
+import yaml
+
 PROMETHEUS_DIR = Path(r"C:\metrics\prometheus")
 CONFIG_PATH = PROMETHEUS_DIR / "prometheus.yml"
 PROMTOOL_PATH = PROMETHEUS_DIR / "promtool.exe"
@@ -77,12 +79,57 @@ def _restart_service() -> Tuple[bool, str]:
     return True, f"{SERVICE_NAME} restarted."
 
 
-def write_and_restart(content: str) -> Tuple[bool, str]:
+def _job_names(text: str) -> set:
+    """job_name set from a prometheus.yml's scrape_configs -- used only by write_and_restart's
+    own job-preservation guard below. Never raises: a candidate that fails to parse here has
+    already failed promtool validation by the time this runs, so an empty set (⊂ any live set)
+    just means the guard has nothing of its own to compare and defers to that earlier check."""
+    try:
+        doc = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return set()
+    return {j.get("job_name") for j in (doc.get("scrape_configs") or []) if j.get("job_name")}
+
+
+def write_and_restart(content: str, *, allow_job_removal: bool = False) -> Tuple[bool, str]:
     """Validate FIRST — a failing config never touches the live file. Only on success does
-    this overwrite prometheus.yml and restart the service. Returns (ok, message)."""
+    this overwrite prometheus.yml and restart the service. Returns (ok, message).
+
+    `allow_job_removal` (2026-09-22, after a real incident): an edit built from a saved
+    PrometheusConfigRevision silently dropped bulawayo_cluster/standalone_servers when applied
+    -- both had been added straight to the live file at some point, outside this app's own
+    Save flow, so no revision ever recorded them; the next apply through the app, built from
+    that now-stale revision, silently reverted the live file to a state missing both,
+    de-monitoring an Infrastructure Admin estate as a side effect of an unrelated SNMP edit.
+    Default False refuses an apply that would remove any job_name the LIVE file currently has
+    but the candidate doesn't, naming exactly which ones -- the same "never silently omit"
+    discipline this app already applies to report data, now applied to the one shared document
+    every estate's scrape config lives in. A caller that genuinely means to remove a job (a
+    real decommission, not a stale source) passes True -- no UI surface exposes this yet, so
+    today that means editing prometheus.yml through Configuration > Prometheus, confirming the
+    named job(s) really should go, and asking an engineer to run this with the flag if the
+    UI's own single-document save (which always sources from the live file at reload) still
+    doesn't cover the case.
+    """
     ok, output = validate(content)
     if not ok:
         return False, f"Rejected — promtool found a problem, nothing was changed:\n{output}"
+
+    if not allow_job_removal:
+        try:
+            live_jobs = _job_names(CONFIG_PATH.read_text(encoding="utf-8"))
+        except OSError:
+            live_jobs = set()
+        missing = sorted(live_jobs - _job_names(content))
+        if missing:
+            return False, (
+                "Rejected — nothing was changed. Applying this would silently remove job(s) "
+                f"currently live but absent from what you're applying: {', '.join(missing)}. "
+                "If this was built from a saved revision rather than the live file, the live "
+                "file has likely drifted ahead of it (edited directly, outside this app) -- "
+                "reload from the live file and reapply your edit on top of that instead. If "
+                "removing these job(s) is genuinely intended, that needs an explicit "
+                "allow_job_removal=True (not exposed in the UI yet).")
 
     try:
         CONFIG_PATH.write_text(content, encoding="utf-8")

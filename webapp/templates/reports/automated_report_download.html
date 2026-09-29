@@ -209,6 +209,14 @@
   .range-bar .range-label { font-family: Consolas, monospace; font-size: 10.5px; color: var(--muted); margin-right: 2px; }
   .range-btn { width: auto; padding: 0 9px; font-size: 10.5px; font-weight: 600; }
   .range-btn[aria-pressed="true"] { border-color: var(--gold); background: var(--gold); color: #16233A; }
+  /* The explicit "scroll back through history" control (2026-09-18, on request: "make the
+     graph scrollable horizontally to the last data point") -- a fixed-width window (whatever
+     Range preset is active, 7d by default) that SLIDES across the full 30-day fetch, distinct
+     from the Range buttons' own job of choosing the window's WIDTH. A plain <input type=range>
+     rather than a custom-drawn control: native keyboard/touch/screen-reader support for free,
+     no extra library. */
+  .range-scroll { flex: 1 1 140px; max-width: 280px; accent-color: var(--gold); height: 15px; margin: 0 2px; }
+  .range-scroll:disabled { opacity: .35; }
   .flagkey { font-family: Consolas, monospace; font-size: 11px; color: var(--muted); margin-top: 2px; }
   .banddot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; }
   .band-red { background: var(--red); } .band-amber { background: var(--amber); }
@@ -358,21 +366,23 @@
     <h2 style="font-size:16px"><span class="n">04</span> Recurring Issues</h2>
     <div class="indent">
 
-    <h2 style="font-size:13px;margin-bottom:8px">Hourly Activity (last 7 days)</h2>
+    <h2 style="font-size:13px;margin-bottom:8px">Hourly Activity (30 days, showing the most recent 7)</h2>
     <div class="indent">
-    <p class="body">RAM/CPU/Disk are the live % reading straight off Prometheus for that one
-      component — a red-ringed point is at or above that reading's own red threshold.
-      Everything else (Unreachable/Service/Backup) is a binary state with no percentage to
-      show, so it plots how many distinct incidents were active that hour instead — a
-      red-ringed point there is a statistical spike (that system's own count exceeds its mean +
-      2 standard deviations). One chart per system affected, grouped under its issue type,
-      since a shared chart can't isolate one system's reading from every other affected
-      system's line. Each system's own charts share one time-range control — drag across any
-      one of them (or pinch to zoom on touch) and every other chart for that system zooms to
-      the identical window, so metrics that moved together are easy to line up; the Range
-      buttons above each system are the same control for keyboard/screen-reader use, and
-      "Full" resets. This is a live drill-down on this page only — it never changes what's in
-      the downloaded PDF or e-mail, which always show the full 7 days.</p>
+    <p class="body">RAM/CPU/Disk are the live % reading for that one component — a red-ringed
+      point is at or above that reading's own red threshold. Everything else (Unreachable/
+      Service/Backup) is a binary state with no percentage to show, so it plots how many
+      distinct incidents were active that hour instead — a red-ringed point there is a
+      statistical spike (that system's own count exceeds its mean + 2 standard deviations). One
+      chart per system affected, grouped under its issue type, since a shared chart can't
+      isolate one system's reading from every other affected system's line. Each system's own
+      charts share one time-range control — drag any one of them to scroll left/right, or
+      scroll/pinch to zoom, and every other chart for that system follows along, so metrics
+      that moved together are easy to line up; the Range buttons above each system are the same
+      control for keyboard/screen-reader use. Every chart opens on the most recent 7 days —
+      drag left (or click further back on the scrollbar under it) to reach the other 23 days
+      behind it, all the way to the oldest point captured. This is a live drill-down on this
+      page only — it never changes what's in the downloaded PDF or e-mail, which always show
+      the most recent 7 days.</p>
     {% if spike_charts %}
     {% comment %}
       System-first, one COLUMN per metric category currently active for that system (item 23,
@@ -392,8 +402,9 @@
       <span class="range-label">Range:</span>
       <button type="button" class="zoom-btn range-btn" data-range="24h" aria-pressed="false">24h</button>
       <button type="button" class="zoom-btn range-btn" data-range="3d" aria-pressed="false">3d</button>
-      <button type="button" class="zoom-btn range-btn" data-range="7d" aria-pressed="false">7d</button>
-      <button type="button" class="zoom-btn range-btn" data-range="full" aria-pressed="true">Full</button>
+      <button type="button" class="zoom-btn range-btn" data-range="7d" aria-pressed="true">7d</button>
+      <button type="button" class="zoom-btn range-btn" data-range="full" aria-pressed="false">Full</button>
+      <input type="range" class="range-scroll" data-scroll-cluster="{{ sysgrp.system }}" min="0" max="0" value="0" aria-label="Scroll {{ sysgrp.system }}'s charts back through time">
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:16px">
     {% for col in sysgrp.columns %}
@@ -406,13 +417,14 @@
     <div class="chart-box" style="height:220px;margin-bottom:8px"><canvas id="{{ c.canvas_id }}"></canvas></div>
     {% if col.is_percent %}
     <p class="diagram-note">{{ col.category_label }} on {{ sysgrp.system }}{% if c.label %} · {{ c.label }}{% endif %} — the x-axis is time
-      (hourly, last 7 days) and the y-axis is the actual % reading. Hover a point for the exact
-      hour and value — a red-ringed point is at or above this component's own red threshold.</p>
+      (hourly, 30 days captured, opening on the most recent 7) and the y-axis is the actual %
+      reading. Hover a point for the exact hour and value — a red-ringed point is at or above
+      this component's own red threshold.</p>
     {% else %}
     <p class="diagram-note">{{ col.category_label }} on {{ sysgrp.system }} — the x-axis is time
-      (hourly, last 7 days) and the y-axis is how many distinct {{ col.category_label }} issues
-      were active that hour. Hover a point for the exact hour and count — a red-ringed point is
-      a spike.</p>
+      (hourly, 30 days captured, opening on the most recent 7) and the y-axis is how many
+      distinct {{ col.category_label }} issues were active that hour. Hover a point for the
+      exact hour and count — a red-ringed point is a spike.</p>
     {% endif %}
     {% endfor %}
     {% if col.more_count %}
@@ -431,14 +443,47 @@
     {% else %}<p class="empty">No incident history yet.</p>{% endif %}
 
     {% if swift_available %}
-    <h2 style="font-size:12.5px;margin:14px 0 6px;color:var(--muted)">SWIFT Transactions</h2>
+    <h2 style="font-size:12.5px;margin:14px 0 6px;color:var(--muted)">SWIFT Transaction History</h2>
     <div class="indent">
+    <div class="range-bar" data-cluster="swift" role="group" aria-label="Time range for the SWIFT chart">
+      <span class="range-label">Range:</span>
+      <button type="button" class="zoom-btn range-btn" data-range="24h" aria-pressed="false">24h</button>
+      <button type="button" class="zoom-btn range-btn" data-range="3d" aria-pressed="false">3d</button>
+      <button type="button" class="zoom-btn range-btn" data-range="7d" aria-pressed="true">7d</button>
+      <button type="button" class="zoom-btn range-btn" data-range="full" aria-pressed="false">Full</button>
+      <input type="range" class="range-scroll" data-scroll-cluster="swift" min="0" max="0" value="0" aria-label="Scroll the SWIFT chart back through time">
+    </div>
     <div class="chart-box" style="height:220px;margin-bottom:8px"><canvas id="swiftLine"></canvas></div>
-    <p class="diagram-note">SWIFT's own running daily total — the x-axis is time (hourly, last 7
-      days) and the y-axis is how many messages have accumulated so far that day. It climbs
-      through the business day, plateaus once processing for the day is done, and resets to 0
-      at the start of the next day — the reset is expected, not a fault. Hover a point for the
-      exact hour and running total.</p>
+    <p class="diagram-note">SWIFT's own running daily total — the x-axis is time (hourly, 30
+      days captured, opening on the most recent 7) and the y-axis is how many messages have
+      accumulated so far that day. It climbs through the business day, plateaus once processing
+      for the day is done, and resets to 0 at the start of the next day — the reset is
+      expected, not a fault. Drag the scrollbar above (or the chart itself) to reach earlier
+      days. Hover a point for the exact hour and running total.</p>
+
+    <h3 style="font-size:11px;margin:14px 0 4px;color:var(--muted);font-weight:600">SWIFT Transaction History — This Week vs. Last Week</h3>
+    <div class="chart-box" style="height:220px;margin-bottom:8px"><canvas id="swiftCompareLine"></canvas></div>
+    <p class="diagram-note">A separate week-over-week comparison — <b>This week</b> against
+      <b>Last week</b>, the two lines sharing one weekday+hour x-axis so the same hour of the
+      same weekday lines up between them, to make one week's shape easy to read against the
+      other's.</p>
+    </div>
+    {% endif %}
+
+    {% if cob_available %}
+    <h2 style="font-size:12.5px;margin:14px 0 6px;color:var(--muted)">COB Duration</h2>
+    <div class="indent">
+    <div class="chart-box" style="height:220px;margin-bottom:8px"><canvas id="cobLine"></canvas></div>
+    <p class="diagram-note">T24's own close-of-business duration — one bar per day (on
+      request: "one solid bar per day" -- COB only publishes a fresh number once a night, so
+      hourly resolution just repeated the same value ~24 times) -- the y-axis is how long that
+      night's COB run took, in seconds. Hover a bar for the exact day and duration.</p>
+
+    <h3 style="font-size:11px;margin:14px 0 4px;color:var(--muted);font-weight:600">COB — This week vs. last week</h3>
+    <div class="chart-box" style="height:220px;margin-bottom:8px"><canvas id="cobCompareLine"></canvas></div>
+    <p class="diagram-note">A separate week-over-week comparison — <b>This week</b> against
+      <b>Last week</b>, one bar per weekday so the same day of the week sits side by side
+      between the two, to make one week's COB run easy to read against the other's.</p>
     </div>
     {% endif %}
     </div>
@@ -602,6 +647,113 @@
   Chart.defaults.font.family = "Segoe UI, system-ui, sans-serif";
   Chart.defaults.color = ink;
 
+  // Sunday/holiday background shading (2026-09-18, on request: "put a shaded area in the
+  // graphs to show a sunday or holiday period... put test [text] on the area saying sunday")
+  // -- a plain custom plugin, not chartjs-plugin-annotation (nothing else on this page needs a
+  // whole new vendored library for one grey rectangle + a label). Reads
+  // `options.plugins.weekendShade.shaded` -- one string per point, parallel to the chart's own
+  // labels ("Sunday"/"Holiday"/"" -- report_charts.swift_transaction_line_data/cob_time_line_
+  // data's own "shaded" key, see that function's docstring) -- and for every contiguous
+  // non-"" run currently in view, fills a light grey band and prints that run's own label
+  // across it (rotated if the band's too narrow for the text to sit flat), so it tracks
+  // whatever's actually visible after a drag/zoom/scrollbar move, not a fixed position. A
+  // chart with no "shaded" data (every RAM/CPU/Disk/count-based Hourly Activity chart) just
+  // draws nothing -- this never applies outside SWIFT/COB. Line GAPS across these same runs
+  // (on request: "all graph lines must disappear on entry and reappear from exiting this
+  // area") are a separate, simpler mechanism -- see withGaps below -- null values Chart.js
+  // itself already refuses to draw a segment across, nothing this plugin needs to do.
+  var weekendShadePlugin = {
+    id: "weekendShade",
+    beforeDatasetsDraw: function (chart, args, opts) {
+      var shaded = opts && opts.shaded;
+      if (!shaded || !shaded.length) return;
+      var xScale = chart.scales.x, yScale = chart.scales.y;
+      if (!xScale || !yScale) return;
+      var lo = Math.max(0, Math.floor(xScale.min));
+      var hi = Math.min(shaded.length - 1, Math.ceil(xScale.max));
+      var ctx = chart.ctx;
+      ctx.save();
+      var i = lo;
+      while (i <= hi) {
+        if (!shaded[i]) { i++; continue; }
+        var start = i, label = shaded[i];
+        while (i <= hi && shaded[i]) i++;
+        var xStart = xScale.getPixelForValue(start - 0.5);
+        var xEnd = xScale.getPixelForValue(i - 1 + 0.5);
+        ctx.fillStyle = "rgba(209,74,58,0.18)";
+        ctx.fillRect(xStart, yScale.top, xEnd - xStart, yScale.bottom - yScale.top);
+
+        var bandWidth = xEnd - xStart;
+        var midX = (xStart + xEnd) / 2, midY = (yScale.top + yScale.bottom) / 2;
+        // A stroked halo (dark-red outline, white fill) reads clearly whichever theme is
+        // active -- a single flat colour can't guarantee contrast against both a light AND a
+        // dark chart background, but an outline around the opposite-toned fill always shows
+        // through (2026-09-18, on request: "visible no matter dark theme or light theme").
+        ctx.font = "bold 13px Segoe UI, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(140,30,20,0.95)";
+        ctx.fillStyle = "#ffffff";
+        if (bandWidth >= 58) {
+          ctx.strokeText(label, midX, midY);
+          ctx.fillText(label, midX, midY);
+        } else if (bandWidth >= 14) {
+          ctx.save();
+          ctx.translate(midX, midY);
+          ctx.rotate(-Math.PI / 2);
+          ctx.strokeText(label, 0, 0);
+          ctx.fillText(label, 0, 0);
+          ctx.restore();
+        }
+      }
+      ctx.restore();
+    },
+  };
+  Chart.register(weekendShadePlugin);
+
+  // Breaks a line across its own shaded (Sunday/holiday) stretches -- Chart.js already treats
+  // a `null` data point as a gap by default (no spanGaps set anywhere here), so replacing the
+  // real value there with null IS "the line disappears on entry, reappears on exit" (2026-09-
+  // 18, on request). The real value is only ever swapped for display -- report_charts still
+  // captured and stored it untouched.
+  function withGaps(values, shaded) {
+    if (!shaded) return values;
+    return values.map(function (v, i) { return shaded[i] ? null : v; });
+  }
+
+  // Gradient area fill under a line (2026-09-18, on request: "beautify the swift transactions
+  // graph... add gradient shading underneath each graph from last week and from this week") --
+  // a Chart.js SCRIPTABLE backgroundColor: it's re-evaluated with the live chart/canvas each
+  // draw, which is the only way to build a gradient sized to the chart's own current area
+  // (a plain colour string can't do this; a gradient built once up front would be wrong-sized
+  // after any resize/zoom). Fades from the line's own colour to fully transparent, so two
+  // overlapping fills (This week over Last week) both stay legible rather than one flat block
+  // obscuring the other.
+  function hexToRgb(hex) {
+    var m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return m ? (parseInt(m[1], 16) + "," + parseInt(m[2], 16) + "," + parseInt(m[3], 16)) : "26,111,196";
+  }
+  function areaGradient(rgb) {
+    return function (ctx2) {
+      var area = ctx2.chart.chartArea;
+      if (!area) return "rgba(" + rgb + ",0.12)";
+      var g = ctx2.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+      g.addColorStop(0, "rgba(" + rgb + ",0.38)");
+      g.addColorStop(1, "rgba(" + rgb + ",0.02)");
+      return g;
+    };
+  }
+  // This page can synchronously construct dozens of interactive charts on load (up to
+  // _SPIKE_CHARTS_PER_COLUMN_MAX=3 Hourly Activity lines per category per flagged system,
+  // each with a zoom plugin and custom canvas-draw plugins registered, plus the summary
+  // doughnuts/bars -- 28 <canvas> on one real report, confirmed 2026-09-14). Animation is
+  // pure cost here (a static-once-rendered analytical chart, not something a reader watches
+  // draw in) and was the single biggest lever to cut: disabled globally, once, rather than
+  // per chart -- reported as the browser tab's main thread visibly freezing (a button stuck
+  // mid-press, the whole page unclickable) while this many charts animated in at once.
+  Chart.defaults.animation = false;
+
   if (data.donut.values.length) {
     new Chart(document.getElementById("donutChart"), {
       type: "doughnut",
@@ -720,57 +872,100 @@
                   data.themes.labels.map(function () { return "#1a6fc4"; }));
   }
 
-  // Cluster zoom (items 33-37, 2026-09-10): one zoom+pan control PER SYSTEM, not per chart --
-  // dragging/pinching/preset-clicking any chart in a system's own cluster (registerCluster
-  // below groups them by chart_data.spikeCharts[].cluster, which views.py sets to the system
-  // name) syncs every OTHER chart in that same cluster to the identical x-axis range, so a
-  // reader can drill into the exact hours where that system's metrics moved together -- direct
-  // visual evidence for the fan-in claim §02 already makes in prose. Deliberately NOT the same
-  // mechanism as the heatmap .zoom-bar above: that's a display-magnification PREFERENCE (so it
-  // persists in localStorage and correctly carries into the PDF via a query param); this is an
-  // analytical drill-down over TIME RANGE, so it is NEVER written to localStorage and NEVER
-  // referenced by the PDF/email pipeline at all -- those are a fully separate server-side
-  // matplotlib render that always plots each cluster's full 7-day window regardless of
-  // whatever's live on this page when they're generated. It also always starts at "Full" on
-  // every fresh load, since a saved range from a past week's timestamps means nothing once
-  // the report's own window has moved on. Scope is exactly the Hourly Activity charts wired
-  // below (item 37) -- the Pareto/onset/sparkline charts elsewhere on this page are static
-  // <img> exports from matplotlib, not Chart.js instances, so there's nothing to zoom there.
-  var clusterCharts = {};     // system name -> [Chart instance, ...]
-  var clusterSyncing = {};    // system name -> true while this page is itself driving a sync,
-                              // so that sync doesn't re-trigger onZoomComplete on the siblings
-                              // it's updating and loop back on itself
+  // Cluster zoom+pan+scroll (items 33-37, extended 2026-09-18 on request: "make the graph
+  // scrollable horizontally to the last data point... the zoom factor and window size should
+  // have 7 days"): one control PER CLUSTER (a system's own Hourly Activity charts, or SWIFT's
+  // single chart -- registerCluster below groups them by chart_data.spikeCharts[].cluster,
+  // which views.py sets to the system name, or "swift"), not per chart -- dragging/wheel-
+  // zooming/pinching/preset-clicking/scrollbar-dragging any chart in a cluster syncs every
+  // OTHER chart in that same cluster to the identical x-axis range, so a reader can drill into
+  // the exact hours where that system's metrics moved together -- direct visual evidence for
+  // the fan-in claim §02 already makes in prose. Deliberately NOT the same mechanism as the
+  // heatmap .zoom-bar above: that's a display-magnification PREFERENCE (so it persists in
+  // localStorage and correctly carries into the PDF via a query param); this is an analytical
+  // drill-down over TIME RANGE, so it is NEVER written to localStorage and NEVER referenced by
+  // the PDF/email pipeline at all -- those are a fully separate server-side matplotlib render
+  // that always plots each cluster's own most recent 7 days regardless of whatever's live on
+  // this page when they're generated.
+  //
+  // Every cluster now opens on its own most recent 7 days by default, not the whole fetch
+  // ("Full" was the old default) -- squeezing 30 days onto one ~600px-wide static view made a
+  // quiet week or two read as a flat line, which is what "why does the SWIFT chart only show 4
+  // peaks" traced back to. Drag a chart, scroll the wheel, pinch, or drag the scrollbar
+  // underneath it to reach further back, all the way to the oldest point captured -- the
+  // fetch itself is now 30 days (report_charts.resource_percent_line_data/swift_transaction_
+  // line_data/spike_line_data_single, all called with days=30 -- see views.py), read from
+  // MetricSample/IssueOccurrence, not live Prometheus, so it's no longer bounded by
+  // Prometheus's own ~15-day retention.
+  var clusterCharts = {};     // cluster name -> [Chart instance, ...]
+  var clusterWindow = {};     // cluster name -> current window width, in POINTS (hours) -- what
+                              // the scrollbar's thumb SIZE represents; its "input" handler reads
+                              // this to know how wide a slice to slide.
+  var clusterSyncing = {};    // cluster name -> true while this page is itself driving a sync,
+                              // so that sync doesn't re-trigger onZoomComplete/onPanComplete on
+                              // the siblings it's updating and loop back on itself
   function registerCluster(name, chart) {
     (clusterCharts[name] = clusterCharts[name] || []).push(chart);
   }
-  function syncClusterRange(name, min, max, source) {
+  function clusterBar(name) { return document.querySelector('.range-bar[data-cluster="' + name + '"]'); }
+  function clusterScrollbar(name) { return document.querySelector('.range-scroll[data-scroll-cluster="' + name + '"]'); }
+  // The one function every range-changing action funnels through -- a drag-pan, a wheel/pinch
+  // zoom, a Range button click, or a scrollbar drag. Syncs every OTHER chart in the cluster to
+  // (min, max), then brings the Range buttons and the scrollbar into agreement with the new
+  // window too, so no control is ever left showing a stale state after another one changed it.
+  // `presetName` is which Range button (if any) this window corresponds to -- "" for a manual
+  // drag/pinch/wheel/scrollbar change, which matches none of the fixed presets.
+  function applyClusterRange(name, min, max, source, presetName) {
     if (clusterSyncing[name]) return;
     clusterSyncing[name] = true;
     (clusterCharts[name] || []).forEach(function (c) {
       if (c !== source) c.zoomScale("x", { min: min, max: max }, "none");
     });
+    clusterWindow[name] = max - min + 1;
+    var bar = clusterBar(name);
+    if (bar) {
+      bar.querySelectorAll(".range-btn").forEach(function (b) {
+        b.setAttribute("aria-pressed", b.getAttribute("data-range") === presetName ? "true" : "false");
+      });
+    }
+    var slider = clusterScrollbar(name);
+    var charts = clusterCharts[name] || [];
+    if (slider && charts.length) {
+      var total = charts[0].data.labels.length;
+      var width = max - min + 1;
+      var slidable = Math.max(0, total - width);
+      slider.max = String(slidable);
+      slider.value = String(Math.min(min, slidable));
+      slider.disabled = slidable === 0;
+    }
     clusterSyncing[name] = false;
   }
 
   // Hourly Activity's own charts: one line, one system, one issue type per canvas. RAM/CPU/Disk
-  // (sc.isPercent) plot the live % reading straight off Prometheus (2026-09-08, on request:
-  // "shouldn't it be the percentage reading... wouldn't it be easier to read" than a
-  // concurrent-incident count) -- everything else is a binary state with no percentage to show,
-  // so it keeps the incident-count chart. A red-ringed point is at/above the red threshold for
-  // a percentage chart, or a statistical spike (mean + 2 stdev) for a count one.
+  // (sc.isPercent) plot the live % reading (2026-09-08, on request: "shouldn't it be the
+  // percentage reading... wouldn't it be easier to read" than a concurrent-incident count) --
+  // everything else is a binary state with no percentage to show, so it keeps the incident-
+  // count chart. A red-ringed point is at/above the red threshold for a percentage chart, or a
+  // statistical spike (mean + 2 stdev) for a count one.
   var haveZoomPlugin = typeof ChartZoom !== "undefined";
   if (haveZoomPlugin) Chart.register(ChartZoom);
   (data.spikeCharts || []).forEach(function (sc) {
     var el = document.getElementById(sc.canvasId);
     if (!el) return;
     var cluster = sc.cluster;
+    // COB is a vertical bar chart, not a line (2026-09-18, on request: "for cob tile lets
+    // switch from line graph presentation to vertical bar graph") -- everything else (SWIFT,
+    // every RAM/CPU/Disk/count-based Hourly Activity chart) stays a line. Nothing else about
+    // the dataset shape changes: withGaps/weekendShade/zoom+pan all work identically against a
+    // bar chart's own category x-axis, which line charts here already use too (no linear/time
+    // scale configured either way).
     var chart = new Chart(el, {
-      type: "line",
+      type: sc.canvasId === "cobLine" ? "bar" : "line",
       data: {
         labels: sc.data.labels,
         datasets: sc.data.datasets.map(function (d) {
           return {
-            label: d.label, data: d.values, borderColor: d.color, backgroundColor: d.color,
+            label: d.label, data: withGaps(d.values, d.shaded), borderColor: d.color, backgroundColor: d.color,
             borderWidth: 1.5, tension: 0.25, pointRadius: d.spikes.map(function (s) { return s ? 5 : 1.5; }),
             pointHoverRadius: d.spikes.map(function (s) { return s ? 7 : 3; }),
             pointBackgroundColor: d.spikes.map(function (s) { return s ? "#d14a3a" : d.color; }),
@@ -783,26 +978,32 @@
         interaction: { mode: "nearest", axis: "x", intersect: false },
         // One line per chart now (the system name is already this chart's own <h3> heading
         // above it, see the template loop), so a legend repeating that same name is redundant.
-        plugins: Object.assign({ legend: { display: false } }, (haveZoomPlugin && cluster) ? {
+        plugins: Object.assign(
+          { legend: { display: false }, weekendShade: { shaded: sc.data.datasets[0] && sc.data.datasets[0].shaded } },
+          (haveZoomPlugin && cluster) ? {
           zoom: {
             limits: { x: { min: "original", max: "original" } },
-            pan: { enabled: false },
+            // Plain click-drag now PANS/SCROLLS (2026-09-18) rather than drawing a zoom-select
+            // box -- "scrollable horizontally" is the primary interaction this control exists
+            // for now; wheel and pinch remain how the WINDOW WIDTH changes (Range buttons and
+            // the scrollbar are the keyboard/screen-reader-accessible equivalents of both).
+            pan: {
+              enabled: true, mode: "x",
+              onPanComplete: function (ctx) {
+                var r = ctx.chart.scales.x;
+                applyClusterRange(cluster, Math.round(r.min), Math.round(r.max), ctx.chart, "");
+              },
+            },
             zoom: {
-              // Touch: pinch only, not single-finger drag -- a one-finger drag on a synced
-              // cluster chart stays page-scroll, matching this spec's own open-question
-              // guidance (a ~200-340px-wide canvas makes pinch-precision fiddly anyway, so
-              // touch users are expected to reach for the Range buttons above instead).
-              drag: { enabled: true, backgroundColor: "rgba(184,147,90,0.18)", borderColor: "#B8935A", borderWidth: 1 },
+              wheel: { enabled: true },
               pinch: { enabled: true },
               mode: "x",
-              // onZoomComplete (not onZoom) fires once per drag-end/pinch-end/wheel-tick, not
-              // per intermediate frame -- that's the debounce the spec's own "redraw jank"
-              // open question asks for, free from the plugin itself.
+              // onZoomComplete (not onZoom) fires once per pinch-end/wheel-tick, not per
+              // intermediate frame -- that's the debounce the spec's own "redraw jank" open
+              // question asks for, free from the plugin itself.
               onZoomComplete: function (ctx) {
                 var r = ctx.chart.scales.x;
-                syncClusterRange(cluster, r.min, r.max, ctx.chart);
-                var bar = document.querySelector('.range-bar[data-cluster="' + cluster + '"]');
-                if (bar) bar.querySelectorAll(".range-btn").forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+                applyClusterRange(cluster, Math.round(r.min), Math.round(r.max), ctx.chart, "");
               },
             },
           },
@@ -818,35 +1019,132 @@
     if (haveZoomPlugin && cluster) registerCluster(cluster, chart);
   });
 
-  // Range preset buttons (item 36) -- the required keyboard/screen-reader-accessible entry
-  // point (drag/pinch above are a faster path for mouse/touch users, not the only path).
-  // Index-based, not wall-clock: every chart in a report shares the identical hourly-cadence
-  // label array for the same 7-day window (item 33's own premise), so "last 24h" is simply
-  // "the last 24 label positions" -- no need to parse the label strings back into real dates.
+  // Default EVERY cluster to its own most recent 7 days (168 hourly points, or everything it
+  // has if fewer) on load, and size/position its Range scrollbar to match -- see this block's
+  // own comment above for why this replaced the old "always starts at Full" default.
   if (haveZoomPlugin) {
+    Object.keys(clusterCharts).forEach(function (name) {
+      var total = clusterCharts[name][0].data.labels.length;
+      var width = Math.min(168, total);
+      var max = total - 1;
+      var min = Math.max(0, total - width);
+      applyClusterRange(name, min, max, null, "7d");
+    });
+  }
+
+  // Range preset buttons (item 36) -- the required keyboard/screen-reader-accessible entry
+  // point for WINDOW WIDTH (drag-pan/wheel/pinch/scrollbar above are the faster mouse/touch
+  // path, not the only one). Index-based, not wall-clock: every chart in one cluster shares
+  // the identical hourly-cadence label array for the same fetch window (item 33's own
+  // premise), so "last 24h" is simply "the last 24 label positions" -- no need to parse the
+  // label strings back into real dates.
+  if (haveZoomPlugin) {
+    var presetHours = { "24h": 24, "3d": 72, "7d": 168 };
     document.querySelectorAll(".range-bar[data-cluster]").forEach(function (bar) {
       var cluster = bar.getAttribute("data-cluster");
       var charts = clusterCharts[cluster] || [];
       if (!charts.length) return;
-      var presetHours = { "24h": 24, "3d": 72, "7d": 168 };
       bar.querySelectorAll(".range-btn").forEach(function (btn) {
         btn.addEventListener("click", function () {
-          bar.querySelectorAll(".range-btn").forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
-          btn.setAttribute("aria-pressed", "true");
           var range = btn.getAttribute("data-range");
-          if (range === "full") {
-            charts.forEach(function (c) { c.resetZoom("none"); });
-            return;
-          }
           var total = charts[0].data.labels.length;
-          var hours = presetHours[range] || total;
-          var min = Math.max(0, total - hours);
+          var width = range === "full" ? total : Math.min(presetHours[range] || total, total);
           var max = total - 1;
-          charts.forEach(function (c) { c.zoomScale("x", { min: min, max: max }, "none"); });
+          var min = Math.max(0, total - width);
+          applyClusterRange(cluster, min, max, null, range);
         });
       });
+      // Scrollbar: a FIXED-WIDTH window (whatever the active Range preset/zoom currently is)
+      // that SLIDES across the full fetch -- a different job from the Range buttons (which
+      // choose the width), the same relationship a real scrollbar's thumb SIZE and POSITION
+      // always have to each other.
+      var slider = clusterScrollbar(cluster);
+      if (slider) {
+        slider.addEventListener("input", function () {
+          var min = parseInt(slider.value, 10) || 0;
+          var width = clusterWindow[cluster] || Math.min(168, charts[0].data.labels.length);
+          var max = min + width - 1;
+          applyClusterRange(cluster, min, max, null, "");
+        });
+      }
     });
   }
+
+  // Week-over-week comparison charts -- SEPARATE from swiftLine/cobLine above (2026-09-18, on
+  // request: "make this a separate graph keep the original as well... add the superimposed
+  // one for cob time same style"; swiftLine keeps its original, unmodified single-line
+  // scrollable/zoomable behaviour via the generic cluster mechanism above -- cobLine has no
+  // cluster at all, see views.py's own comment on why). Always shows exactly two series,
+  // "This week" (the most recent `windowSize` points) and "Last week" (the `windowSize`
+  // immediately before those) -- 168 hourly points for SWIFT, 7 daily points (one bar per
+  // day) for COB -- both plotted against THIS week's own weekday labels, so the same weekday
+  // lines up between them, which a single shared x-axis of absolute timestamps could never do
+  // (last week's Monday and this week's Monday are 7 days apart on a real time axis). No
+  // Range buttons -- it's always this fixed pair -- but wheel/pinch/drag still work for a
+  // closer look within it.
+  function buildWeekCompareChart(sourceCanvasId, targetCanvasId, windowSize) {
+    var entry = (data.spikeCharts || []).find(function (sc) { return sc.canvasId === sourceCanvasId; });
+    var el = document.getElementById(targetCanvasId);
+    if (!entry || !el) return;
+    var allLabels = entry.data.labels;
+    var allValues = entry.data.datasets[0].values;
+    var allShaded = entry.data.datasets[0].shaded || [];
+    var color = entry.data.datasets[0].color;
+    var total = allLabels.length;
+    if (total < windowSize * 2) return;   // not enough history yet for a fair 2-week comparison
+    var curStart = total - windowSize, prevStart = total - windowSize * 2;
+    var haveZoom = typeof ChartZoom !== "undefined";
+    if (haveZoom) Chart.register(ChartZoom);
+
+    // Both weeks share the SAME x-axis positions by weekday+hour, and weekday recurs every
+    // exactly 7 days, so THIS week's own shaded slice tells you which positions to gap on
+    // BOTH lines -- last week's Sunday sits at the identical index as this week's Sunday.
+    var curShaded = allShaded.slice(curStart, total);
+    // COB is a vertical bar chart (2026-09-18, on request: "for cob tile lets switch from
+    // line graph presentation to vertical bar graph") -- plain solid bars, not the gradient
+    // area-fill SWIFT's own line got ("beautify the swift transactions graph... gradient
+    // shading" was scoped to SWIFT specifically). Chart.js groups two datasets' bars
+    // side-by-side per category by default, which reads fine as "This week vs Last week".
+    var isBar = sourceCanvasId === "cobLine";
+    new Chart(el, {
+      type: isBar ? "bar" : "line",
+      data: {
+        labels: allLabels.slice(curStart, total),
+        datasets: isBar ? [
+          { label: "This week", data: withGaps(allValues.slice(curStart, total), curShaded), borderColor: color,
+            backgroundColor: color, borderWidth: 1 },
+          { label: "Last week", data: withGaps(allValues.slice(prevStart, curStart), curShaded), borderColor: "#B8935A",
+            backgroundColor: "#B8935A", borderWidth: 1 },
+        ] : [
+          { label: "This week", data: withGaps(allValues.slice(curStart, total), curShaded), borderColor: color,
+            backgroundColor: areaGradient(hexToRgb(color)), fill: "origin",
+            borderWidth: 1.5, tension: 0.25, pointRadius: 1.5 },
+          { label: "Last week", data: withGaps(allValues.slice(prevStart, curStart), curShaded), borderColor: "#B8935A",
+            backgroundColor: areaGradient(hexToRgb("#B8935A")), fill: "origin",
+            borderWidth: 1.5, borderDash: [5, 3], tension: 0.25, pointRadius: 1.5 },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: "nearest", axis: "x", intersect: false },
+        plugins: Object.assign(
+          { legend: { display: true, position: "bottom", labels: { boxWidth: 10, padding: 8, font: { size: 10 } } },
+            weekendShade: { shaded: curShaded } },
+          haveZoom ? { zoom: {
+            limits: { x: { min: "original", max: "original" } },
+            pan: { enabled: true, mode: "x" },
+            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: "x" },
+          } } : {}
+        ),
+        scales: {
+          x: { ticks: { maxTicksLimit: 12, autoSkip: true, font: { size: 9.5 } } },
+          y: { beginAtZero: true, ticks: { precision: 0 } },
+        },
+      },
+    });
+  }
+  buildWeekCompareChart("swiftLine", "swiftCompareLine", 168);
+  buildWeekCompareChart("cobLine", "cobCompareLine", 7);   // one bar per day, 7 days a week
 
   // Heatmap zoom (2026-09-07, on request) -- CSS `zoom` (not transform) so the surrounding
   // page reflows around the scaled table instead of overlapping it. Persisted per grid in

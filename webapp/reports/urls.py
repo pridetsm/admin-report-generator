@@ -26,19 +26,23 @@ urlpatterns = [
     path("", views.report_form, name="report_form"),
     path("report/", views.report, name="report"),
     path("generate/", views.generate, name="generate"),
+    path("my-alert-groups/", views.my_alert_groups, name="my_alert_groups"),
     path("connect/", views.connect_index, name="connect"),
     path("connect/rdp/", views.connect_rdp, name="connect_rdp"),
     path("folders/", views.folder_watch, name="folder_watch"),
     path("folders/temenos/", views.folder_watch_temenos, name="folder_watch_temenos"),
     path("folders/temenos/data/", views.folder_watch_data, name="folder_watch_data"),
-    path("network/", views.network_dashboard, name="network_dashboard"),
-    path("network/core-switch/", views.network_report, name="network_report"),
-    path("network/generate/", views.network_generate, name="network_generate"),
-    # The start-of-day checklist. Its own trio of URLs rather than a mode of the report
-    # above: that one captures live SNMP for the devices you pick, this one is hand-keyed
-    # from four vendor consoles across a fixed estate — but it gets a picker of its own too,
-    # to thin the entry screen down to what is actually being checked this morning. Nested
-    # the same way network_dashboard/network_report are: the picker owns the parent path.
+    path("management/", views.management_dashboard_focused, name="management_dashboard_focused"),
+    path("management/full/", views.management_dashboard_full, name="management_dashboard_full"),
+    path("management/analytical/", views.management_dashboard_analytical, name="management_dashboard_analytical"),
+    # The start-of-day checklist. Its own trio of URLs rather than a mode of a live report:
+    # that one would capture live SNMP for the devices you pick, this one is hand-keyed from
+    # four vendor consoles across a fixed estate — but it gets a picker of its own too, to
+    # thin the entry screen down to what is actually being checked this morning. Nested the
+    # same way the four Networks Report pickers below are: the picker owns the parent
+    # path. (The old network_dashboard/network_report/network_generate trio this comment used
+    # to reference was retired 2026-09-22 -- see network.DEVICES' own comment on the
+    # 38-device block -- but "network/sod/" itself is unrelated and stays exactly as it was.)
     path("network/sod/", views.network_sod_select, name="network_sod_select"),
     path("network/sod/checklist/", views.network_sod_form, name="network_sod"),
     path("network/sod/generate/", views.network_sod_generate, name="network_sod_generate"),
@@ -48,6 +52,31 @@ urlpatterns = [
     path("active-directory/", views.active_directory_form, name="active_directory_form"),
     path("active-directory/report/", views.active_directory_report, name="active_directory_report"),
     path("active-directory/generate/", views.active_directory_generate, name="active_directory_generate"),
+    # "Networks Report" category (2026-09-22). Deliberately "networks/" (plural), distinct
+    # from the existing singular "network/" prefix above (the SOD checklist) -- signals the
+    # new category and avoids any path collision. Nested the same way infra/ and
+    # active-directory/ are: each picker owns its own parent path.
+    #
+    # Four reports (2026-09-23, on request: "create a seperate core switches report and a
+    # seperate routers report ... this current report rename it to Access switches", then
+    # "the one without poe wireless controller... put it in its own report called wireless
+    # controller") -- replaces the single combined "networks/switches-routers/" trio this
+    # comment used to describe. All four share the same underlying SNMP engine
+    # (network.collect()/build_report(), mode="switches_routers") and differ only in which
+    # DEVICES keys they're scoped to -- see network.py's own "four report-picker estates"
+    # comment just above core_switches_device_keys().
+    path("networks/core-switches/", views.core_switches_form, name="core_switches_form"),
+    path("networks/core-switches/report/", views.core_switches_report, name="core_switches_report"),
+    path("networks/core-switches/generate/", views.core_switches_generate, name="core_switches_generate"),
+    path("networks/routers/", views.routers_form, name="routers_form"),
+    path("networks/routers/report/", views.routers_report, name="routers_report"),
+    path("networks/routers/generate/", views.routers_generate, name="routers_generate"),
+    path("networks/wireless-controller/", views.wireless_controller_form, name="wireless_controller_form"),
+    path("networks/wireless-controller/report/", views.wireless_controller_report, name="wireless_controller_report"),
+    path("networks/wireless-controller/generate/", views.wireless_controller_generate, name="wireless_controller_generate"),
+    path("networks/access-switches/", views.access_switches_form, name="access_switches_form"),
+    path("networks/access-switches/report/", views.access_switches_report, name="access_switches_report"),
+    path("networks/access-switches/generate/", views.access_switches_generate, name="access_switches_generate"),
     path("history/", views.history, name="history"),
     path("history/<int:pk>/", views.submission_detail, name="submission_detail"),
     path("recipients/search/", views.recipient_search, name="recipient_search"),
@@ -71,6 +100,7 @@ urlpatterns = [
     path("configuration/prometheus/", views.config_prometheus, name="config_prometheus"),
     path("configuration/topology/", views.config_topology, name="config_topology"),
     path("configuration/snmp/", views.config_snmp, name="config_snmp"),
+    path("configuration/folder-exporter/", views.config_folder_exporter, name="config_folder_exporter"),
     path("configuration/backup-policy/", views.config_backup_policy, name="config_backup_policy"),
     path("configuration/yaml/", views.config_yaml, name="config_yaml"),
     path("configuration/scripts/", views.config_scripts, name="config_scripts"),

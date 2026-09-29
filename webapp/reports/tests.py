@@ -449,8 +449,8 @@ class ReportBuilderFlow(TestCase):
         self.assertEqual(list(store.links), ["https://efin.rbz.co.zw"])   # CMS link dropped
         # and the overview built from the scoped store counts only Efin's (1 https, 0 http)
         ov = build_overview(store, [efin], gr.Config())
-        web = [w for w in ov["watch"] if w["label"] == "Web encryption"][0]
-        self.assertEqual(web["value"], "1 | 1")   # https | total, not https | http
+        web = [w for w in ov["watch"] if w["label"] == "Unencrypted links"][0]
+        self.assertEqual(web["value"], "0 | 1")   # http | total, not https | http
 
     def test_ldap_down_banner_lists_dependents(self):
         """When the LDAP probe reports down, the overview gets a red, top banner naming the
@@ -1517,151 +1517,10 @@ class NetworkReportCollection(TestCase):
                 network.collect()
 
 
-class NetworkReportPage(TestCase):
-    """The report screen is the SAME screen the systems flow uses.
-
-    One device is one "system" and its faults are its flags, so reports/form.html renders
-    both. These tests are about the network content reaching that screen intact — above all
-    the measurement caveats, which must travel as findings rather than being lost with the
-    standalone page they used to live on.
-    """
-
-    def setUp(self):
-        self.user = get_user_model().objects.create_user("netadm", password="pw12345!")
-        self.user.groups.add(Group.objects.get(name="Network Admin"))
-        self.client.login(username="netadm", password="pw12345!")
-
-    def _body(self):
-        rin = [{"labels": {"ifIndex": "1"}, "value": 90000000.0}]
-        rout = [{"labels": {"ifIndex": "1"}, "value": 40000000.0}]
-        with _snmp_prom(_snmp_series(up=3, down=2), rin=rin, rout=rout):
-            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-            resp = self.client.get(reverse("network_report"))
-        self.assertEqual(resp.status_code, 200)
-        return resp.content.decode()
-
-    def test_it_renders_the_systems_annotation_screen(self):
-        """Not a parallel screen that will drift — literally the same template."""
-        rin = [{"labels": {"ifIndex": "1"}, "value": 9000.0}]
-        with _snmp_prom(_snmp_series(), rin=rin):
-            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-            resp = self.client.get(reverse("network_report"))
-        self.assertTemplateUsed(resp, "reports/form.html")
-
-    def test_the_device_is_named_as_the_subject(self):
-        self.assertIn("Core Switch", self._body())
-
-    def test_it_submits_to_the_network_generator(self):
-        """The shared template differs between the two flows in exactly one thing."""
-        body = self._body()
-        self.assertIn('action="%s"' % reverse("network_generate"), body)
-        self.assertNotIn('action="%s"' % reverse("generate"), body)
-
-    def test_ports_that_are_not_up_are_raised_as_a_watch_item_not_an_incident(self):
-        """Without ifAdminStatus a shut port looks exactly like a failed one, and on a
-        311-port switch most are simply unused. Calling that an incident daily is how a
-        report teaches people to ignore it."""
-        body = self._body()
-        self.assertIn("interfaces are not up", body)
-        self.assertIn("admin status is not collected", body)
-
-    def test_the_counter_width_caveat_travels_as_a_finding(self):
-        """The admins asked for ifHCInOctets by name and are not getting it. A throughput
-        figure without that caveat is a wrong number wearing a confident face — so it is a
-        flagged item on the report, not a footnote on a page that no longer exists."""
-        body = self._body()
-        self.assertIn("under-reported", body)
-        self.assertIn("ifHCInOctets", body)
-
-    def test_the_uncollected_metrics_are_reported_as_a_finding(self):
-        """The count is MEASURED against Prometheus now, not written into the table, so the
-        assertion derives it the same way rather than hardcoding a number that goes stale the
-        day a metric starts being collected."""
-        body = self._body()
-        self.assertIn("not collected", body)
-        with _snmp_prom(_snmp_series(up=3, down=2)):
-            data = network.collect(only={"core-switch"})
-        self.assertGreater(data["count_missing"], 0)
-        self.assertIn(f"{data['count_missing']} of {len(network.CATALOGUE)} requested metrics", body)
-
-    def test_nothing_is_flagged_that_is_not_measured(self):
-        """No band is invented for a metric that is not polled — an amber row for "CPU
-        unknown" would put a fault on screen that no measurement supports."""
-        with _snmp_prom(_snmp_series(up=2, down=0)):
-            snap = network.capture_snapshot("t", only={"core-switch"})
-        keys = {f.key for f in snap.systems[0].flags}
-        for never in ("cpu", "memory", "temperature", "psu", "bgp", "wifi"):
-            self.assertNotIn(never, keys)
-
-    def test_the_screen_speaks_of_devices_not_systems(self):
-        """The shared template is the systems screen. Handed to a network admin unchanged it
-        read "System Analyses Dashboard · 1 system selected" above a switch — someone else's
-        screen with their device on it."""
-        body = self._body()
-        self.assertIn("Network Device Picker", body)
-        self.assertNotIn("System Analyses Dashboard", body)
-        self.assertIn("1 device selected", body)
-        self.assertIn("Devices needing attention", body)
-
-    def test_change_selection_returns_to_the_device_picker(self):
-        """It pointed at the systems picker, which would have walked a network admin into
-        another role's screen — and one that cannot start a network report."""
-        body = self._body()
-        self.assertIn('href="%s" title="Go back to device selection"' % reverse("network_dashboard"), body)
-        self.assertNotIn('href="%s" title="Go back to' % reverse("report_form"), body)
-
-    def test_no_template_comment_text_reaches_the_screen(self):
-        """Django's {# #} is SINGLE-LINE. Spanning it across lines renders it as visible
-        prose, which has already shipped to this UI once."""
-        body = self._body()
-        visible = re.sub(r"<script.*?</script>", "", body, flags=re.S)
-        visible = re.sub(r"<style.*?</style>", "", visible, flags=re.S)
-        visible = re.sub(r"<[^>]+>", " ", visible)
-        for leak in ("{#", "#}", "endcomment", "comment %}"):
-            self.assertNotIn(leak, visible, "template comment syntax leaked: " + leak)
-
-class NetworkReportAccess(TestCase):
-    """The report is for the people who run the network gear."""
-
-    def setUp(self):
-        self.net = get_user_model().objects.create_user("na", password="pw12345!")
-        self.net.groups.add(Group.objects.get(name="Network Admin"))
-        self.sys = get_user_model().objects.create_user("sa", password="pw12345!")
-        self.sys.groups.add(Group.objects.get(name="System Admin"))
-        self.gov = get_user_model().objects.create_user("ga", password="pw12345!")
-        self.gov.groups.add(Group.objects.get(name="Gov Systems Admin"))
-
-    def test_requires_login(self):
-        resp = self.client.get(reverse("network_report"))
-        self.assertEqual(resp.status_code, 302)
-        self.assertIn("/accounts/login/", resp["Location"])
-
-    def test_an_unrelated_role_is_turned_away_from_the_url_itself(self):
-        """Hiding the nav link is not access control."""
-        self.client.login(username="ga", password="pw12345!")
-        resp = self.client.get(reverse("network_report"))
-        self.assertEqual(resp.status_code, 302)
-        self.assertNotIn("/network/", resp["Location"])
-
-    def test_the_nav_link_follows_the_same_rule_as_the_url(self):
-        """A visible link to a page that bounces you is worse than no link at all.
-
-        The network screens are reached through their own dashboard now, so the link to
-        look for is that dashboard rather than the report directly."""
-        self.client.login(username="ga", password="pw12345!")
-        self.assertNotContains(self.client.get(reverse("history")), reverse("network_report"))
-        self.client.logout()
-        self.client.login(username="na", password="pw12345!")
-        self.assertContains(self.client.get(reverse("history")), reverse("network_report"))
-
-    def test_only_network_admin_holds_it(self):
-        """Systems and network are separated deliberately: the System Analyses Dashboard is
-        the systems role's screen and the network ones are not. A platform admin who needs
-        these is granted the Network Admin role, which leaves a record."""
-        self.assertTrue(is_network_admin(self.net))
-        self.assertFalse(is_network_admin(self.sys))
-        self.assertFalse(is_network_admin(self.gov))
-
+# The old NetworkReportPage/NetworkReportAccess classes (network_report/network_dashboard/
+# network_generate) were removed 2026-09-22 along with the views themselves -- superseded by
+# the Switches & Routers Report (see AccessSwitchesReportFlow/AccessSwitchesGenerate/
+# AccessSwitchesDevicePicker below, and network.DEVICES' own comment on the 38-device block).
 
 # =============================================================================== #
 #  SUPERUSER ACCOUNT MANAGEMENT
@@ -1968,11 +1827,11 @@ class RoleSelectScreen(TestCase):
         self.client.login(username="multi", password="pw12345!")
         self.client.post(reverse("role_select"), {"role": "System Admin"})
         scoped = self.client.get(reverse("history")).content.decode()
-        self.assertNotIn(reverse("network_dashboard"), scoped)   # other estate hidden
+        self.assertNotIn(reverse("access_switches_form"), scoped)   # other estate hidden
 
         self.client.post(reverse("role_select"), {"role": "__all__"})
         unscoped = self.client.get(reverse("history")).content.decode()
-        self.assertIn(reverse("network_dashboard"), unscoped)    # both estates now shown
+        self.assertIn(reverse("access_switches_form"), unscoped)    # both estates now shown
         self.assertIn(reverse("folder_watch"), unscoped)
 
     def test_a_single_role_holder_is_not_offered_it(self):
@@ -2175,8 +2034,8 @@ class RoleScopedMenu(TestCase):
         The drawer names Reports once for every role, so what differs is the tiles behind
         it rather than the entry itself."""
         expected = {
-            "System Admin":  ("System Health Report", "Network Report"),
-            "Network Admin": ("Network Report", "System Health Report"),
+            "System Admin":  ("System Health Report", "Switches & Routers Report"),
+            "Network Admin": ("Switches & Routers Report", "System Health Report"),
         }
         for role, (present, absent) in expected.items():
             self.client.post(reverse("role_select"), {"role": role})
@@ -2243,7 +2102,7 @@ class EmptyRoles(TestCase):
     def test_it_is_not_given_another_role_s_dashboard(self):
         body = self.client.get(reverse("history")).content.decode()
         self.assertNotIn("System Analyses Dashboard", body)
-        self.assertNotIn("Network Device Picker", body)
+        self.assertNotIn("Switches &amp; Routers Device Picker", body)
 
     def test_it_lands_on_a_screen_that_admits_it_is_empty(self):
         """Not History, not another role's dashboard. A role with nothing in it should look
@@ -2385,8 +2244,8 @@ class DashboardsAreSeparate(TestCase):
         been separated deliberately, and a systems menu full of switch screens is exactly
         what that separation exists to prevent — now enforced on the Reports tiles."""
         for who, role, mine, theirs in (
-                ("sysadm", "System Admin", "System Health Report", "Network Report"),
-                ("netadm2", "Network Admin", "Network Report", "System Health Report")):
+                ("sysadm", "System Admin", "System Health Report", "Switches & Routers Report"),
+                ("netadm2", "Network Admin", "Switches & Routers Report", "System Health Report")):
             self.client.login(username=who, password="pw12345!")
             self.client.post(reverse("role_select"), {"role": role})
             labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
@@ -2396,7 +2255,7 @@ class DashboardsAreSeparate(TestCase):
     def test_a_system_admin_is_refused_the_network_urls(self):
         """Hiding the link is not access control."""
         self.client.login(username="sysadm", password="pw12345!")
-        for name in ("network_dashboard", "network_report"):
+        for name in ("access_switches_form", "access_switches_report"):
             resp = self.client.get(reverse(name))
             self.assertEqual(resp.status_code, 302, name)
 
@@ -2408,120 +2267,13 @@ class DashboardsAreSeparate(TestCase):
         resp = self.client.post(reverse("role_select"), {"role": "Network Admin"})
         self.assertRedirects(resp, reverse("reports"), fetch_redirect_response=False)
         labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]
-        self.assertEqual(labels, ["Network Report", "Network Infrastructure SOD Report"])
+        self.assertEqual(labels, ["Switches & Routers Report", "Network Infrastructure SOD Report",
+                                  "Active Directory Report"])
 
 
-class NetworkDevicePicker(TestCase):
-    def setUp(self):
-        self.u = get_user_model().objects.create_user("netadm3", password="pw12345!")
-        self.u.groups.add(Group.objects.get(name="Network Admin"))
-        self.client.login(username="netadm3", password="pw12345!")
-
-    def _get(self, up=1.0, ifaces=3):
-        oper = [{"labels": {"ifIndex": str(i + 1), "instance": "10.100.210.253"}, "value": 1.0}
-                for i in range(ifaces)]
-        prom = mock.MagicMock()
-
-        def q(expr):
-            # Two jobs now share the "up{...}" shape (the SNMP switch and the windows_exporter
-            # HCI Cluster host) -- matched on the full expression, each answering with its OWN
-            # instance, rather than one loose "up{" prefix answering for both regardless of
-            # which job actually asked (that used to leak the switch's instance into HCI
-            # Cluster's lookup, making it read as never-scraped even when `up` says healthy).
-            if expr == 'up{job="snmp"}':
-                return ([{"labels": {"instance": "10.100.210.253"}, "value": up}]
-                        if up is not None else [])
-            if expr == 'up{job="hci_cluster"}':
-                return ([{"labels": {"instance": "10.100.246.3:9182"}, "value": up}]
-                        if up is not None else [])
-            if expr == "ifOperStatus":
-                return oper
-            return [{"labels": {}, "value": 1.0}]
-
-        prom.query.side_effect = q
-        with mock.patch("reports.network._prometheus", return_value=(prom, "http://p")):
-            return self.client.get(reverse("network_dashboard"))
-
-    def test_it_lists_exactly_the_one_device_monitored_today(self):
-        """A SELECTION tile, matching the systems picker — the two dashboards ask the same
-        question of different inventories, so they are the same screen."""
-        resp = self._get()
-        body = resp.content.decode()
-        self.assertEqual(body.count('name="include_device"'), len(network.DEVICES))
-        self.assertContains(resp, "Core Switch")
-        self.assertContains(resp, _DEV_TARGET)
-
-    def test_it_submits_to_the_report(self):
-        """Select, then continue — the systems flow exactly."""
-        body = self._get().content.decode()
-        self.assertIn('action="%s"' % reverse("network_report"), body)
-        self.assertIn("Capture &amp; continue", body)
-
-    def test_it_is_structurally_the_systems_picker(self):
-        """Same screen, different inventory. Asserted on the pieces rather than a screenshot:
-        header card, stat pills, section label, select-all, filter, running count, tile
-        anatomy, sticky action bar and the empty-filter row."""
-        body = self._get().content.decode()
-        for piece in ('class="snap"', "sys-stats", "Devices to include", "chk-pill",
-                      "sys-filter", "selectCountTop", "sys-mono", "sys-tick",
-                      "sysNoResults", "actionbar", "sel-pill"):
-            self.assertIn(piece, body, f"{piece} missing — the two pickers have diverged")
-
-    def _grid(self, **kw):
-        """Just the tile grid. The stylesheet block names the same classes, so asserting on
-        the whole page would pass on a CSS rule and prove nothing about the markup."""
-        body = self._get(**kw).content.decode()
-        return body[body.find('id="selectList"'):body.find('id="sysNoResults"')]
-
-    def test_a_healthy_device_carries_no_state_badge(self):
-        """The badge sits in the slot the systems tiles use for "recently reported" and only
-        appears when something is wrong, so a healthy grid looks exactly like that one."""
-        self.assertNotIn("badge-state", self._grid())
-
-    def test_an_unreachable_device_says_so_on_its_tile(self):
-        self.assertIn("not responding", self._grid(up=0.0))
-
-    def test_submitting_nothing_is_stopped_before_the_post(self):
-        """The systems picker guards its own submit; this one does too, in the same words."""
-        self.assertContains(self._get(), "Select at least one device")
-
-    def test_a_responding_device_shows_its_interface_count(self):
-        """The sub-line carries the count, exactly where a system tile carries "5 hosts"."""
-        grid = self._grid(up=1.0, ifaces=4)
-        self.assertIn("4 interfaces", grid)
-        self.assertNotIn("badge-state", grid)      # healthy: no badge
-
-    def test_a_device_that_fails_its_scrape_says_so(self):
-        self.assertIn("not responding", self._grid(up=0.0))
-
-    def test_never_scraped_is_not_rendered_as_down(self):
-        """`up == 0` means Prometheus tried and failed; no `up` at all means it never tried.
-        Rendering them alike sends someone to check a cable over a missing scrape config."""
-        grid = self._grid(up=None)
-        self.assertIn("not scraped", grid)
-        self.assertNotIn("not responding", grid)
-
-
-class NetworkDeviceIsNotASystem(TestCase):
-    """The core switch must never appear among the business systems."""
-
-    def setUp(self):
-        self.u = get_user_model().objects.create_user("sysadm2", password="pw12345!")
-        self.u.groups.add(Group.objects.get(name="System Admin"))
-        self.client.login(username="sysadm2", password="pw12345!")
-
-    def test_the_topology_contains_no_network_device(self):
-        """The systems picker reads systems_config.yml; the switch lives only as a label on
-        the SNMP metrics. This asserts the two inventories stay disjoint."""
-        names = {s["name"] for s in list_systems()}
-        for d in network.DEVICES:
-            self.assertNotIn(d["system"], names)
-            self.assertNotIn(d["name"], names)
-
-    def test_the_systems_picker_shows_no_switch(self):
-        body = self.client.get(reverse("report_form")).content.decode()
-        for probe in ("RBZ Network", "Core Switch", "10.100.210.253"):
-            self.assertNotIn(probe, body)
+# The old NetworkDevicePicker/NetworkDeviceIsNotASystem classes (network_dashboard) were
+# removed 2026-09-22 along with the view itself -- superseded by AccessSwitchesDevicePicker/
+# AccessSwitchesDevicesAreNotBusinessSystems below.
 
 
 class CssTokenHygiene(TestCase):
@@ -2590,10 +2342,11 @@ class DrawerCurrentIndicator(TestCase):
 
     def _drawer(self, url_name, role):
         self.client.post(reverse("role_select"), {"role": role})
-        if url_name == "network_report":
+        if url_name == "access_switches_report":
             # the report covers a SELECTION, so it bounces to the picker without one
+            key = sorted(network.access_switches_device_keys())[0]
             with _snmp_prom(_snmp_series()):
-                self.client.post(reverse("network_report"), {"include_device": "core-switch"})
+                self.client.post(reverse("access_switches_report"), {"include_device": key})
                 body = self.client.get(reverse(url_name)).content.decode()
         else:
             body = self.client.get(reverse(url_name)).content.decode()
@@ -2603,8 +2356,8 @@ class DrawerCurrentIndicator(TestCase):
         for url_name, role in (("report_form", "System Admin"),
                                ("folder_watch", "System Admin"),
                                ("folder_watch_temenos", "System Admin"),
-                               ("network_dashboard", "Network Admin"),
-                               ("network_report", "Network Admin"),
+                               ("access_switches_form", "Network Admin"),
+                               ("access_switches_report", "Network Admin"),
                                ("history", "Administrator"),
                                ("roles_console", "Administrator"),
                                ("system_settings", "Administrator")):
@@ -2743,7 +2496,7 @@ class BrandBackCaret(TestCase):
         defined = set(re.findall(r"\.([a-z][a-z0-9-]*)", css))
 
         self.client.login(username="caret", password="pw12345!")
-        for role, url_name in (("Network Admin", "network_dashboard"),
+        for role, url_name in (("Network Admin", "access_switches_form"),
                                ("System Admin", "report_form")):
             self.client.post(reverse("role_select"), {"role": role})
             with _snmp_prom(_snmp_series()):
@@ -2764,130 +2517,251 @@ class BrandBackCaret(TestCase):
         self.assertNotIn(":has(", code)
 
 
-class NetworkReportFlow(TestCase):
-    """Select devices, then report on them — the systems flow, for network gear.
+# The old NetworkReportFlow/NetworkGenerate classes (network_report/network_generate) were
+# removed 2026-09-22 along with the views themselves -- their valuable coverage (theme
+# painting, repeatable generate, the "workbook states how to read its numbers" caveat check)
+# was ported into AccessSwitchesGenerate below, which exercises the SAME network.build_report
+# these used, just through the new view/estate.
 
-    The point of these tests is that the report covers what the admin CHOSE. Which devices a
-    report covers is the admin's statement about their own estate, not a default the app
-    picked for them.
+
+# ---------------------------------------------------------------------------------------
+#  Access Switches Report (2026-09-22, renamed and narrowed from the old combined "Switches
+#  & Routers Report" on 2026-09-23 -- see network.access_switches_device_keys' own comment
+#  and the three sibling reports it was split into: Core Switches, Routers, Wireless
+#  Controller). Scoped to network.access_switches_device_keys() -- every switch except the
+#  one core switch. Supersedes the older "Network Report" (network_dashboard/network_report/
+#  network_generate), removed 2026-09-22. Mirrors the old Network* classes' own patterns
+#  throughout (same fixtures, same shape) -- see each test's own docstring for what it
+#  borrows from. The engine underneath (collect()/build_report(), mode="switches_routers")
+#  is untouched and shared by all four Networks Report pickers -- see
+#  SwitchesRoutersPerDeviceHardwareFlags just below, which tests that shared engine directly
+#  and is NOT renamed.
+# ---------------------------------------------------------------------------------------
+
+class SwitchesRoutersPerDeviceHardwareFlags(TestCase):
+    """collect()/_device_flags() must read CPU/RAM/temperature/uptime PER DEVICE, not once
+    across the whole queried set -- the 2026-09-22 fix. No existing test covers this: every
+    fixture before this class ever mocked only ONE SNMP device, so a bug that only shows up
+    with two or more would have shipped silently. This is that test.
     """
 
+    def _mock(self, rows_by_metric):
+        """A Prometheus whose answers depend on which query it is asked -- rows_by_metric is
+        {promql_expr: [row, ...]}; anything not listed comes back empty, same "genuinely
+        absent, not a dummy fallback" discipline _snmp_prom uses."""
+        prom = mock.MagicMock()
+
+        def q(expr):
+            if expr == "vector(1)":
+                return [{"labels": {}, "value": 1.0}]
+            return rows_by_metric.get(expr, [])
+
+        prom.query.side_effect = q
+        return mock.patch("reports.network._prometheus", return_value=(prom, "http://prom:9090"))
+
+    def test_two_devices_with_different_readings_get_different_flags(self):
+        dev_hot = {"key": "dev-a", "name": "Device A", "target": "10.0.0.1",
+                  "known": True, "reachable": True}
+        dev_cool = {"key": "dev-b", "name": "Device B", "target": "10.0.0.2",
+                   "known": True, "reachable": True}
+        rows = {
+            "cpmCPUTotal5minRev": [
+                {"labels": {"instance": "10.0.0.1"}, "value": 95.0},   # over both thresholds
+                {"labels": {"instance": "10.0.0.2"}, "value": 10.0},   # nowhere near either
+            ],
+            "ciscoMemoryPoolUsed": [
+                {"labels": {"instance": "10.0.0.1"}, "value": 950.0},
+                {"labels": {"instance": "10.0.0.2"}, "value": 100.0},
+            ],
+            "ciscoMemoryPoolFree": [
+                {"labels": {"instance": "10.0.0.1"}, "value": 50.0},    # 95% used
+                {"labels": {"instance": "10.0.0.2"}, "value": 900.0},   # 10% used
+            ],
+            "entSensorValue": [
+                {"labels": {"instance": "10.0.0.1", "entSensorType": "8"}, "value": 80.0},
+                {"labels": {"instance": "10.0.0.2", "entSensorType": "8"}, "value": 25.0},
+            ],
+            "sysUpTime": [
+                {"labels": {"instance": "10.0.0.1"}, "value": 100.0},    # 0.01 days -- just rebooted
+                {"labels": {"instance": "10.0.0.2"}, "value": 8640000.0},  # 1000 days
+            ],
+        }
+        with self._mock(rows):
+            # only=None (not fake device keys) -- collect() resolves `wanted` to real DEVICES
+            # targets for whatever keys are in `only`, so made-up keys like "dev-a" would
+            # resolve to an EMPTY wanted set and filter every mocked row out. None skips that
+            # scoping entirely, letting the mocked rows above pass straight through -- this
+            # test is about _device_flags' own per-device reads, not collect()'s scoping
+            # (already covered by NetworkReportFlow.test_the_report_covers_only_the_chosen_device).
+            data = network.collect(only=None)
+
+        # The bug this fixes: BEFORE it, both devices would have read whichever device's
+        # values collect() happened to reduce to a single scalar (here, device A's, since
+        # max()/sum() over the combined set picks A's 95%/hot/just-rebooted readings) --
+        # device B's own healthy numbers would never have been visible at all.
+        hot_flags = {f.key: f for f in network._device_flags(dev_hot, data)}
+        cool_flags = {f.key: f for f in network._device_flags(dev_cool, data)}
+
+        self.assertIn("cpu_high", hot_flags)
+        self.assertEqual(hot_flags["cpu_high"].band, "red")
+        self.assertIn("mem_high", hot_flags)
+        self.assertIn("temp_high", hot_flags)
+        self.assertIn("recent_reboot", hot_flags)
+
+        self.assertNotIn("cpu_high", cool_flags)
+        self.assertNotIn("mem_high", cool_flags)
+        self.assertNotIn("temp_high", cool_flags)
+        self.assertNotIn("recent_reboot", cool_flags)
+
+
+class AccessSwitchesDevicePicker(TestCase):
+    """The picker lists exactly network.access_switches_device_keys() -- never the core
+    switch (excluded by is_access_switch()), never a windows-kind device."""
+
     def setUp(self):
-        self.u = get_user_model().objects.create_user("netflow", password="pw12345!")
+        self.u = get_user_model().objects.create_user("swrtpick", password="pw12345!")
         self.u.groups.add(Group.objects.get(name="Network Admin"))
-        self.client.login(username="netflow", password="pw12345!")
+        self.client.login(username="swrtpick", password="pw12345!")
+
+    def _get(self):
+        prom = mock.MagicMock()
+
+        def q(expr):
+            if expr == 'up{job="snmp"}':
+                return []
+            if expr == "ifOperStatus":
+                return []
+            return [{"labels": {}, "value": 1.0}]
+
+        prom.query.side_effect = q
+        with mock.patch("reports.network._prometheus", return_value=(prom, "http://p")):
+            return self.client.get(reverse("access_switches_form"))
+
+    def test_it_lists_exactly_the_access_switches_estate(self):
+        resp = self._get()
+        body = resp.content.decode()
+        self.assertEqual(body.count('name="include_device"'),
+                         len(network.access_switches_device_keys()))
+        self.assertNotIn("Core Switch", body)
+
+    def test_infra_admin_can_also_reach_it(self):
+        """Dual-role visibility, same precedent as the Active Directory Report."""
+        other = get_user_model().objects.create_user("swrtinfra", password="pw12345!")
+        other.groups.add(Group.objects.get(name="Infrastructure Admin"))
+        self.client.logout()
+        self.client.login(username="swrtinfra", password="pw12345!")
+        self.assertEqual(self._get().status_code, 200)
+
+    def test_a_system_admin_cannot_reach_it(self):
+        other = get_user_model().objects.create_user("swrtsys", password="pw12345!")
+        other.groups.add(Group.objects.get(name="System Admin"))
+        self.client.logout()
+        self.client.login(username="swrtsys", password="pw12345!")
+        self.assertEqual(self._get().status_code, 302)
+
+
+class AccessSwitchesDevicesAreNotBusinessSystems(TestCase):
+    """Same discipline as NetworkDeviceIsNotASystem, for the access-switch estate."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("swrtsysadm", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="System Admin"))
+        self.client.login(username="swrtsysadm", password="pw12345!")
+
+    def test_the_topology_contains_no_access_switches_device(self):
+        names = {s["name"] for s in list_systems()}
+        keys = network.access_switches_device_keys()
+        for d in network.DEVICES:
+            if d["key"] in keys:
+                self.assertNotIn(d["name"], names)
+
+
+class AccessSwitchesReportFlow(TestCase):
+    """Select devices, then report on them -- access_switches_form's own twin of
+    NetworkReportFlow, scoped to the new estate."""
+
+    def setUp(self):
+        self.u = get_user_model().objects.create_user("swrtflow", password="pw12345!")
+        self.u.groups.add(Group.objects.get(name="Network Admin"))
+        self.client.login(username="swrtflow", password="pw12345!")
+        self.key = sorted(network.access_switches_device_keys())[0]
+        self.target = next(d["target"] for d in network.DEVICES if d["key"] == self.key)
 
     def test_choosing_a_device_redirects_rather_than_rendering(self):
-        """Post/Redirect/Get, as the systems picker does — a browser refresh on the report
-        must never re-submit the selection."""
-        with _snmp_prom(_snmp_series()):
-            resp = self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-        self.assertRedirects(resp, reverse("network_report"), fetch_redirect_response=False)
-        self.assertEqual(self.client.session["network_devices"], ["core-switch"])
+        with _snmp_prom(_snmp_series(instance=self.target)):
+            resp = self.client.post(reverse("access_switches_report"),
+                                    {"include_device": self.key})
+        self.assertRedirects(resp, reverse("access_switches_report"), fetch_redirect_response=False)
+        self.assertEqual(self.client.session["access_switches_devices"], [self.key])
 
     def test_the_report_needs_a_selection_first(self):
-        """Arriving with nothing chosen sends the admin to the picker rather than quietly
-        reporting on every device."""
-        with _snmp_prom(_snmp_series()):
-            resp = self.client.get(reverse("network_report"))
-        self.assertRedirects(resp, reverse("network_dashboard"), fetch_redirect_response=False)
+        resp = self.client.get(reverse("access_switches_report"))
+        self.assertRedirects(resp, reverse("access_switches_form"), fetch_redirect_response=False)
 
-    def test_submitting_nothing_is_refused(self):
-        resp = self.client.post(reverse("network_report"), {}, follow=True)
+    def test_the_core_switch_is_not_a_valid_selection_here(self):
+        """core-switch has kind "Switch" too, but belongs to the OTHER report -- a hand-edited
+        form must not be able to smuggle it into this one."""
+        resp = self.client.post(reverse("access_switches_report"),
+                                {"include_device": "core-switch"}, follow=True)
         self.assertContains(resp, "Select at least one device")
-        self.assertIsNone(self.client.session.get("network_devices"))
-
-    def test_an_unknown_device_key_is_discarded(self):
-        """The key is checked against the inventory, so a hand-edited form cannot widen the
-        report to something that is not monitored."""
-        resp = self.client.post(reverse("network_report"),
-                                {"include_device": "not-a-device"}, follow=True)
-        self.assertContains(resp, "Select at least one device")
-        self.assertIsNone(self.client.session.get("network_devices"))
-
-    def test_the_report_covers_only_the_chosen_device(self):
-        """Scoping is on the `instance` label, so a report naming the core switch cannot
-        quietly include another device sharing the SNMP job."""
-        oper = _snmp_series(up=2, down=0)
-        oper += [{"labels": {"ifIndex": "1", "instance": "10.0.0.99"}, "value": 1.0},
-                 {"labels": {"ifIndex": "2", "instance": "10.0.0.99"}, "value": 1.0}]
-        with _snmp_prom(oper):
-            data = network.collect(only={"core-switch"})
-        self.assertEqual(data["devices"], [_DEV_TARGET])
-        self.assertEqual(data["iface_count"], 2)
-
-    def test_rates_do_not_blend_two_devices_ports(self):
-        """ifIndex is unique only WITHIN a device. Keyed on it alone, a second switch's port 1
-        would land on the first switch's port 1 the day it is onboarded."""
-        oper = [{"labels": {"ifIndex": "1", "instance": _DEV_TARGET}, "value": 1.0}]
-        rin = [{"labels": {"ifIndex": "1", "instance": "10.0.0.99"}, "value": 1000.0}]
-        with _snmp_prom(oper, rin=rin):
-            data = network.collect(only={"core-switch"})
-        self.assertIsNone(data["interfaces"][0]["in_bps"])   # the other device's rate, ignored
+        self.assertIsNone(self.client.session.get("access_switches_devices"))
 
 
-class NetworkGenerate(TestCase):
-    """Generating the report — the systems flow, for network gear."""
+class AccessSwitchesGenerate(TestCase):
+    """Generating the report -- access_switches_generate's own twin of NetworkGenerate."""
 
     def setUp(self):
-        self.u = get_user_model().objects.create_user("netgen", password="pw12345!")
+        self.u = get_user_model().objects.create_user("swrtgen", password="pw12345!")
         self.u.groups.add(Group.objects.get(name="Network Admin"))
-        self.client.login(username="netgen", password="pw12345!")
+        self.client.login(username="swrtgen", password="pw12345!")
+        self.key = sorted(network.access_switches_device_keys())[0]
+        self.target = next(d["target"] for d in network.DEVICES if d["key"] == self.key)
 
     def _open(self):
-        with _snmp_prom(_snmp_series(up=3, down=2)):
-            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-            body = self.client.get(reverse("network_report")).content.decode()
+        with _snmp_prom(_snmp_series(instance=self.target)):
+            self.client.post(reverse("access_switches_report"), {"include_device": self.key})
+            body = self.client.get(reverse("access_switches_report")).content.decode()
         return re.search(r'name="token" value="([^"]+)"', body).group(1)
 
-    def test_it_returns_a_real_xlsx(self):
-        resp = self.client.post(reverse("network_generate"),
+    def test_it_returns_a_real_xlsx_titled_for_this_report(self):
+        resp = self.client.post(reverse("access_switches_generate"),
                                 {"token": self._open(), "author": "P. Moyo"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"],
                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        self.assertIn("Infrastructure Report", resp["Content-Disposition"])
-        self.assertGreater(len(resp.content), 4000)
-        self.assertTrue(resp.content.startswith(b"PK"))      # a real zip container
+        self.assertIn("Switches & Routers Report", resp["Content-Disposition"])
+        self.assertNotIn("Infrastructure Report", resp["Content-Disposition"])
+        self.assertTrue(resp.content.startswith(b"PK"))
 
-    def test_the_answers_are_recorded_against_the_device(self):
-        token = self._open()
-        self.client.post(reverse("network_generate"), {
-            "token": token, "author": "P. Moyo",
-            "summary_comment": "Phase 1 review.",
-            "fix__0__0": "No", "comment__0": "Unused access ports.",
-        })
+    def test_the_kind_is_recorded_for_history_and_the_executive_dashboard(self):
+        self.client.post(reverse("access_switches_generate"),
+                         {"token": self._open(), "author": "P. Moyo"})
         sub = ReportSubmission.objects.latest("id")
-        self.assertEqual(sub.author, "P. Moyo")
-        self.assertEqual(sub.summary_comment, "Phase 1 review.")
-        self.assertIn("Core Switch", sub.annotations)
-        self.assertEqual(sub.annotations["Core Switch"]["comment"], "Unused access ports.")
-        self.assertEqual([s["name"] for s in sub.report_content["systems"]], ["Core Switch"])
+        self.assertEqual(sub.report_content["kind"], "access_switches")
 
-    def test_the_report_can_be_generated_more_than_once(self):
-        """The page stays open after a download, so Generate has to work a second time. It
-        used to consume the snapshot — pressing it again died with "this snapshot expired",
-        and coming back after e-mailing hit the same wall, which read as e-mailing having
-        forced a refresh. Freshness is guaranteed by every GET re-capturing, not by
-        destroying the snapshot underneath the page that is still showing it."""
-        token = self._open()
-        for _ in range(3):
-            resp = self.client.post(reverse("network_generate"), {"token": token, "author": "P. Moyo"})
-            self.assertEqual(resp.status_code, 200)
-            self.assertTrue(resp.content.startswith(b"PK"))
-
-    def test_a_system_admin_cannot_generate_a_network_report(self):
-        other = get_user_model().objects.create_user("sysgen", password="pw12345!")
+    def test_a_system_admin_cannot_generate_this_report(self):
+        other = get_user_model().objects.create_user("swrtsysgen", password="pw12345!")
         other.groups.add(Group.objects.get(name="System Admin"))
         self.client.logout()
-        self.client.login(username="sysgen", password="pw12345!")
-        resp = self.client.post(reverse("network_generate"), {"token": "x"})
+        self.client.login(username="swrtsysgen", password="pw12345!")
+        resp = self.client.post(reverse("access_switches_generate"), {"token": "x"})
         self.assertEqual(resp.status_code, 302)
+
+    def test_the_report_can_be_generated_more_than_once(self):
+        """The page stays open after a download, so Generate has to work a second time --
+        ported from the old NetworkGenerate's own identical test, same network.build_report
+        underneath."""
+        token = self._open()
+        for _ in range(3):
+            resp = self.client.post(reverse("access_switches_generate"),
+                                    {"token": token, "author": "P. Moyo"})
+            self.assertEqual(resp.status_code, 200)
+            self.assertTrue(resp.content.startswith(b"PK"))
 
     def _xlsx(self, **post):
         body = {"token": self._open(), "author": "P. Moyo"}
         body.update(post)
-        return self.client.post(reverse("network_generate"), body)
+        return self.client.post(reverse("access_switches_generate"), body)
 
     def _sheet(self, content):
         import io
@@ -2896,12 +2770,11 @@ class NetworkGenerate(TestCase):
 
     def test_the_workbook_is_painted_from_the_engine_palette(self):
         """Not a second set of colours that drifts. The build swaps gr.PALETTES the same way
-        the systems build does, so "dark" means one thing in this app."""
+        the systems build does, so "dark" means one thing in this app -- ported from
+        NetworkGenerate's own identical test, same network.build_report underneath."""
         for theme in ("dark", "light"):
             ws = self._sheet(self._xlsx(theme=theme).content)
             pal = gr.PALETTES[theme]
-            # column A is the crest gutter now (the logo floats over it, as in the systems
-            # report), so the body starts at B — sample there, not in the margin
             fills = {ws.cell(r, c).fill.fgColor.rgb for r in range(1, 20) for c in (1, 2, 3)}
             for key in ("BG", "CARD", "HDR"):
                 self.assertIn(str(pal[key]), fills, f"{theme}: {key} missing from the canvas")
@@ -2912,13 +2785,7 @@ class NetworkGenerate(TestCase):
         light = self._sheet(self._xlsx(theme="light").content).cell(3, 2).fill.fgColor.rgb
         self.assertNotEqual(dark, light)
 
-    def test_the_canvas_is_painted_rather_than_left_white(self):
-        """On the dark theme an unpainted sheet frames the report in white and the whole
-        thing reads as broken."""
-        ws = self._sheet(self._xlsx(theme="dark").content)
-        self.assertEqual(ws.cell(2, 7).fill.fgColor.rgb, str(gr.PALETTES["dark"]["BG"]))
-
-    def test_the_theme_is_named_in_the_filename_as_it_is_for_systems(self):
+    def test_the_theme_is_named_in_the_filename(self):
         self.assertIn("(light).xlsx", self._xlsx(theme="light")["Content-Disposition"])
         self.assertIn("(dark).xlsx", self._xlsx(theme="dark")["Content-Disposition"])
 
@@ -2932,32 +2799,16 @@ class NetworkGenerate(TestCase):
         self.assertEqual(ReportSubmission.objects.latest("id").theme, "dark")
 
     def test_no_theme_posted_uses_the_admins_saved_preference(self):
-        """Same order the systems flow uses, so the two never disagree about what "no
-        choice" means."""
         prof = self.u.profile
         prof.default_report_theme = "light"
         prof.save()
         self._xlsx()
         self.assertEqual(ReportSubmission.objects.latest("id").theme, "light")
 
-    def test_the_workbook_states_how_to_read_its_numbers(self):
-        """A spreadsheet outlives the screen it was made on, and these figures are wrong in a
-        specific, knowable way. The caveats have to be inside the artifact."""
-        import io
-        from openpyxl import load_workbook
-
-        resp = self.client.post(reverse("network_generate"),
-                                {"token": self._open(), "author": "P. Moyo"})
-        wb = load_workbook(io.BytesIO(resp.content))
-        text = " ".join(str(c.value) for row in wb.active.iter_rows() for c in row if c.value)
-        self.assertIn("FLOOR", text)
-        self.assertIn("ifHighSpeed", text)
-        self.assertIn("ifAdminStatus", text)
-
 
 class NetworkSodPicker(TestCase):
-    """The device picker in front of the SOD checklist — same convention as the live
-    Network Report's picker, in front of a fixed rather than a discovered estate."""
+    """The device picker in front of the SOD checklist — same convention as a live report's
+    own picker, in front of a fixed rather than a discovered estate."""
 
     def setUp(self):
         self.u = get_user_model().objects.create_user("sodpick", password="pw12345!")
@@ -3040,82 +2891,13 @@ class NetworkSodPicker(TestCase):
         self.assertRedirects(resp, reverse("report_form"), fetch_redirect_response=False)
 
 
-class NetworkOpenReportParity(TestCase):
-    """Continuing an open report behaves the same in both estates.
-
-    Both pickers DISCARD the answers already typed if you re-select on them, so every part of
-    "you have one open" has to work the same way — the resume bar, the Back button, and the
-    snapshot being retired when a new selection is made.
-    """
-
-    def setUp(self):
-        self.u = get_user_model().objects.create_user("parity", password="pw12345!")
-        for r in ("System Admin", "Network Admin"):
-            self.u.groups.add(Group.objects.get(name=r))
-        self.client.login(username="parity", password="pw12345!")
-        self.client.post(reverse("role_select"), {"role": "Network Admin"})
-
-    def _open(self):
-        with _snmp_prom(_snmp_series()):
-            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-            self.client.get(reverse("network_report"))
-
-    def _picker(self):
-        with _snmp_prom(_snmp_series()):
-            return self.client.get(reverse("network_dashboard")).content.decode()
-
-    def test_the_resume_bar_appears_once_a_report_is_open(self):
-        self.assertNotIn("You have a report open", self._picker())
-        self._open()
-        body = self._picker()
-        self.assertIn("You have a report open", body)
-        self.assertIn("Continue that report", body)
-        self.assertIn("Core Switch", body)
-
-    def test_the_resume_bar_outlives_the_snapshot(self):
-        """Gated on the cached token as well, the bar vanished the moment the snapshot lapsed
-        — stranding the admin on the one screen that discards their answers."""
-        self._open()
-        session = self.client.session
-        session.pop("network_token")          # snapshot expired; the selection remains
-        session.save()
-        self.assertIn("You have a report open", self._picker())
-
-    def test_re_selecting_retires_the_previous_snapshot(self):
-        """Otherwise a second run silently reports the FIRST selection's numbers."""
-        self._open()
-        first = self.client.session["network_token"]
-        with _snmp_prom(_snmp_series()):
-            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-        self.assertIsNone(self.client.session.get("network_token"))
-        with _snmp_prom(_snmp_series()):
-            self.client.get(reverse("network_report"))
-        self.assertNotEqual(self.client.session["network_token"], first)
-
-    def test_back_returns_to_the_open_report(self):
-        """The picker is how the report was started; the report is what the admin was doing.
-        Back retraces the second."""
-        self._open()
-        body = self.client.get(reverse("history")).content.decode()
-        self.assertIn('class="backnav" href="%s"' % reverse("network_report"), body)
-
-    def test_back_never_lands_on_another_role_s_dashboard(self):
-        """The nav tree is rooted at the SYSTEMS dashboard, so without a role-aware fallback a
-        network admin's Back led to a screen that is not in their menu."""
-        body = self.client.get(reverse("history")).content.decode()
-        # Back goes to the role's own landing screen — Reports — never to another estate's
-        # picker, which is the failure this test was written for.
-        self.assertIn('class="backnav" href="%s"' % reverse("reports"), body)
-        self.assertNotIn('class="backnav" href="%s"' % reverse("report_form"), body)
-
-    def test_the_systems_flow_is_untouched(self):
-        """The rule is per-estate: a system admin's open report still wins for them."""
-        self.client.post(reverse("role_select"), {"role": "System Admin"})
-        session = self.client.session
-        session["report_systems"] = ["Efin"]
-        session.save()
-        body = self.client.get(reverse("history")).content.decode()
-        self.assertIn('class="backnav" href="%s"' % reverse("report"), body)
+# NetworkOpenReportParity (network_report/network_dashboard open-report resume bar) was
+# removed 2026-09-22 along with the views themselves. The resume-bar/Back-button mechanism it
+# tested is shared infrastructure (_OPEN_UNTIL/_ESTATE_SESSION_KEYS/_open_report_seconds in
+# views.py) that "core_switches"/"routers"/"wireless_controller"/"access_switches" are all
+# registered in the same way "infra"/"active_directory" already are -- not re-verified
+# per-estate here, same as those two estates' own resume-bar behaviour isn't re-tested in a
+# dedicated class either.
 
 
 def _build_overview(unreachable=False, nearfull=False, certs=None, ldap=False):
@@ -3263,19 +3045,21 @@ class OpenReportExpiry(TestCase):
 
     def test_the_network_estate_behaves_the_same(self):
         self.client.post(reverse("role_select"), {"role": "Network Admin"})
-        with _snmp_prom(_snmp_series()):
-            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-            self.client.get(reverse("network_report"))
-            body = self.client.get(reverse("network_dashboard")).content.decode()
+        key = sorted(network.access_switches_device_keys())[0]
+        target = next(d["target"] for d in network.DEVICES if d["key"] == key)
+        with _snmp_prom(_snmp_series(instance=target)):
+            self.client.post(reverse("access_switches_report"), {"include_device": key})
+            self.client.get(reverse("access_switches_report"))
+            body = self.client.get(reverse("access_switches_form")).content.decode()
             self.assertIn("You have a report open", body)
             self.assertRegex(body, r'data-left="\d+"')
 
             session = self.client.session
-            session["network_expires_at"] = time.time() - 1
+            session["access_switches_report_expires_at"] = time.time() - 1
             session.save()
-            body = self.client.get(reverse("network_dashboard")).content.decode()
+            body = self.client.get(reverse("access_switches_form")).content.decode()
         self.assertNotIn("You have a report open", body)
-        self.assertIsNone(self.client.session.get("network_devices"))
+        self.assertIsNone(self.client.session.get("access_switches_devices"))
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
     def test_the_countdown_script_is_absent_when_nothing_is_open(self, _cap):
@@ -3352,11 +3136,12 @@ class BackNavigationChain(TestCase):
 
     def test_the_network_chain_is_the_same_shape(self):
         self.client.post(reverse("role_select"), {"role": "Network Admin"})
+        key = sorted(network.access_switches_device_keys())[0]
         with _snmp_prom(_snmp_series()):
-            self.client.post(reverse("network_report"), {"include_device": "core-switch"})
-            self.assertEqual(self._back("network_report"), reverse("network_dashboard"))
+            self.client.post(reverse("access_switches_report"), {"include_device": key})
+            self.assertEqual(self._back("access_switches_report"), reverse("access_switches_form"))
             # a picker steps out to the report choice, which steps out to the role choice
-            self.assertEqual(self._back("network_dashboard"), reverse("reports"))
+            self.assertEqual(self._back("access_switches_form"), reverse("reports"))
             self.assertEqual(self._back("reports"), reverse("role_select"))
 
     @mock.patch("reports.views.capture_snapshot", side_effect=_synthetic_snapshot)
@@ -4565,18 +4350,21 @@ class ReportsScreen(TestCase):
         self.assertEqual(labels, ["System Health Report", "OS Inventory Report"])
 
     def test_each_role_gets_exactly_its_own_reports(self):
-        """Network Admin has TWO: the live Network Report and the hand-keyed SOD checklist.
-
-        They are genuinely different reports rather than two views of one — the first is
-        captured from Prometheus for devices you pick, the second is worked through each
-        morning across four vendor consoles — which is the same reasoning that gave Security
-        Admin its pair and made this screen necessary in the first place.
+        """Network Admin holds several genuinely different reports, not several views of one:
+        the live Switches & Routers Report (captured from Prometheus for devices you pick),
+        the hand-keyed SOD checklist (worked through each morning across four vendor
+        consoles), and view access to Active Directory Report (owned by Infrastructure
+        Admin) -- the same reasoning that gave Security Admin its own pair and made this
+        screen necessary in the first place.
         """
         for name, role, expected in (
-                ("sys", "System Admin", ["System Health Report"]),
-                ("net", "Network Admin", ["Network Report",
-                                          "Network Infrastructure SOD Report"]),
-                ("inf", "Infrastructure Admin", ["Infrastructure Admin Report"])):
+                ("sys", "System Admin", ["System Health Report", "Automated Reports"]),
+                ("net", "Network Admin", ["Switches & Routers Report",
+                                          "Network Infrastructure SOD Report",
+                                          "Active Directory Report"]),
+                ("inf", "Infrastructure Admin", ["Switches & Routers Report",
+                                                 "Cluster Health Report",
+                                                 "Active Directory Report"])):
             self._user(name, role)
             self._as(name, role)
             labels = [o["label"] for o in self.client.get(reverse("reports")).context["options"]]

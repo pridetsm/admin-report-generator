@@ -188,16 +188,20 @@ def build_overview(store, systems, cfg) -> dict:
          "sub": "down | total", "state": bad(down)},
         {"label": "Expired certs", "value": f"{len(cert_expired)} | {gr.cert_monitored(store)}",
          "sub": "expired | total", "state": bad(len(cert_expired))},
-        # 2026-09-08, on request -- a stuck payment/interface queue is exactly as real a fault
-        # as any other tile in this section; "drained | total" (not "stuck | total") because a
-        # drained queue is the healthy steady state this tile is checking FOR, matching the
-        # positive framing "Backup tracking"/"Web encryption" already use elsewhere on this
-        # same overview. `warn`, not `bad`: the finer red/amber verdict already happens once,
-        # correctly, via the flagged-metric mechanism (reports.alerting.
-        # undrained_folder_flags_by_system) -- this tile is a glance-level count, not a second
-        # independently-computed severity judgement.
-        {"label": "Queue folders drained", "value": f"{n_drained} | {n_queue}",
-         "sub": "drained | total", "state": warn(n_queue - n_drained)},
+        # "Undrained queues", not "Queue folders drained" (2026-09-16, on request: "this needs
+        # to be undrained queues so that 0 meant healthy" -- the positive "drained | total"
+        # framing this tile used to have reads great in an e-mail's own text, but every OTHER
+        # tile on the Executive Dashboard turns its own numerator into a mini-bar's fill width,
+        # where a bigger number always means "worse". A positive-framed numerator inverts that:
+        # a fully healthy estate (5 drained of 5) drew a nearly-full bar, the same visual an
+        # actually-broken tile would draw. Counting the problem instead (0 undrained of 5) makes
+        # 0 the small/healthy bar every other tile already promises.
+        # `warn`, not `bad`: the finer red/amber verdict already happens once, correctly, via
+        # the flagged-metric mechanism (reports.alerting.undrained_folder_flags_by_system) --
+        # this tile is a glance-level count, not a second independently-computed severity
+        # judgement.
+        {"label": "Undrained queues", "value": f"{n_queue - n_drained} | {n_queue}",
+         "sub": "undrained | total", "state": warn(n_queue - n_drained)},
     ]
     watch = [
         # Every tile reads "affected | total" so a count can never be mistaken for the whole
@@ -209,10 +213,13 @@ def build_overview(store, systems, cfg) -> dict:
          "state": warn(ram_hosts)},
         {"label": f"High disk ≥{thr}%", "value": f"{dh_hosts} | {hosts}",
          "sub": f"hosts | total · {dh_disks} | {dh_total} disks", "state": dh_state},
-        # https out of ALL monitored endpoints, not https vs http — the old pair made a fully
-        # encrypted estate read "12 | 0", which looks like half a number rather than a pass.
-        {"label": "Web encryption", "value": f"{n_https} | {n_https + n_http}",
-         "sub": "https | total", "state": web_state},
+        # "Unencrypted links", not "Web encryption" (2026-09-16, on request: "should be
+        # unencrypted links or something so that 0 means healthy" -- same mini-bar-inversion
+        # reasoning as "Undrained queues" above: a fully-encrypted estate used to read
+        # "12 | 12", drawing a full bar for a perfect score. Counting the plain-HTTP endpoints
+        # instead makes 0 the small/healthy bar.
+        {"label": "Unencrypted links", "value": f"{n_http} | {n_https + n_http}",
+         "sub": "http | total", "state": web_state},
         {"label": "Backup tracking", "value": f"{n_tracked} | {len(systems)}",
          "sub": "tracked | total", "state": warn(n_untracked)},
     ]
@@ -494,10 +501,20 @@ class EmailNotConfigured(RuntimeError):
 
 
 def email_report(snapshot: Snapshot, data: bytes, *, recipients: List[str],
-                 author: str, filename: str) -> str:
+                 author: str, filename: str, subject_prefix: str = "") -> str:
     """E-mail the generated report (attached) with the standard HTML summary, stamped with
     the author as the sender. Reuses mail_report (SMTP + templating). Returns the subject.
-    Raises EmailNotConfigured / the underlying SMTP error on failure."""
+    Raises EmailNotConfigured / the underlying SMTP error on failure.
+
+    `subject_prefix` (2026-09-22, for reports.views._send_system_admin_report_test) -- the
+    established way this app marks a synthetic test send is a "[SYNTHETIC TEST]" SUBJECT
+    prefix (see e.g. _send_narrative_report_test/_send_xlsx_report_test's own AD branch), NOT
+    an altered `author`/from_name: `author` also becomes mail["from_name"] below, and
+    mail_report.send_email's From header goes through formataddr, so a bracketed marker
+    there is no longer a parsing hazard the way it was before that fix -- but stuffing a
+    "[SYNTHETIC TEST]" marker into `author` would still show up as the "By" field inside the
+    xlsx itself (author is also passed to build_report), which is wrong: a test send's report
+    content should look identical to a real one, only the envelope should say TEST."""
     import os
     import pathlib
     import tempfile
@@ -524,6 +541,8 @@ def email_report(snapshot: Snapshot, data: bytes, *, recipients: List[str],
     subject = f"System Admin Report — {datetime.date.today():%d %b %Y} — {sev}"
     if author:
         subject += f" — by {author}"
+    if subject_prefix:
+        subject = f"{subject_prefix} {subject}"
 
     # write the attachment to a temp dir with its proper name (mr.send_email uses path.name)
     tmpdir = tempfile.mkdtemp(prefix="report_")

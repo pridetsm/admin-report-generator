@@ -7,6 +7,8 @@ ROLE_NAMES = [
     "Infrastructure Admin",
     "Gov Systems Admin",
     "Security Admin",
+    "Management",
+    "Sub Admin",
     "Administrator",
 ]
 
@@ -15,6 +17,25 @@ SYSTEM_ADMIN_ROLE = "System Admin"
 NETWORK_ADMIN_ROLE = "Network Admin"
 INFRA_ADMIN_ROLE = "Infrastructure Admin"
 SECURITY_ADMIN_ROLE = "Security Admin"
+MANAGEMENT_ROLE = "Management"
+# A "weaker admin" (2026-09-18, on request: "create a weaker admin role to give access to
+# certain things... someone to access their own alert group... and modify it but not be able
+# to remove people") -- unlike every OTHER role above, which only ever picks which screens/
+# systems a user sees, Sub Admin can be granted a real (if narrow) EDITING power over specific
+# objects it's personally a stakeholder on. See RoleScope.can_edit_own_alert_groups and
+# can_edit_alert_group's own docstring below for the actual mechanism -- this constant is just
+# the role name, the power itself is opt-in per role on Role Scopes, not hardcoded to this one
+# name, so a future second "weaker admin" variant can reuse the same flag.
+SUB_ADMIN_ROLE = "Sub Admin"
+
+#: ROLE_NAMES minus the ones that make no sense as a self-service tile on role_select/no_role.
+#: Sub Admin has no screens of its own to switch into (see its own comment above) -- it is a
+#: capability that rides along on whatever role IS active (can_reach_my_alert_groups checks
+#: everything the user HOLDS, not the active selection), so offering it as either "switch to
+#: this" or "request this" would just be a tile that does nothing when picked. It is still a
+#: real ROLE_NAMES entry -- Role assignments/Role scopes both still manage it normally, only
+#: the two self-service picker screens skip it.
+SELECTABLE_ROLE_NAMES = [r for r in ROLE_NAMES if r != SUB_ADMIN_ROLE]
 
 # Which pages each role unlocks. Anything not listed here is COMMON — the report builder and
 # the personal pages belong to every role, because they are the job everyone signed in to do.
@@ -57,14 +78,24 @@ ROLE_PAGES = {
     # common to the systems estates: the download is a step INSIDE the SOD screen, not a
     # destination of its own, so it is listed in NON_SCREEN_PAGES below and never counted
     # as a screen the role "adds".
-    NETWORK_ADMIN_ROLE:  {"reports", "network_dashboard", "network_report", "history",
+    NETWORK_ADMIN_ROLE:  {"reports", "history",
                           "submission_detail", "connect",
                           "network_sod_select", "network_sod", "network_sod_generate",
                           # Active Directory Report (2026-09-11) is owned by Infrastructure
                           # Admin (see that role's own comment below) but Network Admin gets
                           # view access too -- see roles.REPORTS' own entry for the on-tile
                           # ownership hint.
-                          "active_directory_form", "active_directory_report"},
+                          "active_directory_form", "active_directory_report",
+                          # Networks Report category -- Network Admin's own estate, four SNMP
+                          # reports (2026-09-23, split from the old single combined "Switches &
+                          # Routers Report" -- see roles.REPORTS' own comment on why). The
+                          # "*_generate" screens are deliberately NOT listed, same as
+                          # "infra_generate" above -- a POST-only step inside each report, not
+                          # a screen of its own.
+                          "core_switches_form", "core_switches_report",
+                          "routers_form", "routers_report",
+                          "wireless_controller_form", "wireless_controller_report",
+                          "access_switches_form", "access_switches_report"},
     # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
     # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
     # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
@@ -80,7 +111,15 @@ ROLE_PAGES = {
     # report, not a screen of its own.
     INFRA_ADMIN_ROLE:    {"reports", "infra_form", "infra_report", "history",
                           "submission_detail", "connect",
-                          "active_directory_form", "active_directory_report"},
+                          "active_directory_form", "active_directory_report",
+                          # Networks Report category (2026-09-22, split into four 2026-09-23)
+                          # -- Infrastructure Admin gets VIEW access too, same dual-role
+                          # precedent as Active Directory Report just above; real ownership
+                          # stays with Network Admin (see roles.REPORTS' own entry).
+                          "core_switches_form", "core_switches_report",
+                          "routers_form", "routers_report",
+                          "wireless_controller_form", "wireless_controller_report",
+                          "access_switches_form", "access_switches_report"},
     ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
                           "prometheus_config", "prometheus_rule_file",
                           "configuration", "config_yaml", "config_role_scopes",
@@ -99,6 +138,18 @@ ROLE_PAGES = {
     # One role still has no estate. Deliberately empty rather than borrowing another role's
     # dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),
+    # Three overview screens now, not one (2026-09-16, on request: "save current dashboard as
+    # is... move it to a page... called Executive - Full... add another such page and make it
+    # the landing page... called Executive - Focused"; 2026-09-19, on request: "save the
+    # current variation of the focused dashboard as -analytical instead of -focused" -- Focused
+    # was redesigned into a plain 2x2 domain grid and its former content preserved as its own
+    # page, Analytical). Still no Reports/History access: this role's whole job is these three
+    # glance-able pages, not generating or reviewing individual reports the way every estate
+    # role above does. See views._management_dashboard_context for the one context builder all
+    # three pages share, and management_dashboard_full.html / management_dashboard_focused.html
+    # / management_dashboard_analytical.html for how their own content actually differs.
+    MANAGEMENT_ROLE: {"management_dashboard_full", "management_dashboard_focused",
+                      "management_dashboard_analytical"},
 }
 
 # Where each role lands once chosen. Without this, picking Network Admin would drop the user
@@ -120,6 +171,10 @@ ROLE_HOME = {
     # The role with no estate yet lands on a screen that says so, rather than on History or
     # on another role's dashboard.
     "Gov Systems Admin": "role_empty",
+    # Its own dashboard IS its landing page -- there is nothing else to choose between first.
+    # Lands on the Focused view specifically (2026-09-16): Full is reachable from the drawer
+    # for when more detail is wanted, but the day-to-day glance is the trimmed-down page.
+    MANAGEMENT_ROLE: "management_dashboard_focused",
 }
 
 # url_name -> the roles that own it, for the "you are in the wrong role for that page" hint.
@@ -167,6 +222,12 @@ ROLE_DESCRIPTIONS = {
                          "business systems that run on them.",
     "Gov Systems Admin": "For the administrators of the government systems estate.",
     "Security Admin":    "For the security team.",
+    MANAGEMENT_ROLE:     "A single at-a-glance overview of the whole monitoring estate — "
+                         "estate health, SWIFT transaction volume, and today's alert activity.",
+    SUB_ADMIN_ROLE:      "A narrower admin — can edit the alert group(s) they're personally a "
+                         "stakeholder on (My Alert Groups), including adding new stakeholders, "
+                         "but never removing one or deleting the group. Nothing else in "
+                         "Configuration is reachable with this role alone.",
     ADMIN_ROLE:          "For whoever manages people's access — who holds which role, and "
                          "the app's own configuration.",
 }
@@ -199,6 +260,10 @@ ROLE_ICONS = {
     "Gov Systems Admin":    "img/roles/bank.png",
     "Security Admin":       "img/roles/cyber-security.png",
     ADMIN_ROLE:             "img/roles/system-administration.png",
+    # 2026-09-16, on request: "added a png for the management role icon" -- the boss's own
+    # read-only overview, so a glyph about the estate reporting back to someone rather than
+    # any of the hands-on estate icons above.
+    MANAGEMENT_ROLE:        "img/roles/management-feedback.png",
 }
 
 
@@ -232,6 +297,70 @@ def is_role_admin(user) -> bool:
     Django superuser, which bootstraps the very first Administrator)."""
     return bool(user and user.is_authenticated
                 and (user.is_superuser or user.groups.filter(name=ADMIN_ROLE).exists()))
+
+
+def can_edit_alert_group(user, group) -> bool:
+    """Who may open a specific AlertGroup's own edit screen: a full Administrator always, OR a
+    Sub-Admin-shaped user -- holds a role whose RoleScope has can_edit_own_alert_groups=True,
+    AND is personally one of THIS group's own stakeholders (group.users). The membership check
+    IS the scope for this permission -- no separate system-list needed the way Role Scopes'
+    own `systems` field scopes a role's dashboard, since "which alert groups" already means
+    "the ones I'm a stakeholder on," not a fixed list an Administrator would have to maintain
+    per person.
+
+    Deliberately takes the OBJECT, not just the role, unlike every other is_*/can_* check in
+    this module -- those all answer "can this role reach this SCREEN", this answers "can this
+    user touch this specific ROW", the actual new permission shape Sub Admin introduces
+    (2026-09-18, on request: "create a weaker admin role to give access to certain things...
+    someone to access their own alert group any alert group they are a part off and modify
+    it")."""
+    if is_role_admin(user):
+        return True
+    if not (user and user.is_authenticated):
+        return False
+    from .models import RoleScope   # local: models.py doesn't import this module, but keep
+                                    # the app-loading-order discipline every other Django
+                                    # model import in this file's siblings already follows.
+    empowered_roles = set(RoleScope.objects.filter(can_edit_own_alert_groups=True)
+                          .values_list("role", flat=True))
+    if not empowered_roles or not user.groups.filter(name__in=empowered_roles).exists():
+        return False
+    return group.users.filter(pk=user.pk).exists()
+
+
+def can_delete_alert_group(user) -> bool:
+    """Deleting a group (and its notification history) stays full-Administrator-only, even for
+    a user who can_edit_alert_group() their own group -- Sub Admin's own power is deliberately
+    "add, never remove/destroy," and a delete is the most irreversible remove there is."""
+    return is_role_admin(user)
+
+
+def can_reach_my_alert_groups(user) -> bool:
+    """Nav-gate for the "My Alert Groups" screen: a full Administrator always (it already
+    reaches every group via Configuration > Alerting, but the direct link still works
+    sensibly for them too), OR someone who HOLDS a role with can_edit_own_alert_groups=True
+    AND is actually a stakeholder on at least one group.
+
+    Deliberately checks everything the user HOLDS (user.groups), not the active role SCOPE
+    the way every other nav flag in context.py does (is_system_admin(user) and
+    in_scope("System Admin")) -- Sub Admin is not an estate you switch into (see
+    SUB_ADMIN_ROLE's own comment: it has no screens of its own and no tile on the role
+    picker), it is a capability that rides along on top of whatever role IS active. Scoping
+    this to the active role was the original bug (2026-09-18): Innocent Nyama, holding both
+    System Admin and Sub Admin, never saw "My Alert Groups" while working as System Admin,
+    since Sub Admin dropped out of effective_roles() the moment a specific role was picked.
+    can_edit_alert_group() already got this right (it checks user.groups directly) -- this
+    now matches it."""
+    if is_role_admin(user):
+        return True
+    if not (user and user.is_authenticated):
+        return False
+    from .models import RoleScope
+    empowered_roles = set(RoleScope.objects.filter(can_edit_own_alert_groups=True)
+                          .values_list("role", flat=True))
+    if not empowered_roles or not user.groups.filter(name__in=empowered_roles).exists():
+        return False
+    return user.alert_groups.exists()
 
 
 def is_system_admin(user) -> bool:
@@ -290,6 +419,14 @@ def is_network_admin(user) -> bool:
     return bool(user and user.is_authenticated
                 and (user.is_superuser
                      or user.groups.filter(name=NETWORK_ADMIN_ROLE).exists()))
+
+
+def is_management(user) -> bool:
+    """Who may see the Executive Dashboard -- a read-only overview, not an estate role, so it
+    gets its own gate rather than folding into any admin role above. A superuser passes,
+    holding every role by definition."""
+    return bool(user and user.is_authenticated
+                and (user.is_superuser or user.groups.filter(name=MANAGEMENT_ROLE).exists()))
 
 
 def is_infra_admin(user) -> bool:
@@ -368,7 +505,7 @@ def roles_without_screens() -> list:
 #  ROLE_PAGES would have shown a tile per screen instead, which is how you end up offering
 #  "Report" and "System Picker" as if they were two things to choose between.
 class ReportOption:
-    def __init__(self, key, label, blurb, url_name, roles, icon=""):
+    def __init__(self, key, label, blurb, url_name, roles, icon="", category=""):
         self.key = key
         self.label = label
         self.blurb = blurb
@@ -378,6 +515,11 @@ class ReportOption:
         # it — otherwise these would read as a different, monochrome set beside the coloured
         # role tiles they deliberately echo.
         self.icon = icon
+        # `category` (2026-09-22, for the new "Networks Report" family): "" means ungrouped --
+        # renders in the flat list exactly as every report did before this field existed, so
+        # no existing ReportOption call site needed to change. A truthy category renders under
+        # its own heading on the Reports screen instead (see views.reports' own grouping).
+        self.category = category
 
 
 REPORTS = [
@@ -387,11 +529,40 @@ REPORTS = [
         "certificates, with your comments against each finding.",
         "report_form", {SYSTEM_ADMIN_ROLE, SECURITY_ADMIN_ROLE},
         "img/reports/system-health.png"),
+    # The "Networks Report" category, under the full 39-device SNMPv3 estate (core switch
+    # included -- see network.DEVICES' own comment on the 38-device block). Used to be one
+    # combined "Switches & Routers Report" tile; split into four narrower ones (2026-09-23,
+    # on request: "create a seperate core switches report and a seperate routers report ...
+    # this current report rename it to Access switches", then "the one without poe wireless
+    # controller... put it in its own report called wireless controller"). All four owned by
+    # Network Admin (this is squarely their estate); Infrastructure Admin gets view access
+    # too, the same dual-role precedent the Active Directory Report entry below established.
     ReportOption(
-        "network", "Network Report",
-        "Switches and links — port state, optics, PSU and fan health, and the traffic "
-        "moving across them.",
-        "network_dashboard", {NETWORK_ADMIN_ROLE}, "img/reports/network.png"),
+        "core_switches", "Core Switches Report",
+        "Per-device health for the core switches (HQ, DR, BYO) — CPU, memory, temperature, "
+        "PSU/fan, uptime, interface bandwidth and errors, OSPF adjacency, and storage.",
+        "core_switches_form", {NETWORK_ADMIN_ROLE, INFRA_ADMIN_ROLE},
+        "img/reports/network.png", category="Networks Report"),
+    ReportOption(
+        "routers", "Routers Report",
+        "Per-device health for the router estate — CPU, memory, temperature, PSU/fan, "
+        "uptime, interface bandwidth and errors, OSPF adjacency, and storage.",
+        "routers_form", {NETWORK_ADMIN_ROLE, INFRA_ADMIN_ROLE},
+        "img/reports/network.png", category="Networks Report"),
+    ReportOption(
+        "wireless_controller", "Wireless Controller Report",
+        "Per-device health for the wireless LAN controller — CPU, memory, temperature, "
+        "uptime, interface bandwidth and errors, and storage. No PoE/PSU/fan readings — "
+        "the WLC is virtual.",
+        "wireless_controller_form", {NETWORK_ADMIN_ROLE, INFRA_ADMIN_ROLE},
+        "img/reports/network.png", category="Networks Report"),
+    ReportOption(
+        "access_switches", "Access Switches Report",
+        "Per-device health for the access switch estate — CPU, memory, temperature, "
+        "PSU/fan, uptime, interface bandwidth and errors, access-point/uplink ports, "
+        "OSPF adjacency, and storage, device by device.",
+        "access_switches_form", {NETWORK_ADMIN_ROLE, INFRA_ADMIN_ROLE},
+        "img/reports/network.png", category="Networks Report"),
     # The morning checklist, a different thing from the live Network Report above: that one
     # is captured from Prometheus, this one is worked through by hand across the SolarWinds,
     # Cisco WLC, Perfstack and Radware consoles. Both belong to Network Admin, which is why
@@ -413,7 +584,7 @@ REPORTS = [
         "controllers and the Radware WAF, captured each morning by the on-duty engineer.",
         "network_sod_select", {NETWORK_ADMIN_ROLE}, "img/reports/network-sod.png"),
     ReportOption(
-        "infrastructure", "Infrastructure Admin Report",
+        "infrastructure", "Cluster Health Report",
         "The hardware underneath the systems — hyper-converged clusters and standalone "
         "database hosts.",
         "infra_form", {INFRA_ADMIN_ROLE}, "img/reports/infrastructure.png"),

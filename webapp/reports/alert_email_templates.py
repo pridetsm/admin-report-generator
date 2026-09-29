@@ -101,6 +101,15 @@ BLUE, BLUE_SOFT, BLUE_LINE = "#1E5FA8", "#E8F0FB", "#B9CFEA"
 # family's palette, so it reads as neither "something on a system is wrong" nor "something
 # happened" but "we may not actually be able to see something on a system any more."
 SYSTEM, SYSTEM_SOFT, SYSTEM_LINE = "#5B3E96", "#EFEAFB", "#C9BCE8"
+# SILENCED ALERTS DIGEST (2026-09-19: "reduce the intrusiveness of alerts" for findings known
+# to self-resolve) is a FOURTH notification family, outside every other family's palette for
+# the same reason SYSTEM is -- it answers yet another different question again: not "is a
+# value over a threshold" (red/amber/green/imminent), not "did a discrete thing happen"
+# (blue), not "has our own monitoring gone quiet" (purple), but "here is what a KNOWN, already-
+# accepted noisy check did today, batched instead of paged one at a time." A calm slate-teal,
+# deliberately the least alarming colour in this file -- the whole point of this family is
+# that it should read as quieter than everything else, not as a fifth kind of urgency.
+SILENCED, SILENCED_SOFT, SILENCED_LINE = "#3F7370", "#E7F1F0", "#B9D6D3"
 FONT = "Arial, 'Segoe UI', sans-serif"
 MONO = "'Courier New', monospace"
 
@@ -985,4 +994,60 @@ def render_system_alert(items: list, *, group_name: str, for_browser: bool = Fal
         min_severity="", hero_images={}, for_browser=for_browser, compact=True,
         detail_text="A monitoring source itself has stopped reporting fresh data — the "
                     "system(s) it watches may be silently unmonitored until this clears.")
+    return html_out, inline_images
+
+
+def _silenced_row(label: str, detail: str, still_open: bool, *, last: bool) -> str:
+    """One <tr> for a single silenced check's last-24h summary -- same label/detail layout as
+    _system_alert_row, minus the New/reminder status tag (a digest row has no notification
+    schedule of its own to report on) and with a small "open now"/"clear" chip instead, since
+    that -- not how many times it's been said -- is the one thing worth a glance here."""
+    border = "" if last else f"border-bottom:1px solid {LINE};"
+    badge = _badge_pill("silenced", SILENCED, SILENCED_SOFT)
+    # GOLD, not a dedicated amber text colour -- this file has never had one (see _severity's
+    # own "WARNING" case, the only other place a non-red/green status text is needed).
+    chip_fg, chip_soft, chip_word = (GOLD, AMBER_SOFT, "Open now") if still_open \
+        else (GREEN, GREEN_SOFT, "Clear")
+    chip = (f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
+           f'background:{chip_soft};color:{chip_fg};font-family:{FONT};font-size:10px;'
+           f'font-weight:bold;">{chip_word}</span>')
+    return f"""<tr><td style="padding:14px 20px;{border}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+<td width="{_BADGE_COL_WIDTH}" style="vertical-align:middle;">{badge}</td>
+<td style="padding-left:12px;vertical-align:middle;">
+<div style="font-family:{FONT};font-size:14px;font-weight:bold;color:{TEXT};">{html.escape(label)}</div>
+<div style="font-family:{FONT};font-size:12px;color:{MUTED};">{html.escape(detail)}</div>
+</td>
+<td style="text-align:right;vertical-align:middle;white-space:nowrap;">{chip}</td>
+</tr></table>
+</td></tr>"""
+
+
+def render_silenced_digest(rows: list, *, group_name: str, for_browser: bool = False) -> tuple:
+    """Renders ONE daily digest for ONE AlertGroup -- the FOURTH notification family
+    (2026-09-19: "reduce the intrusiveness of alerts"), alongside render_fired (a value over a
+    threshold), render_event (a discrete occurrence) and render_system_alert (a monitoring
+    source gone quiet). Answers "what did a KNOWN, already-accepted noisy check do in roughly
+    the last day", batched once instead of paged every time it fired or cleared -- slate-teal,
+    deliberately the calmest colour of the four, since intrusiveness is exactly what this
+    exists to reduce.
+
+    `rows`: [(label, detail, still_open), ...] -- label is "system · category", detail is an
+    already-human-readable line (e.g. "Fired 6 times in the last 24h, still open now"),
+    still_open is a plain bool driving the "Open now"/"Clear" chip. See
+    alerting.build_silenced_digest, this function's only caller, for how rows are built."""
+    group_name_esc = html.escape(group_name)
+    rows_html = [_silenced_row(label, detail, still_open, last=(i == len(rows) - 1))
+                for i, (label, detail, still_open) in enumerate(rows)]
+    body_html = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
+                f'{"".join(rows_html)}</table>')
+    banner_text = f"SILENCED ALERTS &middot; {len(rows)} known, self-resolving check(s) — last 24h"
+    html_out, inline_images = _shell(
+        title=f"Silenced alerts digest — {group_name_esc}", banner_bg=SILENCED_SOFT,
+        banner_fg=SILENCED, banner_text=banner_text, body_html=body_html,
+        group_name=group_name_esc, min_severity="", hero_images={}, for_browser=for_browser,
+        compact=True,
+        detail_text="These checks are known to self-resolve and are silenced from individual "
+                    "notifications — see Alerting configuration to review or un-silence any "
+                    "of them.")
     return html_out, inline_images

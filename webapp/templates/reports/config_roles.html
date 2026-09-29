@@ -32,6 +32,16 @@
   .cfg-section-hint { font-weight:400; text-transform:none; letter-spacing:0; color:var(--muted); font-size:12px; }
   .cfg-section-body { padding:18px; border-top:1px solid var(--line-strong); }
   @media (prefers-reduced-motion: reduce) { .cfg-section > summary::before { transition:none; } }
+  /* Same "long list scrolls inside its own box" pattern config_alerts.html's own
+     .cfg-scroll-list already uses -- ALSO handling horizontal overflow here (that one only
+     needed vertical), since the roles table is wide enough (7 role columns) to overflow this
+     page's own 1040px container and silently push its last columns off-screen otherwise (on
+     request, 2026-09-18: "some rules like the administrator role have been cut from the
+     list" -- confirmed: nothing was actually broken, the table just had nowhere to go). */
+  .cfg-scroll-list { max-height:420px; overflow:auto; border:1px solid var(--line); border-radius:var(--radius); }
+  .cfg-scroll-list table { margin:0; }
+  #roles-table { min-width:720px; }
+  #roles-table thead th { position:sticky; top:0; background:var(--panel); z-index:1; }
 </style>
 <div class="container" style="max-width:1040px">
 
@@ -72,32 +82,51 @@
         {% endif %}
       </div></div>
 
-      {# ---- all users + their roles -- role assignment ONLY; account actions (profile,
+      {% comment %}
+      ---- all users + their roles -- role assignment ONLY; account actions (profile,
       password, delete) moved to their own screen, see Configuration > Users (2026-09-04:
-      "make user management a screen on its own, separate it from roles") ---- #}
+      "make user management a screen on its own, separate it from roles") ----
+      {% endcomment %}
       <div class="section-label sub" style="margin-top:20px">All users &amp; roles</div>
       <div class="card"><div class="body" style="padding:6px 18px 14px">
-        <table class="hist">
+        {% comment %}
+        Explicit instruction, not left implicit (on request, 2026-09-18: "there is no clear
+        mechanism for adding roles you just asign and hit enter") -- same "tell them the exact
+        two steps" convention the Alert Groups stakeholders section already uses ("Tick the box
+        below AND click Save"). Each row is its own form/Save button (not one page-wide submit)
+        so saving one person's roles never risks re-submitting everyone else's on the same
+        page -- Save really is the mechanism; there's no separate "add" step because ticking
+        IS the assignment, Save is what commits it.
+        {% endcomment %}
+        <p class="cfg-note" style="margin:0 0 10px">
+          Tick the roles a user should hold, then click <b>Save</b> on THEIR row — each row saves
+          independently, so leaving other rows untouched never changes them.
+        </p>
+        <input type="text" class="cfg-search" data-table-search="#roles-table"
+               placeholder="Search by name, username or e-mail…" autocomplete="off" aria-label="Search users">
+        <div class="cfg-scroll-list" style="margin-top:10px">
+        <table class="hist" id="roles-table">
           <thead><tr><th>User</th><th>Email</th>{% for r in role_names %}<th style="text-align:center">{{ r }}</th>{% endfor %}<th></th></tr></thead>
           <tbody>
           {% for row in user_rows %}
-            <tr>
+            <tr data-search-row>
               <td><b>{{ row.u.get_full_name|default:row.u.get_username }}</b><br><span style="color:var(--muted);font-size:12px">{{ row.u.get_username }}{% if row.u.is_superuser %} · superuser{% endif %}</span></td>
               <td style="color:var(--muted)">{{ row.u.email|default:"—" }}</td>
               {% for r in role_names %}
-              <td style="text-align:center"><input type="checkbox" name="roles" value="{{ r }}" form="uf-{{ row.u.id }}" {% if r in row.roles %}checked{% endif %}></td>
+              <td style="text-align:center"><input type="checkbox" name="roles" value="{{ r }}" form="uf-{{ row.u.id }}" {% if r in row.roles %}checked{% endif %} aria-label="{{ r }} for {{ row.u.get_username }}"></td>
               {% endfor %}
-              <td style="text-align:right">
+              <td style="text-align:right;white-space:nowrap">
                 <form method="post" action="{% url 'roles_console' %}" id="uf-{{ row.u.id }}" style="margin:0">{% csrf_token %}
                   <input type="hidden" name="action" value="set_roles">
                   <input type="hidden" name="user_id" value="{{ row.u.id }}">
-                  <button class="btn ghost" type="submit" style="padding:6px 12px">Save</button>
+                  <button class="btn primary" type="submit" style="padding:6px 12px">Save</button>
                 </form>
               </td>
             </tr>
           {% endfor %}
           </tbody>
         </table>
+        </div>
       </div></div>
 
     </div>
@@ -134,15 +163,19 @@
             <button type="button" class="btn ghost cfg-add" data-scope-all>Select all</button>
             <button type="button" class="btn ghost cfg-add" data-scope-none>Clear (unrestricted)</button>
           </div>
+          <label class="scope-opt" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+            <input type="checkbox" name="can_edit_own_alert_groups__{{ row.role }}" {% if row.can_edit_own_alert_groups %}checked{% endif %}>
+            <span>Members may edit an Alert group they belong to <span class="cfg-note" style="display:inline;margin:0">— can add new stakeholders, but never remove one or delete the group</span></span>
+          </label>
         </div></div>
         {% endfor %}
 
-        <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+        <div style="margin-top:12px">
           <button class="btn primary" type="submit">Save role scopes</button>
-          <span style="color:var(--muted);font-size:12.5px">
-            Applies the next time a role is selected — users already signed in keep their current scope
-            until they switch roles.
-          </span>
+          <p class="cfg-note" style="margin:8px 0 0">
+            Applies the next time a role is selected — users already signed in keep their current
+            scope until they switch roles.
+          </p>
         </div>
       </form>
       {% endif %}

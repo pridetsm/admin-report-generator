@@ -70,16 +70,17 @@
         <div style="display:flex;flex-wrap:wrap;gap:10px">
           {% for row in health_rows %}
           <button type="button" class="live-chip {% if row.is_live %}is-live{% else %}is-broken{% endif %}"
-                  data-detail="live-detail-{{ forloop.counter }}">
+                  data-detail="live-detail-{{ forloop.counter }}"
+                  {% if not row.is_live %}data-href="{% url 'config_alert_group_edit' row.group.pk %}"{% endif %}>
             {{ row.group.name }}
           </button>
           {% endfor %}
         </div>
         <div id="liveDetailBox" class="cfg-note" style="margin:12px 0 0;display:none"></div>
         {% for row in health_rows %}
-        <template id="live-detail-{{ forloop.counter }}">{% if row.is_live %}This alert is live — it's fully configured and will fire.{% else %}Not live yet:{% for p in row.problems %} {{ p }}{% endfor %}{% endif %}</template>
+        <template id="live-detail-{{ forloop.counter }}">{% if row.is_live %}This alert is live — it's fully configured and will fire.{% else %}Not live yet:{% for p in row.problems %} {{ p }}{% endfor %} Taking you to its config…{% endif %}</template>
         {% endfor %}
-        <small class="cfg-hint" style="display:block;margin-top:10px">Green = fully configured and will fire. Red = click it to see exactly what's missing.</small>
+        <small class="cfg-hint" style="display:block;margin-top:10px">Green = fully configured and will fire. Red = click it to see exactly what's missing, then jump straight to that group's config to fix it.</small>
       </div></div>
       {% endif %}
 
@@ -468,13 +469,93 @@
     </div>
   </details>
 
+  <details class="cfg-section" id="sec-silencing">
+    <summary>Alert Silencing <span class="cfg-section-hint">— known, self-resolving findings, batched into one digest a day</span></summary>
+    <div class="cfg-section-body">
+      <p class="cfg-note" style="margin-top:0">For a Monitoring alert that's known to fire and clear on its own (a nightly batch job, a predictable overnight spike) and isn't actually being acted on — instead of an individual e-mail every time it fires or clears, it's rolled into ONE digest a day for whichever group would otherwise be notified. If a silenced finding stops clearing on its own and stays open more than a few hours, normal alerting resumes for it automatically — silencing something is never a permanent way to stop hearing about a real, ongoing problem.</p>
+
+      <div class="section-label sub">Currently silenced</div>
+      <div class="card"><div class="body" style="padding:14px 18px">
+        {% if alert_silences %}
+        <div class="cfg-scroll-list">
+        <table class="hist">
+          <thead><tr><th>System</th><th>Flag key</th><th>Group</th><th>Reason</th><th>Expires</th><th></th><th></th></tr></thead>
+          <tbody>
+          {% for s in alert_silences %}
+            <tr{% if not s.active %} style="opacity:.55"{% endif %}>
+              <td><b>{{ s.system }}</b></td>
+              <td style="color:var(--muted);font-family:var(--mono, monospace);font-size:12px">{{ s.flag_key }}</td>
+              <td style="color:var(--muted)">{{ s.group.name }}</td>
+              <td style="color:var(--muted);font-size:12px">{{ s.reason|default:"—" }}</td>
+              <td style="color:var(--muted);font-size:12px">{{ s.expires_at|date:"d M Y" }}</td>
+              <td>{% if not s.active %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">deactivated</span>{% elif not s.in_effect %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">expired</span>{% endif %}</td>
+              <td style="text-align:right">
+                <form method="post" style="display:inline">{% csrf_token %}
+                  <input type="hidden" name="section" value="silence_toggle">
+                  <input type="hidden" name="id" value="{{ s.pk }}">
+                  <button class="btn ghost" style="padding:5px 11px" type="submit">{% if s.active %}Deactivate{% else %}Re-activate{% endif %}</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+        {% else %}
+          <p style="margin:0;color:var(--muted);font-size:13px">Nothing silenced yet.</p>
+        {% endif %}
+      </div></div>
+
+      <div class="section-label sub" style="margin-top:16px">Silence a finding</div>
+      <div class="card"><div class="body" style="padding:16px 18px">
+        <form method="post">{% csrf_token %}
+          <input type="hidden" name="section" value="silence">
+          <div class="cfg-grid4">
+            <label class="field">
+              <span>System</span>
+              <select name="system" required>
+                <option value="">Choose…</option>
+                {% for s in topology_systems %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>Flag key</span>
+              <input type="text" name="flag_key" placeholder="disk:Database:/u01" required>
+              <small class="cfg-hint">Copy it from a fired alert e-mail or the System Admin Report's own flag list — there's no picker for this yet.</small>
+            </label>
+            <label class="field">
+              <span>Digest goes to</span>
+              <select name="group" required>
+                <option value="">Choose a Monitoring alert group…</option>
+                {% for g in monitoring_groups %}<option value="{{ g.pk }}">{{ g.name }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>Expires in (days)</span>
+              <input type="number" name="expires_days" value="60" min="1" required>
+              <small class="cfg-hint">Silencing stops automatically — a deliberate renewal, not a standing rule.</small>
+            </label>
+          </div>
+          <div style="margin-top:10px">
+            <label class="field">
+              <span>Reason <span style="color:var(--muted);font-weight:normal">(optional)</span></span>
+              <input type="text" name="reason" placeholder="Nightly batch job, spikes and clears every night around 02:00">
+            </label>
+          </div>
+          <button class="btn primary cfg-add" type="submit">＋ Silence</button>
+        </form>
+      </div></div>
+
+    </div>
+  </details>
+
 </div>
 
 <script>
 (function () {
   "use strict";
   var STORE = "cfgAlertsOpen";
-  var ids = ["sec-groups", "sec-templates", "sec-peralert", "sec-display", "sec-systemalerting"];
+  var ids = ["sec-groups", "sec-templates", "sec-peralert", "sec-display", "sec-systemalerting", "sec-silencing"];
   var saved = null;
   try { saved = JSON.parse(sessionStorage.getItem(STORE) || "null"); } catch (e) { saved = null; }
 
@@ -509,6 +590,13 @@
       if (!tpl) { return; }
       box.textContent = chip.textContent.trim() + " — " + tpl.textContent.trim();
       box.style.display = "block";
+      // A red chip names an actual problem to go fix -- take the admin straight to that
+      // group's own config screen rather than leaving them to hunt for it themselves
+      // (on request: "make it so when you click on a glowing red alert group it takes you
+      // to the failing config"). A green chip has nothing to navigate to, so it just shows
+      // the confirmation text above.
+      var href = chip.getAttribute("data-href");
+      if (href) { window.location.href = href; }
     });
   });
 })();

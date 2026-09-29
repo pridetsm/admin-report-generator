@@ -16,6 +16,17 @@
     <a class="btn ghost" href="{% url 'config_alerts' %}">All groups</a>
   </div>
 
+  {% if health and not health.is_live %}
+  <div class="card" style="border-color:var(--red);margin-bottom:16px">
+    <div class="body" style="padding:14px 18px">
+      <p style="margin:0 0 6px;font-weight:700;color:var(--red)">● Not live — this is what the red chip on Alerting meant</p>
+      <ul style="margin:0;padding-left:18px;color:var(--ink)">
+        {% for p in health.problems %}<li>{{ p }}</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+  {% endif %}
+
   <form method="post">{% csrf_token %}
     <div class="section-label sub">Name</div>
     <div class="card"><div class="body" style="padding:16px 18px">
@@ -25,7 +36,7 @@
       </label>
     </div></div>
 
-    <div class="section-label sub">Systems this group covers</div>
+    <div class="section-label sub">Systems this group covers{% if not group.systems %} <span class="chip red" style="font-weight:400">nothing selected — this is why it's not live</span>{% endif %}</div>
     <div class="card"><div class="body" style="padding:14px 18px">
       {% if not systems %}
         <p class="cfg-note" style="margin:0">No systems found — nothing to map yet.</p>
@@ -110,9 +121,12 @@
       {% endif %}
     </div></div>
 
-    <div class="section-label sub">App-user stakeholders</div>
+    <div class="section-label sub">App-user stakeholders{% if not group.recipient_emails %} <span class="chip red" style="font-weight:400">none selected — this is why it's not live</span>{% endif %}</div>
     <div class="card"><div class="body" style="padding:14px 18px">
-      <p class="cfg-note" style="margin:0 0 10px">Notified at their account e-mail.</p>
+      <p class="cfg-note" style="margin:0 0 10px">Notified at their account e-mail. Tick the box below AND click Save — an unticked box here is saved as "no stakeholder", even if one was set moments ago from elsewhere.</p>
+      {% if not can_remove_stakeholders %}
+        <p class="cfg-note" style="margin:0 0 10px">You can add new stakeholders here, but an existing one can't be removed — those boxes are locked checked.</p>
+      {% endif %}
       {% if not users %}
         <p class="cfg-note" style="margin:0 0 10px">No active users found.</p>
       {% else %}
@@ -120,7 +134,12 @@
       <div class="scope-grid" data-scope-group>
         {% for u in users %}
         <label class="scope-opt">
+          {% if u.pk in chosen_users and not can_remove_stakeholders %}
+          <input type="checkbox" checked disabled aria-label="{{ u.username }} — existing stakeholder, cannot be removed">
+          <input type="hidden" name="users" value="{{ u.pk }}">
+          {% else %}
           <input type="checkbox" name="users" value="{{ u.pk }}" {% if u.pk in chosen_users %}checked{% endif %}>
+          {% endif %}
           <span>{{ u.username }}{% if u.email %} · {{ u.email }}{% endif %}</span>
         </label>
         {% endfor %}
@@ -151,11 +170,13 @@
       <div class="container-inner">
         <button class="btn primary" type="submit">Save</button>
         <span class="spacer" style="flex:1"></span>
+        {% if can_delete %}
         <button class="btn ghost" type="submit" name="action" value="delete"
                 style="color:var(--red)"
                 onclick="return confirm('Remove “{{ group.name }}” and its notification history?\n\nThis cannot be undone.');">
           Remove group
         </button>
+        {% endif %}
       </div>
     </div>
   </form>

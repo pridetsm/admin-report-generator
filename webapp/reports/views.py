@@ -40,27 +40,29 @@ import generate_report as gr   # to show the config.ini defaults on the settings
 from pathlib import Path
 
 from . import (alert_email_templates, alerting, backup_policy_admin, connect, crypto,
-               folder_size_admin, folders, grafana_admin, network, network_sod, promconfig,
-               prometheus_admin, scripts, snmp_admin, system_alerts, usage_threshold_admin)
+               folder_exporter_admin, folder_size_admin, folders, grafana_admin, network,
+               network_sod, promconfig, prometheus_admin, scripts, snmp_admin, system_alerts,
+               usage_threshold_admin)
 from . import keycloak as keycloak_mod
 from .directory import search_directory
 from .forms import (GrafanaConfigForm, PrometheusConfigForm, ProfileForm, SystemConfigForm,
                     UserAccountForm)
-from .models import (AlertGroup, AutomatedReportGroup, AutomatedReportInstance, BackupPolicyRevision,
-                     DrainageThresholdConfig, EventGroup, FreshnessCheck, GeneratedScript,
-                     GrafanaConfigRevision, PrometheusConfigRevision,
+from .models import (AlertGroup, AlertSilence, AutomatedReportGroup, AutomatedReportInstance,
+                     BackupPolicyRevision, DrainageThresholdConfig, EventGroup, FreshnessCheck,
+                     GeneratedScript, GrafanaConfigRevision, PrometheusConfigRevision,
                      PrometheusRuleFileRevision, ReportSubmission, RoleRequest, RoleScope,
                      SnmpConfigRevision, SystemConfig, UserProfile)
 from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_LABEL,
                     ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, SYSTEM_ADMIN_ROLE, roles_without_screens,
-                    active_role, held_roles, is_infra_admin, is_network_admin, is_role_admin,
-                    effective_roles, is_security_admin, reports_for,
+                    active_role, held_roles, is_infra_admin, is_management, is_network_admin,
+                    is_role_admin, effective_roles, is_security_admin, reports_for,
                     role_icon, role_screens,
-                    is_superuser, is_system_admin)
+                    is_superuser, is_system_admin,
+                    can_edit_alert_group, can_delete_alert_group, can_reach_my_alert_groups,
+                    SELECTABLE_ROLE_NAMES)
 from .automated_reports import REPORT_TYPES, generate_automated_report, report_to_dict
 from .scheduled_xlsx_reports import XLSX_REPORT_TYPES
-from .xlsx_report_mail import send_xlsx_report_bundle
 from .automated_reports_mail import send_automated_report
 from .services import (
     OsInventoryUnavailable,
@@ -171,39 +173,496 @@ def role_empty(request):
     })
 
 
+def _live_report_sections() -> list:
+    """The SAME shape report_sections has always had ({"kind", "label", "generated_at",
+    "author", "overview", "systems"}), now read from LiveEstateOverview -- the alert poller's
+    own cache (2026-09-18, on request: "broaden alert poller to cover infrastructure and
+    network metrics and just use this as default poller to feed both alerts and live
+    dashboards"). This is the SECOND half of that request: the poller side
+    (reports.alerting.run_alert_cycle) already writes a fresh, fully-computed overview/systems
+    row per domain on every ~5-minute poll (see LiveEstateOverview's own docstring); this is
+    just a plain DB read of what it last wrote, replacing the live-capture-per-pageview
+    approach an earlier pass of this same request used as an interim fix (a real Prometheus/
+    SNMP round trip on every single dashboard view, ~6s combined even parallelized -- now a
+    handful of indexed reads).
+
+    "Real-time" now means "as of the last poll" (≤5 minutes stale) rather than instantaneous,
+    the tradeoff inherent in reading a poller's cache instead of capturing live -- the same
+    tradeoff IssueOccurrence-based alerting has always made for the estates it already covered.
+
+    Falls back to the last SAVED ReportSubmission for any ONE domain with no cache row yet
+    (e.g. immediately after this deploy, before the poller's first run since) -- a dashboard
+    that goes blank the moment one estate hasn't been polled yet would be a worse regression
+    than the staleness this replaces.
+    """
+    from .models import LiveEstateOverview
+
+    def _fallback(kind):
+        sub = (ReportSubmission.objects.filter(report_content__kind=kind)
+              .order_by("-created_at").first())
+        if not sub:
+            return None
+        return {"generated_at": sub.created_at, "author": sub.author,
+                "overview": sub.report_content.get("overview", {}),
+                "systems": sub.report_content.get("systems", [])}
+
+    def _from_cache(row):
+        return {"generated_at": row.captured_at, "author": "Live",
+                "overview": row.overview, "systems": row.systems}
+
+    specs = [
+        ("system_admin", "System Admin Report"),
+        ("infrastructure", "Cluster Health Report"),
+        ("active_directory", "Active Directory Report"),
+        # "Network" (2026-09-24, on request: "wire in this network report cluster to the
+        # management dashboards as the network domain") -- reads the SAME combined,
+        # whole-estate "switches_routers" LiveEstateOverview row the alert poller has always
+        # written (see network.switches_routers_device_keys' own comment on why that combined
+        # view stays separate from the four report-picker screens split out of it); this
+        # dashboard section was never about which report screen an admin opens, only about
+        # having one live reading for the whole network estate, so nothing else here needed
+        # to change once the picker itself split into four.
+        ("switches_routers", "Network"),
+    ]
+    cached = {row.kind: row for row in LiveEstateOverview.objects.filter(
+        kind__in=[k for k, _ in specs])}
+
+    sections = []
+    for kind, label in specs:
+        row = cached.get(kind)
+        data = _from_cache(row) if row else _fallback(kind)
+        if data:
+            sections.append({"kind": kind, "label": label, **data})
+    return sections
+
+
+def _management_dashboard_context(request):
+    """Shared context builder behind both Executive Dashboard pages -- Full and Focused
+    (2026-09-16, on request: "save current dashboard as is well move it to a page... called
+    Executive - Full... add another such page and make it the landing page... called
+    Executive - Focused"). Every number either page shows comes from here; the two templates
+    then just choose which sections to lay out and how wide (see management_dashboard_full.html
+    / management_dashboard_focused.html), rather than this function knowing about either page's
+    own layout.
+
+    Pulls each estate's own "At a glance / Needs immediate attention / Needs attention" tiles
+    VERBATIM from the alert poller's own LiveEstateOverview cache (2026-09-18, on request:
+    "shouldn't it be fed by the pollers not the reports[,] because this is set to be a realtime
+    system", then "broaden alert poller... use this as default poller to feed both alerts and
+    live dashboards" -- see _live_report_sections' own docstring) -- the exact same overview
+    dict form.html's own review screen renders (snapshot.overview.glance/immediate/watch),
+    rather than deriving any new metric of its own. Each section is labelled with which estate
+    it came from and when it was last polled (2026-09-12, on request, after an earlier version
+    invented its own "estate health"/icon tiles instead: "pull all tiles as is from every
+    report we generate so far... clearly labelled where they came from" -- "generated" now
+    means "as of the poller's last run", not "whenever someone last submitted a report", but
+    the same verbatim-tiles promise holds). Falls back to the last SAVED ReportSubmission, per
+    estate, only if that estate has no poller cache row yet -- see _live_report_sections' own
+    docstring.
+
+    Attention Items (oldest unresolved, what admins are saying) is the one section that was
+    NEVER pulled from a report even before this -- it was asked for directly, sourced from
+    live IssueOccurrence/AutomatedFindingAction rows, and labelled as live activity rather
+    than dressed up as a report section it is not. (The Alert Activity fired/resolved/still-
+    firing-today tiles that used to sit alongside SWIFT/COB here were removed 2026-09-18, on
+    request: "remove the alert table from both exec dashboards" -- SWIFT and COB's own charts
+    took their place.)
+
+    Returns None when the viewer isn't Management -- callers redirect on that themselves,
+    same as the single view function did before this was split into Full/Focused.
+    """
+    if not is_management(request.user):
+        return None
+
+    import re
+
+    from . import report_charts
+    from .models import AutomatedFindingAction, IssueOccurrence
+
+    report_sections = _live_report_sections()
+
+    # ---- Exception-based domain view (2026-09-14, on request: "go into the executive
+    # dashboard zip file and execute this" -- rbz_executive_dashboard.zip's own
+    # design_prompt.md/exec_dashboard.html). Every number below still comes verbatim from
+    # each report's own overview.glance/immediate/watch tiles (the same "pull tiles as is,
+    # clearly labelled where they came from" rule the original version of this page was
+    # built under, 2026-09-12) -- this only changes how those SAME tiles are grouped and
+    # drawn (domain cards + bars instead of a flat KPI wall), it never invents a new metric.
+    def _ratio(value):
+        """'N | Total' -> (n, total, pct), else None -- never fabricate a ratio for a tile
+        that isn't genuinely one (on request, matching design_prompt.md's own rule)."""
+        m = re.match(r"^\s*(\d+)\s*\|\s*(\d+)\s*$", str(value))
+        if not m:
+            return None
+        n, total = int(m.group(1)), int(m.group(2))
+        return (n, total, round(n / total * 100)) if total > 0 else None
+
+    def _domain_pill(overview):
+        immediate, watch = overview.get("immediate", []), overview.get("watch", [])
+        if any(i.get("state") == "bad" for i in immediate + watch):
+            return "bad"
+        if any(i.get("state") == "warn" for i in immediate + watch):
+            return "warn"
+        return "ok"
+
+    def _domain_bars(overview):
+        bars = []
+        for item in overview.get("immediate", []) + overview.get("watch", []):
+            if item.get("state") not in ("bad", "warn"):
+                continue
+            ratio = _ratio(item.get("value"))
+            bars.append({"label": item["label"], "value": item["value"],
+                        "band": item["state"], "pct": ratio[2] if ratio else None})
+        return bars
+
+    # Shorter domain names in the exception-based view only (2026-09-14, on request: "drop
+    # the admin in estate banner names just network not network admin systems not systems
+    # admin") -- report_sections' own "label" stays the full "System Admin Report" etc. (still
+    # used to look reports up by kind), this only renames what gets DISPLAYED as a domain.
+    # Infrastructure/Active Directory get a "Infrastructure · <component>" form (2026-09-16, on
+    # request: "infrastructure is the domain not active directory, active directory is one of
+    # the components of the infrastructure domain, the other component... is clusters") -- used
+    # by the flat per-row lists below (exceptions, compliance) that still need to name which
+    # COMPONENT a finding came from; domain_cards itself merges the two into one card further
+    # down, where "Infrastructure" alone is the right label (see that merge's own comment).
+    _DOMAIN_DISPLAY_NAMES = {"System Admin": "Systems", "Network Admin": "Network",
+                             "Cluster Health": "Infrastructure · Clusters",
+                             "Active Directory": "Infrastructure · Active Directory"}
+
+    def _domain_display_name(label):
+        base = label.replace(" Report", "")
+        return _DOMAIN_DISPLAY_NAMES.get(base, base)
+
+    sections_by_kind = {s["kind"]: s for s in report_sections}
+
+    domain_cards = []
+    for kind, name in (("system_admin", "Systems"), ("switches_routers", "Network")):
+        sec = sections_by_kind.get(kind)
+        if not sec:
+            continue
+        ov = sec["overview"]
+        domain_cards.append({
+            "name": name, "pill": _domain_pill(ov), "glance": ov.get("glance", []),
+            "bars": _domain_bars(ov), "components": [], "generated_at": sec["generated_at"],
+        })
+
+    # Infrastructure is the domain; Clusters (the report still tagged "infrastructure" --
+    # HCI cluster hardware, not a general infrastructure catch-all) and Active Directory are
+    # its two components, merged into ONE card rather than two separate domain-level entries
+    # (2026-09-16, on request -- confirmed via the "one merged domain card, worst-of status
+    # wins" option: Estate at a Glance, the Overview donut/domain tally, and Domain Health all
+    # now treat this as a single domain; a component's own bars are prefixed with its name so
+    # a merged card's mini-bar list still says which component an issue belongs to).
+    infra_components = []
+    for kind, comp_name in (("infrastructure", "Clusters"), ("active_directory", "Active Directory")):
+        sec = sections_by_kind.get(kind)
+        if not sec:
+            continue
+        ov = sec["overview"]
+        infra_components.append({
+            "name": comp_name, "pill": _domain_pill(ov), "glance": ov.get("glance", []),
+            "bars": _domain_bars(ov), "generated_at": sec["generated_at"],
+        })
+    if infra_components:
+        combined_bars = [{**b, "label": f"{comp['name']} — {b['label']}"}
+                         for comp in infra_components for b in comp["bars"]]
+        infra_pill = ("bad" if any(c["pill"] == "bad" for c in infra_components) else
+                     "warn" if any(c["pill"] == "warn" for c in infra_components) else "ok")
+        domain_cards.append({
+            "name": "Infrastructure", "pill": infra_pill,
+            "glance": [g for c in infra_components for g in c["glance"]],
+            "bars": combined_bars, "components": infra_components,
+            "generated_at": max(c["generated_at"] for c in infra_components),
+        })
+
+    # Grouped by severity, worst first (2026-09-14, on request: "add a group by severity
+    # feature for domain banners... will make the presentation cleaner") -- same "bad before
+    # warn" ordering `exceptions` below already uses, so a degraded domain is never buried
+    # after several clean ones just because of report-generation order. Stable sort: domains
+    # tied on severity keep report_sections' own relative order.
+    _PILL_RANK = {"bad": 0, "warn": 1, "ok": 2}
+    domain_cards.sort(key=lambda c: _PILL_RANK.get(c["pill"], 2))
+
+    # Domain Health split into its own two sub-sub-sections, clean domains first (2026-09-14,
+    # on request: "get all greens...no faults detected in their own sub sub section then
+    # another sub section for those that have issues") -- domain_cards itself stays the single
+    # full list Overview's own donut/bar chart still reads.
+    domain_cards_ok = [c for c in domain_cards if c["pill"] == "ok"]
+    domain_cards_issues = [c for c in domain_cards if c["pill"] != "ok"]
+
+    # Two domains with no report/data source at all -- shown honestly as such (on request,
+    # matching design_prompt.md's own explicit instruction), not silently omitted or
+    # fabricated a "clean" reading from data that doesn't exist.
+    no_data_domains = [
+        {"name": "Security", "note": "No monitoring data source yet."},
+    ]
+    excluded_domain_note = ("Government Systems isn't included yet -- no monitoring data "
+                            "is available for that domain.")
+
+    # Click an exception to see its exact source -- which system, which component (2026-09-16,
+    # on request: "clicking it should reveal the exact source of that error which system,
+    # system component is giving that error"). The exception rows above are DOMAIN-level
+    # aggregates ("Missing backups: 1 | 12"); the actual per-system detail already lives in
+    # report_content["systems"][*]["flags"] (every report kind stores this the same way -- see
+    # e.g. generate_active_directory_report.py's own report_content dict), just one level down
+    # from what the aggregate tiles read. There's no shared key to join the two on precisely
+    # (the aggregate's own "label" is free text, a flag's "category" is a coarse bucket several
+    # unrelated labels can share -- Network's own links_failed/iface_discards_heavy are BOTH
+    # category "service"), so this matches on significant words the label and a flag's own
+    # key/category/text have in common. A best-effort hint, not a guaranteed join -- a label
+    # with no real per-system counterpart (Expired certs, Undrained queues -- rollups that
+    # were never recorded as a per-system flag) simply shows no detail, rather than a wrong one.
+    # A length>=4 floor originally dropped "cpu"/"ram" outright (2026-09-16, on request: "High
+    # CPU and High RAM tiles do not open these boxes" -- both boiled down to just the word
+    # "high", too generic to match anything, since "cpu"/"ram" are only 3 letters). A stopword
+    # list instead of a length floor keeps short-but-specific words like these.
+    _DETAIL_STOPWORDS = {"high", "down", "total", "with", "that", "this"}
+
+    # A flag's own text is free-form prose, sometimes with a comma-separated tail bolted on
+    # (a device list, a metric list) that reads as a wall of jargon once several wrap across a
+    # narrow box (2026-09-16, on request: "is there too much text data, if yes can data be
+    # tabulated"). This splits "headline — a, b, c" or "headline: a, b, c" into a plain
+    # headline plus a real list of items the template renders as small wrapped tags instead of
+    # one long run-on sentence -- text with no such tail (most flags: "RAM 95%") is left alone.
+    def _split_detail_text(text):
+        for sep in (" — ", ": "):
+            if sep in text:
+                head, _, tail = text.partition(sep)
+                if "," in tail:
+                    items = [i.strip() for i in tail.split(",") if i.strip()]
+                    return head.strip(), items
+        return text, None
+
+    def _exception_detail(sec, label):
+        words = {w[:-1] if w.endswith("s") and len(w) > 4 else w
+                 for w in re.findall(r"[a-z]{3,}", label.lower())
+                 if w not in _DETAIL_STOPWORDS}
+        if not words:
+            return []
+        found = []
+        for s in sec["systems"]:
+            for f in s.get("flags", []):
+                if f.get("band") not in ("red", "amber", "bad", "warn"):
+                    continue
+                haystack = f"{f.get('key', '')} {f.get('category', '')} {f.get('text', '')}".lower()
+                if any(w in haystack for w in words):
+                    headline, items = _split_detail_text(f.get("text", ""))
+                    found.append({"system": s["name"], "headline": headline, "items": items,
+                                  "band": "bad" if f.get("band") in ("red", "bad") else "warn"})
+        return found
+
+    exceptions = []
+    for sec in report_sections:
+        ov = sec["overview"]
+        for tier in ("immediate", "watch"):
+            for item in ov.get(tier, []):
+                # "Storage at capacity" no longer exists as its own tile at all (2026-09-18,
+                # on request -- see network._infra_overview's own comment on its own removal),
+                # so there's nothing left to filter out here; "Storage critical" alone covers
+                # this table's own storage row now, same as it always has for every other
+                # caller of _infra_overview.
+                if item.get("state") in ("bad", "warn"):
+                    exceptions.append({"domain": _domain_display_name(sec["label"]),
+                                       "label": item["label"], "value": item["value"],
+                                       "band": item["state"],
+                                       "generated_at": sec["generated_at"],
+                                       "detail": _exception_detail(sec, item["label"])})
+    # Unreachable components -- ALWAYS shown, unlike every row above (2026-09-18, on request:
+    # "one of the most important metrics to add... is the unreachable components, even if
+    # things are reachable we still need that green [not] showing that all is well"). Every
+    # other row here is a pure problem list, silently absent when nothing's wrong; this one is
+    # a standing status line instead, so "reachability" is never a metric you have to infer
+    # from its own ABSENCE. Reuses generate_report's own "Unreachable components" immediate
+    # tile (System Admin Report's own component-reachability count) rather than inventing a
+    # second, parallel definition of "unreachable". Skipped if the main loop above already
+    # added it (its own state was bad/warn) -- never duplicated.
+    _unreachable_domains = {e["domain"] for e in exceptions if e["label"] == "Unreachable components"}
+    for sec in report_sections:
+        if _domain_display_name(sec["label"]) in _unreachable_domains:
+            continue
+        for item in sec["overview"].get("immediate", []):
+            if item["label"] == "Unreachable components":
+                exceptions.append({"domain": _domain_display_name(sec["label"]),
+                                   "label": item["label"], "value": item["value"],
+                                   "band": "ok" if item.get("state") == "good" else item.get("state", "ok"),
+                                   "generated_at": sec["generated_at"],
+                                   "detail": _exception_detail(sec, item["label"])})
+    exceptions.sort(key=lambda r: {"bad": 0, "warn": 1}.get(r["band"], 2))
+
+    donut = {"ok": 1 + sum(1 for c in domain_cards if c["pill"] == "ok"),   # +1 = Security
+            "warn": sum(1 for c in domain_cards if c["pill"] == "warn"),
+            "bad": sum(1 for c in domain_cards if c["pill"] == "bad")}
+
+    if any(c["pill"] == "bad" for c in domain_cards):
+        banner_tier = "bad"
+    elif any(c["pill"] == "warn" for c in domain_cards):
+        banner_tier = "warn"
+    else:
+        banner_tier = "ok"
+
+    swift_kpis = [g for sec in report_sections if sec["label"] == "System Admin Report"
+                 for g in sec["overview"].get("glance", [])
+                 if "swift" in g["label"].lower() or "cob" in g["label"].lower()]
+
+    # A splash of color on the numbers themselves (2026-09-14, on request: "add a splash of
+    # alert colours as there perhaps in the numbers eg 0|13 can be green if this is healthy" --
+    # later corrected: every reading in this section is already filtered to state == "good",
+    # so it's ALWAYS the healthy one, not just when its value happens to parse as an "N | Total"
+    # ratio with N==0 -- the first cut only tinted domains whose good values were ratio-shaped
+    # (Infrastructure/Active Directory), silently leaving Network/Systems' equally-clean plain
+    # readings untinted, which is what "tint the other [domain]s' metrics green too" was
+    # flagging). No per-item health check needed at all -- membership in `good` already means it.
+    compliance_rows = []
+    for sec in report_sections:
+        ov = sec["overview"]
+        good = [i for i in ov.get("immediate", []) + ov.get("watch", []) if i.get("state") == "good"]
+        total = len(ov.get("immediate", [])) + len(ov.get("watch", []))
+        if good:
+            clean_count = len(good)
+            compliance_rows.append({
+                "domain": _domain_display_name(sec["label"]), "good": good,
+                "clean_count": clean_count, "total": total, "fully_clean": clean_count == total,
+            })
+
+    open_issues = IssueOccurrence.objects.filter(resolved_at__isnull=True)
+
+    # Attention Items coloured by how long each issue has been open (2026-09-14, on request:
+    # "a splash of colour in the attention items section perhaps as it relates to how long the
+    # issues have remained open") -- same 3-day red threshold backup/log drainage already uses
+    # elsewhere in this app for "this has been overdue too long", not a new number invented
+    # for this section.
+    now = timezone.now()
+    oldest_open = []
+    for o in open_issues.order_by("started_at")[:5]:
+        days_open = (now - o.started_at).days
+        age_band = "bad" if days_open >= 3 else ("warn" if days_open >= 1 else "ok")
+        oldest_open.append({"system": o.system, "text": o.text, "flag_key": o.flag_key,
+                            "started_at": o.started_at, "age_band": age_band})
+
+    recent_comments = (AutomatedFindingAction.objects.exclude(comment="")
+                       .select_related("updated_by").order_by("-updated_at")[:5])
+
+    return {
+        "report_sections": report_sections,
+        "domain_cards": domain_cards,
+        "domain_cards_ok": domain_cards_ok,
+        "domain_cards_issues": domain_cards_issues,
+        "no_data_domains": no_data_domains,
+        "excluded_domain_note": excluded_domain_note,
+        "exceptions": exceptions,
+        "donut": donut,
+        "banner_tier": banner_tier,
+        "swift_kpis": swift_kpis,
+        "compliance_rows": compliance_rows,
+        "oldest_open": oldest_open,
+        "recent_comments": recent_comments,
+        # days=30 (2026-09-18, on request: same scrollable/zoomable treatment as the Weekly
+        # Trend report's own SWIFT chart -- see automated_report_download.html's "Cluster
+        # zoom+pan+scroll" block, mirrored below for this page's single swiftLine2 canvas).
+        "swift_chart": report_charts.swift_transaction_line_data(days=30),
+        # cob_chart (2026-09-18, on request: "add the superimposed one for cob time same
+        # style") -- same days=30 window as swift_chart, same reason.
+        "cob_chart": report_charts.cob_time_line_data(days=30),
+        "generated_at": timezone.localtime(),
+    }
+
+
 @never_cache
 @login_required
-def network_dashboard(request):
-    """Network Analyses Dashboard — the network admin's landing screen.
-
-    The counterpart to the System Analyses Dashboard: that one lists business systems, this
-    one lists network devices. Same shape, same grid, different inventory — a network admin
-    should not have to read past RTGS and Temenos to reach a switch.
-
-    One tile today, because one device is monitored. It is still a picker rather than a
-    straight redirect to the report: the grid is where the second and third device land when
-    the firewall and the wireless controller are onboarded, and a screen that silently
-    becomes a list later is less confusing than one that appears from nowhere.
+def management_dashboard_full(request):
+    """Executive - Full: the original Executive Dashboard, unchanged, now reachable from the
+    Management drawer rather than being the only screen the role has (2026-09-16, on request:
+    "save current dashboard as is well move it to a page accessible through the management
+    roles drawer navigation panel called Executive - full"). See management_dashboard_focused
+    for the trimmed landing-page variant and _management_dashboard_context for the shared data.
     """
-    if not is_network_admin(request.user):
+    ctx = _management_dashboard_context(request)
+    if ctx is None:
         return redirect("report_form")
-    try:
-        devices = network.device_inventory()
-    except network.NetworkUnavailable as exc:
-        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
-    # A device already chosen means a report is open — surfaced the same way the systems
-    # picker surfaces one, so the only way forward is not "start again and lose the answers".
-    open_seconds = _open_report_seconds(request, "network")
-    open_keys = (request.session.get("network_devices") or []) if open_seconds else []
-    by_key = {d["key"]: d for d in devices}
-    return render(request, "reports/network_select.html", {
-        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
-        "total_interfaces": sum(d["iface_count"] for d in devices),
-        "reachable_count": sum(1 for d in devices if d["reachable"]),
-        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
-        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
-        "open_seconds": open_seconds,
-    })
+    return render(request, "reports/management_dashboard_full.html", ctx)
+
+
+# Needs Attention Now drops a handful of tiles on the two trimmed dashboards specifically
+# (2026-09-18, on request: "remove ram and cpu usage even disk usage from the smaller
+# dashboard's needs attention banner", then "remove metric not collected too and links shut")
+# -- Full keeps every exception unfiltered, only these narrow. Matched by label PREFIX ("High
+# disk", not the trailing "≥85%" threshold text; "Links shut" alone matches Network's own
+# "Links shut / unclear") so this doesn't silently stop working if wording/thresholds are ever
+# retuned. "Storage critical" (Infrastructure's own cluster storage capacity -- "Storage at
+# capacity" no longer exists as a separate tile at all, see network._infra_overview's own
+# comment) and "Links failed" (a real outage, not a collection gap) are deliberately untouched
+# -- only usage-noise and collection-gap tiles are hidden here. Shared by both
+# management_dashboard_focused and management_dashboard_analytical (2026-09-19: Analytical is
+# the former Focused page, kept verbatim under a new name/URL when Focused itself was redesigned
+# into a plain 2x2 domain grid -- see management_dashboard_focused's own docstring) so the two
+# pages can never quietly drift apart on which tiles this hides.
+_HIDDEN_EXCEPTION_PREFIXES = ("High CPU", "High RAM", "High disk",
+                              "Metrics not collected", "Links shut")
+
+
+def _trimmed_dashboard_exceptions(ctx):
+    return [e for e in ctx["exceptions"] if not e["label"].startswith(_HIDDEN_EXCEPTION_PREFIXES)]
+
+
+@never_cache
+@login_required
+def management_dashboard_analytical(request):
+    """Executive - Analytical: the ORIGINAL Executive - Focused page, kept verbatim under a new
+    name/URL (2026-09-19, on request: "save the current variation of the focused dashboard as
+    -analytical instead of -focused... for -focused dashboard which will become our landing
+    page[, redesign it]") -- management_dashboard_focused.html was cloned byte-for-byte into
+    management_dashboard_analytical.html BEFORE that redesign touched it, so this page is
+    exactly what "Executive - Focused" used to render: the exception-grouped (clean/issues)
+    Domain Health cards and the two SWIFT/COB week-over-week comparison charts. See
+    management_dashboard_focused for what replaced it as the landing page.
+    """
+    ctx = _management_dashboard_context(request)
+    if ctx is None:
+        return redirect("report_form")
+    ctx = dict(ctx, exceptions=_trimmed_dashboard_exceptions(ctx))
+    return render(request, "reports/management_dashboard_analytical.html", ctx)
+
+
+@never_cache
+@login_required
+def management_dashboard_focused(request):
+    """Executive - Focused: Management's landing page (2026-09-16, on request: "add another
+    such page and make it the landing page..."; redesigned 2026-09-19, on request: "remove the
+    original domain grouping mechanism and just place them in a simple 2x2 grid, starting with
+    security then infrastructure then networks then systems... remove [the weekly comparison
+    graphs]... swap in the scrollable line graph for swift transactions from the full
+    dashboard... replace the overview and domain health section heading with just domain
+    health" -- the former content of this page, unchanged, now lives at Executive - Analytical,
+    see management_dashboard_analytical). Same shared context as Full/Analytical -- see
+    _management_dashboard_context -- this view just also reshapes domain_cards into a fixed
+    four-cell grid for its own template to render.
+    """
+    ctx = _management_dashboard_context(request)
+    if ctx is None:
+        return redirect("report_form")
+    ctx = dict(ctx, exceptions=_trimmed_dashboard_exceptions(ctx))
+
+    # Fixed 2x2 order regardless of status or which domains happen to have real data this poll
+    # (2026-09-19, on request: "starting with security then infrastructure then networks then
+    # systems") -- Security has no monitoring source at all (see _management_dashboard_context's
+    # own no_data_domains), so it's normalised into the SAME card shape as a real domain here,
+    # with a distinct "nodata" pill/band the template styles neutrally rather than green/amber/
+    # red. Went green->neutral->green->neutral over three quick rounds on 2026-09-19 ("you
+    # removed green coloring from security domain", then "i think i like no data source
+    # better") -- neutral is the settled choice; a Security card that's never actually measured
+    # anything shouldn't look identical to one that measured everything and found it healthy.
+    _domain_by_name = {c["name"]: c for c in ctx["domain_cards"]}
+    _no_data_by_name = {nd["name"]: nd for nd in ctx["no_data_domains"]}
+    domain_grid = []
+    for name in ("Security", "Infrastructure", "Network", "Systems"):
+        if name in _domain_by_name:
+            domain_grid.append(_domain_by_name[name])
+        elif name in _no_data_by_name:
+            domain_grid.append({"name": name, "pill": "nodata", "glance": [], "bars": [],
+                                "components": [], "note": _no_data_by_name[name]["note"]})
+    ctx["domain_grid"] = domain_grid
+
+    return render(request, "reports/management_dashboard_focused.html", ctx)
 
 
 @never_cache
@@ -224,7 +683,7 @@ def role_select(request):
     if request.method == "POST":
         # Requesting a role you do not hold — the same action the first-login screen offers,
         # so the two screens differ in presentation and not in what they can do.
-        wanted = [r for r in request.POST.getlist("request_role") if r in ROLE_NAMES]
+        wanted = [r for r in request.POST.getlist("request_role") if r in SELECTABLE_ROLE_NAMES]
         if wanted:
             created = 0
             for r in wanted:
@@ -269,15 +728,16 @@ def role_select(request):
     # a selection shows every screen from every role held at once, which is precisely what
     # picking a role exists to narrow.
     return render(request, "reports/role_select.html", {
-        # EVERY role in the catalogue, each with its standing. The first-login screen already
-        # lists them all; showing only what you hold here made the app look like it had two
-        # different ideas of how many roles exist.
+        # Every SELECTABLE role in the catalogue (ROLE_NAMES minus Sub Admin -- see
+        # SELECTABLE_ROLE_NAMES' own comment), each with its standing. The first-login screen
+        # already lists them all; showing only what you hold here made the app look like it
+        # had two different ideas of how many roles exist.
         "roles": [{"name": r,
                    "description": ROLE_DESCRIPTIONS.get(r, ""),
                    "icon": role_icon(r),
                    "pages": role_screens(r),
                    "held": r in held,
-                   "pending": r in pending} for r in ROLE_NAMES],
+                   "pending": r in pending} for r in SELECTABLE_ROLE_NAMES],
         "held_count": len(held),
         "current": active_role(request),
         # offered only to someone with more than one role — for everyone else "all my roles"
@@ -294,17 +754,30 @@ def role_select(request):
 #: session keys holding when an open report lapses, per estate. An open report is a claim on
 #: the admin's attention ("your answers are still there"), so it has to expire on its own —
 #: otherwise the resume bar offers to continue a report whose numbers went stale hours ago.
-_OPEN_UNTIL = {"systems": "report_expires_at", "network": "network_expires_at",
+_OPEN_UNTIL = {"systems": "report_expires_at",
               "infra": "infra_report_expires_at",
-              "active_directory": "active_directory_report_expires_at"}
+              "active_directory": "active_directory_report_expires_at",
+              # Networks Report category (2026-09-22, split into four reports 2026-09-23 --
+              # see roles.REPORTS' own comment) -- one estate entry per picker, same shape as
+              # every other estate here, not a single "switches_routers" entry any more.
+              "core_switches": "core_switches_report_expires_at",
+              "routers": "routers_report_expires_at",
+              "wireless_controller": "wireless_controller_report_expires_at",
+              "access_switches": "access_switches_report_expires_at"}
 
 #: session keys an estate's open report claims, cleared together once it lapses or is closed.
 _ESTATE_SESSION_KEYS = {
     "systems": {"report_systems", "snapshot_token", "report_expires_at"},
-    "network": {"network_devices", "network_token", "network_expires_at"},
     "infra":   {"infra_report_systems", "infra_snapshot_token", "infra_report_expires_at"},
     "active_directory": {"active_directory_report_systems", "active_directory_snapshot_token",
                          "active_directory_report_expires_at"},
+    "core_switches": {"core_switches_devices", "core_switches_token",
+                      "core_switches_report_expires_at"},
+    "routers": {"routers_devices", "routers_token", "routers_report_expires_at"},
+    "wireless_controller": {"wireless_controller_devices", "wireless_controller_token",
+                            "wireless_controller_report_expires_at"},
+    "access_switches": {"access_switches_devices", "access_switches_token",
+                        "access_switches_report_expires_at"},
 }
 
 
@@ -359,8 +832,29 @@ def reports(request):
     for r in available:
         label = _automated_reports_label(request) if r.key == "automated_reports" else r.label
         options.append({"key": r.key, "label": label, "blurb": r.blurb,
-                        "url": reverse(r.url_name), "icon": r.icon, "initial": label[:1]})
-    return render(request, "reports/reports.html", {"options": options})
+                        "url": reverse(r.url_name), "icon": r.icon, "initial": label[:1],
+                        "category": r.category})
+    # Grouped by category (2026-09-22, for the new "Networks Report" family) -- ungrouped
+    # tiles (category == "") render first, in `available`'s own order, exactly as the screen
+    # looked before this grouping existed; a truthy category gets its own heading afterwards.
+    # Built here rather than via Django's {% regroup %} (which requires the list pre-sorted by
+    # the group key, awkward when most items share the same "" category) -- a plain dict keeps
+    # first-seen order for free and needs no sort.
+    grouped: list = []
+    by_category: dict = {}
+    for o in options:
+        cat = o["category"] or None
+        if cat not in by_category:
+            by_category[cat] = {"category": cat, "items": []}
+            grouped.append(by_category[cat])
+        by_category[cat]["items"].append(o)
+    grouped.sort(key=lambda g: g["category"] is not None)
+    # "options" kept alongside "groups" (2026-09-22) -- the flat list every existing test/
+    # caller already reads (response.context["options"]) predates the grouping work; dropping
+    # it in favour of "groups" alone broke every one of them. "groups" is what the template
+    # actually renders from; "options" is the same tiles, ungrouped, for anything reading the
+    # flat shape.
+    return render(request, "reports/reports.html", {"groups": grouped, "options": options})
 
 
 @never_cache
@@ -718,10 +1212,16 @@ def automated_report_detail(request, report_type, pk):
             charts = []
             for flag_key in catrow["components"]:
                 if flag_key:
-                    data = report_charts.resource_percent_line_data(sysname, flag_key, cat)
+                    # days=30 (2026-09-18, on request: "store this data... so we can have a
+                    # much longer retention window") -- reads MetricSample now, not live
+                    # Prometheus, so this is no longer bounded by Prometheus's own ~15-day
+                    # retention. The web chart's own default ZOOM still opens on the most
+                    # recent 7 days (see the haveZoomPlugin block below) -- this just gives it
+                    # real room to scroll/pan back further than that.
+                    data = report_charts.resource_percent_line_data(sysname, flag_key, cat, days=30)
                     label = report_charts.flag_location(flag_key)
                 else:
-                    data = report_charts.spike_line_data_single(sysname, cat)
+                    data = report_charts.spike_line_data_single(sysname, cat, days=30)
                     label = None
                 if data:
                     charts.append({"canvas_id": f"spikeLines-{idx}", "label": label, "data": data})
@@ -753,10 +1253,28 @@ def automated_report_detail(request, report_type, pk):
     # very similar to existing line graphs"). Not tied to a system/category/recurring_issues at
     # all (see report_charts.swift_transaction_series), so it's built and gated independently
     # rather than folded into the _spike_chart_targets loop above.
-    swift_data = report_charts.swift_transaction_line_data()
+    swift_data = report_charts.swift_transaction_line_data(days=30)
     if swift_data:
+        # "cluster": "swift" -- gives swiftLine the same generic zoom+pan+Range-buttons+
+        # scrollbar treatment every Hourly Activity chart's own cluster gets above. A SEPARATE
+        # second chart (canvas "swiftCompareLine", template-only -- see automated_report_
+        # download.html's own script block) reuses this identical data to draw the week-over-
+        # week comparison (2026-09-18, on request: "make this a separate graph keep the
+        # original as well") rather than this one switching shape under a Range button.
         chart_data["spikeCharts"].append(
-            {"canvasId": "swiftLine", "data": swift_data, "isPercent": False})
+            {"canvasId": "swiftLine", "data": swift_data, "isPercent": False, "cluster": "swift"})
+    # COB duration -- both the original chart and a separate week-over-week comparison chart,
+    # same as SWIFT (2026-09-18, on request: "add the superimposed one for cob time same
+    # style... both everywhere else" -- this report counts as "everywhere else"). No "cluster"
+    # key: COB's own data is now ONE POINT PER DAY (on request: "one solid bar per day" --
+    # see report_charts.cob_time_line_data's own docstring), so it never joins the generic
+    # hourly zoom+pan+Range-buttons+scrollbar mechanism above -- there's nothing to scroll
+    # through at ~30 total points, and "24h"/"3d" would be meaningless button labels at daily
+    # resolution. Built and rendered standalone -- see the template's own script block.
+    cob_data = report_charts.cob_time_line_data(days=30)
+    if cob_data:
+        chart_data["spikeCharts"].append(
+            {"canvasId": "cobLine", "data": cob_data, "isPercent": False})
     return render(request, "reports/automated_report_download.html", {
         "instance": instance, "report": instance.content,
         "sections": narrative_sections(instance.content.get("narrative", {})),
@@ -765,6 +1283,7 @@ def automated_report_detail(request, report_type, pk):
         "extra_charts": extra_charts,
         "spike_charts": spike_charts,
         "swift_available": bool(swift_data),
+        "cob_available": bool(cob_data),
         # Editable Action fields (item 10a) -- explicit context flag/URL rather than relying on
         # template auto-context for `request`. This template is ONLY ever rendered from here
         # (the downloaded PDF is a wholly separate template, automated_report_pdf.html, always
@@ -1156,7 +1675,11 @@ def generate(request):
 
     # Freeze exactly what the report presented (overview + per-system flagged items, each
     # married to the admin's answer) so History can replay it without touching Prometheus.
+    # "kind" (2026-09-12) lets the Executive Dashboard find "the latest System Admin Report"
+    # among ReportSubmission's shared table -- same ad-hoc tagging network_sod/os_inventory's
+    # own report_content already used, just extended to the other xlsx-family reports too.
     report_content = {
+        "kind": "system_admin",
         "overview": snapshot.overview,
         "systems": [
             {
@@ -1366,67 +1889,85 @@ def folder_watch_data(request):
 
 @never_cache
 @login_required
-def network_report(request):
-    """The Network Admin Report for the SELECTED devices.
+def core_switches_form(request):
+    """The Core Switches Report's own landing page (2026-09-23, split out of the old
+    combined Switches & Routers Report -- see network.core_switches_device_keys'
+    own comment). Scoped to network.core_switches_device_keys() -- today three devices,
+    HQ/DR/BYO (see DEVICES' own comment on them).
 
-    Mirrors the systems flow deliberately. POST (from the device picker) records the choice
-    and redirects to GET — Post/Redirect/Get, so a browser refresh never re-submits the
-    selection — and GET renders the report scoped to those devices.
-
-    Arriving with no selection sends the admin to the picker rather than quietly reporting on
-    everything: which devices a report covers is the admin's statement, not a default.
+    Dual-role visibility, same idiom as active_directory_form: owned by Network Admin
+    (this is squarely their estate), Infrastructure Admin has view access too (same
+    precedent as the combined report this replaces).
     """
-    if not is_network_admin(request.user):
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+    try:
+        keys = network.core_switches_device_keys()
+        devices = [d for d in network.device_inventory() if d["key"] in keys]
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    open_seconds = _open_report_seconds(request, "core_switches")
+    open_keys = (request.session.get("core_switches_devices") or []) if open_seconds else []
+    by_key = {d["key"]: d for d in devices}
+    return render(request, "reports/core_switches_select.html", {
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
+        "total_interfaces": sum(d["iface_count"] for d in devices),
+        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
+        "open_seconds": open_seconds,
+    })
+
+
+@login_required
+def core_switches_report(request):
+    """The annotation screen for the SELECTED core switch -- network_report's own
+    twin (same simple shape, no windows-exporter connect-strip machinery needed), scoped to
+    network.core_switches_device_keys() and posting to its own core_switches_generate.
+
+    GET: ALWAYS captures a fresh live snapshot -- same rule network_report's own docstring
+    establishes and for the same reason (a Refresh click, or any other way of landing back on
+    this URL, must never quietly serve numbers that aged past the countdown).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
         return redirect("report_form")
 
     if request.method == "POST":
         keys = [k for k in request.POST.getlist("include_device") if k]
-        known = {d["key"] for d in network.DEVICES}
+        known = network.core_switches_device_keys()
         keys = [k for k in keys if k in known]
         if not keys:
             messages.error(request, "Select at least one device to include in the report.")
-            return redirect("network_dashboard")
-        request.session["network_devices"] = keys
-        request.session.pop("network_token", None)   # new selection -> fresh capture
-        return redirect("network_report")
+            return redirect("core_switches_form")
+        request.session["core_switches_devices"] = keys
+        request.session.pop("core_switches_token", None)   # new selection -> fresh capture
+        return redirect("core_switches_report")
 
-    keys = request.session.get("network_devices")
+    keys = request.session.get("core_switches_devices")
     if not keys:
-        return redirect("network_dashboard")
+        return redirect("core_switches_form")
 
-    force = request.GET.get("fresh") == "1"
-    snapshot = None
-    token = request.session.get("network_token", "")
-    if not force and token:
-        snapshot = cache.get(_cache_key(token))
+    token = uuid.uuid4().hex
+    try:
+        # report_kind="core_switches" (2026-09-24, on request: "for the core switch report
+        # drop these metrics no need to check them") -- drops BGP/Active connections/
+        # Connected devices from the catalogue this report's own "Metrics not collected"
+        # tile and flag count against; see CATALOGUE's own skip_for comment.
+        snapshot = network.capture_snapshot(token, only=set(keys), mode="switches_routers",
+                                            report_kind="core_switches")
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+        request.session.pop("core_switches_devices", None)
+        return redirect("core_switches_form")
+    snapshot.systems.sort(key=lambda s: s.name.lower())
+    cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+    request.session["core_switches_token"] = token
+    request.session["core_switches_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
 
-    if snapshot is None:
-        token = uuid.uuid4().hex
-        try:
-            snapshot = network.capture_snapshot(token, only=set(keys))
-        except network.NetworkUnavailable as exc:
-            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
-        if not snapshot.systems:                # the selection no longer resolves
-            messages.error(request, "Those devices are no longer being monitored. Please choose again.")
-            request.session.pop("network_devices", None)
-            return redirect("network_dashboard")
-        # Alphabetical, same as the systems flow (see report()) and for the same reason: sort
-        # once, HERE, before caching, so the page render and network_generate()'s enumerate()
-        # over this same cached object agree on the same order.
-        snapshot.systems.sort(key=lambda s: s.name.lower())
-        cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
-        request.session["network_token"] = token
-        request.session["network_expires_at"] = time.time() + settings.SNAPSHOT_TTL
-
-    # Anchor the countdown to the capture time so a refresh continues it (never restarts) —
-    # the same reasoning report()'s equivalent line uses. A cached snapshot reused across
-    # requests had been showing the full TTL on every load instead of what was actually left.
     elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
     remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
 
-    # The SAME annotation screen the systems report uses. One device is one "system" and its
-    # faults are its flags, so the template needs no network special-casing — which is the
-    # point: an admin who has written a system report already knows how to write this one.
     return render(request, "reports/form.html", {
         "snapshot": snapshot,
         "token": token,
@@ -1434,7 +1975,7 @@ def network_report(request):
         "suggested_author": _profile_author(request.user),
         "suggested_recipients": default_recipients(),
         "recipient_options": recipient_options(),
-        "default_filename": network.network_report_filename(
+        "default_filename": network.core_switches_report_filename(
             getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
         "alpha_grouped": True,
         "letter_index": sorted({s.name[0].upper() for s in snapshot.systems if s.name}),
@@ -1442,43 +1983,42 @@ def network_report(request):
         "ttl_seconds": settings.SNAPSHOT_TTL,
         "remaining_seconds": remaining,
         "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
-        # the shared screen's nouns and destinations, so a network admin is not handed the
-        # systems screen with a switch on it
-        # Still the Network Admin role/routes (see network_report's own docstring) -- this is
-        # a wording-only rename: what started as switch monitoring is now mostly HCI Cluster
-        # infrastructure data, so the displayed title says so. Kept under Network Admin for
-        # now (this remains the place to SELECT and ANNOTATE these devices); Infrastructure
-        # Admin's OWN report (infra_form/infra_report/infra_generate) now reads the same live
-        # data read-only, through the new tree-nested template -- see
-        # network.build_infrastructure_report's module docstring.
-        "dash_title": "Infrastructure Analyses Dashboard",
+        "dash_title": "Core Switches Report",
         "subject": "device",
-        "draft_key": "draft:network:" + ",".join(sorted(keys)),
-        "picker_url": reverse("network_dashboard"),
-        "generate_url": reverse("network_generate"),
+        "draft_key": "draft:core_switches:" + ",".join(sorted(keys)),
+        "picker_url": reverse("core_switches_form"),
+        "generate_url": reverse("core_switches_generate"),
         "generate_default": reverse("generate"),
     })
 
 
 @login_required
 @require_POST
-def network_generate(request):
-    """Build the Network Admin Report from the reviewed snapshot — the systems generate flow,
-    for network gear. Answers are namespaced the same way (fix__<device>__<flag>), so the
-    shared form template needs no branch."""
-    if not is_network_admin(request.user):
+def core_switches_generate(request):
+    """Build the Core Switches Report from the reviewed snapshot -- network_generate's own twin, calling network.build_report with title="Core Switches Report" (NOT the
+    default "Infrastructure Report" -- see build_report's own docstring) so the downloaded
+    xlsx never claims to be a report it isn't."""
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
         return redirect("report_form")
 
-    token = request.POST.get("token", "") or request.session.get("network_token", "")
+    token = request.POST.get("token", "") or request.session.get("core_switches_token", "")
     snapshot = cache.get(_cache_key(token)) if token else None
     if snapshot is None:
         messages.error(request, "That snapshot has expired. Capture a fresh one.")
-        return redirect("network_report")
+        return redirect("core_switches_report")
+
+    action = request.POST.get("action", "download")
+    if action not in ("download", "email"):
+        action = "download"
+    recipients_raw = request.POST.get("recipients", "").strip()
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    if action == "email" and not recipients:
+        return render(request, "reports/error.html", {
+            "detail": "Add at least one recipient to e-mail the report.",
+        }, status=400)
 
     theme = request.POST.get("theme", "").strip().lower()
     if theme not in gr.PALETTES:
-        # falls back to the admin's saved preference, then dark — the same order the systems
-        # flow uses, so the two reports never disagree about what "no choice" means
         theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
     if theme not in gr.PALETTES:
         theme = "dark"
@@ -1497,11 +2037,14 @@ def network_generate(request):
             annotations[sysvm.name] = {"flags": answers, "comment": comment}
 
     data = network.build_report(snapshot, theme=theme, author=author,
-                                annotations=annotations, summary_comment=summary_comment)
-    filename = network.network_report_filename(theme, timezone.localtime())
+                                annotations=annotations, summary_comment=summary_comment,
+                                title="Core Switches Report")
+    filename = network.core_switches_report_filename(theme, timezone.localtime())
 
-    # Frozen exactly as presented, so History replays it without touching Prometheus.
+    # "kind" (2026-09-22): lets History/the Executive Dashboard find "the latest Switches &
+    # Routers Report" the same way every other estate's own kind literal already does.
     report_content = {
+        "kind": "core_switches",
         "overview": snapshot.overview,
         "systems": [{
             "name": s.name, "hosts": s.hosts,
@@ -1512,14 +2055,630 @@ def network_generate(request):
         } for s in snapshot.systems],
     }
 
+    # Email path: send first — only record + consume the snapshot if it actually went out,
+    # same contract every other generate view here follows.
+    subject = ""
+    if action == "email":
+        try:
+            subject = network.email_windows_report(
+                snapshot, data, recipients=recipients, author=author,
+                filename=filename, title="CORE SWITCHES REPORT")
+        except EmailNotConfigured as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=500)
+        except Exception as exc:   # noqa: BLE001 — SMTP/network errors surfaced to the admin
+            return render(request, "reports/error.html", {
+                "detail": f"Could not send the e-mail: {exc}",
+            }, status=502)
+
     ReportSubmission.objects.create(
         generated_by=request.user, author=author, theme=theme,
+        delivery=action, recipients=recipients_raw,
         annotations=annotations, report_content=report_content,
         immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
         summary_comment=summary_comment,
     )
-    # Left in the cache to lapse at its TTL, for the same reason as the systems flow above:
-    # the page stays open after a download, and Generate has to work twice.
+
+    if action == "email":
+        return render(request, "reports/sent.html", {
+            "recipients": recipients, "author": author,
+            "filename": filename, "subject": subject,
+        })
+
+    resp = HttpResponse(
+        data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
+@never_cache
+@login_required
+def routers_form(request):
+    """The Routers Report's own landing page (2026-09-23, split out of the old combined
+    Switches & Routers Report -- see network.routers_device_keys' own comment).
+    Scoped to network.routers_device_keys() -- today exactly one device,
+    hre-dr-swift-router (the 2951 ISR).
+
+    Dual-role visibility, same idiom as active_directory_form: owned by Network Admin
+    (this is squarely their estate), Infrastructure Admin has view access too (same
+    precedent as the combined report this replaces).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+    try:
+        keys = network.routers_device_keys()
+        devices = [d for d in network.device_inventory() if d["key"] in keys]
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    open_seconds = _open_report_seconds(request, "routers")
+    open_keys = (request.session.get("routers_devices") or []) if open_seconds else []
+    by_key = {d["key"]: d for d in devices}
+    return render(request, "reports/routers_select.html", {
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
+        "total_interfaces": sum(d["iface_count"] for d in devices),
+        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
+        "open_seconds": open_seconds,
+    })
+
+
+@login_required
+def routers_report(request):
+    """The annotation screen for the SELECTED router -- network_report's own
+    twin (same simple shape, no windows-exporter connect-strip machinery needed), scoped to
+    network.routers_device_keys() and posting to its own routers_generate.
+
+    GET: ALWAYS captures a fresh live snapshot -- same rule network_report's own docstring
+    establishes and for the same reason (a Refresh click, or any other way of landing back on
+    this URL, must never quietly serve numbers that aged past the countdown).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    if request.method == "POST":
+        keys = [k for k in request.POST.getlist("include_device") if k]
+        known = network.routers_device_keys()
+        keys = [k for k in keys if k in known]
+        if not keys:
+            messages.error(request, "Select at least one device to include in the report.")
+            return redirect("routers_form")
+        request.session["routers_devices"] = keys
+        request.session.pop("routers_token", None)   # new selection -> fresh capture
+        return redirect("routers_report")
+
+    keys = request.session.get("routers_devices")
+    if not keys:
+        return redirect("routers_form")
+
+    token = uuid.uuid4().hex
+    try:
+        snapshot = network.capture_snapshot(token, only=set(keys), mode="switches_routers")
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+        request.session.pop("routers_devices", None)
+        return redirect("routers_form")
+    snapshot.systems.sort(key=lambda s: s.name.lower())
+    cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+    request.session["routers_token"] = token
+    request.session["routers_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+
+    elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
+    remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    return render(request, "reports/form.html", {
+        "snapshot": snapshot,
+        "token": token,
+        "selected_count": len(snapshot.systems),
+        "suggested_author": _profile_author(request.user),
+        "suggested_recipients": default_recipients(),
+        "recipient_options": recipient_options(),
+        "default_filename": network.routers_report_filename(
+            getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
+        "alpha_grouped": True,
+        "letter_index": sorted({s.name[0].upper() for s in snapshot.systems if s.name}),
+        "ttl_minutes": settings.SNAPSHOT_TTL // 60,
+        "ttl_seconds": settings.SNAPSHOT_TTL,
+        "remaining_seconds": remaining,
+        "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        "dash_title": "Routers Report",
+        "subject": "device",
+        "draft_key": "draft:routers:" + ",".join(sorted(keys)),
+        "picker_url": reverse("routers_form"),
+        "generate_url": reverse("routers_generate"),
+        "generate_default": reverse("generate"),
+    })
+
+
+@login_required
+@require_POST
+def routers_generate(request):
+    """Build the Routers Report from the reviewed snapshot -- network_generate's own twin, calling network.build_report with title="Routers Report" (NOT the
+    default "Infrastructure Report" -- see build_report's own docstring) so the downloaded
+    xlsx never claims to be a report it isn't."""
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    token = request.POST.get("token", "") or request.session.get("routers_token", "")
+    snapshot = cache.get(_cache_key(token)) if token else None
+    if snapshot is None:
+        messages.error(request, "That snapshot has expired. Capture a fresh one.")
+        return redirect("routers_report")
+
+    action = request.POST.get("action", "download")
+    if action not in ("download", "email"):
+        action = "download"
+    recipients_raw = request.POST.get("recipients", "").strip()
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    if action == "email" and not recipients:
+        return render(request, "reports/error.html", {
+            "detail": "Add at least one recipient to e-mail the report.",
+        }, status=400)
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    annotations: dict = {}
+    for si, sysvm in enumerate(snapshot.systems):
+        answers = {}
+        for fi, flag in enumerate(sysvm.flags):
+            ans = request.POST.get(f"fix__{si}__{fi}", "")
+            if ans in ("Yes", "No"):
+                answers[flag.key] = ans
+        comment = request.POST.get(f"comment__{si}", "").strip()
+        if answers or comment:
+            annotations[sysvm.name] = {"flags": answers, "comment": comment}
+
+    data = network.build_report(snapshot, theme=theme, author=author,
+                                annotations=annotations, summary_comment=summary_comment,
+                                title="Routers Report")
+    filename = network.routers_report_filename(theme, timezone.localtime())
+
+    # "kind" (2026-09-22): lets History/the Executive Dashboard find "the latest Switches &
+    # Routers Report" the same way every other estate's own kind literal already does.
+    report_content = {
+        "kind": "routers",
+        "overview": snapshot.overview,
+        "systems": [{
+            "name": s.name, "hosts": s.hosts,
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category,
+                       "answer": annotations.get(s.name, {}).get("flags", {}).get(f.key, "")}
+                      for f in s.flags],
+            "comment": annotations.get(s.name, {}).get("comment", ""),
+        } for s in snapshot.systems],
+    }
+
+    # Email path: send first — only record + consume the snapshot if it actually went out,
+    # same contract every other generate view here follows.
+    subject = ""
+    if action == "email":
+        try:
+            subject = network.email_windows_report(
+                snapshot, data, recipients=recipients, author=author,
+                filename=filename, title="ROUTERS REPORT")
+        except EmailNotConfigured as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=500)
+        except Exception as exc:   # noqa: BLE001 — SMTP/network errors surfaced to the admin
+            return render(request, "reports/error.html", {
+                "detail": f"Could not send the e-mail: {exc}",
+            }, status=502)
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        delivery=action, recipients=recipients_raw,
+        annotations=annotations, report_content=report_content,
+        immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
+        summary_comment=summary_comment,
+    )
+
+    if action == "email":
+        return render(request, "reports/sent.html", {
+            "recipients": recipients, "author": author,
+            "filename": filename, "subject": subject,
+        })
+
+    resp = HttpResponse(
+        data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
+@never_cache
+@login_required
+def wireless_controller_form(request):
+    """The Wireless Controller Report's own landing page (2026-09-23, split out of the
+    old combined Switches & Routers Report on request: "the one without poe wireless
+    controller... put it in its own report called wireless controller"). Scoped to
+    network.wireless_controller_device_keys() -- today exactly one device, hre-wlc-02
+    (a virtual C9800-CL with no PoE/PSU/fan of its own).
+
+    Dual-role visibility, same idiom as active_directory_form: owned by Network Admin
+    (this is squarely their estate), Infrastructure Admin has view access too (same
+    precedent as the combined report this replaces).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+    try:
+        keys = network.wireless_controller_device_keys()
+        devices = [d for d in network.device_inventory() if d["key"] in keys]
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    open_seconds = _open_report_seconds(request, "wireless_controller")
+    open_keys = (request.session.get("wireless_controller_devices") or []) if open_seconds else []
+    by_key = {d["key"]: d for d in devices}
+    return render(request, "reports/wireless_controller_select.html", {
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
+        "total_interfaces": sum(d["iface_count"] for d in devices),
+        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
+        "open_seconds": open_seconds,
+    })
+
+
+@login_required
+def wireless_controller_report(request):
+    """The annotation screen for the SELECTED wireless controller -- network_report's own
+    twin (same simple shape, no windows-exporter connect-strip machinery needed), scoped to
+    network.wireless_controller_device_keys() and posting to its own wireless_controller_generate.
+
+    GET: ALWAYS captures a fresh live snapshot -- same rule network_report's own docstring
+    establishes and for the same reason (a Refresh click, or any other way of landing back on
+    this URL, must never quietly serve numbers that aged past the countdown).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    if request.method == "POST":
+        keys = [k for k in request.POST.getlist("include_device") if k]
+        known = network.wireless_controller_device_keys()
+        keys = [k for k in keys if k in known]
+        if not keys:
+            messages.error(request, "Select at least one device to include in the report.")
+            return redirect("wireless_controller_form")
+        request.session["wireless_controller_devices"] = keys
+        request.session.pop("wireless_controller_token", None)   # new selection -> fresh capture
+        return redirect("wireless_controller_report")
+
+    keys = request.session.get("wireless_controller_devices")
+    if not keys:
+        return redirect("wireless_controller_form")
+
+    token = uuid.uuid4().hex
+    try:
+        snapshot = network.capture_snapshot(token, only=set(keys), mode="switches_routers")
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+        request.session.pop("wireless_controller_devices", None)
+        return redirect("wireless_controller_form")
+    snapshot.systems.sort(key=lambda s: s.name.lower())
+    cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+    request.session["wireless_controller_token"] = token
+    request.session["wireless_controller_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+
+    elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
+    remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    return render(request, "reports/form.html", {
+        "snapshot": snapshot,
+        "token": token,
+        "selected_count": len(snapshot.systems),
+        "suggested_author": _profile_author(request.user),
+        "suggested_recipients": default_recipients(),
+        "recipient_options": recipient_options(),
+        "default_filename": network.wireless_controller_report_filename(
+            getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
+        "alpha_grouped": True,
+        "letter_index": sorted({s.name[0].upper() for s in snapshot.systems if s.name}),
+        "ttl_minutes": settings.SNAPSHOT_TTL // 60,
+        "ttl_seconds": settings.SNAPSHOT_TTL,
+        "remaining_seconds": remaining,
+        "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        "dash_title": "Wireless Controller Report",
+        "subject": "device",
+        "draft_key": "draft:wireless_controller:" + ",".join(sorted(keys)),
+        "picker_url": reverse("wireless_controller_form"),
+        "generate_url": reverse("wireless_controller_generate"),
+        "generate_default": reverse("generate"),
+    })
+
+
+@login_required
+@require_POST
+def wireless_controller_generate(request):
+    """Build the Wireless Controller Report from the reviewed snapshot -- network_generate's own twin, calling network.build_report with title="Wireless Controller Report" (NOT the
+    default "Infrastructure Report" -- see build_report's own docstring) so the downloaded
+    xlsx never claims to be a report it isn't."""
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    token = request.POST.get("token", "") or request.session.get("wireless_controller_token", "")
+    snapshot = cache.get(_cache_key(token)) if token else None
+    if snapshot is None:
+        messages.error(request, "That snapshot has expired. Capture a fresh one.")
+        return redirect("wireless_controller_report")
+
+    action = request.POST.get("action", "download")
+    if action not in ("download", "email"):
+        action = "download"
+    recipients_raw = request.POST.get("recipients", "").strip()
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    if action == "email" and not recipients:
+        return render(request, "reports/error.html", {
+            "detail": "Add at least one recipient to e-mail the report.",
+        }, status=400)
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    annotations: dict = {}
+    for si, sysvm in enumerate(snapshot.systems):
+        answers = {}
+        for fi, flag in enumerate(sysvm.flags):
+            ans = request.POST.get(f"fix__{si}__{fi}", "")
+            if ans in ("Yes", "No"):
+                answers[flag.key] = ans
+        comment = request.POST.get(f"comment__{si}", "").strip()
+        if answers or comment:
+            annotations[sysvm.name] = {"flags": answers, "comment": comment}
+
+    data = network.build_report(snapshot, theme=theme, author=author,
+                                annotations=annotations, summary_comment=summary_comment,
+                                title="Wireless Controller Report")
+    filename = network.wireless_controller_report_filename(theme, timezone.localtime())
+
+    # "kind" (2026-09-22): lets History/the Executive Dashboard find "the latest Switches &
+    # Routers Report" the same way every other estate's own kind literal already does.
+    report_content = {
+        "kind": "wireless_controller",
+        "overview": snapshot.overview,
+        "systems": [{
+            "name": s.name, "hosts": s.hosts,
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category,
+                       "answer": annotations.get(s.name, {}).get("flags", {}).get(f.key, "")}
+                      for f in s.flags],
+            "comment": annotations.get(s.name, {}).get("comment", ""),
+        } for s in snapshot.systems],
+    }
+
+    # Email path: send first — only record + consume the snapshot if it actually went out,
+    # same contract every other generate view here follows.
+    subject = ""
+    if action == "email":
+        try:
+            subject = network.email_windows_report(
+                snapshot, data, recipients=recipients, author=author,
+                filename=filename, title="WIRELESS CONTROLLER REPORT")
+        except EmailNotConfigured as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=500)
+        except Exception as exc:   # noqa: BLE001 — SMTP/network errors surfaced to the admin
+            return render(request, "reports/error.html", {
+                "detail": f"Could not send the e-mail: {exc}",
+            }, status=502)
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        delivery=action, recipients=recipients_raw,
+        annotations=annotations, report_content=report_content,
+        immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
+        summary_comment=summary_comment,
+    )
+
+    if action == "email":
+        return render(request, "reports/sent.html", {
+            "recipients": recipients, "author": author,
+            "filename": filename, "subject": subject,
+        })
+
+    resp = HttpResponse(
+        data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
+@never_cache
+@login_required
+def access_switches_form(request):
+    """The Access Switches Report's own landing page -- the renamed, narrowed successor
+    to the old combined Switches & Routers Report (2026-09-23, on request: "this
+    current report rename it to Access switches"). Scoped to
+    network.access_switches_device_keys() -- every switch except the one core switch
+    (see is_access_switch's own comment), 36 devices today.
+
+    Dual-role visibility, same idiom as active_directory_form: owned by Network Admin
+    (this is squarely their estate), Infrastructure Admin has view access too (same
+    precedent as the combined report this replaces).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+    try:
+        keys = network.access_switches_device_keys()
+        devices = [d for d in network.device_inventory() if d["key"] in keys]
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    open_seconds = _open_report_seconds(request, "access_switches")
+    open_keys = (request.session.get("access_switches_devices") or []) if open_seconds else []
+    by_key = {d["key"]: d for d in devices}
+    return render(request, "reports/access_switches_select.html", {
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
+        "total_interfaces": sum(d["iface_count"] for d in devices),
+        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
+        "open_seconds": open_seconds,
+    })
+
+
+@login_required
+def access_switches_report(request):
+    """The annotation screen for the SELECTED access switches -- network_report's own
+    twin (same simple shape, no windows-exporter connect-strip machinery needed), scoped to
+    network.access_switches_device_keys() and posting to its own access_switches_generate.
+
+    GET: ALWAYS captures a fresh live snapshot -- same rule network_report's own docstring
+    establishes and for the same reason (a Refresh click, or any other way of landing back on
+    this URL, must never quietly serve numbers that aged past the countdown).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    if request.method == "POST":
+        keys = [k for k in request.POST.getlist("include_device") if k]
+        known = network.access_switches_device_keys()
+        keys = [k for k in keys if k in known]
+        if not keys:
+            messages.error(request, "Select at least one device to include in the report.")
+            return redirect("access_switches_form")
+        request.session["access_switches_devices"] = keys
+        request.session.pop("access_switches_token", None)   # new selection -> fresh capture
+        return redirect("access_switches_report")
+
+    keys = request.session.get("access_switches_devices")
+    if not keys:
+        return redirect("access_switches_form")
+
+    token = uuid.uuid4().hex
+    try:
+        snapshot = network.capture_snapshot(token, only=set(keys), mode="switches_routers")
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+        request.session.pop("access_switches_devices", None)
+        return redirect("access_switches_form")
+    snapshot.systems.sort(key=lambda s: s.name.lower())
+    cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+    request.session["access_switches_token"] = token
+    request.session["access_switches_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+
+    elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
+    remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    return render(request, "reports/form.html", {
+        "snapshot": snapshot,
+        "token": token,
+        "selected_count": len(snapshot.systems),
+        "suggested_author": _profile_author(request.user),
+        "suggested_recipients": default_recipients(),
+        "recipient_options": recipient_options(),
+        "default_filename": network.access_switches_report_filename(
+            getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
+        "alpha_grouped": True,
+        "letter_index": sorted({s.name[0].upper() for s in snapshot.systems if s.name}),
+        "ttl_minutes": settings.SNAPSHOT_TTL // 60,
+        "ttl_seconds": settings.SNAPSHOT_TTL,
+        "remaining_seconds": remaining,
+        "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        "dash_title": "Access Switches Report",
+        "subject": "device",
+        "draft_key": "draft:access_switches:" + ",".join(sorted(keys)),
+        "picker_url": reverse("access_switches_form"),
+        "generate_url": reverse("access_switches_generate"),
+        "generate_default": reverse("generate"),
+    })
+
+
+@login_required
+@require_POST
+def access_switches_generate(request):
+    """Build the Access Switches Report from the reviewed snapshot -- network_generate's own twin, calling network.build_report with title="Access Switches Report" (NOT the
+    default "Infrastructure Report" -- see build_report's own docstring) so the downloaded
+    xlsx never claims to be a report it isn't."""
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    token = request.POST.get("token", "") or request.session.get("access_switches_token", "")
+    snapshot = cache.get(_cache_key(token)) if token else None
+    if snapshot is None:
+        messages.error(request, "That snapshot has expired. Capture a fresh one.")
+        return redirect("access_switches_report")
+
+    action = request.POST.get("action", "download")
+    if action not in ("download", "email"):
+        action = "download"
+    recipients_raw = request.POST.get("recipients", "").strip()
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    if action == "email" and not recipients:
+        return render(request, "reports/error.html", {
+            "detail": "Add at least one recipient to e-mail the report.",
+        }, status=400)
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    annotations: dict = {}
+    for si, sysvm in enumerate(snapshot.systems):
+        answers = {}
+        for fi, flag in enumerate(sysvm.flags):
+            ans = request.POST.get(f"fix__{si}__{fi}", "")
+            if ans in ("Yes", "No"):
+                answers[flag.key] = ans
+        comment = request.POST.get(f"comment__{si}", "").strip()
+        if answers or comment:
+            annotations[sysvm.name] = {"flags": answers, "comment": comment}
+
+    data = network.build_report(snapshot, theme=theme, author=author,
+                                annotations=annotations, summary_comment=summary_comment,
+                                title="Access Switches Report")
+    filename = network.access_switches_report_filename(theme, timezone.localtime())
+
+    # "kind" (2026-09-22): lets History/the Executive Dashboard find "the latest Switches &
+    # Routers Report" the same way every other estate's own kind literal already does.
+    report_content = {
+        "kind": "access_switches",
+        "overview": snapshot.overview,
+        "systems": [{
+            "name": s.name, "hosts": s.hosts,
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category,
+                       "answer": annotations.get(s.name, {}).get("flags", {}).get(f.key, "")}
+                      for f in s.flags],
+            "comment": annotations.get(s.name, {}).get("comment", ""),
+        } for s in snapshot.systems],
+    }
+
+    # Email path: send first — only record + consume the snapshot if it actually went out,
+    # same contract every other generate view here follows.
+    subject = ""
+    if action == "email":
+        try:
+            subject = network.email_windows_report(
+                snapshot, data, recipients=recipients, author=author,
+                filename=filename, title="ACCESS SWITCHES REPORT")
+        except EmailNotConfigured as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=500)
+        except Exception as exc:   # noqa: BLE001 — SMTP/network errors surfaced to the admin
+            return render(request, "reports/error.html", {
+                "detail": f"Could not send the e-mail: {exc}",
+            }, status=502)
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        delivery=action, recipients=recipients_raw,
+        annotations=annotations, report_content=report_content,
+        immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
+        summary_comment=summary_comment,
+    )
+
+    if action == "email":
+        return render(request, "reports/sent.html", {
+            "recipients": recipients, "author": author,
+            "filename": filename, "subject": subject,
+        })
 
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -1726,11 +2885,21 @@ def infra_form(request):
 
 @login_required
 def infra_report(request):
-    """The annotation screen for the SELECTED infrastructure devices — mirrors network_report
-    exactly (device picker -> capture -> the shared form.html annotation screen), not `report`:
-    the data here is network.py's Snapshot/SystemVM shape (windows-kind devices), not
-    generate_report.py's business-system Store/System shape the plain systems flow expects, so
-    this estate posts to its own infra_generate rather than the shared `generate`.
+    """The annotation screen for the SELECTED infrastructure devices — device picker -> capture
+    -> the shared form.html annotation screen, same as network_report, but posting to its own
+    infra_generate rather than the shared `generate`: the data here is network.py's Snapshot/
+    SystemVM shape (windows-kind devices), not generate_report.py's business-system Store/
+    System shape the plain systems flow expects.
+
+    GET: ALWAYS captures a fresh live snapshot, the same rule `report()`'s own docstring uses
+    and for the same reason -- a plain browser refresh, or any other way of landing back on
+    this URL, must never quietly serve numbers that aged past the countdown without the admin
+    knowing. This used to reuse whatever snapshot was still sitting in the cache under the
+    session's token (added on the `fresh=1` query param, easy to land on this page without),
+    which is exactly what made a bare refresh here feel glitchy compared to the plain systems
+    report -- fixed 2026-09-17 by dropping the cache-reuse branch and matching `report()`
+    exactly: every GET is its own capture, cached under a brand-new token purely so
+    infra_generate can read it back moments later.
 
     Session key kept as "infra_report_systems" (now holding device KEYS rather than system
     names) — context.py's back-button override only checks it for truthiness, so renaming it
@@ -1758,26 +2927,19 @@ def infra_report(request):
     if not keys:
         return redirect("infra_form")
 
-    force = request.GET.get("fresh") == "1"
-    snapshot = None
-    token = request.session.get("infra_snapshot_token", "")
-    if not force and token:
-        snapshot = cache.get(_cache_key(token))
-
-    if snapshot is None:
-        token = uuid.uuid4().hex
-        try:
-            snapshot = network.capture_snapshot(token, only=set(keys), infra=True)
-        except network.NetworkUnavailable as exc:
-            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
-        if not snapshot.systems:
-            messages.error(request, "Those devices are no longer being monitored. Please choose again.")
-            request.session.pop("infra_report_systems", None)
-            return redirect("infra_form")
-        snapshot.systems.sort(key=lambda s: s.name.lower())
-        cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
-        request.session["infra_snapshot_token"] = token
-        request.session["infra_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+    token = uuid.uuid4().hex
+    try:
+        snapshot = network.capture_snapshot(token, only=set(keys), infra=True)
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+        request.session.pop("infra_report_systems", None)
+        return redirect("infra_form")
+    snapshot.systems.sort(key=lambda s: s.name.lower())
+    cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+    request.session["infra_snapshot_token"] = token
+    request.session["infra_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
 
     elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
     remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
@@ -1833,6 +2995,18 @@ def infra_generate(request):
         messages.error(request, "That snapshot has expired. Capture a fresh one.")
         return redirect("infra_report")
 
+    # 2026-09-17: this view never read `action` -- see network_generate's own comment on this
+    # exact fix, the same bug, same shared "Generate & email" button.
+    action = request.POST.get("action", "download")
+    if action not in ("download", "email"):
+        action = "download"
+    recipients_raw = request.POST.get("recipients", "").strip()
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    if action == "email" and not recipients:
+        return render(request, "reports/error.html", {
+            "detail": "Add at least one recipient to e-mail the report.",
+        }, status=400)
+
     theme = request.POST.get("theme", "").strip().lower()
     if theme not in gr.PALETTES:
         theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
@@ -1857,7 +3031,9 @@ def infra_generate(request):
         annotations=annotations, summary_comment=summary_comment)
     filename = network.infrastructure_report_filename(theme, timezone.localtime())
 
+    # "kind" (2026-09-12): lets the Executive Dashboard find "the latest Infrastructure Admin Report".
     report_content = {
+        "kind": "infrastructure",
         "overview": snapshot.overview,
         "systems": [{
             "name": s.name, "hosts": s.hosts,
@@ -1868,12 +3044,34 @@ def infra_generate(request):
         } for s in snapshot.systems],
     }
 
+    # Email path: send first — only record + consume the snapshot if it actually went out,
+    # same contract generate()'s own docstring establishes for the System Admin report.
+    subject = ""
+    if action == "email":
+        try:
+            subject = network.email_windows_report(
+                snapshot, data, recipients=recipients, author=author,
+                filename=filename, title="CLUSTER HEALTH REPORT")
+        except EmailNotConfigured as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=500)
+        except Exception as exc:   # noqa: BLE001 — SMTP/network errors surfaced to the admin
+            return render(request, "reports/error.html", {
+                "detail": f"Could not send the e-mail: {exc}",
+            }, status=502)
+
     ReportSubmission.objects.create(
         generated_by=request.user, author=author, theme=theme,
+        delivery=action, recipients=recipients_raw,
         annotations=annotations, report_content=report_content,
         immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
         summary_comment=summary_comment,
     )
+
+    if action == "email":
+        return render(request, "reports/sent.html", {
+            "recipients": recipients, "author": author,
+            "filename": filename, "subject": subject,
+        })
 
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -1928,7 +3126,13 @@ def active_directory_report(request):
     """The annotation screen for the SELECTED Active Directory devices -- infra_report's own
     twin, same network.py Snapshot/SystemVM capture and the same shared form.html annotation
     screen, just its own session keys/picker/generate endpoint so the two estates' open
-    reports never collide."""
+    reports never collide.
+
+    GET: ALWAYS captures a fresh live snapshot -- see infra_report's own docstring (2026-09-17)
+    for why: this view had the identical cache-reuse-unless-`fresh=1` branch, so form.html's
+    shared "Refresh" button (a plain reload, no query param) silently kept serving whatever
+    snapshot was cached under the session's token. Fixed the same way, for the same reason.
+    """
     if not (is_infra_admin(request.user) or is_network_admin(request.user)):
         return redirect("report_form")
 
@@ -1947,26 +3151,19 @@ def active_directory_report(request):
     if not keys:
         return redirect("active_directory_form")
 
-    force = request.GET.get("fresh") == "1"
-    snapshot = None
-    token = request.session.get("active_directory_snapshot_token", "")
-    if not force and token:
-        snapshot = cache.get(_cache_key(token))
-
-    if snapshot is None:
-        token = uuid.uuid4().hex
-        try:
-            snapshot = network.capture_snapshot(token, only=set(keys), infra=True)
-        except network.NetworkUnavailable as exc:
-            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
-        if not snapshot.systems:
-            messages.error(request, "Those devices are no longer being monitored. Please choose again.")
-            request.session.pop("active_directory_report_systems", None)
-            return redirect("active_directory_form")
-        snapshot.systems.sort(key=lambda s: s.name.lower())
-        cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
-        request.session["active_directory_snapshot_token"] = token
-        request.session["active_directory_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+    token = uuid.uuid4().hex
+    try:
+        snapshot = network.capture_snapshot(token, only=set(keys), infra=True)
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+        request.session.pop("active_directory_report_systems", None)
+        return redirect("active_directory_form")
+    snapshot.systems.sort(key=lambda s: s.name.lower())
+    cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+    request.session["active_directory_snapshot_token"] = token
+    request.session["active_directory_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
 
     elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
     remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
@@ -2023,6 +3220,18 @@ def active_directory_generate(request):
         messages.error(request, "That snapshot has expired. Capture a fresh one.")
         return redirect("active_directory_report")
 
+    # 2026-09-17: this view never read `action` -- see network_generate's own comment on this
+    # exact fix, the same bug, same shared "Generate & email" button.
+    action = request.POST.get("action", "download")
+    if action not in ("download", "email"):
+        action = "download"
+    recipients_raw = request.POST.get("recipients", "").strip()
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    if action == "email" and not recipients:
+        return render(request, "reports/error.html", {
+            "detail": "Add at least one recipient to e-mail the report.",
+        }, status=400)
+
     theme = request.POST.get("theme", "").strip().lower()
     if theme not in gr.PALETTES:
         theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
@@ -2048,7 +3257,9 @@ def active_directory_generate(request):
         report_title="ACTIVE DIRECTORY REPORT")
     filename = network.active_directory_report_filename(theme, timezone.localtime())
 
+    # "kind" (2026-09-12): lets the Executive Dashboard find "the latest Active Directory Report".
     report_content = {
+        "kind": "active_directory",
         "overview": snapshot.overview,
         "systems": [{
             "name": s.name, "hosts": s.hosts,
@@ -2059,12 +3270,34 @@ def active_directory_generate(request):
         } for s in snapshot.systems],
     }
 
+    # Email path: send first — only record + consume the snapshot if it actually went out,
+    # same contract generate()'s own docstring establishes for the System Admin report.
+    subject = ""
+    if action == "email":
+        try:
+            subject = network.email_windows_report(
+                snapshot, data, recipients=recipients, author=author,
+                filename=filename, title="ACTIVE DIRECTORY REPORT")
+        except EmailNotConfigured as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=500)
+        except Exception as exc:   # noqa: BLE001 — SMTP/network errors surfaced to the admin
+            return render(request, "reports/error.html", {
+                "detail": f"Could not send the e-mail: {exc}",
+            }, status=502)
+
     ReportSubmission.objects.create(
         generated_by=request.user, author=author, theme=theme,
+        delivery=action, recipients=recipients_raw,
         annotations=annotations, report_content=report_content,
         immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
         summary_comment=summary_comment,
     )
+
+    if action == "email":
+        return render(request, "reports/sent.html", {
+            "recipients": recipients, "author": author,
+            "filename": filename, "subject": subject,
+        })
 
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -2157,11 +3390,18 @@ _CONFIG_CHILDREN = [
     # group mechanism now also covers the unattended xlsx Active Directory Report (see
     # reports.scheduled_xlsx_reports.XLSX_REPORT_TYPES) -- url_name kept as-is, label-only.
     ("config_automated_reports", "Reporting", "Who receives which scheduled report"),
+    # 2026-09-12, on request: "I also dont see the folder exporter config in administrator
+    # role" -- unlike Prometheus/SNMP/Grafana, this is not a DB-versioned editor (this screen
+    # never writes folder_exporter.yml, it only reflects what's already on disk/running) and
+    # it's superuser-only (see _SUPERUSER_ONLY_CHILDREN below): the service it reports on is
+    # what every one of this app's OWN scheduled jobs (alert/event pollers, automated reports)
+    # runs through, so the blast radius of getting this wrong matches config_users' own.
+    ("config_folder_exporter", "Folder Exporter", "Job scheduler and monitored folders — status and install guidance"),
 ]
 #: hub cards that render grayed-out/unclickable for anyone who isn't a superuser -- the
 #: server-side gate lives on each such view itself (is_superuser check, redirect otherwise);
 #: this set only controls the HUB TILE's own presentation.
-_SUPERUSER_ONLY_CHILDREN = {"config_users"}
+_SUPERUSER_ONLY_CHILDREN = {"config_users", "config_folder_exporter"}
 
 
 def _hub_cards(children: list, active: str | None, *, viewer_is_superuser: bool = True) -> list:
@@ -2637,6 +3877,49 @@ def config_alerts(request):
             messages.success(request, f"Added “{name}”.")
         return redirect("config_alerts")
 
+    # ---- Alert Silencing: known, self-resolving findings rolled into ONE daily digest
+    # instead of individual new/reminder e-mails (2026-09-19, on request: "reduce the
+    # intrusiveness of alerts" for alerts "not being actioned at all by admins... that self
+    # resolve and then start again"). See AlertSilence's own docstring for the full design --
+    # `flag_key` is free text, matching alerting.ALERT_FLAG_SUPPRESSED's own established
+    # precedent (copy it from a fired alert e-mail or the System Admin Report's own flag
+    # list) -- there is no enumerated picker for it today. Monitoring groups only: System
+    # Alert (staleness) findings go through a completely separate pipeline
+    # (reports.system_alerts) this feature does not touch yet. ---------------------------------
+    elif section == "silence":
+        system_name = (request.POST.get("system") or "").strip()
+        flag_key = (request.POST.get("flag_key") or "").strip()
+        group_id = request.POST.get("group")
+        reason = (request.POST.get("reason") or "").strip()
+        try:
+            days = int(request.POST.get("expires_days") or "60")
+        except ValueError:
+            days = 60
+        group = AlertGroup.objects.filter(
+            pk=group_id, alert_type=AlertGroup.ALERT_TYPE_MONITORING).first()
+        if not (system_name and flag_key and group):
+            messages.error(request, "System, flag key and a Monitoring alert group are all required.")
+        elif days <= 0:
+            messages.error(request, "Expires in: enter a whole number of days greater than zero.")
+        elif AlertSilence.objects.filter(system=system_name, flag_key=flag_key, active=True).exists():
+            messages.error(request, f"{system_name} — {flag_key} is already silenced.")
+        else:
+            AlertSilence.objects.create(
+                system=system_name, flag_key=flag_key, group=group, reason=reason,
+                created_by=request.user, expires_at=timezone.now() + datetime.timedelta(days=days))
+            messages.success(request, f"Silenced {system_name} — {flag_key}. "
+                                      f"{group.name} will get a daily digest instead.")
+        return redirect("config_alerts")
+
+    elif section == "silence_toggle":
+        silence = AlertSilence.objects.filter(pk=request.POST.get("id")).first()
+        if silence:
+            silence.active = not silence.active
+            silence.save(update_fields=["active"])
+            messages.success(request, ("Re-activated " if silence.active else "Deactivated ")
+                             + f"{silence.system} — {silence.flag_key}.")
+        return redirect("config_alerts")
+
     # ---- Read-side context for every section, regardless of which one (if any) was posted ----
     # `groups` deliberately includes EVERY alert_type/alert_subtype (2026-09-05) -- ONE list
     # for the whole "Alert groups" section, with a Type column distinguishing them, rather
@@ -2646,6 +3929,8 @@ def config_alerts(request):
     grouped_alert_groups = _grouped_alert_groups(groups)
     freshness_checks = FreshnessCheck.objects.all()
     topology_systems = _topology_systems()
+    alert_silences = AlertSilence.objects.select_related("group").all()
+    monitoring_groups = groups.filter(alert_type=AlertGroup.ALERT_TYPE_MONITORING)
 
     template_rows = [{"category": cat, "label": lbl, "available": cat in alert_email_templates.FILE_BY_CATEGORY}
                      for cat, lbl in AlertGroup.CATEGORY_CHOICES]
@@ -2690,6 +3975,8 @@ def config_alerts(request):
         "size_pct": size_pct_val,
         "freshness_checks": freshness_checks,
         "topology_systems": topology_systems,
+        "alert_silences": alert_silences,
+        "monitoring_groups": monitoring_groups,
     })
 
 
@@ -2787,6 +4074,23 @@ def config_event_group_edit(request, pk):
     })
 
 
+def _automated_report_group_health(group) -> dict:
+    """Reporting's own twin of _alert_group_health -- same "glowing green halo / red halo,
+    click to see exactly what's wrong" treatment (2026-09-22, on request: "add the glowing
+    report group names so we see if there[']s reports that are configured properly....as is
+    done for alert groups"). `report_types` standing in for AlertGroup.systems as the "has
+    nothing to watch" check, matching AutomatedReportGroup's own docstring ("Empty means
+    covers nothing yet")."""
+    problems = []
+    if not group.active:
+        problems.append("Paused — nothing will fire until it's reactivated.")
+    if not group.report_types:
+        problems.append("No report types selected — it covers nothing yet.")
+    if not group.recipient_emails():
+        problems.append("No stakeholders with a valid e-mail address.")
+    return {"group": group, "is_live": not problems, "problems": problems}
+
+
 @never_cache
 @login_required
 def config_automated_reports(request):
@@ -2815,9 +4119,11 @@ def config_automated_reports(request):
         return redirect("config_automated_reports")
 
     groups = AutomatedReportGroup.objects.all()
+    health_rows = [_automated_report_group_health(g) for g in groups]
     return render(request, "reports/config_automated_reports.html", {
         **_config_context("config_automated_reports"),
         "groups": groups,
+        "health_rows": health_rows,
         # Narrative REPORT_TYPES + the xlsx family (reports.scheduled_xlsx_reports) --
         # widened here only, not in REPORT_TYPES itself: generate_automated_report.py's own
         # CLI choices must stay narrative-only (see that module's own docstring).
@@ -2940,37 +4246,288 @@ def _send_narrative_report_test(report_type: str, recipients: list) -> None:
             pass
 
 
+def _send_system_admin_report_test(recipients: list) -> None:
+    """Reporting's own fire_live equivalent for the System Admin Report xlsx type -- generates
+    the real, current estate-wide snapshot and e-mails it through the EXACT same
+    services.capture_snapshot/build_report/email_report pipeline generate_system_admin_report's
+    own scheduled run uses (2026-09-22 migration off the old standalone/ fork -- see that
+    command's own module docstring), not a second implementation. Never creates a
+    ReportSubmission row, same "never touch real history" principle _send_xlsx_report_test's
+    own docstring already established for the Active Directory twin below. `author` stays
+    "Automated" (real production value, same as generate_system_admin_report's own scheduled
+    run) -- the test marker goes in the SUBJECT only, via subject_prefix (2026-09-22, fixed
+    after a real test send arrived showing sender "Unknown": stuffing "[SYNTHETIC TEST]" into
+    `author` instead put it in the From display name, and mail_report.send_email's old raw
+    f-string From header couldn't parse the brackets, swallowing the address entirely -- see
+    mail_report.send_email's own formataddr fix. This is also just more correct on its own
+    terms: `author` becomes the xlsx's own "By" field too, and a test send's report content
+    should look identical to a real one)."""
+    token = uuid.uuid4().hex
+    snapshot = capture_snapshot(token)
+    data = build_report(snapshot, theme="dark", author="Automated",
+                        annotations={}, summary_comment="")
+    filename = default_report_filename("dark", timezone.localtime())
+    email_report(snapshot, data, recipients=recipients, author="Automated", filename=filename,
+                subject_prefix="[SYNTHETIC TEST]")
+
+
+def _send_network_reports_test(recipients: list) -> None:
+    """Reporting's own fire_live equivalent for the "network_reports" bundle -- generates all
+    four Networks Report pickers CONCURRENTLY through the EXACT same
+    generate_network_reports.JOBS/_build_one pipeline the real 07:30 scheduled run uses (not
+    a second implementation -- imported directly, same "kept in step with production" rule
+    every other test-fire function on this screen already follows), and e-mails whichever of
+    the four succeeded as one bundle via network.email_network_reports_bundle, subject marked
+    [SYNTHETIC TEST]. Never creates a ReportSubmission row for any of the four, same "never
+    touch real history" principle _send_xlsx_report_test's own docstring already established.
+
+    This is also the app's own safe way to exercise the ThreadPoolExecutor path against real
+    Prometheus without touching the real "Infrastructure reports" recipients -- clicking this
+    button IS a live concurrency test, not just a content preview.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from reports.management.commands.generate_network_reports import JOBS, _build_one
+
+    results = []
+    with ThreadPoolExecutor(max_workers=len(JOBS), thread_name_prefix="network_report_test") as pool:
+        futures = {pool.submit(_build_one, job): job for job in JOBS}
+        for future in as_completed(futures):
+            results.append(future.result())
+
+    succeeded = [r for r in results if r["ok"]]
+    failed = [r for r in results if not r["ok"]]
+    if not succeeded:
+        raise RuntimeError(
+            "All four network reports failed: "
+            + "; ".join(f"{r['title']} ({r['error']})" for r in failed))
+
+    network.email_network_reports_bundle(succeeded, recipients=recipients, author="Automated",
+                                         subject_prefix="[SYNTHETIC TEST]")
+    if failed:
+        # The send above still went out with whatever succeeded -- surface the partial
+        # failure to the admin clicking "test" rather than reporting a clean success, same
+        # honesty the real scheduled command's own CommandError gives folder_exporter's log.
+        raise RuntimeError(
+            "Sent, but " + "; ".join(f"{r['title']} failed ({r['error']})" for r in failed))
+
+
 def _send_xlsx_report_test(report_type: str, recipients: list) -> None:
     """Reporting's own fire_live equivalent for an xlsx report type -- generates the real,
-    current Active Directory Report the same way generate_active_directory_report does, sends
-    it with the subject clearly marked [SYNTHETIC TEST], and never creates a ReportSubmission
-    row (there is no `kind` field on that model to tag a test row as such anyway, so simply
-    not persisting one is the only clean option -- same "never touch real history" principle
-    as the narrative twin above)."""
+    current Active Directory Report and e-mails it through the EXACT same pipeline
+    generate_active_directory_report's own scheduled run uses (send_report/mail_report.py's
+    render_html()/analyse(), not a second implementation -- see that command's own module
+    docstring for why, 2026-09-14), subject clearly marked [SYNTHETIC TEST], and never
+    creates a ReportSubmission row (there is no `kind` field on that model to tag a test row
+    as such anyway, so simply not persisting one is the only clean option -- same "never
+    touch real history" principle as the narrative twin above). Kept in step with that
+    command deliberately: a test-fire tool that exercises a DIFFERENT code path than
+    production would be testing the wrong thing.
+
+    2026-09-17: this had fallen OUT of step with that command -- the dual Cluster Health
+    Report attachment, the extra_estate tile consolidation, and the "Infrastructure Reports"
+    title/subject rename all landed in generate_active_directory_report.py alone, so clicking
+    this group's own "test" button in the admin kept showing the OLD single-attachment,
+    AD-only output while the real 07:30 run already had every fix (on request: "I remember
+    asking you to combine the [scheduled] report... apparently none of those changes where
+    actually added to the scheduled report Active Directory report group" -- the code was
+    never lost, this specific test path just never got it in the first place). Brought back
+    in step by hand, same as before -- see that command's own comments for the full reasoning
+    behind each piece; only reproduced here, not re-derived."""
+    import dataclasses
+    import tempfile
     import uuid
+    from pathlib import Path
+
+    import mail_report as mr
+
+    if report_type == "system_admin":
+        # Simple, single-report twin -- see _send_system_admin_report_test's own docstring.
+        _send_system_admin_report_test(recipients)
+        return
+
+    if report_type == "network_reports":
+        # Simple, single-report... well, single-CALL twin -- see
+        # _send_network_reports_test's own docstring.
+        _send_network_reports_test(recipients)
+        return
 
     if report_type != "active_directory":
-        # The only xlsx type registered today (reports.scheduled_xlsx_reports.
-        # XLSX_REPORT_TYPES) -- a future second entry needs its own branch here, same as
-        # generate_active_directory_report needed its own management command rather than a
-        # generic "generate any xlsx type" dispatcher.
+        # Every OTHER xlsx type registered (reports.scheduled_xlsx_reports.XLSX_REPORT_TYPES)
+        # needs its own branch here, same as generate_active_directory_report needed its own
+        # management command rather than a generic "generate any xlsx type" dispatcher.
         raise ValueError(f"No test generator wired up for xlsx report type {report_type!r}.")
 
+    theme, author = "dark", "Automated"
     only = {d["key"] for d in network.DEVICES if d.get("system") in network.AD_SYSTEMS}
     snapshot = network.capture_snapshot(uuid.uuid4().hex, only=only, infra=True)
     data = network.build_infrastructure_report(
-        snapshot, theme="dark", author="Automated", annotations={}, summary_comment="",
+        snapshot, theme=theme, author=author, annotations={}, summary_comment="",
         report_title="ACTIVE DIRECTORY REPORT")
-    filename = network.active_directory_report_filename("dark", timezone.localtime())
-    send_xlsx_report_bundle(recipients, reports=[{
-        "type": report_type,
-        "title": f"[SYNTHETIC TEST] {XLSX_REPORT_TYPES[report_type]['label']}",
-        "filename": filename,
-        "overview": snapshot.overview,
-        "systems": [{"name": s.name, "hosts": s.hosts, "flags": [], "comment": ""}
-                   for s in snapshot.systems],
-        "xlsx_bytes": data,
-    }])
+    filename = network.active_directory_report_filename(theme, timezone.localtime())
+
+    # Second, best-effort attachment -- same as generate_active_directory_report's own (see
+    # that command's module docstring): a failure here must not break the AD-alone send.
+    infra_data = infra_filename = infra_snapshot = None
+    infra_only = {d["key"] for d in network.DEVICES
+                 if d.get("kind") == "windows" and d.get("system") not in network.AD_SYSTEMS}
+    try:
+        infra_snapshot = network.capture_snapshot(uuid.uuid4().hex, only=infra_only, infra=True)
+        infra_data = network.build_infrastructure_report(
+            infra_snapshot, theme=theme, author=author, annotations={}, summary_comment="")
+        infra_filename = network.infrastructure_report_filename(theme, timezone.localtime())
+    except Exception:   # noqa: BLE001 -- best-effort, see generate_active_directory_report's own
+        infra_data = infra_filename = infra_snapshot = None
+
+    cfg = gr.load_config()
+    prom = gr.Prometheus(cfg.prom, cfg.http_timeout, getattr(cfg, "verify_tls", True))
+    ad_systems = gr.load_topology(cfg.prometheus_yml, scope="ad")
+    ad_store = gr.capture(prom, ad_systems, cfg)
+    # Same fixes as generate_active_directory_report's own real scheduled run (2026-09-21, see
+    # that command's own comments) -- kept in step deliberately, same as this whole function's
+    # own docstring already explains for every other piece: web links scoped down to AD's own
+    # (none), and WARN raised to 80 to match network.py's own CPU/RAM/disk amber threshold
+    # used everywhere else in the Infrastructure/AD realm, not mail_report.py's business-
+    # estate-oriented 75.
+    gr.scope_links_to_systems(ad_store, ad_systems)
+    ad_cfg = dataclasses.replace(cfg, chip_amber=80)
+    unreach, crit, warn, nodata = mr.analyse(ad_store, ad_systems, cfg=ad_cfg)
+
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    mailcfg["from_name"] = "RBZ Monitoring Console · Reporting"
+    mailcfg["author"] = author
+    mailcfg["grafana"] = cfg.grafana
+    mailcfg["prom"] = cfg.prom
+    mailcfg["elevated"] = cfg.overview_threshold
+    mailcfg["report_url"] = "https://monitoring.rbz.co.zw"
+    mailcfg["attachments"] = [{
+        "name": filename, "theme": theme,
+        "label": "the complete Active Directory Report",
+        "detail": "(Services / Memory / Disk / Replication / NTP per domain controller)",
+    }]
+    attachment_names = [filename]
+    if infra_data is not None:
+        mailcfg["attachments"].append({
+            "name": infra_filename, "theme": theme,
+            "label": "the complete Cluster Health Report",
+            "detail": "(Services / Memory / Disk / Storage volumes per cluster node)",
+        })
+        attachment_names.append(infra_filename)
+
+    infra_immediate = infra_snapshot.overview.get("immediate", []) if infra_snapshot else []
+    components_down = next(
+        (int(str(t["value"]).split(" | ")[0]) for t in infra_immediate
+        if t["label"] == "Components down"), 0)
+    # extra_disk/extra_disk_total now read "Storage critical" (immediate tier), not "Storage
+    # at capacity" -- that watch-tier tile is GONE (2026-09-18, on request: "storage capacity
+    # and storage critical are the same metric... combine every occurrence", confirmed after a
+    # first pass: "infrastructure still views these as separate" -- see network._infra_
+    # overview's own comment on the removal). "Storage critical" is excluded from
+    # immediate_tiles' own generic "others" loop below for the same reason "Components down"/
+    # "Nodes down" already are: it's merged into the AD report's own "High disk usage" tile via
+    # extra_disk AND still gets its own dedicated red banner (storage_critical_items /
+    # mail_report._cluster_storage_critical_block) -- rendering it a THIRD time as a plain
+    # generic tile here would be exactly the redundancy this whole change is about removing.
+    extra_disk = next((int(str(t["value"]).split(" | ")[0]) for t in infra_immediate
+                       if t["label"] == "Storage critical"), 0)
+    extra_disk_total = next((int(str(t["value"]).split(" | ")[1]) for t in infra_immediate
+                             if t["label"] == "Storage critical"), 0)
+    immediate_tiles = [t for t in infra_immediate
+                      if t["label"] not in ("Components down", "Nodes down", "Storage critical")]
+    infra_watch = infra_snapshot.overview.get("watch", []) if infra_snapshot else []
+    def _tile_num(label: str) -> int:
+        return next((int(str(t["value"]).split(" | ")[0]) for t in infra_watch
+                    if t["label"] == label), 0)
+    extra_cpu = _tile_num("High CPU")
+    extra_ram = _tile_num("High memory")
+    watch_tiles = [t for t in infra_watch if t["label"] not in ("High CPU", "High memory")]
+    # storage_critical_items (2026-09-17) -- see network.critical_disk_items' own docstring;
+    # kept in step with generate_active_directory_report's own identical addition.
+    storage_critical_items = network.critical_disk_items(infra_snapshot) if infra_snapshot else []
+    # cluster_count/cluster_nodes/total_devices -- see generate_active_directory_report's own
+    # identical fix and render_html's own docstring on extra_estate for why these three are
+    # separate keys now (Standalone Servers had been inflating cluster_count/cluster_nodes).
+    by_name = {d["name"]: d for d in network.DEVICES}
+    cluster_count = (sum(1 for s in infra_snapshot.systems if by_name.get(s.name, {}).get("cluster"))
+                     if infra_snapshot else 0)
+    cluster_nodes = len(infra_snapshot._hci_nodes) if infra_snapshot else 0
+    total_devices = infra_snapshot.hosts_count if infra_snapshot else 0
+    extra_estate = ({"cluster_count": cluster_count,
+                    "cluster_nodes": cluster_nodes,
+                    "total_devices": total_devices,
+                    "extra_down": components_down,
+                    "extra_cpu": extra_cpu, "extra_ram": extra_ram,
+                    "extra_disk": extra_disk, "extra_disk_total": extra_disk_total,
+                    "storage_critical_items": storage_critical_items,
+                    "immediate_tiles": immediate_tiles, "watch_tiles": watch_tiles}
+                   if infra_snapshot is not None else None)
+
+    infra_red = infra_snapshot.immediate_count if infra_snapshot else 0
+    infra_amber = infra_snapshot.watch_count if infra_snapshot else 0
+    if unreach:
+        sev = f"{len(unreach)} unreachable"
+    elif crit or infra_red:
+        parts = ([f"{len(crit)} AD critical"] if crit else []) + \
+               ([f"{infra_red} cluster critical"] if infra_red else [])
+        sev = " · ".join(parts)
+    elif warn or infra_amber:
+        parts = ([f"{len(warn)} AD warning"] if warn else []) + \
+               ([f"{infra_amber} cluster warning"] if infra_amber else [])
+        sev = " · ".join(parts)
+    else:
+        sev = "all healthy"
+    report_names = "Infrastructure Reports" if infra_data is not None else "Active Directory Report"
+    subject = f"[SYNTHETIC TEST] {report_names} — {timezone.localdate():%d %b %Y} — {sev}"
+    # Same fixes as generate_active_directory_report's own real scheduled run (2026-09-21, see
+    # that command's own comments) -- kept in step deliberately.
+    from .models import SystemAlertFinding
+
+    def _age_str(seconds: float) -> str:
+        days, rem = divmod(max(0, int(seconds)), 86400)
+        hours, rem = divmod(rem, 3600)
+        return f"{days}d {hours}h" if days else f"{hours}h {rem // 60}m"
+
+    stale_systems = {s.name for s in ad_systems}
+    if infra_snapshot is not None:
+        stale_systems |= {s.name for s in infra_snapshot.systems}
+    _now = timezone.now()
+    stale_metrics = [
+        (f"{f.freshness_check.system} · {f.freshness_check.name}",
+         f"not updated in {_age_str((_now - f.first_seen_at).total_seconds())}")
+        for f in SystemAlertFinding.objects.filter(
+            freshness_check__system__in=stale_systems, resolved_at__isnull=True)
+            .select_related("freshness_check")
+    ]
+    stale_metrics += [
+        (sysvm.name, f.text) for sysvm in snapshot.systems for f in sysvm.flags
+        if f.key == "win_stale_but_pinging"
+    ]
+    html_body = mr.render_html(ad_store, ad_systems, unreach, crit, warn, nodata, mailcfg,
+                               title=report_names.upper(), system_label="Devices",
+                               show_backups=False, show_web_links=False, show_swift=False,
+                               show_cob=False, show_certs=False, show_queues=False,
+                               extra_estate=extra_estate, stale_metrics=stale_metrics)
+    text_body = mr.plain_summary(unreach, crit, warn, nodata, mailcfg["report_url"], attachment_names)
+
+    tmpdir = tempfile.mkdtemp(prefix="ad_report_test_")
+    attachments = [Path(tmpdir) / filename]
+    if infra_data is not None:
+        attachments.append(Path(tmpdir) / infra_filename)
+    try:
+        attachments[0].write_bytes(data)
+        if infra_data is not None:
+            attachments[1].write_bytes(infra_data)
+        mr.send_email(mailcfg, recipients, subject, html_body, text_body, attachments)
+    finally:
+        for a in attachments:
+            try:
+                a.unlink()
+            except OSError:
+                pass
+        try:
+            Path(tmpdir).rmdir()
+        except OSError:
+            pass
 
 
 @login_required
@@ -3650,13 +5207,14 @@ def _role_scopes_context() -> dict:
     see config_roles' own docstring for why all three still exist) so whichever URL a request
     lands on, the Role scopes section shows the same real data."""
     systems = _topology_systems()
-    mapped = {s.role: set(s.systems or []) for s in RoleScope.objects.all()}
+    mapped = {s.role: s for s in RoleScope.objects.all()}
     rows = [{
         "role": role,
         "icon": role_icon(role),
         "description": ROLE_DESCRIPTIONS.get(role, ""),
-        "chosen": mapped.get(role, set()),
-        "unscoped": not mapped.get(role),
+        "chosen": set(mapped[role].systems or []) if role in mapped else set(),
+        "unscoped": not (mapped.get(role) and mapped[role].systems),
+        "can_edit_own_alert_groups": bool(mapped.get(role) and mapped[role].can_edit_own_alert_groups),
     } for role in ROLE_NAMES]
     return {"rows": rows, "systems": systems}
 
@@ -3684,6 +5242,7 @@ def config_role_scopes(request):
             chosen = [s for s in request.POST.getlist(f"systems__{role}") if s in systems]
             scope, _ = RoleScope.objects.get_or_create(role=role)
             scope.systems = chosen
+            scope.can_edit_own_alert_groups = bool(request.POST.get(f"can_edit_own_alert_groups__{role}"))
             scope.updated_by = request.user
             scope.save()
         messages.success(request, "Role scopes saved — they apply the next time a role is selected.")
@@ -3704,16 +5263,19 @@ def config_alert_group_edit(request, pk):
     policy (minimum severity, re-notify behaviour, which metric categories) — all
     admin-configurable, on purpose, so the organization's own idea of "who owns what" and
     "what to page them for" is never hardcoded here."""
-    denied = _require_admin(request)
-    if denied:
-        return denied
     group = get_object_or_404(AlertGroup, pk=pk)
+    if not can_edit_alert_group(request.user, group):
+        return redirect("report_form")
+    is_full_admin = is_role_admin(request.user)
+    can_delete = can_delete_alert_group(request.user)
     systems = _topology_systems()
     users = get_user_model().objects.filter(is_active=True).order_by("username")
     valid_categories = {k for k, _ in AlertGroup.CATEGORY_CHOICES}
 
     if request.method == "POST":
         if request.POST.get("action") == "delete":
+            if not can_delete:
+                return redirect("config_alert_group_edit", pk=group.pk)
             name = group.name
             group.delete()
             messages.success(request, f"Removed “{name}” and its notification history.")
@@ -3824,6 +5386,8 @@ def config_alert_group_edit(request, pk):
                     "imminent_reminder_value": imminent_raw,
                     "weekday_choices": _WEEKDAY_CHOICES,
                     "category_headers": _category_headers(),
+                    "health": _alert_group_health(group),
+                    "can_delete": can_delete, "can_remove_stakeholders": is_full_admin,
                 })
             group.reminder_minutes = minutes
             group.imminent_reminder_minutes = imminent_minutes
@@ -3865,18 +5429,42 @@ def config_alert_group_edit(request, pk):
         if bad:
             messages.error(request, "Dropped invalid address(es): " + ", ".join(bad))
 
+        # Sub Admin (or any role opted into can_edit_own_alert_groups): add-only stakeholders
+        # -- an unchecked EXISTING user or a dropped existing e-mail never actually leaves the
+        # group, it's just a union with whatever's already there (2026-09-18, on request: "he
+        # can add but not remove"). A full Administrator's save is a real replacement, same as
+        # always.
+        new_user_ids = set(chosen_user_ids)
+        new_emails = set(valid)
+        if not is_full_admin:
+            new_user_ids |= set(group.users.values_list("pk", flat=True))
+            new_emails |= set(group.emails or [])
+
         group.name = name
         group.systems = chosen_systems
         group.categories = chosen_categories
-        group.emails = sorted(set(valid))
+        group.emails = sorted(new_emails)
         group.active = request.POST.get("active") == "on"
         group.updated_by = request.user
         group.save()
-        group.users.set(get_user_model().objects.filter(pk__in=chosen_user_ids))
+        group.users.set(get_user_model().objects.filter(pk__in=new_user_ids))
         # State what actually landed, not just "Saved." -- the reported confusion was not
-        # knowing whether an e-mail was really kept after a save.
-        messages.success(request, f"Saved — {len(group.emails)} plain e-mail address(es), "
-                                  f"{group.users.count()} app-user stakeholder(s) on file.")
+        # knowing whether an e-mail was really kept after a save. An unchecked "Stakeholders"
+        # box submits nothing at all (plain HTML checkbox behaviour), so a save that touches
+        # only Name/Systems/When-to-fire silently zeroes .users right along with them if it
+        # was ever non-empty -- traced 2026-09-14 as exactly how "Innocent Nyama" lost its one
+        # stakeholder (re-saved from a browser tab that had loaded the page before the
+        # stakeholder was added, so its form still showed the checkbox unticked). A plain
+        # green "Saved" here is how that went unnoticed both times -- this is now a warning
+        # instead whenever the save leaves an ACTIVE group with nobody to actually notify.
+        recipients_now = group.recipient_emails()
+        summary = (f"{len(group.emails)} plain e-mail address(es), "
+                  f"{group.users.count()} app-user stakeholder(s) on file.")
+        if group.active and not recipients_now:
+            messages.warning(request, f"Saved — but {summary} This group will not notify "
+                                      f"anyone until it has at least one valid stakeholder.")
+        else:
+            messages.success(request, f"Saved — {summary}")
         return redirect("config_alert_group_edit", pk=group.pk)
 
     schedule_minutes = group.effective_reminder_minutes
@@ -3893,6 +5481,29 @@ def config_alert_group_edit(request, pk):
         "system_reminder_value": _seconds_to_duration_str(group.effective_system_reminder_minutes * 60),
         "weekday_choices": _WEEKDAY_CHOICES,
         "category_headers": _category_headers(),
+        "health": _alert_group_health(group),
+        "can_delete": can_delete, "can_remove_stakeholders": is_full_admin,
+    })
+
+
+@never_cache
+@login_required
+def my_alert_groups(request):
+    """A narrow, Sub-Admin-shaped alternative to the full Alerting hub (config_alerts) --
+    just the groups screen's own list, filtered to the groups the signed-in user actually
+    belongs to (a full Administrator sees every group, same as the hub's own list, since
+    nothing here is a restriction for them). Deliberately not a section of config_alerts
+    itself: that hub also holds per-alert thresholds, templates and System Alerting config
+    that a Sub Admin -- who can edit at most a couple of groups they're a stakeholder on --
+    should never see (2026-09-18, on request: "create a weaker admin role... access their
+    own alert group any alert group they are a part off and modify it")."""
+    if not can_reach_my_alert_groups(request.user):
+        return redirect("report_form")
+    is_full_admin = is_role_admin(request.user)
+    groups = AlertGroup.objects.all() if is_full_admin else request.user.alert_groups.all()
+    return render(request, "reports/my_alert_groups.html", {
+        "grouped_alert_groups": _grouped_alert_groups(groups),
+        "is_full_admin": is_full_admin,
     })
 
 
@@ -4195,6 +5806,37 @@ def config_users(request):
 
 
 @login_required
+def config_folder_exporter(request):
+    """folder_exporter's own status/mapping screen (2026-09-12, on request: "I also dont see
+    the folder exporter config in administrator role"). Superuser-only, same reasoning as
+    config_users -- the service this reports on is what every one of this app's OWN scheduled
+    jobs (alert/event pollers, automated reports) runs through.
+
+    Deliberately READ-ONLY and non-executing (on request, after the risk was laid out: the
+    project has no releases/tags/signing, so "install the latest version" would mean running
+    unverified code from a public GitHub repo as a privileged Windows service): this screen
+    only ever detects and shows the exact commands to run by hand, never clones/builds/
+    installs anything itself. See folder_exporter_admin's own module docstring."""
+    if not is_superuser(request.user):
+        messages.error(request, "Only a superuser may view Folder Exporter status.")
+        return redirect("configuration")
+
+    installed = folder_exporter_admin.is_installed()
+    jobs, folders = folder_exporter_admin.read_jobs_and_folders() if installed else ([], [])
+    return render(request, "reports/config_folder_exporter.html", {
+        **_config_context("config_folder_exporter", viewer_is_superuser=True),
+        "installed": installed,
+        "version": folder_exporter_admin.installed_version(),
+        "mtime": folder_exporter_admin.installed_mtime(),
+        "service_status": folder_exporter_admin.service_status(),
+        "jobs": jobs,
+        "folders": folders,
+        "latest": folder_exporter_admin.latest_commit_info(),
+        "repo_url": folder_exporter_admin.REPO_URL,
+    })
+
+
+@login_required
 def config_edit_user(request, pk):
     """Superuser-only: a full editing screen for one account (on request, 2026-09-04: "give
     superuser the ability to modify existing user profile such as change email and
@@ -4480,7 +6122,7 @@ def no_role(request):
     if request.method == "POST":
         created = 0
         for r in request.POST.getlist("roles"):
-            if r in ROLE_NAMES and r not in my_roles and r not in pending:
+            if r in SELECTABLE_ROLE_NAMES and r not in my_roles and r not in pending:
                 RoleRequest.objects.create(user=request.user, role=r)
                 created += 1
         if created:
@@ -4489,7 +6131,7 @@ def no_role(request):
             messages.error(request, "Select at least one new role to request.")
         return redirect("no_role")
 
-    roles = [{"name": r, "has": r in my_roles, "pending": r in pending} for r in ROLE_NAMES]
+    roles = [{"name": r, "has": r in my_roles, "pending": r in pending} for r in SELECTABLE_ROLE_NAMES]
     return render(request, "reports/no_role.html", {"roles": roles, "has_any": bool(my_roles)})
 
 

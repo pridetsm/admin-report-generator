@@ -1,8 +1,9 @@
 # HTTP → HTTPS Migration — 2026-08-14
 
-**Status:** Prometheus, Grafana, and the webapp are all now serving HTTPS, sharing one
-self-signed cert. A real wildcard cert has been issued and is mid-swap-in (blocked — see
-"Open items"). Written the same day this work happened, for whoever picks it up next.
+**Status:** Prometheus, Grafana, and the webapp are all now serving HTTPS on a real,
+CA-issued wildcard cert (`*.rbz.co.zw`, Sectigo OV, valid to 2027-02-26) — see §10 for the
+completed swap-in. Written the same day the original work happened, for whoever picks it up
+next; §10 added 2026-09-21 once the cert swap that used to block this actually went in.
 
 ---
 
@@ -267,29 +268,17 @@ requests here) and a signed cert came back the same day as a zip,
 
 ## 8. Open items / not yet done
 
-- **Cert swap is BLOCKED.** The issued leaf cert's public key does **not** match the private
-  key generated alongside our CSR (`wildcard-rbz-co-zw.key`) — confirmed by comparing RSA
-  modulus MD5 hashes, they differ. No private key was included in the zip either. This means
-  whoever actually submitted the request to the CA generated a *different* key/CSR pair than
-  the one made in this session (§7) — quite possibly via IIS's own "Create Certificate
-  Request" wizard, which keeps its private key in the Windows certificate store's pending
-  **Certificate Enrollment Requests** area rather than as a file on disk. **Next step:** check
-  `Cert:\LocalMachine\REQUEST` for a pending request matching `CN=*.rbz.co.zw` — if found, IIS's
-  "Complete Certificate Request" flow (or `certreq -accept`) should pair it with the issued
-  cert automatically. This was interrupted mid-investigation and needs to be picked up.
+- ~~Cert swap is BLOCKED...~~ **Resolved 2026-09-21 — see §10.** The original zip's cert
+  genuinely didn't pair with any key we held (confirmed at the time by comparing RSA modulus
+  MD5 hashes) — turned out to be a stale delivery from the original August request, not a new
+  one. A fresh zip containing BOTH the leaf cert and its actual matching private key
+  (`privatenew.pem`) resolved it; see §10 for the swap itself.
 - **Grafana and Prometheus do not have an HTTP→HTTPS redirect** the way the webapp now does.
   Both can only serve one protocol at a time on their port, so replicating the redirect would
   mean moving their real service to a different port and standing up an IIS site pair for
   each — more invasive, and lower priority since neither is normally typed directly into a
   browser by end users (Prometheus especially — it's mostly hit by Grafana and the report
   scripts, not humans).
-- **Once a working real cert is in place**, it needs to be swapped into three places:
-  1. `C:\metrics\prometheus\server.crt` / `server.key` (Prometheus, `web-config.yml`)
-  2. Same two file paths, referenced by Grafana's `custom.ini` (no change needed there if the
-     new cert reuses the same file paths — just overwrite the files and restart both services)
-  3. Re-imported into the IIS certificate store (`Cert:\LocalMachine\My`) and rebound to
-     `MonitoringProxy`'s `:443` binding (`$binding.AddSslCertificate(...)`), replacing
-     thumbprint `77DC3C03325C55F9305420FCA058CD99FCB5FB6D`
 - The **`.gitignore`d config files** (`webapp/.env`, `send_report/config.ini` — both copies)
   hold the operative TLS settings (`verify_tls`, HTTPS URLs) and are **not** captured by git
   at all. If this server is ever rebuilt from the repo alone, all of §4's `config.ini` changes
@@ -312,3 +301,45 @@ requests here) and a signed cert came back the same day as a zip,
 
 If this server is rebuilt, **all of the above must be redone from this document** — none of it
 is recoverable from `git pull` alone.
+
+## 10. The real wildcard cert swap — 2026-09-21
+
+What finally unblocked §8's item: infra sent a fresh `Certificates.zip` containing
+`cert.pem` (the same Sectigo leaf + intermediate + root chain from §7, `CN=*.rbz.co.zw`,
+valid 2026-01-26 → 2027-02-26) **and**, this time, `privatenew.pem` — a private key that
+actually pairs with it. Verified two independent ways before touching anything (modulus MD5
+match, and full public-key MD5 match via `openssl x509 -pubkey` vs `openssl pkey -pubout`)
+after an earlier same-day check wrongly reported a mismatch — that first check used
+`openssl pkey -noout -modulus`, an invalid flag combination on this openssl build that
+silently prints an error instead of failing, and piping that error into a hash gave a bogus
+"different" result. `openssl rsa -noout -modulus` is the correct incantation for a
+`BEGIN PRIVATE KEY` (PKCS8) file.
+
+Swapped into all three places §8 called out, in order, verifying after each step before
+moving to the next:
+
+1. **Prometheus + Grafana** — backed up the old self-signed `server.crt`/`server.key` (as
+   `*.bak-20260921` alongside the originals, not deleted), overwrote both with `cert.pem`/
+   `privatenew.pem`, restarted both services (`Restart-Service Prometheus`, `Restart-Service
+   Grafana`). Verified live with `openssl s_client -connect 127.0.0.1:<port> -showcerts` on
+   both `:9090` and `:3000` — both now present the real chain (`verify return:1` all the way
+   to the Sectigo root), not the old self-signed one.
+2. **IIS** — built a PFX (`openssl pkcs12 -export`, throwaway export password, file deleted
+   immediately after import — same discipline as the original §6.2 import), imported into
+   `Cert:\LocalMachine\My` (new thumbprint `A8C8E3576D4210F1BFA4AADACDFB42B56F0CE27F`), then
+   rebound `MonitoringProxy`'s `:443` binding to it via `$binding.AddSslCertificate(...)`,
+   replacing the old self-signed thumbprint `77DC3C03325C55F9305420FCA058CD99FCB5FB6D` (left
+   in the cert store, unbound, not deleted — harmless, and it's the fallback if this one ever
+   needs rolling back).
+
+**End-to-end re-verified against §6.6's own checklist, unchanged:**
+```
+http://monitoring.rbz.co.zw/   → 301 → https://monitoring.rbz.co.zw/
+https://monitoring.rbz.co.zw/  → 302 → /accounts/login/?next=/  → 200
+```
+
+**Still server-only, not in git** (extends §9's list): the new `server.crt`/`server.key`
+content, the `*.bak-20260921` backups, and the IIS binding's new cert thumbprint. The backup
+files mean a rollback to the self-signed cert (all three services) is a straight file-copy +
+service restart + one `AddSslCertificate` call back to the old thumbprint, no regeneration
+needed, if this cert is ever found to have a problem.

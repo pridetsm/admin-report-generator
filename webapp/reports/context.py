@@ -11,8 +11,8 @@ from django.urls import NoReverseMatch, reverse
 
 from .models import RoleRequest
 from .roles import (ROLE_HOME, ROLE_PAGES, active_role, effective_roles, held_roles,
-                    is_infra_admin, is_network_admin, is_role_admin, is_system_admin,
-                    page_in_scope, reports_for)
+                    is_infra_admin, is_management, is_network_admin, is_role_admin,
+                    is_system_admin, page_in_scope, reports_for, can_reach_my_alert_groups)
 
 
 def _asset_version() -> str:
@@ -45,9 +45,19 @@ _NAV_PARENT = {
     # Each picker is a step inside running a report, so Back steps out to the report choice
     # rather than all the way to the role choice.
     "report_form": "reports",
-    "network_dashboard": "reports",
     "network_sod_select": "reports",
     "infra_form": "reports",
+    # Networks Report category (2026-09-22, split into four reports 2026-09-23 -- see
+    # roles.REPORTS' own comment) -- same "picker leads back to Reports, report leads back to
+    # its own picker" shape as every other estate here.
+    "core_switches_form": "reports",
+    "core_switches_report": "core_switches_form",
+    "routers_form": "reports",
+    "routers_report": "routers_form",
+    "wireless_controller_form": "reports",
+    "wireless_controller_report": "wireless_controller_form",
+    "access_switches_form": "reports",
+    "access_switches_report": "access_switches_form",
     "os_inventory": "reports",
     "automated_reports": "reports",
     # Both child screens map straight back to the top tile rather than to each other: their
@@ -69,10 +79,8 @@ _NAV_PARENT = {
     "connect": "report_form",
     "folder_watch": "report_form",
     "folder_watch_temenos": "folder_watch",
-    "network_report": "network_dashboard",
-    # The SOD checklist hangs off its own device picker now, the same shape as the live
-    # network report: Back steps out to what was picked, not straight to the tile that
-    # opened it.
+    # The SOD checklist hangs off its own device picker now, the same shape as a live report:
+    # Back steps out to what was picked, not straight to the tile that opened it.
     "network_sod": "network_sod_select",
     "history": "report_form",
     "submission_detail": "history",
@@ -146,6 +154,18 @@ _NAV_PARENT = {
     "prometheus_config": "config_prometheus",
     "config_yaml": "config_prometheus",
     "prometheus_rule_file": "prometheus_config",
+    # Executive - Focused is Management's HOME page (see ROLE_HOME), the same role a picker
+    # plays for every other estate -- it has to lead straight to Role Select for the same
+    # reason configuration/report_form/network_dashboard/infra_form do: otherwise the
+    # ROLE_HOME fallback below resolves "Management's home" to this very page and Back points
+    # at the screen you're already standing on. Executive - Full and Executive - Analytical
+    # both hang off Focused rather than off Role Select directly (2026-09-16 for Full,
+    # 2026-09-19 for Analytical -- the former Focused page, preserved under its own URL when
+    # Focused itself was redesigned) -- same "detail page off its own landing page" shape as
+    # infra_report/infra_form above, just with Focused playing infra_form's part.
+    "management_dashboard_focused": "role_select",
+    "management_dashboard_full": "management_dashboard_focused",
+    "management_dashboard_analytical": "management_dashboard_focused",
 }
 #: the tree's root — a parent of everything, so never marked as "the branch you are in"
 _NAV_ROOT = "report_form"
@@ -162,13 +182,19 @@ _NAV_LABEL = {
     "connect": "Connect",
     "folder_watch": "Folder Watch",
     "folder_watch_temenos": "Temenos",
-    "network_dashboard": "Network Device Picker",
     "network_sod_select": "SOD Device Picker",
     "network_sod": "SOD Checklist",
     "role_empty": "Home",
-    "network_report": "Core Switch",
     "infra_form": "Infrastructure Picker",
-    "infra_report": "Infrastructure Admin Report",
+    "infra_report": "Cluster Health Report",
+    "core_switches_form": "Core Switches Picker",
+    "core_switches_report": "Core Switches Report",
+    "routers_form": "Routers Picker",
+    "routers_report": "Routers Report",
+    "wireless_controller_form": "Wireless Controller Picker",
+    "wireless_controller_report": "Wireless Controller Report",
+    "access_switches_form": "Access Switches Picker",
+    "access_switches_report": "Access Switches Report",
     "history": "History",
     "roles_console": "Role assignments",
     "config_roles": "Roles",
@@ -194,6 +220,9 @@ _NAV_LABEL = {
     "config_create_user": "Add stakeholder",
     "config_edit_user": "Edit account",
     "profile": "Profile",
+    "management_dashboard_focused": "Executive - Focused",
+    "management_dashboard_full": "Executive - Full",
+    "management_dashboard_analytical": "Executive - Analytical",
 }
 
 
@@ -248,18 +277,21 @@ def _back_nav(request):
     # retrace the report rather than the screen it was started from.
     # ...but never when you are ALREADY on that report: the override would hand its own URL
     # back as "Back", so the button pointed at the page you were standing on and did nothing.
-    on_the_open_report = name in ("report", "network_report", "infra_report", "active_directory_report")
-    on_a_picker = name in ("report_form", "network_dashboard", "infra_form", "active_directory_form")
+    on_the_open_report = name in ("report", "infra_report",
+                                  "active_directory_report",
+                                  "core_switches_report", "routers_report",
+                                  "wireless_controller_report", "access_switches_report")
+    on_a_picker = name in ("report_form", "infra_form",
+                           "active_directory_form",
+                           "core_switches_form", "routers_form",
+                           "wireless_controller_form", "access_switches_form")
     # A picker's Back steps OUT of the estate, so the open-report override does not apply
     # there — the picker already offers "Continue that report" in its own widget, and having
     # Back do the same thing would leave no way up at all.
-    if (parent in ("report_form", "network_dashboard", "infra_form", "active_directory_form")
+    if (parent in ("report_form", "infra_form", "active_directory_form",
+                   "core_switches_form", "routers_form",
+                   "wireless_controller_form", "access_switches_form")
             and not on_the_open_report and not on_a_picker):
-        if "Network Admin" in scope and request.session.get("network_devices"):
-            try:
-                return reverse("network_report"), "Report"
-            except NoReverseMatch:
-                pass
         if "Infrastructure Admin" in scope and request.session.get("infra_report_systems"):
             try:
                 return reverse("infra_report"), "Report"
@@ -274,6 +306,23 @@ def _back_nav(request):
                 return reverse("active_directory_report"), "Report"
             except NoReverseMatch:
                 pass
+        # Networks Report category (2026-09-22, split into four reports 2026-09-23) -- owned
+        # by Network Admin, view access for Infrastructure Admin (see roles.py), same
+        # dual-role outranking as Active Directory Report just above. Checked in this order
+        # (arbitrary but fixed) so at most one open report ever wins the override.
+        for devices_key, report_name in (
+            ("core_switches_devices", "core_switches_report"),
+            ("routers_devices", "routers_report"),
+            ("wireless_controller_devices", "wireless_controller_report"),
+            ("access_switches_devices", "access_switches_report"),
+        ):
+            if (("Network Admin" in scope or "Infrastructure Admin" in scope)
+                    and request.session.get(devices_key)):
+                try:
+                    return reverse(report_name), "Report"
+                except NoReverseMatch:
+                    pass
+                break
         # An empty scope means the user holds no catalogue role at all — the pre-picker
         # world. They keep the original behaviour rather than being narrowed out of it.
         if request.session.get("report_systems") and (not scope or "System Admin" in scope):
@@ -358,6 +407,13 @@ def role_flags(request):
         "is_system_admin": is_system_admin(user) and in_scope("System Admin"),
         "is_network_admin": is_network_admin(user) and in_scope("Network Admin"),
         "is_infra_admin": is_infra_admin(user) and in_scope("Infrastructure Admin"),
+        # drives the Management drawer group (Executive - Full/Focused)
+        "is_management": is_management(user) and in_scope("Management"),
+        # drives the "My Alert Groups" drawer entry -- a Sub-Admin-shaped role opted into
+        # can_edit_own_alert_groups on Role Scopes, with at least one group to actually show.
+        # Checks everything the user HOLDS, not the active role scope (unlike every other flag
+        # in this dict) -- see can_reach_my_alert_groups' own docstring for why.
+        "can_reach_my_alert_groups": can_reach_my_alert_groups(user) if user is not None else False,
         # History/Connect are common to every estate role but NOT Administrator (see
         # ROLE_PAGES' own comment) -- reuses page_in_scope, the exact same test
         # RoleScopeMiddleware applies, so the drawer link and the redirect a bookmark hits can

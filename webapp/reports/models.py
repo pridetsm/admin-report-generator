@@ -563,6 +563,11 @@ class RoleScope(models.Model):
     systems = models.JSONField(
         default=list, blank=True,
         help_text="System names from prometheus.yml. Empty = this role sees every system.")
+    can_edit_own_alert_groups = models.BooleanField(
+        default=False,
+        help_text="Members may edit an Alert group they belong to (add stakeholders, not "
+                  "remove; can't delete the group). A general opt-in, not hardcoded to one "
+                  "role — see roles.can_edit_alert_group().")
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name="+")
@@ -1035,6 +1040,55 @@ class AlertFinding(models.Model):
         return f"{self.group.name} · {self.system} · {self.flag_key} ({state})"
 
 
+class AlertSilence(models.Model):
+    """A (system, flag_key) pair known to be noisy but SELF-RESOLVING -- e.g. a nightly batch
+    job that legitimately spikes and clears every night -- pulled out of the normal every-
+    poll/every-reminder notification path and rolled into ONE digest e-mail a day instead
+    (2026-09-19, on request: "reduce the intrusiveness of alerts" for alerts "not being
+    actioned at all by admins... that self resolve and then start again given times of the day
+    or week"). Extends the same idea `alerting.ALERT_FLAG_SUPPRESSED` already used (a small,
+    named, (system, flag_key)-scoped exemption list) but as a real, admin-manageable table
+    instead of a hardcoded set, and BATCHED into a digest rather than dropped silently.
+
+    `group` decides who hears the daily digest -- the SAME AlertGroup that would otherwise
+    have been notified for this finding, so silencing never changes WHO ultimately sees it,
+    only how often/when. See alerting.build_silenced_digest, this table's only reader, and
+    alerting.SILENCE_ESCALATE_AFTER for the safety valve: a silence exists because a finding is
+    EXPECTED to clear on its own; if one particular incident stops doing that and just stays
+    open, normal immediate alerting resumes for it rather than trusting a rule that assumed a
+    shorter-lived pattern -- a silence must never become a permanent blind spot for something
+    that quietly turned into a real, ongoing problem.
+
+    Deliberately EXPIRES (`expires_at`, default 60 days out) rather than lasting forever for
+    the same reason -- a silence nobody ever revisits is indistinguishable from a blind spot.
+    Forcing a renewal keeps a human deciding, on a cadence, that this is still expected/
+    accepted behaviour, not something that was silenced once and forgotten."""
+    system = models.CharField(max_length=120)             # System.name from prometheus.yml
+    flag_key = models.CharField(max_length=255)           # generate_report.Flag.key
+    group = models.ForeignKey(AlertGroup, on_delete=models.CASCADE, related_name="silences",
+                              help_text="Whose digest this rolls into -- normally the same "
+                                        "group that would otherwise be notified for it.")
+    reason = models.TextField(blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
+                                   on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(
+        help_text="Silencing stops automatically after this date -- a deliberate renewal, "
+                  "not a permanent standing rule, keeps this reviewed periodically.")
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "alert silence"
+
+    def __str__(self):
+        return f"{self.system} · {self.flag_key} (until {self.expires_at:%Y-%m-%d})"
+
+    @property
+    def in_effect(self) -> bool:
+        return self.active and self.expires_at > timezone.now()
+
+
 class IssueOccurrence(models.Model):
     """One (system, flag_key) incident, append-only -- the comprehensive occurrence ledger
     reports.alert_spikes' hourly Issue Spikes chart reads from (2026-09-07, on request, after
@@ -1454,3 +1508,131 @@ class GeneratedScript(models.Model):   # noqa: E303 — appended after EmailReci
     def secret_names(self) -> list:
         """Which secrets are set, for display. Names only — never the values."""
         return sorted(self.secret_values().keys())
+
+
+class MetricSample(models.Model):
+    """One captured hourly reading of a Prometheus percentage/throughput series -- RAM/CPU/Disk
+    per instance+mount, and SWIFT transaction throughput -- so the Hourly Activity / SWIFT
+    charts are no longer bounded by Prometheus's own retention window (2026-09-18, on request:
+    "store this data in the database... so we can have a much longer retention window").
+
+    `metric_key` is a join key back to PROMETHEUS'S OWN identity space, not this app's
+    system/label naming: "ram:{instance}" / "cpu:{instance}" / "disk:{instance}:{mount}" /
+    "swift". Built the same way on every write (reports.metric_history.capture_now/backfill)
+    and every read (report_charts.resource_percent_series/swift_transaction_series), so a
+    lookup always finds what was captured for that exact series even if this app's own
+    system/label display naming for that instance changes later. NOT keyed on system/label
+    directly, because those belong to THIS app's topology config, and reusing them here would
+    mean a rename in systems_config.yml silently orphans every sample captured under the old
+    name.
+
+    Captured hourly by reports.metric_history.capture_now (scheduled the same way the alert/
+    event/system-alert pollers already are -- see deploy/gms/folder_exporter.yml, job
+    metric_history_capture), independent of which categories/components happen to be
+    "currently flagged" in any one report -- every RAM/CPU/Disk series across the WHOLE
+    topology is captured every run, not just whatever a report instance's own recurring_issues
+    turned up, so a component that becomes newsworthy later still has history behind it.
+
+    No FK to any topology model -- Component/System are plain dataclasses read fresh from
+    systems_config.yml on every report, not persisted rows, so there is nothing here to point
+    at."""
+    metric_key = models.CharField(max_length=255)
+    taken_at = models.DateTimeField()
+    value = models.FloatField()
+
+    class Meta:
+        verbose_name = "metric sample"
+        indexes = [models.Index(fields=["metric_key", "taken_at"])]
+        constraints = [
+            # capture_now runs hourly and backfill runs once over the same window -- either
+            # could otherwise double up a point for the same series/hour; ignore_conflicts=True
+            # bulk_create calls on both sides rely on this to silently skip a re-capture rather
+            # than duplicate it.
+            models.UniqueConstraint(fields=["metric_key", "taken_at"], name="unique_metric_sample_point"),
+        ]
+        ordering = ["taken_at"]
+
+    def __str__(self):
+        return f"{self.metric_key} @ {self.taken_at:%Y-%m-%d %H:%M} = {self.value:.1f}"
+
+
+class LiveEstateOverview(models.Model):
+    """One row per estate ("system_admin" | "network" | "infrastructure" | "active_directory")
+    -- the Executive Dashboard's own poller-fed cache (2026-09-18, on request: "broaden alert
+    poller to cover infrastructure and network metrics and just use this as default poller to
+    feed both alerts and live dashboards").
+
+    Written every ~5 minutes by reports.alerting.run_alert_cycle, which already pays for a live
+    capture of every estate to populate IssueOccurrence -- this table just also keeps the fully-
+    computed `overview` dict (glance/immediate/watch/banners) and per-system flag list from that
+    SAME capture, verbatim, using the identical build_overview()/network._network_overview()/
+    _infra_overview() engine the live "generate a report" flow itself uses. No threshold or
+    tile logic is reimplemented here.
+
+    The dashboard (views._live_report_sections) reads this table instead of live-capturing on
+    every page view -- a single fast DB read instead of paying a fresh Prometheus/SNMP round
+    trip PER VISITOR, at the cost of the read being "as of the last poll" (≤5 minutes stale)
+    rather than instantaneous. Falls back to the last ReportSubmission if a row doesn't exist
+    yet (e.g. right after a deploy, before the first poll)."""
+    kind = models.CharField(max_length=40, unique=True)
+    captured_at = models.DateTimeField()
+    overview = models.JSONField()
+    systems = models.JSONField()
+
+    class Meta:
+        verbose_name = "live estate overview"
+
+    def __str__(self):
+        return f"{self.kind} @ {self.captured_at:%Y-%m-%d %H:%M}"
+
+
+class MonitoredInterface(models.Model):
+    """Sticky "should be up" baseline for one SNMP interface (device + ifIndex) on the
+    Switches & Routers estate (2026-09-23, on request: "take a snapshot of all currently on
+    interfaces and monitor them... if any of these at any given point goes down now it's a
+    problem... not to say ignore all other interfaces, keep monitoring them, but in a
+    different sheet").
+
+    A port this estate has NEVER been seen up on is presumed administratively disabled on
+    purpose (an unused wall jack, a spare uplink) -- see network._device_flags' own comment on
+    why ifAdminStatus can't tell the two apart here (confirmed absent from this vendor's SNMP
+    module, not just unread). The FIRST time a port is observed up, it enters this table and
+    becomes part of the monitored set for good, barring a manual reset -- from then on, seeing
+    it down again is a genuine regression, not an assumption, and network._device_flags()
+    flags it as one on every run until it comes back up.
+
+    `is_scoped` (2026-09-23, narrowing the above: "we only want to monitor these interfaces
+    not all of them... uplink, accesspoint, links going to other switches") -- True once CDP
+    has EVER identified this port as an access point, an uplink, or a neighbour link to
+    another switch, and STAYS True from then on even once CDP stops reporting it, which is
+    exactly what happens the moment the port actually goes down (CDP's own neighbour cache
+    ages the entry out within its hold-time once the two sides stop exchanging frames). Without
+    this stickiness, the one moment a monitored port fails -- when its CDP entry disappears
+    along with the link -- would also be the moment it silently fell out of "monitored" and
+    stopped being flagged at all, which is backwards. Only rows with is_scoped=True count
+    toward "monitored" anywhere in the report now; a row that was up once but never
+    CDP-classified (most ports) stays in this table for history but is never flagged.
+
+    Updated on every collect() the Switches & Routers estate produces -- both the alert
+    poller's own cycle and any admin viewing the live report -- not just a scheduled job: an
+    "up" observation from EITHER source is equally real, so either is enough to (re)confirm
+    the baseline or clear a standing regression. See network._update_interface_baseline()."""
+
+    device = models.CharField(max_length=120)    # the SNMP target -- collect()'s own `instance`
+    if_index = models.CharField(max_length=20)
+    if_name = models.CharField(max_length=255, blank=True)   # cached for display if it later drops off
+    first_seen_up_at = models.DateTimeField()
+    last_seen_up_at = models.DateTimeField()
+    last_checked_at = models.DateTimeField()
+    currently_up = models.BooleanField(default=True)
+    is_scoped = models.BooleanField(
+        default=False,
+        help_text="Ever CDP-identified as an AP/uplink/neighbour link -- sticky, see this "
+                  "model's own docstring for why it must never be unset once True.")
+
+    class Meta:
+        unique_together = ("device", "if_index")
+        verbose_name = "monitored interface baseline"
+
+    def __str__(self):
+        return f"{self.device}:{self.if_index} ({'up' if self.currently_up else 'DOWN'})"

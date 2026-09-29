@@ -329,7 +329,21 @@ def win_service(name: str, inst: str) -> str:
     # WHICH state that is -- "stopped" contributes a 1 just as readily as "running" does. This
     # made every win_service() check in this app structurally incapable of ever reporting a
     # real stop, silently, since whenever it was first written.
-    return f'max by (name, display) (windows_service_state{{name="{name}", instance="{inst}", state="running"}})'
+    #
+    # `name` matched case-INSENSITIVELY (fixed 2026-09-17, confirmed live: RBZHQ-ROOT-01
+    # exposes W32Time as name="w32time", not "W32Time" -- an exact match on "W32Time" returns
+    # NO series at all for that host, and this function's caller (analyse()) treats "no
+    # matching series" as DOWN, not "not checked" -- a permanent false CRITICAL on Windows
+    # Time, mistaken for a live outage or a stale/uncached report until checked against the
+    # actual label value). webapp/reports/network.py's own _ad_service_states hit the exact
+    # same casing inconsistency first (see its own comment: "observed as 'w32time' on one DC
+    # and 'W32Time' on the other") and already fixed it the same way -- this just brings
+    # win_service() in line with that, for every caller, not only the AD services. No
+    # re.escape() on `name`: see _ad_service_states' own comment on why that's fine for these
+    # fixed, internally-configured service names (a bare `.` becoming "any character" in the
+    # regex has never produced a false match among them).
+    return (f'max by (name, display) (windows_service_state{{name=~"(?i)^{name}$", '
+           f'instance="{inst}", state="running"}})')
 
 
 def systemd(inst: str, name: str, type_: Optional[str] = None) -> str:
@@ -343,6 +357,29 @@ def probe(inst: str) -> str:
 
 def host_up(inst: str) -> str:
     return f'up{{job="windows_exporter", instance="{inst}"}}'
+
+
+def _win_services(inst: str, checks: List[Tuple[str, str]]) -> List[Service]:
+    """One host's worth of win_service() Service entries from (service_name, display_name)
+    pairs -- the AD estate's own SERVICE_CHECKS rows (2026-09-14) share this shape across
+    several hosts (all Domain Controllers check the same 7 services), unlike the rest of
+    SERVICE_CHECKS' own one-off, hand-written-per-host style, so this is worth a small
+    helper rather than repeating the same win_service(name, inst) call 7 times per host."""
+    return [Service(display, win_service(name, inst)) for name, display in checks]
+
+
+# Every Domain Controller's own 7 services -- identical list to webapp/reports/network.py's
+# own _AD_SERVICES (confirmed running live on the DCs that own this report today), reused
+# verbatim rather than re-derived.
+_AD_DC_SERVICES: List[Tuple[str, str]] = [
+    ("ADWS", "ADWS (AD Web Services)"),
+    ("DNS", "DNS Server"),
+    ("DFSR", "DFSR (SYSVOL replication)"),
+    ("Kdc", "Kerberos KDC"),
+    ("Netlogon", "Netlogon"),
+    ("IsmServ", "Intersite Messaging"),
+    ("W32Time", "Windows Time"),
+]
 
 
 def _t24_label(name: str) -> str:
@@ -442,6 +479,35 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
         Service("Docker", systemd("10.0.207.16:9100", "docker.service", "notify"), group="Attendance App"),
         Service("Docker", systemd("10.0.207.17:9100", "docker.service", "notify"), group="Attendance DB"),
     ],
+    # Active Directory estate (2026-09-14, on request: "create the data model for domain
+    # controllers and model it after the systems domain" -- see AD_SYSTEMS' own comment above
+    # SKIP_SYSTEMS for why these three systems are addressable here at all now). Service names
+    # and per-host role split (ADSync vs PTA) confirmed against webapp/reports/network.py's own
+    # _AD_SERVICES/_AD_SYNC_AUTH_SERVICES -- same services, same instances, reused rather than
+    # re-derived so the two engines never quietly disagree about what "healthy" means here.
+    "rootdomaincontrollers": (
+        _win_services("10.100.249.200:9182", _AD_DC_SERVICES) +
+        _win_services("10.100.249.201:9182", _AD_DC_SERVICES)
+    ),
+    "domaincontrollers": (
+        _win_services("10.100.249.203:9182", _AD_DC_SERVICES) +
+        # BYO-AD-DC-01 -- present in prometheus.yml's own domain_controllers job (10.200.200.8)
+        # but not yet a webapp/reports/network.py DEVICES entry; included here from the SAME
+        # topology load_topology(scope="ad") already reads, so this report doesn't silently
+        # drop a real DC just because the webapp's own device picker hasn't caught up to it.
+        _win_services("10.200.200.8:9182", _AD_DC_SERVICES)
+    ),
+    "adsyncauthentication": (
+        _win_services("10.100.249.206:9182", [
+            ("ADSync", "Azure AD Sync"),
+            ("AzureADConnectHealthAgent", "Microsoft Entra Connect Health Agent"),
+            ("SecurityHealthService", "Windows Security Service"),
+        ]) +
+        _win_services("10.100.249.207:9182", [
+            ("AzureADConnectAuthenticationAgent", "Azure AD Connect Authentication Agent (PTA)"),
+            ("SecurityHealthService", "Windows Security Service"),
+        ])
+    ),
 }
 
 # preferred display order (known systems first); anything else is appended A-Z
@@ -881,24 +947,42 @@ def folder_expected_gb(store: "Store", instance: Optional[str], name: str) -> Op
 # are left alone: those are real infrastructure belonging to a real system, not test systems in
 # their own right, so excluding them here would be wrong.)
 # "domain controllers" (the Child DC job's own `system` label — RBZHQ-DC-203/BYO-AD-DC-01,
-# 2026-09-10) and "ad sync & authentication" (RBZ-HQ-ADS-01/RBZ-ADAPT-01, also 2026-09-10) are
-# the SAME situation as "root domain controllers" just above, just missed when the child DCs
-# were first added (this report kept reading them as a real business system the whole time,
-# nobody had noticed until now) and newly introduced by the AD Sync/BYO-DC additions -- both
-# already have their own proper home in the Infrastructure Admin Report's "Active Directory"
-# group (see network.py's DEVICES list), where the flags that actually make sense for them
-# (services/CPU/RAM/disk/replication) already live; the System Admin Report's own "UNTRACKED
-# (no backup check)" framing never meant anything for AD/DC infrastructure to begin with.
-SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest", "root domain controllers",
-                "domain controllers", "ad sync & authentication"}
+# 2026-09-10) and "ad sync & authentication" (RBZ-HQ-ADS-01/RBZ-ADAPT-01, also 2026-09-10) used
+# to sit in SKIP_SYSTEMS right alongside "root domain controllers" -- moved out 2026-09-14 (on
+# request: "create the data model for domain controllers and model it after the systems domain
+# so it makes sense its already very similar") into AD_SYSTEMS below, the exact same "excluded
+# from business, addressable under its own scope" split INFRA_SYSTEMS already established for
+# HCI/Oracle. Still never mixed into the business estate's own "UNTRACKED (no backup check)"
+# framing, which never meant anything for AD/DC infrastructure -- see load_topology's own
+# scope="ad" for how a caller now asks for these on purpose instead.
+SKIP_SYSTEMS = {"unassigned", "prometheus", "", "rbz network", "rtgstest"}
 
 # `system` label values that ARE real systems, but belong to Infrastructure Admin's own
 # estate (hyper-converged clusters, standalone DB hosts — the underlying hardware) rather
 # than System Admin's business-systems topology. Same split SKIP_SYSTEMS already makes for
-# "rbz network"/"root domain controllers" above, just for a second, non-network estate with
-# its own report screens (see webapp/reports/roles.py's Infrastructure Admin role and
-# views.infra_form/infra_report).
-INFRA_SYSTEMS = {"hci cluster", "oracle hosts"}
+# "rbz network" above, just for a second, non-network estate with its own report screens (see
+# webapp/reports/roles.py's Infrastructure Admin role and views.infra_form/infra_report).
+# "disaster recovery cluster" added 2026-09-16 alongside webapp/reports/network.py's own
+# DEVICES entry for it -- a second HCI/S2D-style cluster, same estate as "hci cluster".
+# "standalone servers" and "bulawayo cluster" added 2026-09-21 (on request: "stand alone
+# servers is still appearing in system admin report..."  then "bulawayo cluster also appears
+# in systems admin report") -- both are network.py DEVICES entries added 2026-09-17 (Bulawayo:
+# a THIRD HCI/S2D cluster; Standalone Servers: 10.100.249.240/.252/.253) that were never
+# mirrored into this set the way HCI/Oracle/DR already were -- a plain miss each time a new
+# infra group was added, not a deliberate choice. Checked the FULL current network.DEVICES
+# list against this set when fixing Bulawayo (2026-09-21) to catch any other gaps in one pass
+# rather than one bug report at a time -- none found beyond these two.
+INFRA_SYSTEMS = {"hci cluster", "oracle hosts", "disaster recovery cluster", "standalone servers",
+                 "bulawayo cluster"}
+
+# `system` label values for Active Directory's own estate (Root/Child Domain Controllers, AD
+# Sync & Authentication) -- a THIRD scope alongside "business"/"infra" (2026-09-14, on request:
+# see AD_SYSTEMS' own history above SKIP_SYSTEMS). Deliberately its own set, not folded into
+# INFRA_SYSTEMS: Infrastructure Admin and Active Directory are two separate report screens in
+# the webapp (webapp/reports/roles.py), each with their own scope value here to match --
+# scope="infra" must keep returning exactly HCI/Oracle, not grow AD systems into it as a side
+# effect of this addition.
+AD_SYSTEMS = {"root domain controllers", "domain controllers", "ad sync & authentication"}
 
 # Scrape jobs whose targets carry a `system` label for a DIFFERENT feature's benefit, not
 # because the target is a host this report should track CPU/RAM/disk on. folder_exporter's
@@ -1041,20 +1125,55 @@ def platform_host_pcts(systems: List[System]) -> Tuple[int, int]:
     return round(linux / hosts * 100), round(windows / hosts * 100)
 
 
+_TOPOLOGY_CACHE: Dict[tuple, List["System"]] = {}
+
+
 def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[System]:
     """Read the system -> hosts topology from prometheus.yml (grouped by the `system` label).
 
     `scope` picks which estate comes back:
-      "business" (default, every existing caller) — everything except SKIP_SYSTEMS and
-          INFRA_SYSTEMS. This is the System Admin topology.
+      "business" (default, every existing caller) — everything except SKIP_SYSTEMS,
+          INFRA_SYSTEMS and AD_SYSTEMS. This is the System Admin topology.
       "infra"    — ONLY the INFRA_SYSTEMS entries, for Infrastructure Admin's own picker/
           report (see webapp/reports/views.infra_form/infra_report).
-      "all"      — everything except SKIP_SYSTEMS (both estates together) — used by the
+      "ad"       — ONLY the AD_SYSTEMS entries (2026-09-14, on request: "create the data
+          model for domain controllers and model it after the systems domain") -- Root/Child
+          Domain Controllers and AD Sync & Authentication, modelled exactly like any business
+          System (real Component list from prometheus.yml, capture()'s own generic disk/ram/
+          cpu/up queries already cover them with zero engine changes since capture() queries
+          Prometheus globally, not per-topology -- see capture()'s own docstring). Lets
+          mail_report.py's OWN render_html/analyse run against real AD data directly, instead
+          of a second, hand-ported presentation layer.
+      "all"      — everything except SKIP_SYSTEMS (all three estates together) — used by the
           webapp's Connect screen, which quick-launches to any monitored host regardless of
           which report estate owns it.
-    "business" and "infra" are mutually exclusive, so a system never appears in both
-    estates' reports.
-    """
+    "business", "infra" and "ad" are mutually exclusive, so a system never appears in more
+    than one estate's reports.
+
+    Cached by (path, mtime, scope) -- added 2026-09-14, after profiling a single
+    /configuration/alerts/ page load found this file re-parsed 33+ times (~190ms each, ~6.5s
+    total) because folders.backup_drain_limits() calls this once PER SYSTEM in a loop, even
+    though its own caller already loaded the same topology once. Keyed on the file's own
+    mtime, not a blind TTL, so an admin's prometheus.yml edit (via config_prometheus) still
+    takes effect on the very next call -- the cost of staying current is one stat() (a few
+    microseconds), not skipping the cache. Callers must not mutate the returned list/System/
+    Component objects (none do today) since it's shared across every caller until the file's
+    mtime changes."""
+    import os
+    try:
+        mtime = os.stat(prometheus_yml).st_mtime
+    except OSError:
+        mtime = None
+    cache_key = (os.path.abspath(prometheus_yml), mtime, scope)
+    cached = _TOPOLOGY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    result = _load_topology_uncached(prometheus_yml, scope=scope)
+    _TOPOLOGY_CACHE[cache_key] = result
+    return result
+
+
+def _load_topology_uncached(prometheus_yml: str, *, scope: str) -> List[System]:
     import yaml  # PyYAML — see requirements.txt
     with open(prometheus_yml, encoding="utf-8") as fh:
         doc = yaml.safe_load(fh) or {}
@@ -1069,9 +1188,12 @@ def load_topology(prometheus_yml: str, *, scope: str = "business") -> List[Syste
             if system.lower() in SKIP_SYSTEMS:
                 continue
             is_infra = system.lower() in INFRA_SYSTEMS
-            if scope == "business" and is_infra:
+            is_ad = system.lower() in AD_SYSTEMS
+            if scope == "business" and (is_infra or is_ad):
                 continue
             if scope == "infra" and not is_infra:
+                continue
+            if scope == "ad" and not is_ad:
                 continue
             role, display = labels.get("role"), labels.get("display")
             for target in sc.get("targets", []) or []:
@@ -2451,13 +2573,20 @@ class ReportBuilder:
              "good" if down == 0 else "bad"),
             ("panel", "EXPIRED CERTS", [("EXPIRED", len(cert_expired)), ("TOTAL", cert_monitored(store))],
              "good" if not cert_expired else "bad"),
-            # "DRAINED", not "STUCK", out of TOTAL -- the positive framing every affected-out-
-            # of-total tile on this row already uses. "warn", not "bad"/"critical": the finer
-            # red/amber verdict already happens once, correctly, via the flagged-metric
-            # mechanism (see reports.alerting.undrained_folder_flags_by_system) -- this tile is
-            # a glance-level count, not a second independently-computed severity judgement.
-            ("panel", "QUEUE FOLDERS DRAINED",
-             [("DRAINED", n_queue_drained), ("TOTAL", n_queue_folders)],
+            # "UNDRAINED", not "DRAINED", out of TOTAL (2026-09-16, on request: same fix
+            # webapp/reports/services.py's own overview() tile already got -- "this needs to
+            # be undrained queues so that 0 meant healthy". The old positive "DRAINED | TOTAL"
+            # framing read great in prose but every OTHER affected-out-of-total tile on this
+            # row already counts the PROBLEM, not the pass -- a fully healthy estate (5
+            # drained of 5) drew a nearly-full "affected" reading here, same visual an
+            # actually-broken tile would draw. Counting the undrained ones instead makes 0 the
+            # healthy reading, consistent with every sibling tile). "warn", not "bad"/
+            # "critical": the finer red/amber verdict already happens once, correctly, via the
+            # flagged-metric mechanism (see reports.alerting.undrained_folder_flags_by_system)
+            # -- this tile is a glance-level count, not a second independently-computed
+            # severity judgement.
+            ("panel", "UNDRAINED QUEUES",
+             [("UNDRAINED", n_queue_folders - n_queue_drained), ("TOTAL", n_queue_folders)],
              "good" if n_queue_drained == n_queue_folders else "warn"),
         ]
         # This tile counts EVERY high disk (>= thr) — elevated and near-full together —
@@ -2489,9 +2618,14 @@ class ReportBuilder:
             ("panel", f"HIGH DISK USAGE  ·  ≥{thr}%",
              [("DISKS", disk_high_d), ("TOTAL", total_disks(store, systems))],
              disk_high_state),
-            # https out of ALL monitored endpoints. The old https-vs-http pair made a fully
-            # encrypted estate read "12 | 0", which looks like half a number, not a pass.
-            ("panel", "WEB ENCRYPTION", [("HTTPS", n_https), ("TOTAL", n_https + n_http)], web_state),
+            # "UNENCRYPTED LINKS" (http count), not "WEB ENCRYPTION" (https count), out of ALL
+            # monitored endpoints (2026-09-16, on request: same fix webapp/reports/services.py's
+            # own overview() tile already got -- "should be unencrypted links or something so
+            # that 0 means healthy". A fully-encrypted estate used to read "12 | 12" here,
+            # drawing a full/perfect-looking pair for a clean estate -- but every other
+            # affected-out-of-total tile on this row counts the problem, not the pass, so this
+            # counted the plain-HTTP endpoints instead, making 0 the healthy reading here too.
+            ("panel", "UNENCRYPTED LINKS", [("HTTP", n_http), ("TOTAL", n_https + n_http)], web_state),
             ("panel", "BACKUP TRACKING", [("TRACKED", n_tracked), ("TOTAL", len(systems))],
              "good" if n_untracked == 0 else "warn"),
         ]

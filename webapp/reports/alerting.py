@@ -37,9 +37,58 @@ ALERT_FLAG_SUPPRESSED = {
     ("RTGS", "disk:Database:/u01"),   # 2026-09-08: known/accepted, not to be re-alerted
 }
 
+# Kill switch for IMMINENT's own persistent-reminder behaviour (2026-09-14, on request:
+# "disable persistent alerts for the time being, just have these have the original alert
+# count") -- False makes run_alert_cycle's own `is_imminent` computation below always False,
+# so unreachable/disk-near-full findings fall back to the SAME capped daily schedule every
+# other red/critical finding already uses ("the original alert count"), instead of repeating
+# every group.effective_imminent_reminder_minutes forever until resolved. The underlying
+# mechanism (_decide's own `imminent=`/`imminent_minutes=` branch, AlertGroup.
+# effective_imminent_reminder_minutes) is untouched -- flip this back to True to restore it
+# exactly as it was, no other code changes needed.
+IMMINENT_REMINDERS_ENABLED = False
+
 
 def _flag_suppressed(system: str, flag_key: str) -> bool:
     return (system, flag_key) in ALERT_FLAG_SUPPRESSED
+
+
+# Silenced Alerts (2026-09-19, on request: "reduce the intrusiveness of alerts" for findings
+# "not being actioned at all by admins... that self resolve and then start again given times
+# of the day or week") -- an admin-managed alternative to ALERT_FLAG_SUPPRESSED above: same
+# (system, flag_key) scope, but batched into ONE digest e-mail a day (see
+# build_silenced_digest) rather than dropped from notification entirely. See AlertSilence's
+# own docstring for the full design and why it expires rather than lasting forever.
+#
+# A silence exists because a finding is EXPECTED to clear on its own; if one particular
+# incident stops doing that and just stays open, it no longer matches that pattern, so normal
+# immediate alerting resumes for it rather than trusting a rule that assumed a shorter-lived
+# one. Chosen well above a single poll cycle (a transient blip must never escalate) but
+# comfortably below the shortest genuinely-self-resolving pattern seen so far in this estate
+# (the HCI staleness findings that DID heal on their own ran 1.5-2 days; this is a fraction of
+# that) -- long enough that a real flap-and-heal cycle is never mistaken for "stuck", short
+# enough that something that stopped healing doesn't hide in a digest for long.
+SILENCE_ESCALATE_AFTER = datetime.timedelta(hours=4)
+
+
+def _active_silences() -> Dict[tuple, object]:
+    from .models import AlertSilence
+    now = timezone.now()
+    return {(s.system, s.flag_key): s
+           for s in AlertSilence.objects.filter(active=True, expires_at__gt=now)}
+
+
+def _silenced(system: str, flag_key: str, silences: Dict[tuple, object],
+             open_started_by_key: Dict[str, "datetime.datetime"], now) -> bool:
+    """True if (system, flag_key) is currently silenced AND hasn't escalated back to normal
+    alerting (see SILENCE_ESCALATE_AFTER's own comment). `open_started_by_key` is a
+    one-query-per-system prefetch (started_at of THIS system's own open IssueOccurrence rows,
+    keyed by flag_key) built by the caller right after record_occurrences -- not a per-flag
+    query here."""
+    if (system, flag_key) not in silences:
+        return False
+    started = open_started_by_key.get(flag_key)
+    return started is None or (now - started) <= SILENCE_ESCALATE_AFTER
 
 
 @dataclass
@@ -53,6 +102,16 @@ class AlertRunResult:
     resolved_count: int = 0
     emails_sent: int = 0
     resolved_emails_sent: int = 0
+    emails_preview: List[dict] = field(default_factory=list)   # populated only when dry_run
+
+
+@dataclass
+class SilencedDigestResult:
+    """What one build_silenced_digest() call did, for the management command to report and
+    for tests to assert against."""
+    silences_evaluated: int = 0
+    groups_notified: int = 0
+    emails_sent: int = 0
     emails_preview: List[dict] = field(default_factory=list)   # populated only when dry_run
 
 
@@ -384,6 +443,9 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
             result.resolved_count += _collect_and_resolve(stale)
 
     covered = {s for g in groups for s in (g.systems or [])}
+    # Read once per poll, not once per flag -- see _silenced's own docstring for how this is
+    # used below.
+    silences = _active_silences()
 
     # Full topology, not just `covered` (2026-09-07, on request): the occurrence log recorded
     # below must be comprehensive, independent of which systems any AlertGroup happens to
@@ -440,10 +502,20 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     # -- appearing here is pure context, never a notification event in its own right.
     per_group_still_open: Dict[int, list] = {g.pk: [] for g in groups}
 
+    # System Admin's own half of the LiveEstateOverview cache (see that model's docstring) --
+    # built alongside the notification loop below from the SAME flags it already computes per
+    # system, so caching costs nothing extra beyond the one build_overview() call after the loop.
+    live_systems_json: List[dict] = []
+
     for sysm in systems:
         flags = (gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
                  + undrained_flags_by_system.get(sysm.name, [])
                  + backup_uncleared_flags_by_system.get(sysm.name, []))
+        live_systems_json.append({
+            "name": sysm.name, "hosts": len(sysm.components),
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category}
+                     for f in flags],
+        })
 
         # Comprehensive occurrence log (see IssueOccurrence's own docstring): every system,
         # every category, regardless of whether any AlertGroup below even covers this system
@@ -451,6 +523,17 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
         # is untouched then -- a preview must not write real incident history.
         if not dry_run:
             record_occurrences(sysm.name, flags, now)
+
+        # One query per system (not per silenced flag) -- built right after record_occurrences
+        # above so it reflects an already-fresh IssueOccurrence.started_at for THIS poll. Only
+        # queried when this system actually has a silence to check, since most systems have
+        # none at all.
+        open_started_by_key = {}
+        if not dry_run and any(system == sysm.name for system, _ in silences):
+            from .models import IssueOccurrence
+            open_started_by_key = {
+                r.flag_key: r.started_at for r in
+                IssueOccurrence.objects.filter(system=sysm.name, resolved_at__isnull=True)}
 
         if sysm.name not in covered:
             continue   # no active group cares about this system for NOTIFICATION purposes
@@ -460,14 +543,16 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
             matches = [f for f in flags
                       if severity_meets(f.band, f.category)
                       and g.category_matches(sysm.name, f.category)]
-            # eligible_keys (below) comes from `matches`, NOT the suppression-filtered
-            # `eligible` -- a suppressed flag that's still genuinely present must not fall out
-            # of eligible_keys, or the stale-resolution pass right below would mark its
-            # existing AlertFinding resolved and fire a false "resolved" e-mail (the disk usage
-            # hasn't gone away, it's just been told not to page anyone -- see
-            # ALERT_FLAG_SUPPRESSED's own docstring). `eligible` itself (the new/reminder loop
-            # below) DOES exclude it -- that's the actual suppression.
-            eligible = [f for f in matches if not _flag_suppressed(sysm.name, f.key)]
+            # eligible_keys (below) comes from `matches`, NOT the suppression/silence-filtered
+            # `eligible` -- a suppressed or silenced flag that's still genuinely present must
+            # not fall out of eligible_keys, or the stale-resolution pass right below would
+            # mark its existing AlertFinding resolved and fire a false "resolved" e-mail (the
+            # disk usage hasn't gone away, it's just been told not to page anyone this way --
+            # see ALERT_FLAG_SUPPRESSED's/AlertSilence's own docstrings). `eligible` itself (the
+            # new/reminder loop below) DOES exclude both -- that's the actual suppression.
+            eligible = [f for f in matches
+                       if not _flag_suppressed(sysm.name, f.key)
+                       and not _silenced(sysm.name, f.key, silences, open_started_by_key, now)]
             eligible_keys = {f.key for f in matches}
 
             if not dry_run:
@@ -488,7 +573,8 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
                 # the daily report's own DISK NEAR-FULL banner already uses, see
                 # alert_email_templates._severity's own docstring on why no new threshold was
                 # needed for this).
-                is_imminent = f.band == "red" and f.category in ("unreachable", "disk")
+                is_imminent = (IMMINENT_REMINDERS_ENABLED
+                              and f.band == "red" and f.category in ("unreachable", "disk"))
                 action, reminder_number = _decide(
                     existing, f.band, now, schedules[g.pk],
                     imminent=is_imminent, imminent_minutes=g.effective_imminent_reminder_minutes)
@@ -536,6 +622,74 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
                     row.resolved_at = None
                     row.save()
                     per_group_rows[g.pk].append((row, email_action))
+
+    # LiveEstateOverview cache (see that model's own docstring) -- System Admin's half, built
+    # from the SAME store/systems/cfg this cycle already captured above, so this costs one
+    # extra (cheap, in-process) build_overview() call, not another Prometheus round trip.
+    if not dry_run:
+        from .models import LiveEstateOverview
+        from . import services as _services
+
+        LiveEstateOverview.objects.update_or_create(
+            kind="system_admin",
+            defaults={"captured_at": now,
+                     "overview": _services.build_overview(store, systems, cfg),
+                     "systems": live_systems_json})
+
+    # Infrastructure's HCI clusters, Active Directory's domain controllers, and (2026-09-22)
+    # the Switches & Routers estate, recorded into the SAME comprehensive occurrence log the
+    # business-system loop above already writes to (2026-09-18, on request: "broaden alert
+    # poller to cover infrastructure and network metrics and just use this as default poller
+    # to feed both alerts and live dashboards") -- these estates never had a poller of their
+    # own before this; the only source of truth for their state used to be whatever the LAST
+    # GENERATED REPORT for that estate happened to say (see the exec dashboard's own former
+    # live-capture-per-pageview workaround, which the LiveEstateOverview cache below replaced).
+    # The old bare "network" entry (only=None, the whole DEVICES pool) was retired the same
+    # day the core switch moved into Switches & Routers -- by then it was 100% redundant with
+    # infrastructure + active_directory + switches_routers combined, not a distinct estate.
+    #
+    # Deliberately does NOT touch `covered`/groups/AlertFinding/notifications -- no AlertGroup
+    # lists an Infrastructure/AD/Switches & Routers system today, so nothing about who gets
+    # e-mailed changes just by recording this; it's pure history, same as record_occurrences
+    # always was
+    # for a system no AlertGroup happened to cover. An admin who later creates a group covering
+    # one of these systems finds it already has real occurrence history to alert on from day
+    # one, not a cold start. Each estate's own capture is wrapped separately (not one shared
+    # try/except) so SNMP being briefly unreachable never also skips Infrastructure/AD, and
+    # vice versa -- the same "one estate's own hiccup must never take the others down with it"
+    # principle the exec dashboard's own per-domain fallback already uses. The same capture also
+    # feeds LiveEstateOverview for this estate -- one live read serving alerts, occurrence
+    # history, and the dashboard cache all at once.
+    if not dry_run:
+        from . import network as _network
+
+        for kind, capture in (
+            ("infrastructure", lambda: _network.capture_snapshot(
+                "alert-poller", only=_network.infra_device_keys(), infra=True)),
+            ("active_directory", lambda: _network.capture_snapshot(
+                "alert-poller", only=_network.ad_device_keys(), infra=True)),
+            # Switches & Routers Report (2026-09-22) -- same "own LiveEstateOverview row" split
+            # as infrastructure/active_directory just above, using mode= (not the infra= alias)
+            # so it gets _switches_routers_overview's own correct per-device CPU/RAM/temp
+            # tiles rather than _network_overview's single-scalar ones -- see capture_snapshot's
+            # own docstring.
+            ("switches_routers", lambda: _network.capture_snapshot(
+                "alert-poller", only=_network.switches_routers_device_keys(),
+                mode="switches_routers")),
+        ):
+            try:
+                snap = capture()
+            except Exception:   # noqa: BLE001 -- see this block's own comment above
+                continue
+            for sysvm in snap.systems:
+                record_occurrences(sysvm.name, sysvm.flags, now)
+            LiveEstateOverview.objects.update_or_create(
+                kind=kind,
+                defaults={"captured_at": now, "overview": snap.overview,
+                         "systems": [{"name": s.name, "hosts": s.hosts,
+                                     "flags": [{"key": f.key, "text": f.text, "band": f.band,
+                                                "category": f.category} for f in s.flags]}
+                                    for s in snap.systems]})
 
     import mail_report as mr
     mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
@@ -592,6 +746,84 @@ def run_alert_cycle(*, dry_run: bool = False) -> AlertRunResult:
     return result
 
 
+def build_silenced_digest(*, dry_run: bool = False) -> SilencedDigestResult:
+    """Once a day (see run_silenced_digest.bat / folder_exporter.yml's own
+    silenced_alerts_digest job, 10:30am), roll up everything that happened under an active
+    AlertSilence over roughly the last 24 hours into ONE digest e-mail per AlertGroup, in
+    place of the individual new/reminder e-mails run_alert_cycle's own _silenced() check above
+    already withholds for these (system, flag_key) pairs.
+
+    Needs no bookkeeping of its own: IssueOccurrence (record_occurrences, run_alert_cycle's
+    own writer, every ~5 minutes) already tracks every system/flag's own occurrence history
+    regardless of AlertGroup coverage or silencing -- this just asks "what happened for each
+    silenced pair in roughly the last day" and reports it. A silence with NOTHING that
+    happened in the window is left out of its group's digest entirely -- a quiet day for an
+    already-known-noisy check isn't itself news."""
+    from .models import AlertSilence, IssueOccurrence
+
+    result = SilencedDigestResult()
+    now = timezone.now()
+    cutoff = now - datetime.timedelta(hours=24)
+
+    silences = list(AlertSilence.objects.filter(active=True, expires_at__gt=now)
+                    .select_related("group"))
+    result.silences_evaluated = len(silences)
+    if not silences:
+        return result
+
+    import mail_report as mr
+    mailcfg = mr.load_mail_config(str(gr.DEFAULT_CONFIG))
+    mailcfg["from_name"] = "Silenced Alerts Digest"
+
+    by_group: Dict[int, list] = {}
+    for s in silences:
+        by_group.setdefault(s.group_id, []).append(s)
+
+    for group_silences in by_group.values():
+        group = group_silences[0].group
+        rows = []
+        for s in group_silences:
+            occurrences = list(IssueOccurrence.objects
+                              .filter(system=s.system, flag_key=s.flag_key, last_seen_at__gte=cutoff)
+                              .order_by("-started_at"))
+            if not occurrences:
+                continue   # silenced, but nothing actually happened in the window -- no row
+            latest = occurrences[0]
+            still_open = latest.resolved_at is None
+            label = f"{s.system} · {latest.category}"
+            if len(occurrences) == 1:
+                span = _duration_str(latest.started_at, latest.resolved_at or now)
+                detail = (f"Currently open, {span} so far" if still_open
+                         else f"Fired and cleared — open for {span}")
+            else:
+                detail = (f"Fired {len(occurrences)} times in the last 24h" +
+                         (", still open now" if still_open else ", currently clear"))
+            rows.append((label, detail, still_open))
+        if not rows:
+            continue
+
+        subject = f"[Silenced Alerts] {group.name} — {len(rows)} check(s), last 24h"
+        text_body = "\n".join(f"  {label} — {detail}" for label, detail, _open in rows)
+        html_body, inline_images = alert_email_templates.render_silenced_digest(
+            rows, group_name=group.name)
+        recipients = group.recipient_emails()
+        if dry_run:
+            result.emails_preview.append({"group": group.name, "to": recipients,
+                                          "subject": subject, "text_body": text_body})
+            continue
+        if not recipients:
+            continue   # misconfigured group: no stakeholders -- skip, don't crash the run
+        if mailcfg.get("host"):
+            try:
+                mr.send_email(mailcfg, recipients, subject, html_body, text_body,
+                             inline_images=inline_images)
+                result.emails_sent += 1
+                result.groups_notified += 1
+            except Exception:  # noqa: BLE001 -- one group's SMTP failure must not stop the rest
+                pass
+    return result
+
+
 def send_test_alert(group, *, to: str | None = None) -> tuple[bool, str]:
     """Manually triggered from the group's own edit screen -- always a REAL send, never a dry
     run, because the whole point is to answer "does this actually reach my stakeholders right
@@ -627,15 +859,23 @@ def send_test_alert(group, *, to: str | None = None) -> tuple[bool, str]:
     folder_flags_by_system = folder_size_flags_by_system(store, systems)
     undrained_flags_by_system = undrained_folder_flags_by_system(cfg, set(group.systems))
     backup_uncleared_flags_by_system = backup_uncleared_folder_flags_by_system(cfg, set(group.systems))
+    silences = _active_silences()
     items = []
     for sysm in systems:
         flags = (gr.flagged_for_system(store, sysm, cfg) + folder_flags_by_system.get(sysm.name, [])
                  + undrained_flags_by_system.get(sysm.name, [])
                  + backup_uncleared_flags_by_system.get(sysm.name, []))
+        open_started_by_key = {}
+        if any(system == sysm.name for system, _ in silences):
+            from .models import IssueOccurrence
+            open_started_by_key = {
+                r.flag_key: r.started_at for r in
+                IssueOccurrence.objects.filter(system=sysm.name, resolved_at__isnull=True)}
         eligible = [f for f in flags
                    if severity_meets(f.band, f.category)
                    and group.category_matches(sysm.name, f.category)
-                   and not _flag_suppressed(sysm.name, f.key)]
+                   and not _flag_suppressed(sysm.name, f.key)
+                   and not _silenced(sysm.name, f.key, silences, open_started_by_key, timezone.now())]
         items += [(sysm.name, f, "new", None, None) for f in eligible]
 
     subject, text_body, html_body, inline_images = _render_fired_email(group, items)
