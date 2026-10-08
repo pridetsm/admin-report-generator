@@ -1,0 +1,220 @@
+<!-- ===================== 03 Incident Calendar =====================
+     Left column of .mid-row2, directly under 01 Needs Attention Now.
+     Reuses the Needs Attention classes: na-panel, na-banner, na-stats,
+     na-matrix, na-overlay/na-popup, na-alert-row, na-pill, naOpenPopup().
+     Data: incident_data is built by reports.views.build_incident_calendar_context,
+     reusing the real IssueOccurrence ledger -- see that function's own docstring
+     for why no new Incident model exists. Ported from incident-calendar.zip's own
+     reference partial verbatim; only the template path changed
+     (this app's own convention is templates/reports/, not templates/dashboard/). -->
+<style>
+.inc-panel { height:auto; }
+.inc-panel .na-banner-meta { display:flex; align-items:center; gap:12px; }
+.inc-months { display:flex; gap:4px; }
+.inc-months button { background:#0d1117; border:1px solid #1e2a3a; color:#64748b; font-size:9px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; padding:5px 10px; border-radius:5px; cursor:pointer; }
+.inc-months button.on { color:#f1f5f9; border-color:color-mix(in srgb, var(--na-blend) 55%, transparent); }
+.inc-matrix { min-width:720px; }
+.inc-matrix td.na-row-label .na-row-label-inner { font-size:9px; }
+.inc-matrix th.na-col-head { padding:7px 0; }
+.inc-matrix th.na-col-head.wk { color:#334155; }
+.inc-matrix th.na-col-head.today { color:#10b981; box-shadow:inset 0 0 0 1px #14532d; }
+.inc-matrix td.inc-d { padding:0; height:28px; }
+.inc-matrix td.inc-clear { background:#111827; border:1px solid #1a2535; }
+.inc-matrix td.inc-future { background:transparent; border:1px dashed #1a2535; }
+.inc-matrix td.inc-d { font-size:10px; font-weight:600; font-variant-numeric:tabular-nums; }
+.inc-matrix td.na-c-red { color:#ef4444; }
+.inc-matrix td.na-c-amb { color:#f59e0b; }
+.inc-matrix td.inc-yel { background:#131100; border:1px solid #4a3f00; color:#facc15; cursor:pointer; transition:filter .15s; }
+.inc-matrix td.inc-yel:hover { filter:brightness(1.4); }
+.inc-n-yel { color:#facc15; }
+.inc-matrix td.inc-clear { color:#1e2a3a; }
+.inc-matrix td.inc-tot { background:#111827; border:1px solid #1a2535; padding:0; }
+.inc-legend { display:flex; gap:16px; flex-wrap:wrap; padding:0 16px 14px; font-size:9px; letter-spacing:.07em; text-transform:uppercase; color:#475569; }
+.inc-legend span { display:flex; align-items:center; gap:6px; }
+.inc-legend i { width:12px; height:12px; border-radius:3px; display:inline-block; }
+.inc-note { font-size:11px; color:#94a3b8; margin-top:6px; line-height:1.45; }
+.inc-note b { color:#64748b; font-size:9px; letter-spacing:.07em; text-transform:uppercase; font-weight:700; margin-right:6px; }
+</style>
+
+<section class="sec2 inc-sec">
+  <h2><span class="n">03</span> Incident Calendar</h2>
+  <div class="na-panel inc-panel">
+    <div class="na-banner state-ok" id="incBanner" style="--na-blend:#10b981;">
+      <div class="na-banner-top">
+        <div class="na-pulse-wrap"><div class="na-pulse-core"></div><div class="na-pulse-ring1"></div><div class="na-pulse-ring2"></div></div>
+        <div class="na-banner-title" id="incTitle"></div>
+        <div class="na-banner-meta">
+          <div>
+            <div class="na-banner-meta-line">Incidents logged from admin reports</div>
+            <div class="na-banner-meta-line">+ live alert feed</div>
+          </div>
+          <div class="inc-months" id="incMonths"></div>
+        </div>
+      </div>
+      <div class="na-stats">
+        <div class="na-bstat"><div class="na-bstat-n" id="incK1"></div><div class="na-bstat-l">Incidents</div></div>
+        <div class="na-bstat"><div class="na-bstat-n" id="incK2"></div><div class="na-bstat-l">Incident types</div></div>
+        <div class="na-bstat"><div class="na-bstat-n" id="incK3"></div><div class="na-bstat-l">Affected domains</div></div>
+      </div>
+    </div>
+    <div class="na-matrix-wrap"><table class="na-matrix inc-matrix" id="incMatrix"></table></div>
+    <div class="inc-legend">
+      <span><i style="background:#111827;border:1px solid #1a2535"></i>Clear</span>
+      <span><i style="background:#160606;border:1px solid #450a0a"></i>Unresolved only</span>
+      <span><i style="background:#140a00;border:1px solid #451a00"></i>Resolved and unresolved</span>
+      <span><i style="background:#131100;border:1px solid #4a3f00"></i>Resolved only</span>
+      <span>Number = incidents that day</span>
+      <span><i style="border:1px dashed #1a2535"></i>Upcoming</span>
+      <span><i style="background:#0a0f1a"></i>No data source</span>
+    </div>
+  </div>
+</section>
+
+<div class="na-overlay" id="na-ov-inc" onclick="naCloseOnBackdrop(event, 'inc')">
+  <div class="na-popup">
+    <div class="na-popup-header">
+      <div class="na-popup-header-top">
+        <div>
+          <div class="na-popup-domain-label" id="incPopDomain"></div>
+          <div class="na-popup-issue-title" id="incPopTitle"></div>
+        </div>
+        <button type="button" class="na-popup-close" onclick="naClosePopup('inc')">&#10005;</button>
+      </div>
+      <div class="na-popup-tiles" id="incPopTiles"></div>
+    </div>
+    <div class="na-popup-body" id="incPopBody"></div>
+  </div>
+</div>
+
+{{ incident_data|json_script:"incident-data" }}
+
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("incident-data").textContent);
+  var keys = Object.keys(DATA.months).sort();
+  var cur = keys[keys.length - 1];
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) { var d = document.createElement("div"); d.textContent = s; return d.innerHTML; };
+  var mName = function (k) { return new Date(k + "-01T00:00:00").toLocaleString("en-GB", { month: "long", year: "numeric" }); };
+  var daysIn = function (k) { var p = k.split("-"); return new Date(+p[0], +p[1], 0).getDate(); };
+  var dow = function (k, d) { return new Date(k + "-" + String(d).padStart(2, "0") + "T00:00:00").getDay(); };
+
+  // red = only unresolved, orange = mix, yellow = only resolved
+  function sevClass(items, red, orange, yellow) {
+    var un = items.filter(function (i) { return !i.resolved; }).length;
+    return un === items.length ? red : un ? orange : yellow;
+  }
+
+  function render() {
+    var m = DATA.months[cur], n = daysIn(cur), list = m.incidents;
+    var open = list.filter(function (i) { return !i.resolved; }).length;
+    var doms = {}, devs = {};
+    list.forEach(function (i) { doms[i.domain] = 1; i.devices.forEach(function (d) { devs[d] = 1; }); });
+
+    // Banner colour/pulse are averaged across EVERY day this panel holds (DATA.health, built
+    // server-side in build_incident_calendar_context), not just whichever month tab is open,
+    // and scored by DAY COVERAGE (how many elapsed days were genuinely incident-free) rather
+    // than resolved/total -- a chronic daily backup miss that always gets cleared same-day
+    // still isn't "stable" (2026-10-07, on request, after the first version scored
+    // resolved/total and read 94% green despite incidents on 18 of the last 37 days: "how
+    // does this translate to a green"). The title text stays specific to the CURRENTLY
+    // VIEWED month when there's something to say about it; otherwise it reports the real
+    // day-coverage honestly instead of a blanket "Stable" the colour would contradict.
+    var health = DATA.health || { green_pct: 100, open: 0, total: 0, clear_pct: 100, incident_days: 0, window_days: 1 };
+    // Routed through amber at the midpoint rather than one straight green<->red mix -- a
+    // direct color-mix(green, red) at a middling ratio (e.g. 40%) lands on a dull, muddy
+    // brown, since red and green sit on near-opposite sides of the colour wheel and a
+    // straight-line sRGB blend between them passes through mud, not a meaningful warning
+    // colour (found live, 2026-10-07: "now its brown"). Same green-amber-red traffic-light
+    // gradient the "Needs Attention Now" banner's own nested color-mix already uses.
+    var g = health.green_pct;
+    var blend = g >= 50
+      ? "color-mix(in srgb, #10b981 " + (2 * (g - 50)) + "%, #f59e0b)"
+      : "color-mix(in srgb, #f59e0b " + (2 * g) + "%, #ef4444)";
+    var tier = g >= 80 ? "state-ok" : (g >= 50 ? "state-amb" : "state-red");
+    $("incBanner").className = "na-banner " + tier;
+    $("incBanner").style.setProperty("--na-blend", blend);
+    $("incTitle").textContent = open
+      ? "Critical — " + open + " unresolved incident" + (open > 1 ? "s" : "") + " in " + mName(cur)
+      : health.open
+      ? "Stable this month — " + health.open + " unresolved incident" + (health.open > 1 ? "s" : "") + " still open overall"
+      : health.clear_pct < 80
+      ? "Recurring — incidents on " + health.incident_days + " of the last " + health.window_days + " days"
+      : "Stable — all " + list.length + " incidents resolved in " + mName(cur);
+    $("incK1").textContent = list.length;
+    var types = {}; list.forEach(function (i) { types[i.type] = 1; });
+    $("incK2").textContent = Object.keys(types).length + " | " + (DATA.types || Object.keys(types)).length;
+    $("incK3").textContent = Object.keys(doms).length + " | " + DATA.domains.length;
+
+    $("incMonths").innerHTML = keys.map(function (k) {
+      return '<button type="button" class="' + (k === cur ? "on" : "") + '" data-k="' + k + '">' + mName(k).slice(0, 3) + "</button>";
+    }).join("");
+    $("incMonths").querySelectorAll("button").forEach(function (b) { b.onclick = function () { cur = b.dataset.k; render(); }; });
+
+    var h = '<colgroup><col style="width:104px">';
+    for (var c = 0; c < n; c++) h += "<col>";
+    h += '<col style="width:44px"></colgroup><thead><tr><th class="na-corner"></th>';
+    for (var d = 1; d <= n; d++) {
+      var wk = dow(cur, d) === 0 || dow(cur, d) === 6;
+      h += '<th class="na-col-head' + (wk ? " wk" : "") + (d === m.today && m.today <= n ? " today" : "") + '">' + d + "</th>";
+    }
+    h += '<th class="na-col-head">Total</th></tr></thead><tbody>';
+
+    DATA.domains.forEach(function (dom) {
+      var nd = (m.nodata || []).indexOf(dom) > -1;
+      var mine = list.filter(function (i) { return i.domain === dom; });
+      h += '<tr><td class="na-row-label"><div class="na-row-label-inner">' + esc(dom) + "</div></td>";
+      for (var d = 1; d <= n; d++) {
+        if (nd) { h += '<td class="inc-d na-empty"></td>'; continue; }
+        var day = mine.filter(function (i) { return i.day === d; });
+        if (day.length) {
+          h += '<td class="inc-d ' + sevClass(day, "na-c-red", "na-c-amb", "inc-yel") + '" tabindex="0" role="button" data-dom="' + esc(dom) + '" data-day="' + d + '" aria-label="' + esc(dom) + ", " + d + " " + mName(cur) + ", " + day.length + " incident" + (day.length > 1 ? "s" : "") + '">' + day.length + "</td>";
+        } else {
+          h += d <= m.today ? '<td class="inc-d inc-clear">0</td>' : '<td class="inc-d inc-future"></td>';
+        }
+      }
+      h += nd
+        ? '<td class="inc-tot na-cell-txt na-n-tot">—</td>'
+        : '<td class="inc-tot"><span class="na-cell-txt ' + (!mine.length ? "na-n-tot" : sevClass(mine, "na-n-red", "na-n-amb", "inc-n-yel")) + '">' + mine.length + "</span></td>";
+      h += "</tr>";
+    });
+    $("incMatrix").innerHTML = h + "</tbody>";
+
+    $("incMatrix").querySelectorAll("td[data-day]").forEach(function (td) {
+      var go = function () { openDay(td.dataset.dom, +td.dataset.day); };
+      td.onclick = go;
+      td.onkeydown = function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+    });
+  }
+
+  function openDay(dom, day) {
+    var items = DATA.months[cur].incidents.filter(function (i) { return i.domain === dom && i.day === day; });
+    var open = items.filter(function (i) { return !i.resolved; }).length;
+    var devs = {}; items.forEach(function (i) { i.devices.forEach(function (d) { devs[d] = 1; }); });
+    $("incPopDomain").textContent = dom;
+    $("incPopTitle").textContent = day + " " + mName(cur);
+    $("incPopTiles").innerHTML =
+      '<div class="na-ptile"><div class="na-ptile-n ' + sevClass(items, "na-n-red", "na-n-amb", "inc-n-yel") + '">' + items.length + '</div><div class="na-ptile-l">Incidents</div></div>' +
+      '<div class="na-ptile"><div class="na-ptile-n ' + (open ? "na-n-red" : "na-n-ok") + '">' + open + '</div><div class="na-ptile-l">Unresolved</div></div>' +
+      '<div class="na-ptile"><div class="na-ptile-n" style="color:#94a3b8">' + Object.keys(devs).length + '</div><div class="na-ptile-l">Devices</div></div>';
+    $("incPopBody").innerHTML = items.map(function (i) {
+      var sev = i.resolved ? "amb" : "red";
+      var pill = i.resolved
+        ? '<span class="na-pill" style="color:#facc15;border-color:rgba(250,204,21,.35);background:rgba(250,204,21,.08)">Resolved</span>'
+        : '<span class="na-pill" style="color:#ef4444;border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.08)">Unresolved</span>';
+      return '<div class="na-alert-row sev-' + sev + '"><div class="na-alert-row-top">' +
+        '<span class="na-alert-dot ' + sev + '"></span><div class="na-alert-main">' +
+        '<div class="na-alert-title"><strong>' + esc(i.type) + "</strong> — " + esc(i.desc) + "</div>" +
+        '<div class="na-alert-pills">' + i.devices.map(function (d) { return '<span class="na-pill">' + esc(d) + "</span>"; }).join("") + "</div>" +
+        '<div class="inc-note"><b>' + (i.resolved ? "Resolution" : "Status") + "</b>" + esc(i.note) + "</div>" +
+        '</div><div class="na-alert-time">' + pill + "</div></div></div>";
+    }).join("");
+    naOpenPopup("inc");
+  }
+
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") naClosePopup("inc"); });
+  render();
+})();
+</script>
+<!-- =================== /03 Incident Calendar =================== -->

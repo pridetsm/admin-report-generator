@@ -5,7 +5,8 @@ from reports import alerting
 
 class Command(BaseCommand):
     help = ("Roll up everything that happened under an active AlertSilence over the last "
-           "24 hours into one digest e-mail per AlertGroup.")
+           "24 hours into ONE combined digest e-mail covering every AlertGroup, sent to the "
+           "union of their stakeholders (2026-10-02: previously one e-mail per group).")
 
     def add_arguments(self, parser):
         parser.add_argument("--dry-run", action="store_true",

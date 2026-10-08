@@ -17,7 +17,7 @@
       unknown.
     </p>
 
-    <form method="post">{% csrf_token %}
+    <form method="post" class="xlsx-download-form">{% csrf_token %}
       <label class="field" style="margin-bottom:18px">
         <span>Theme</span>
         <div class="segtheme">
@@ -30,7 +30,7 @@
         </div>
       </label>
 
-      <button class="btn primary" type="submit" onclick="if(window.skipSpinnerOnce)window.skipSpinnerOnce();">
+      <button class="btn primary" type="submit">
         ⬇ Generate &amp; download
       </button>
     </form>

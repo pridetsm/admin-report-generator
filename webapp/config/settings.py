@@ -156,8 +156,23 @@ if os.environ.get("POSTGRES_DB"):
             "HOST": os.environ.get("POSTGRES_HOST", "127.0.0.1"),
             "PORT": os.environ.get("POSTGRES_PORT", "5432"),
             "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
-        }
+        },
+        # The long-term metric archive (MetricSample, routed here by reports.db_router) --
+        # its own database, not another table in "default", for backup-lifecycle independence
+        # and workload isolation -- see PROMETHEUS-RETENTION-PLAN.md. Same server/credentials
+        # as "default" unless overridden; only the database NAME differs by default, since
+        # this is the same Postgres instance, just a separate database on it.
+        "metrics": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_METRICS_DB", "prometheus_snapshot_db"),
+            "USER": os.environ.get("POSTGRES_METRICS_USER", os.environ.get("POSTGRES_USER", "postgres")),
+            "PASSWORD": os.environ.get("POSTGRES_METRICS_PASSWORD", os.environ.get("POSTGRES_PASSWORD", "")),
+            "HOST": os.environ.get("POSTGRES_METRICS_HOST", os.environ.get("POSTGRES_HOST", "127.0.0.1")),
+            "PORT": os.environ.get("POSTGRES_METRICS_PORT", os.environ.get("POSTGRES_PORT", "5432")),
+            "CONN_MAX_AGE": int(os.environ.get("POSTGRES_CONN_MAX_AGE", "60")),
+        },
     }
+    DATABASE_ROUTERS = ["reports.db_router.MetricsRouter"]
 else:
     DATABASES = {
         "default": {

@@ -1,0 +1,272 @@
+# ============================================================================
+#  folder_exporter configuration
+#
+#  This exporter reports on THIS SERVER ONLY. Add the local folders you want
+#  monitored under "folders:" at the bottom. Network (UNC) paths and mapped
+#  network drives are rejected - run an instance on the server that owns the
+#  storage instead.
+#
+#  The file is watched: save it and the configuration reloads automatically,
+#  with no restart and without losing the added/removed counters.
+#  Validate before deploying with:   folder_exporter.exe --check-config
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# Server settings
+# ---------------------------------------------------------------------------
+
+# Where this exporter listens for Prometheus scrapes.
+#   0.0.0.0:9847   all interfaces (needs Administrator, or a netsh urlacl)
+#   127.0.0.1:9847 loopback only, if Prometheus runs on this same server
+listen_address: 0.0.0.0:9847
+metrics_path: /metrics
+
+# How often folders are walked. Scrapes serve a cached result, so this - not
+# the Prometheus scrape interval - is what controls freshness and disk cost.
+#
+# 10s so the Folder Watch screen shows files arriving and being consumed close to
+# live. These are queue folders holding a handful of files with recursive: false,
+# so a scan costs about a millisecond and the process runs at low I/O priority
+# anyway. Raise this for any folder large enough that a walk is not free - or set
+# scan_interval_seconds on that folder alone.
+scan_interval_seconds: 10
+
+# Give up on a single folder after this long and report partial data.
+scan_timeout_seconds: 900
+
+# Folders scanned at the same time. Keep at 1 for a single physical disk.
+max_concurrent_scans: 1
+
+# Run at low CPU *and* low disk I/O priority so scans yield to real workloads.
+low_priority: true
+
+# Return freed memory to the OS after each scan cycle.
+trim_working_set: true
+
+# Optional pacing for very large trees: sleep N ms every M files. 0 disables.
+throttle_every_files: 0
+throttle_sleep_ms: 5
+
+# Logging. A Windows service has no console, so log_file is set by default -
+# without it a service that misbehaves leaves no trace. The directory is created
+# automatically. The file rotates to exporter.log.1 at log_max_bytes.
+log_level: info                 # error | warn | info | debug
+log_file: C:\ProgramData\folder_exporter\exporter.log
+log_max_bytes: 8388608
+
+# Optional scrape authentication. Leave username empty to disable.
+basic_auth:
+  username: ""
+  password: ""
+
+# Buckets for the folder_file_age_seconds histogram: 5m, 15m, 30m, 1h, 6h, 1d, 7d, 30d.
+# 900 and 1800 are here because the Folder Watch page reads "how many files are past the
+# ageing limit / past the too-old limit" straight off this histogram, and it can only
+# answer that at a boundary that actually exists. If you retune AMBER_SECONDS or
+# RED_SECONDS in the dashboard (reports/folders.py), add the matching boundary here.
+file_age_buckets_seconds: [300, 900, 1800, 3600, 21600, 86400, 604800, 2592000]
+
+# ---------------------------------------------------------------------------
+# Job scheduler. Runs scripts on a schedule inside this same service, so Task
+# Scheduler drift, GPO baselines and routine preventive-maintenance sweeps on
+# the T24 application server (which reset/disable scheduled tasks) cannot
+# silently drop them. Migrated off Task Scheduler on 2026-08-18 from the
+# exported "Count Swift Transactions" task, originally authored
+# WIN-ATS621C2OIS\Administrator. See README.md - Job scheduling for the full
+# key reference.
+# ---------------------------------------------------------------------------
+job_poll_interval_seconds: 15
+job_state_file: C:\ProgramData\folder_exporter\jobs\state.tsv
+job_log_directory: C:\ProgramData\folder_exporter\jobs\logs
+
+job_defaults:
+  shell: auto
+  timeout_seconds: 3600
+  if_running: skip
+  on_missed: run_once
+  missed_grace_seconds: 7200
+
+jobs:
+  # Was the "Count Swift Transactions" scheduled task: counts SWIFT
+  # transactions.
+  #
+  # NOTE ON THE INTERVAL. The original task's DESCRIPTION said "hourly", but
+  # its actual trigger was a TimeTrigger with Repetition Interval PT5M - it
+  # really ran every 5 MINUTES, not hourly. every_seconds: 300 below preserves
+  # what the task actually did, not what its description claimed. If hourly was
+  # the intent all along and the trigger was the mistake, change this to
+  # every_seconds: 3600 (or cron: "0 * * * *" to pin it to the top of the hour).
+  #
+  # every_seconds is used rather than cron because the original was a repeating
+  # interval from a start time, not a calendar schedule - the two are not the
+  # same thing once a service restart shifts the phase.
+  #
+  # on_missed: skip overrides the run_once default. At a 5-minute cadence a
+  # missed run is moot by the time anyone notices - the next one is along
+  # shortly - so catching up after an outage would just burn work.
+  - name: count_swift_transactions
+    cron: */5 * * * *
+    command: C:\Users\Administrator\Desktop\morning_report\run_count.bat
+    working_directory: C:\Users\Administrator\Desktop\morning_report\
+   
+
+  - name: t24_service_checker
+    cron: */5 * * * *
+    command: C:\Users\Administrator\Desktop\morning_report\run_services.bat
+    working_directory: C:\Users\Administrator\Desktop\morning_report\
+ 
+# ---------------------------------------------------------------------------
+# Defaults applied to every folder below. Any folder can override any of these.
+# ---------------------------------------------------------------------------
+defaults:
+  recursive: true
+  max_depth: 0                  # 0 = unlimited, 1 = the folder itself only
+  include: []                   # e.g. ["*.csv", "*.xml"] - empty means all files
+  exclude: ["*.tmp", "~$*"]
+  exclude_directories: []       # directory names skipped entirely
+  follow_reparse_points: false  # junctions/symlinks skipped: prevents loops
+  skip_hidden: false
+  skip_system: false
+
+  # Add/remove detection.
+  #   hash - keeps a 64-bit hash per file (cheapest, ~24 bytes per file)
+  #   name - also keeps the relative path, which is what lets the exporter
+  #          report the NAME of a removed file
+  track_changes: true
+  change_tracking_mode: hash
+  max_tracked_files: 5000000
+
+  # Emit filenames as label values. Off by default: filenames are
+  # high-cardinality labels in Prometheus.
+  expose_filename_labels: false
+
+  disk_metrics: true            # free/total bytes of the containing volume
+  extension_metrics: false      # per-extension file counts and sizes
+  top_extensions: 10
+
+  age_basis: write              # write = last write time, create = creation time
+
+# ---------------------------------------------------------------------------
+# THE FOLDERS TO MONITOR
+#
+#   name:  becomes the `target` label in Prometheus. Must be unique.
+#   path:  an absolute local path on this server. %EnvironmentVariables% work.
+#
+# Every key from "defaults" above can be repeated here to override it for one
+# folder.
+#
+# These are Temenos T24 R23 interface queue directories. They are message
+# queues, so the metrics that matter most are folder_files (backlog depth),
+# folder_oldest_file_age_seconds (is something stuck?) and the added/removed
+# counters (are messages still flowing?).
+#
+# ---------------------------------------------------------------------------
+# MESSAGE PATH
+#
+# Each folder carries source / via / destination labels describing the leg of
+# the payment path it holds, so the dashboard can show where a stuck message
+# was going and PromQL can ask questions like "everything inbound to T24"
+# (destination="T24") or "every leg that crosses SWIFT" (via="SWIFT").
+#
+#   ALLIANCE.IN_MT    RTGS   -> SWIFT -> T24     MT format
+#   ALLIANCE.IN_MX    RTGS   -> SWIFT -> T24     MX format
+#   ALLIANCE.OUT_MX   T24    -> SWIFT -> RTGS    MX format, everything T24 sends
+#   PAYNET.IN         PAYNET -> T24              direct, no translation
+#   EFIN.IN           EFIN   -> T24              direct, no translation
+#
+# T24 and RTGS only speak to each other through the SWIFT Alliance translation
+# layer, so those three folders carry via: SWIFT. PAYNET and EFIN feed T24
+# directly, so they carry no `via` at all - absent rather than "direct", so the
+# dashboard draws a two-stop path instead of inventing a hop, and PromQL can
+# select the direct feeds with via="".
+# ---------------------------------------------------------------------------
+#
+# recursive: false is set on all of them deliberately - a queue folder's count
+# should reflect what is WAITING in the queue. If an interface archives into a
+# subfolder, recursing would fold the archive into the backlog number and the
+# folder would look permanently full. If any of these folders has no subfolders
+# at all, the setting simply costs nothing. Set recursive: true on any folder
+# where you do want the whole tree counted.
+# ---------------------------------------------------------------------------
+folders:
+
+  # ---- SWIFT Alliance ------------------------------------------------------
+
+  # Inbound from RTGS, translated by SWIFT Alliance, landing for T24 to consume.
+  - name: ALLIANCE.IN_MT
+    path: C:\Temenos\R23\bnk\UD\ALLIANCE\IN_MT
+    recursive: false
+    labels:
+      system: temenos
+      interface: alliance
+      direction: in
+      format: mt
+      source: RTGS
+      via: SWIFT
+      destination: T24
+
+  # The same leg as IN_MT; these messages simply arrive in MX rather than MT.
+  - name: ALLIANCE.IN_MX
+    path: C:\Temenos\R23\bnk\UD\ALLIANCE\IN_MX
+    recursive: false
+    labels:
+      system: temenos
+      interface: alliance
+      direction: in
+      format: mx
+      source: RTGS
+      via: SWIFT
+      destination: T24
+
+  # Everything T24 sends to RTGS leaves through here, translated by SWIFT on the
+  # way out and consumed by RTGS at the far end.
+  - name: ALLIANCE.OUT_MX
+    path: C:\Temenos\R23\bnk\UD\ALLIANCE\OUT_MX
+    recursive: false
+    labels:
+      system: temenos
+      interface: alliance
+      direction: out
+      format: mx
+      source: T24
+      via: SWIFT
+      destination: RTGS
+
+  # ---- PAYNET --------------------------------------------------------------
+
+  # Feeds T24 directly - no translation layer, so no `via`.
+  - name: PAYNET.IN
+    path: C:\Temenos\R23\bnk\UD\PAYNET.IN
+    recursive: false
+    labels:
+      system: temenos
+      interface: paynet
+      direction: in
+      source: PAYNET
+      destination: T24
+
+  # ---- EFIN ----------------------------------------------------------------
+
+  # Feeds T24 directly - no translation layer, so no `via`.
+  - name: EFIN.IN
+    path: C:\Temenos\R23\bnk\UD\EFIN.IN
+    recursive: false
+    labels:
+      system: temenos
+      interface: efin
+      direction: in
+      source: EFIN
+      destination: T24
+
+# ---------------------------------------------------------------------------
+# Optional: to see the NAME of the file that most recently arrived or was
+# removed from a folder, add these two keys to that folder:
+#
+#     change_tracking_mode: name
+#     expose_filename_labels: true
+#
+# Left off by default here on purpose. Each distinct filename becomes its own
+# Prometheus time series, and SWIFT/payment message files have unique names per
+# message - on a busy interface that is a cardinality problem. Enable it only on
+# a low-volume folder where knowing the filename is worth the cost.
+# ---------------------------------------------------------------------------

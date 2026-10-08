@@ -134,7 +134,12 @@ MONO = "'Courier New', monospace"
 # service down imminently (the disk fills, the service stops), the same reasoning IMMINENT
 # was built for in the first place.
 def _severity(category: str, band: str) -> dict:
-    if band == "red" and category in ("unreachable", "disk"):
+    # Keep this category tuple in step with alert_catalog._tier()'s and alerting.py's own
+    # is_imminent line (2026-10-01: "disk" replaced by "very_high_disk", "undrained_folders"
+    # added, "cpu"/"ram" got their own "very_high_*" siblings too -- see those comments for
+    # the full history).
+    if band == "red" and category in ("unreachable", "very_high_disk", "very_high_cpu",
+                                      "very_high_ram", "very_high_folder", "queue_stuck"):
         return {"label": "IMMINENT", "fg": IMMINENT, "soft": IMMINENT_SOFT, "line": IMMINENT_LINE}
     if band == "red":
         return {"label": "CRITICAL", "fg": RED, "soft": RED_SOFT, "line": RED_LINE}
@@ -145,6 +150,18 @@ _METRIC_KEY = {
     "service": "service_down", "unreachable": "component_unreachable",
     "backup": "backup_missing", "untracked": "backup_untracked",
     "backup_uncleared": "uncleared_backups", "folder": "folder_over_expected_size",
+    # Same underlying metric as their base category, different severity only -- see each
+    # category's own comment in models.py (2026-10-01 split).
+    "very_high_disk": "disk", "backup_overdue": "uncleared_backups",
+    "very_high_cpu": "cpu_usage", "very_high_ram": "ram_usage",
+    "very_high_folder": "folder_over_expected_size",
+    "high_disk": "disk", "high_cpu": "cpu_usage", "high_ram": "ram_usage",
+    # "undrained_folders" was never in this dict at all (a real, PRE-EXISTING gap, not
+    # something introduced today) despite _chip_row's own `_METRIC_KEY[category]` using
+    # direct indexing with no fallback -- a live KeyError waiting for the first real
+    # undrained_folders notification to render. Fixed here since "queue_stuck" (2026-10-01
+    # split) shares the identical risk and this dict was already being touched.
+    "undrained_folders": "folder_not_draining", "queue_stuck": "folder_not_draining",
 }
 # The SAME human labels AlertGroup.CATEGORY_CHOICES carries (webapp/reports/models.py) --
 # duplicated here as a plain dict, not imported, so this module keeps its existing
@@ -157,6 +174,12 @@ _CATEGORY_LABEL = {
     "backup": "Backup missing", "untracked": "Backup untracked",
     "backup_uncleared": "Backup & log drainage",
     "folder": "Size monitoring", "undrained_folders": "Drainage monitoring",
+    "very_high_disk": "Very high disk usage",
+    "backup_overdue": "Backup & log drainage overdue",
+    "very_high_cpu": "Very high CPU usage", "very_high_ram": "Very high RAM usage",
+    "very_high_folder": "Folder far over expected size",
+    "high_disk": "High disk usage", "high_cpu": "High CPU usage", "high_ram": "High RAM usage",
+    "queue_stuck": "Queue not draining",
 }
 # The badge word each compact row shows on the left (see _fired_row/_resolved_row) -- plain
 # text in a colored pill, not a drawn icon or a cryptic abbreviation ("DRN" for Drainage
@@ -175,6 +198,9 @@ _CATEGORY_BADGE = {
     "service": "service", "unreachable": "unreachable",
     "backup": "backup", "untracked": "untracked", "backup_uncleared": "uncleared",
     "folder": "folder", "undrained_folders": "drainage",
+    "very_high_disk": "disk", "backup_overdue": "overdue",
+    "very_high_cpu": "cpu", "very_high_ram": "ram", "very_high_folder": "folder",
+    "high_disk": "disk", "high_cpu": "cpu", "high_ram": "ram", "queue_stuck": "drainage",
 }
 _BADGE_COL_WIDTH = 76   # fits "Unreachable" (the longest badge word) at 10px bold with padding
 
@@ -190,6 +216,14 @@ _STATUS_FALLBACK = {
     "service": "Service Down", "unreachable": "Unreachable",
     "backup": "Missing Backup", "untracked": "Not Tracked", "backup_uncleared": "Not Cleared",
     "folder": "Over Size", "undrained_folders": "Not Draining",
+    # Deliberately NOT reusing the word "Critical"/"Imminent" here -- those are the SEVERITY
+    # banner's own words (shown once, immediately above, see this dict's own module comment);
+    # this is a plain description of what's wrong, so each tier gets escalating plain English
+    # instead ("High" -> "Very High" -> "Extreme") rather than repeating the tier label twice.
+    "high_disk": "Very High Usage", "high_cpu": "Very High Usage", "high_ram": "Very High Usage",
+    "very_high_disk": "Extreme Usage", "very_high_cpu": "Extreme Usage",
+    "very_high_ram": "Extreme Usage", "very_high_folder": "Extremely Over Size",
+    "backup_overdue": "Severely Overdue", "queue_stuck": "Not Draining",
 }
 
 # disk/ram/cpu's own real wording (generate_report.flagged_for_system) is always
@@ -522,6 +556,15 @@ def _shell(*, title: str, banner_bg: str, banner_fg: str, banner_text: str, body
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="x-apple-disable-message-reformatting">
 <title>{title}</title>
+<style>
+/* Whole-template scaling (2026-10-06, same fix as render_silenced_digest_combined's own --
+   see that function's identical rule for the full "why"). Fixed ONCE here since _shell is the
+   SHARED header/banner/footer wrapper every other alert e-mail this module renders (render(),
+   render_fired, render_resolved, render_event, render_system_alert) goes through -- covers
+   all five at once rather than five separate copies to keep in sync. */
+table{{table-layout:fixed}}
+td,th{{overflow-wrap:anywhere}}
+</style>
 </head>
 <body style="margin:0;padding:0;background:{PAPER};">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:{PAPER};">
@@ -725,36 +768,48 @@ def render_fired(items: list, *, group_name: str, min_severity: str, total_remin
     schedule (AlertGroup.reminder_minutes; ships as 10/40/60 minutes after first notification,
     then silence).
 
-    `items`: [(system, Flag, action, reminder_number, item_total), ...] where action is "new"
-    or "remind" and reminder_number is 1..item_total when action is "remind", else None (see
-    reports.alerting's own action vocabulary). `item_total` travels WITH each item rather than
-    being one shared value for the whole digest (2026-09-04) -- a persistent IMMINENT reminder
-    (component unreachable, no daily cap, see reports.alerting._decide's own imminent branch)
-    carries item_total=None, meaning "unbounded, no final reminder", so it is never mislabeled
-    "final" just because it has out-lived some OTHER, unrelated finding's own capped schedule
-    length in the same digest. `total_reminders` (this function's own parameter) is now only a
-    fallback for a caller whose items don't set a real per-item total at all; defaults to 3
-    (the shipped default's own length) as a last-resort safety net. Escaping happens inside
-    _fired_row, AFTER _headline_value has had a chance to pattern-match the RAW text --
-    escaping first would not break the patterns used today, but there is no reason to risk it
-    mattering for a future one.
+    `items`: [(system, Flag, action, reminder_number, item_total, domain), ...] where action is
+    "new" or "remind" and reminder_number is 1..item_total when action is "remind", else None
+    (see reports.alerting's own action vocabulary). `item_total` travels WITH each item rather
+    than being one shared value for the whole digest (2026-09-04) -- a persistent IMMINENT
+    reminder (component unreachable, no daily cap, see reports.alerting._decide's own imminent
+    branch) carries item_total=None, meaning "unbounded, no final reminder", so it is never
+    mislabeled "final" just because it has out-lived some OTHER, unrelated finding's own capped
+    schedule length in the same digest. `total_reminders` (this function's own parameter) is
+    now only a fallback for a caller whose items don't set a real per-item total at all;
+    defaults to 3 (the shipped default's own length) as a last-resort safety net. Escaping
+    happens inside _fired_row, AFTER _headline_value has had a chance to pattern-match the RAW
+    text -- escaping first would not break the patterns used today, but there is no reason to
+    risk it mattering for a future one.
 
-    `still_open`: [(system, Flag), ...] -- OTHER findings in this same group that are
+    `still_open`: [(system, Flag, domain), ...] -- OTHER findings in this same group that are
     currently open but weren't themselves due for a new/reminder event this poll (2026-09-05,
     on request: a RAM alert for system Y shouldn't leave system X's own still-high RAM
     unmentioned just because X's reminder isn't due yet). Rendered as its own "Also still
-    open" section below the New/reminder rows, status-labeled "Still open" rather than an
-    ordinal reminder -- these rows carry no reminder-count information (reports.alerting
-    never touches that finding's own reminder_count/first_notified_at/last_notified_at for
-    appearing here) and exist purely for situational awareness."""
+    open" sub-section, status-labeled "Still open" rather than an ordinal reminder -- these
+    rows carry no reminder-count information (reports.alerting never touches that finding's
+    own reminder_count/first_notified_at/last_notified_at for appearing here) and exist purely
+    for situational awareness.
+
+    `domain` -- "Network"/"Systems"/"Infrastructure" (reports.alerting's own
+    record_occurrences-aligned values) or "" when unknown (reports.alerting.send_test_alert's
+    own synthetic items, which don't cheaply know one) -- GROUPS the whole digest by domain
+    (2026-10-02, on request: "alerts should collect each other by domain... we have the still
+    open that shows other alerts still open instead of firing them again unnecessarily" --
+    extends that existing "Also still open" idea from "per group" to "per domain within the
+    group" for exactly the groups whose own systems span more than one). Each domain section
+    carries its OWN New / reminder / Also-still-open rows, same structure the whole digest
+    used to have flat. A digest that only ever touches ONE domain this poll (the overwhelming
+    majority -- Network Team is always Network, RTGS/T24 are always Systems) renders with NO
+    domain headers at all, identical to the pre-2026-10-02 flat layout -- the grouping only
+    becomes visible on a poll where it actually matters."""
     group_name = html.escape(group_name)
     min_severity = html.escape(min_severity)
-    new_items = [(s, f) for s, f, a, _n, _t in items if a == "new"]
-    reminders = [(s, f, n, t) for s, f, a, n, t in items if a == "remind"]
+    new_items = [(s, f, d) for s, f, a, _n, _t, d in items if a == "new"]
+    reminders = [(s, f, n, t, d) for s, f, a, n, t, d in items if a == "remind"]
     still_open = still_open or []
     total_rows = len(new_items) + len(reminders) + len(still_open)
 
-    rows_html = []
     worst_rank = 3
     # Counted alongside worst_rank, not derived from it afterward -- 2026-09-08, on request:
     # "each notification message may have alerts of different severities so its better to
@@ -770,23 +825,46 @@ def render_fired(items: list, *, group_name: str, min_severity: str, total_remin
         severity_counts[sev["label"]] = severity_counts.get(sev["label"], 0) + 1
         return _SEVERITY_RANK[sev["label"]]
 
-    for i, (s, f) in enumerate(new_items):
-        worst_rank = min(worst_rank, _tally(f))
-        rows_html.append(_fired_row(s, f.category, f.band, f.text, "new", None, total_reminders,
-                                    last=(i == total_rows - 1)))
-    for i, (s, f, n, t) in enumerate(reminders):
-        worst_rank = min(worst_rank, _tally(f))
-        # t is None ONLY for a persistent imminent reminder (reports.alerting always sets a
-        # real int otherwise) -- passed through as-is, not defaulted, so reminder_label()
-        # itself decides how an unbounded reminder reads.
-        rows_html.append(_fired_row(s, f.category, f.band, f.text, "remind", n, t,
-                                    last=(len(new_items) + i == total_rows - 1)))
-    if still_open:
-        rows_html.append(_section_divider("Also still open"))
-        for i, (s, f) in enumerate(still_open):
+    domains_present = {d for _s, _f, _n, _t, d in reminders} | {d for _s, _f, d in new_items} \
+        | {d for _s, _f, d in still_open}
+    # No headers at all when the whole digest is one domain (or domain is unknown throughout,
+    # e.g. a manually triggered test) -- see this function's own docstring on why that's the
+    # overwhelmingly common real case.
+    group_by_domain = len(domains_present) > 1
+    _DOMAIN_ORDER = {"Network": 0, "Systems": 1, "Infrastructure": 2, "": 9}
+    ordered_domains = sorted(domains_present, key=lambda d: _DOMAIN_ORDER.get(d, 5)) \
+        if group_by_domain else [None]
+
+    rows_html = []
+    row_i = 0
+    for dom in ordered_domains:
+        dom_new = [(s, f) for s, f, d in new_items if not group_by_domain or d == dom]
+        dom_rem = [(s, f, n, t) for s, f, n, t, d in reminders if not group_by_domain or d == dom]
+        dom_open = [(s, f) for s, f, d in still_open if not group_by_domain or d == dom]
+        if group_by_domain and not (dom_new or dom_rem or dom_open):
+            continue
+        if group_by_domain:
+            rows_html.append(_section_divider(dom or "Other"))
+        for s, f in dom_new:
             worst_rank = min(worst_rank, _tally(f))
-            rows_html.append(_fired_row(s, f.category, f.band, f.text, "open", None, None,
-                                        last=(len(new_items) + len(reminders) + i == total_rows - 1)))
+            row_i += 1
+            rows_html.append(_fired_row(s, f.category, f.band, f.text, "new", None, total_reminders,
+                                        last=(row_i == total_rows)))
+        for s, f, n, t in dom_rem:
+            worst_rank = min(worst_rank, _tally(f))
+            row_i += 1
+            # t is None ONLY for a persistent imminent reminder (reports.alerting always sets
+            # a real int otherwise) -- passed through as-is, not defaulted, so reminder_label()
+            # itself decides how an unbounded reminder reads.
+            rows_html.append(_fired_row(s, f.category, f.band, f.text, "remind", n, t,
+                                        last=(row_i == total_rows)))
+        if dom_open:
+            rows_html.append(_section_divider("Also still open"))
+            for s, f in dom_open:
+                worst_rank = min(worst_rank, _tally(f))
+                row_i += 1
+                rows_html.append(_fired_row(s, f.category, f.band, f.text, "open", None, None,
+                                            last=(row_i == total_rows)))
     body_html = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
                 f'{"".join(rows_html)}</table>')
 
@@ -810,13 +888,13 @@ def render_fired(items: list, *, group_name: str, min_severity: str, total_remin
     # about severity (already the banner's own job, see _STATUS_FALLBACK's own docstring on
     # not repeating that word twice).
     seen_cats: list = []
-    for _s, _f in new_items:
+    for _s, _f, _d in new_items:
         if _f.category not in seen_cats:
             seen_cats.append(_f.category)
-    for _s, _f, _n, _t in reminders:
+    for _s, _f, _n, _t, _d in reminders:
         if _f.category not in seen_cats:
             seen_cats.append(_f.category)
-    for _s, _f in still_open:
+    for _s, _f, _d in still_open:
         if _f.category not in seen_cats:
             seen_cats.append(_f.category)
     detail_text = html.escape(", ".join(_CATEGORY_LABEL.get(c, c) for c in seen_cats))
@@ -997,57 +1075,434 @@ def render_system_alert(items: list, *, group_name: str, for_browser: bool = Fal
     return html_out, inline_images
 
 
-def _silenced_row(label: str, detail: str, still_open: bool, *, last: bool) -> str:
-    """One <tr> for a single silenced check's last-24h summary -- same label/detail layout as
-    _system_alert_row, minus the New/reminder status tag (a digest row has no notification
-    schedule of its own to report on) and with a small "open now"/"clear" chip instead, since
-    that -- not how many times it's been said -- is the one thing worth a glance here."""
-    border = "" if last else f"border-bottom:1px solid {LINE};"
-    badge = _badge_pill("silenced", SILENCED, SILENCED_SOFT)
-    # GOLD, not a dedicated amber text colour -- this file has never had one (see _severity's
-    # own "WARNING" case, the only other place a non-red/green status text is needed).
-    chip_fg, chip_soft, chip_word = (GOLD, AMBER_SOFT, "Open now") if still_open \
-        else (GREEN, GREEN_SOFT, "Clear")
-    chip = (f'<span style="display:inline-block;padding:2px 8px;border-radius:10px;'
-           f'background:{chip_soft};color:{chip_fg};font-family:{FONT};font-size:10px;'
-           f'font-weight:bold;">{chip_word}</span>')
-    return f"""<tr><td style="padding:14px 20px;{border}">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-<td width="{_BADGE_COL_WIDTH}" style="vertical-align:middle;">{badge}</td>
-<td style="padding-left:12px;vertical-align:middle;">
-<div style="font-family:{FONT};font-size:14px;font-weight:bold;color:{TEXT};">{html.escape(label)}</div>
-<div style="font-family:{FONT};font-size:12px;color:{MUTED};">{html.escape(detail)}</div>
-</td>
-<td style="text-align:right;vertical-align:middle;white-space:nowrap;">{chip}</td>
+
+# Check-type classification for the digest's own per-section grouping (2026-10-02, on request:
+# a redesign package -- digest-redesign-package.zip's own GROUP_DIGEST_REDESIGN_PROMPT.md,
+# "Within each group, checks are grouped by check type not by device"). Scoped by CATEGORY,
+# not by which AlertGroup the row happens to belong to -- today's real data has Network Team
+# rows landing entirely in PERFORMANCE/METRICS and RTGS/T24 landing entirely in RESOURCE, which
+# is what makes the reference mockup look like "network groups get a matrix, app groups get a
+# table" -- but that's a property of TODAY's data, not a rule to hardcode, so a future finding
+# in any bucket under any group still renders in its own correct sub-section instead of being
+# silently dropped or forced into the wrong layout.
+_PERF_DEG_LABEL = {"degraded": "Degraded", "degrading": "Degrading",
+                   "potentially_degrading": "Potentially degrading"}
+PERFORMANCE_CHECKS = set(_PERF_DEG_LABEL) | {"unreachable", "service", "high_cpu", "very_high_cpu"}
+METRICS_CHECKS = {"untracked_metrics", "untracked", "metrics_missing"}
+RESOURCE_CHECKS = {"disk", "high_disk", "very_high_disk", "ram", "high_ram", "very_high_ram",
+                   "cpu", "backup", "backup_overdue", "backup_uncleared"}
+
+
+def _digest_bucket(category: str) -> str:
+    if category in PERFORMANCE_CHECKS:
+        return "performance"
+    if category in METRICS_CHECKS:
+        return "metrics"
+    if category in RESOURCE_CHECKS:
+        return "resource"
+    return "other"   # never silently dropped -- a real category outside the spec's own three
+
+
+def _digest_badge(category: str, open_: bool) -> tuple:
+    """(css_class, text) -- 'Clear'/green whenever resolved regardless of category (matches
+    the reference design's own db-clear usage on every cleared row, performance or resource
+    alike); otherwise the "Degraded"/"Degrading" amber pair for exactly those two categories
+    (plus their Note-tier sibling, not in the original spec's own table but the same family --
+    see PERFORMANCE_CHECKS' own comment), and a plain red "Open" for every other open check,
+    matching the reference RTGS/T24 table's own uniform "Open" badge for disk/ram/cpu alike."""
+    if not open_:
+        return ("db-clear", "Clear")
+    if category in _PERF_DEG_LABEL:
+        return ("db-deg", _PERF_DEG_LABEL[category])
+    return ("db-open", "Open")
+
+
+def _digest_hostname_html(system: str) -> str:
+    """Splits the first "." so a long FQDN's own ".rbz.co.zw" renders in the reference
+    design's own dimmer grey suffix style instead of competing with the hostname itself for
+    attention -- see .dn/.sfx's own CSS, copied from the reference mockup verbatim."""
+    name = html.escape(system)
+    if "." in system:
+        head, _dot, tail = system.partition(".")
+        return f'{html.escape(head)}<span class="sfx">.{html.escape(tail)}</span>'
+    return name
+
+
+def _digest_chk_hd(title: str, badge_cls: str, badge_text: str, sub: str, count_text: str = "") -> str:
+    """Check-type heading bar -- a real 2-column TABLE, not the reference mockup's own
+    flex row (2026-10-02, reported: "the way you aranged elements is vertical not horizontal
+    look at the template" -- Outlook's Word rendering engine has no support for CSS flexbox
+    OR grid at all; every flex/grid container in the original port silently collapsed to
+    stacked blocks there even though it rendered correctly in a browser, exactly the risk the
+    redesign brief's own Implementation Notes #1/#2 called out for the grid-based matrix
+    specifically. Applied here too, and everywhere else below, since Outlook doesn't
+    distinguish flexbox from grid -- both get the same collapse)."""
+    count_cell = (f'<td style="padding:7px 14px;text-align:right">'
+                 f'<span class="chk-count">{count_text}</span></td>') if count_text else ""
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+           f'class="chk-hd"><tr><td style="padding:7px 14px">'
+           f'<span class="chk-name">{html.escape(title)}</span> '
+           f'<span class="chk-badge {badge_cls}">{badge_text}</span> '
+           f'<span class="chk-sub">{html.escape(sub)}</span></td>{count_cell}</tr></table>')
+
+
+def _digest_device_rows(entries: list) -> str:
+    """<tr> rows for one matrix column's own table -- hostname left (wraps rather than a
+    JS/CSS ellipsis email clients can't be trusted to honour), count + badge right."""
+    rows = []
+    for e in entries:
+        cls, text = _digest_badge(e["category"], e["open"])
+        scope = e["category"] + (" (all)" if e["is_category_wide"] else "")
+        # Explicit widths (2026-10-07, confirmed live: with table-layout:fixed gone, an
+        # unwidthed hostname cell next to a white-space:nowrap badge got squeezed to almost
+        # nothing under real narrow-screen pressure -- "Disaster Recovery Cluster" broke
+        # letter-by-letter). A width="N%" ATTRIBUTE alone did nothing under table-layout:auto
+        # (confirmed live: 58% -> 66% changed nothing) -- auto-layout treats it as a soft
+        # preference that the badge's own nowrap minimum still overrides. This row's own table
+        # (see _digest_matrix_column's "dr-row" class below) is the ONE deliberately scoped
+        # table-layout:fixed exception left in this document, the mirror image of .sm-row's own
+        # (table-layout:auto) exception elsewhere -- here fixed-layout is what's needed to make
+        # a width hint actually stick, for the opposite reason .sm-row needed auto.
+        rows.append(f'<tr><td class="dn" width="66%">{_digest_hostname_html(e["system"])}</td>'
+                   f'<td class="dcell" width="34%" style="text-align:right">'
+                   f'<span class="dc">{html.escape(scope)} &times;{e["count"]}</span> '
+                   f'<span class="db {cls}">{text}</span></td></tr>')
+    return "".join(rows)
+
+
+def _digest_matrix_column(entries: list, side: str, label: str) -> str:
+    """One full column of the open/clear split -- its OWN table (header row + one row per
+    device), dropped into a <td width="50%"> of the outer 2-column matrix table by
+    _digest_perf_section. `side` is "open" or "clear", driving the header bar's colour."""
+    if not entries:
+        return ""
+    dot_cls = "dot-open" if side == "open" else "dot-clear"
+    hd_cls = "open" if side == "open" else "clear"
+    devices = len({e["system"] for e in entries})
+    header = (f'<tr><td colspan="2" class="col-hd {hd_cls}">'
+             f'<span class="dot {dot_cls}"></span>{html.escape(label)} &middot; {devices} device(s)</td></tr>')
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+           f'class="dr-row">{header}{_digest_device_rows(entries)}</table>')
+
+
+def _digest_perf_section(entries: list, title: str, sub: str) -> str:
+    """Split matrix -- open devices left, self-resolved right, each sorted by occurrence
+    count descending (reference design's own "most-fired at top in both columns"), as a real
+    2-column TABLE rather than CSS grid (see _digest_chk_hd's own comment on why)."""
+    open_e = sorted((e for e in entries if e["open"]), key=lambda e: -e["count"])
+    clear_e = sorted((e for e in entries if not e["open"]), key=lambda e: -e["count"])
+    devices = len({e["system"] for e in entries})
+    badge_cls, badge_text = ("chk-open", "All Open") if not clear_e else \
+                            ("chk-clear", "All Clear") if not open_e else ("chk-mixed", "Mixed")
+    hd = _digest_chk_hd(title, badge_cls, badge_text, sub,
+                       f"{devices} device(s) &middot; {len(entries)} check(s)")
+    open_col = _digest_matrix_column(open_e, "open", "Still Open")
+    clear_col = _digest_matrix_column(clear_e, "clear", "Self-resolved")
+    matrix = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+             f'border="0"><tr>'
+             f'<td width="50%" valign="top" style="border-right:1px solid #EEEFF2">{open_col}</td>'
+             f'<td width="50%" valign="top">{clear_col}</td></tr></table>')
+    return f'<div class="chk-sec">{hd}{matrix}</div>'
+
+
+def _digest_metrics_section(entries: list) -> str:
+    """3-column compact grid (a real table, 3 <td> per <tr>) when there are enough devices to
+    be worth collapsing (reference design's own "> 10" threshold) AND every one of them is
+    open (the grid has no room for a state badge -- a closed metrics check falls back to the
+    ordinary split-matrix row instead of being silently shown as if still open). Below that
+    threshold, same split-matrix the performance bucket uses, just under this bucket's own
+    heading."""
+    devices = len({e["system"] for e in entries})
+    if devices > 10 and all(e["open"] for e in entries):
+        ordered = sorted(entries, key=lambda e: e["system"])
+        cells = [f'<td width="33%" class="ut-item"><span class="ut-dot"></span>'
+                f'<span class="ut-name">{html.escape(e["system"])}</span></td>' for e in ordered]
+        while len(cells) % 3:
+            cells.append('<td width="33%" class="ut-item">&nbsp;</td>')
+        rows = "".join(f'<tr>{"".join(cells[i:i + 3])}</tr>' for i in range(0, len(cells), 3))
+        hd = _digest_chk_hd("Untracked Metrics", "chk-open", "All Open",
+                            "metrics collection not yet configured on these devices · "
+                            "1 occurrence each", f"{len(entries)} check(s)")
+        grid = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+               f'border="0">{rows}</table>')
+        return f'<div class="chk-sec">{hd}{grid}</div>'
+    return _digest_perf_section(entries, "Untracked Metrics",
+                                "metrics collection not yet configured on these devices")
+
+
+def _digest_resource_section(entries: list, title: str = "Resource checks") -> str:
+    """Flat table (system / check / occurrences / state) -- the reference design's own RTGS/
+    T24 layout, used for any bucket where a side-by-side open/clear matrix wouldn't help (each
+    row is usually a different system AND a different check, not many devices sharing one
+    check the way switch degradation does). Already a real <table> in the reference design --
+    the one sub-section layout that never needed converting."""
+    cats = sorted({e["category"] for e in entries})
+    open_n = sum(1 for e in entries if e["open"])
+    badge_cls, badge_text = ("chk-open", "Mostly Open") if open_n >= len(entries) / 2 else ("chk-clear", "Mostly Clear")
+    rows_html = []
+    for e in sorted(entries, key=lambda e: (e["system"], e["category"])):
+        cls, text = _digest_badge(e["category"], e["open"])
+        scope = e["category"] + (" (all)" if e["is_category_wide"] else "")
+        rows_html.append(f'<tr><td><span class="sys">{html.escape(e["system"])}</span></td>'
+                         f'<td>{html.escape(scope)}</td><td>&times;{e["count"]}</td>'
+                         f'<td><span class="db {cls}">{text}</span></td></tr>')
+    hd = _digest_chk_hd(title, badge_cls, badge_text, " · ".join(cats))
+    return (f'<div class="chk-sec">{hd}'
+           f'<table class="st"><thead><tr><th>System</th><th>Check</th><th>Occurrences</th>'
+           f'<th>State</th></tr></thead><tbody>{"".join(rows_html)}</tbody></table></div>')
+
+
+def _digest_resolved_section(entries: list) -> str:
+    """Flat table (system / check / was-severity / open-for) -- findings that fired, got a
+    real notification, and have since cleared (2026-10-03, on request: "do not send emails
+    for resolved alerts just pump this into the combined notification digest instead" --
+    run_alert_cycle no longer sends a separate real-time "Alert resolved" e-mail at all; see
+    that function's own comment). Same flat-table shape _digest_resource_section already uses
+    for "one row per different system/check" data, green throughout since nothing here is a
+    live problem any more -- band is what the finding USED TO BE before it cleared (never
+    escalates/de-escalates after the fact, same convention alert_email_templates._resolved_row
+    already uses for the real-time template this replaces)."""
+    rows_html = []
+    for e in sorted(entries, key=lambda e: (e["system"], e["category"])):
+        rows_html.append(f'<tr><td><span class="sys">{html.escape(e["system"])}</span></td>'
+                         f'<td>{html.escape(e["category"])}</td>'
+                         f'<td>was {e["band"].upper()}</td>'
+                         f'<td><span class="db db-clear">{html.escape(e["duration"])}</span></td></tr>')
+    hd = _digest_chk_hd("Resolved Today", "chk-clear", f"{len(entries)} cleared",
+                        "fired, notified, and have since cleared on their own")
+    return (f'<div class="chk-sec">{hd}'
+           f'<table class="st"><thead><tr><th>System</th><th>Check</th><th>Was</th>'
+           f'<th>Open for</th></tr></thead><tbody>{"".join(rows_html)}</tbody></table></div>')
+
+
+def render_silenced_digest_combined(group_rows: list, *, total_silences: int = 0,
+                                    generated_at=None, for_browser: bool = False) -> tuple:
+    """ONE daily digest covering EVERY AlertGroup at once, redesigned (2026-10-02) from a flat
+    one-row-per-check scrolling list into a structured, scannable layout -- digest-redesign-
+    package.zip's own GROUP_DIGEST_REDESIGN_PROMPT.md, built from this app's own real 02 Oct
+    2026 digest data (108 rows, 330 active silences, 4 groups): checks are grouped BY TYPE
+    within each AlertGroup (_digest_bucket), not listed individually -- 29 switches x 2 checks
+    each used to mean 58 near-identical rows; the performance bucket's own split matrix (open
+    left, self-resolved right, sorted by occurrence count) and the metrics bucket's compact
+    grid (devices with nothing but an always-open, always-1-occurrence "metrics not configured"
+    reading) are both aimed at that same problem. A STANDALONE document, not built on this
+    module's own _shell() wrapper every other alert e-mail uses -- the reference design is its
+    own self-contained header/summary-strip/footer, not this app's usual gradient-hero navy
+    masthead, and the brief's own reference HTML is followed directly rather than forced into
+    a shape it was never designed for.
+
+    `group_rows`: [(group_name, recipients, entries, resolved_entries), ...] -- `entries` a
+    list of {"system","category","flag_key","count","open","is_category_wide"} dicts (ONE per
+    silence that had real activity in the last 24h -- the SAME "nothing happened, no row" rule
+    the original version used, still decided by the caller). `resolved_entries` (2026-10-03,
+    "do not send emails for resolved alerts just pump this into the combined notification
+    digest instead") -- {"system","category","flag_key","band","duration"} dicts, ONE per
+    AlertFinding that fired, got a real notification, and cleared again today; rendered as its
+    own "Resolved Today" sub-section per group, the SAME card a group's silenced activity
+    renders into rather than a separate section or e-mail. `total_silences` is the Section-1-
+    style "every active silence right now" count for the summary strip's own first tile, a
+    DIFFERENT, larger number than what actually shows in today's body -- "muted" vs. "actually
+    had something happen in the window worth a row"."""
+    from django.utils import timezone as dj_timezone
+
+    if generated_at is None:
+        generated_at = dj_timezone.now()
+    generated_at = dj_timezone.localtime(generated_at)
+
+    group_sections = []
+    total_rows = 0
+    total_open = 0
+    total_clear = 0
+    total_resolved = 0
+    group_count = 0
+    for group_name, recipients, entries, resolved_entries in group_rows:
+        if not entries and not resolved_entries:
+            continue
+        group_count += 1
+        total_rows += len(entries)
+        open_n = sum(1 for e in entries if e["open"])
+        clear_n = len(entries) - open_n
+        total_open += open_n
+        total_clear += clear_n
+        total_resolved += len(resolved_entries)
+        devices = len({e["system"] for e in entries} | {e["system"] for e in resolved_entries})
+
+        by_bucket: dict = {"performance": [], "metrics": [], "resource": [], "other": []}
+        for e in entries:
+            by_bucket[_digest_bucket(e["category"])].append(e)
+
+        sub_sections = []
+        if by_bucket["performance"]:
+            cats = sorted({e["category"] for e in by_bucket["performance"]})
+            sub_sections.append(_digest_perf_section(
+                by_bucket["performance"],
+                " / ".join(_PERF_DEG_LABEL.get(c) or c.replace("_", " ").title() for c in cats),
+                "switch/device health checks · some open, some self-resolved"))
+        if by_bucket["metrics"]:
+            sub_sections.append(_digest_metrics_section(by_bucket["metrics"]))
+        if by_bucket["resource"]:
+            sub_sections.append(_digest_resource_section(by_bucket["resource"]))
+        if by_bucket["other"]:
+            sub_sections.append(_digest_resource_section(by_bucket["other"], title="Other checks"))
+        if resolved_entries:
+            sub_sections.append(_digest_resolved_section(resolved_entries))
+
+        recip_html = (f'<div class="recip">{html.escape(", ".join(recipients))}</div>'
+                     if recipients else "")
+        count_bits = []
+        if entries:
+            count_bits.append(f"{len(entries)} silenced check(s)")
+        if resolved_entries:
+            count_bits.append(f"{len(resolved_entries)} resolved")
+        # Real 2-column TABLE, not the reference mockup's own flex row (2026-10-02, "the way
+        # you aranged elements is vertical not horizontal" -- see _digest_chk_hd's own comment
+        # for why every flex/grid container in this template needed the same fix).
+        grp_hd = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+                 f'border="0" class="grp-hd"><tr>'
+                 f'<td style="padding:10px 14px"><span class="grp-name">{html.escape(group_name)}</span> '
+                 f'<span class="grp-count">{devices} device(s) &middot; {" &middot; ".join(count_bits)}</span>'
+                 f'{recip_html}</td>'
+                 f'<td style="padding:10px 14px;text-align:right">'
+                 f'<span class="oc">{open_n} open</span>&nbsp;&nbsp;'
+                 f'<span class="cc">{clear_n} clear</span></td></tr></table>')
+        group_sections.append(f'<div class="grp">{grp_hd}{"".join(sub_sections)}</div>')
+
+    body_sections = "".join(group_sections)
+    # 6 real <td>s, not a CSS grid (2026-10-02, "the way you aranged elements is vertical not
+    # horizontal" -- see _digest_chk_hd's own comment).
+    tiles = [("blue", str(total_silences), "Active silences"), ("", str(total_rows), "Digest rows (24h)"),
+            ("red", str(total_open), "Still open"), ("grn", str(total_clear), "Self-resolved"),
+            ("grn", str(total_resolved), "Resolved today"), ("grey", str(group_count), "Groups")]
+    tile_w = round(100 / len(tiles), 2)
+    tile_cells = "".join(
+        f'<td width="{tile_w}%" style="padding:0 {4 if i else 0}px 0 {4 if i < len(tiles) - 1 else 0}px">'
+        f'<div class="sm"><div class="sm-n {cls}">{n}</div><div class="sm-l">{label}</div></div></td>'
+        for i, (cls, n, label) in enumerate(tiles))
+    summary = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+              f'border="0" class="sm-row" style="margin-bottom:12px"><tr>{tile_cells}</tr></table>')
+
+    html_out = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Silenced Alerts Digest</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Segoe UI',system-ui,sans-serif;background:#F0F2F5;color:#1A2332;font-size:12px}}
+/* Whole-template scaling (2026-10-07, FINAL -- table-layout:fixed removed for good here, same
+   as network.py's own report emails: a real screenshot showed it breaking words mid-letter
+   ("Accurate" -> "Accura"/"te") elsewhere in this app, and the user's own words apply equally
+   here: "my colums still scale down based on screen size i do not want this... scale it as a
+   whole not individual report elements... use system admin report scaling n[o] compromises".
+   table-layout:fixed WAS adopted here 2026-10-06 to fix a real bug ("OCCURRENCES"/"STATE"
+   table headers running together into "OCCURRENCESTATE" at 320px) -- but the actual fix for
+   THAT bug is the overflow-wrap:anywhere rule just below, which makes any <th>/<td> wrap its
+   own text instead of overflowing into its neighbour regardless of table-layout mode; fixed-
+   layout was never the necessary part, just the thing that happened to be reached for at the
+   time. table-layout:auto (the browser default, and mail_report.py's own current/reverted
+   behaviour) is what every table in this document uses now -- columns size to their own real
+   content instead of being forced into equal shares that then have to letter-break to fit. */
+td,th{{overflow-wrap:anywhere}}
+/* ONE deliberate exception, the mirror image of the above (2026-10-07, confirmed live): the
+   device-name/badge row (.dr-row, see _digest_matrix_column/_digest_device_rows) pairs a
+   monospace hostname column against a white-space:nowrap badge column -- under table-layout:
+   auto, the badge's own nowrap minimum width wins regardless of any width="N%" hint given to
+   either cell (confirmed: changing the hint from 58% to 66% changed nothing), squeezing a long
+   hostname ("Disaster Recovery Cluster") down to almost nothing and breaking it letter-by-
+   letter. table-layout:fixed here is what makes the 66/34 split actually stick -- the one
+   table in this document where fixed-layout is the correct choice, not auto. */
+.dr-row{{table-layout:fixed}}
+/* The real width constraint now lives on the <table> wrapper just inside <body> (2026-10-05,
+   on request: "the network, infrastructure and digest emails squash to much trying to fit a
+   smaller screen...the whole layout should shrink and everything remain in place...look at how
+   the systems email scales down") -- a `max-width` on <body> itself is exactly the kind of CSS
+   Outlook's Word rendering engine does not reliably honour (same class of bug this digest's
+   own flex/grid layout hit the first time, see this stylesheet's own comment just below).
+   mail_report.render_html's "systems email" never had this problem because its outer
+   constraint was always a real `<table width="1100" style="max-width:1100px;width:100%">` --
+   BOTH the HTML width attribute (Outlook's own fallback) and the CSS max-width/width:100% pair
+   (what lets modern/mobile clients shrink the whole card fluidly as ONE block, carrying every
+   tile/row inside it down together instead of each one re-flowing on its own) -- this digest
+   now copies that exact structure instead of relying on <body> CSS alone. */
+/* Every layout container below is a real HTML <table>, not CSS flexbox/grid (2026-10-02,
+   reported: "the way you aranged elements is vertical not horizontal look at the template" --
+   Outlook's Word rendering engine supports neither at all and silently collapses both to
+   stacked blocks; this stylesheet now only carries COLOUR/FONT/BORDER rules, which Outlook
+   does respect, never positioning ones). */
+.hd{{background:#0F2540;color:#fff;border-radius:10px;margin-bottom:12px}}
+.hd-icon{{width:36px;height:36px;background:rgba(255,255,255,.1);border-radius:8px;font-size:18px;text-align:center;line-height:36px}}
+.hd-title{{font-size:15px;font-weight:600;margin-bottom:2px}}
+.hd-sub{{font-size:11px;color:#8AACC8}}
+.hd-ts{{font-size:10px;color:#8AACC8}}
+.hd-window{{font-size:11px;color:#FFB347;font-weight:500;margin-top:2px}}
+.sm{{background:#fff;border-radius:8px;padding:8px 4px;border:1px solid #E8EBF0;text-align:center}}
+.sm-n{{font-size:17px;font-weight:600}}.sm-l{{font-size:9px;color:#6B7A8D;margin-top:1px;text-transform:uppercase;letter-spacing:.04em}}
+.red{{color:#C62828}}.grn{{color:#2E7D32}}.blue{{color:#1565C0}}.grey{{color:#757575}}.amber{{color:#E65100}}
+.grp{{background:#fff;border-radius:10px;border:1px solid #E8EBF0;margin-bottom:12px}}
+.grp-hd{{background:#F8F9FB;border-bottom:2px solid #E8EBF0}}
+.grp-name{{font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#0F2540}}
+.grp-count{{font-size:10px;color:#6B7A8D}}
+.oc{{color:#C62828;font-weight:600}}.cc{{color:#2E7D32;font-weight:600}}
+.recip{{font-size:9px;color:#9E9E9E;margin-top:2px;overflow-wrap:anywhere}}
+.chk-sec{{border-bottom:1px solid #F0F2F5}}
+.chk-hd{{background:#FAFBFC;border-bottom:1px solid #EEEFF2}}
+.chk-name{{font-size:10px;font-weight:600;color:#344054;text-transform:uppercase;letter-spacing:.05em}}
+.chk-badge{{font-size:8px;padding:2px 7px;border-radius:20px;font-weight:600}}
+.chk-open{{background:#FEECEC;color:#C62828;border:1px solid #F5BFBF}}
+.chk-clear{{background:#E8F5E9;color:#2E7D32;border:1px solid #A5D6A7}}
+.chk-mixed{{background:#FFF3E0;color:#E65100;border:1px solid #FFCC80}}
+.chk-sub{{font-size:9px;color:#9E9E9E}}
+.chk-count{{font-size:9px;color:#6B7A8D}}
+.col-hd{{padding:5px 12px;font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-bottom:1px solid #E8EBF0;background:#FEFEFE}}
+.col-hd.open{{color:#C62828;background:#FFF8F8}}.col-hd.clear{{color:#2E7D32;background:#F6FBF6}}
+.dot{{display:inline-block;width:6px;height:6px;border-radius:50%;vertical-align:middle;margin-right:3px}}
+.dot-open{{background:#C62828}}.dot-clear{{background:#2E7D32}}
+.dn{{padding:4px 12px;border-bottom:1px solid #F5F6F8;font-size:10px;font-weight:500;color:#1A2332;font-family:'Cascadia Code','Consolas',monospace}}
+.dcell{{padding:4px 12px;border-bottom:1px solid #F5F6F8}}
+.dn .sfx{{color:#9E9E9E;font-weight:400}}
+.dc{{font-size:9px;color:#9E9E9E;overflow-wrap:anywhere}}
+.db{{font-size:8px;font-weight:700;padding:2px 5px;border-radius:20px;white-space:nowrap}}
+.db-open{{background:#FEECEC;color:#C62828;border:1px solid #F5BFBF}}
+.db-clear{{background:#E8F5E9;color:#2E7D32;border:1px solid #A5D6A7}}
+.db-deg{{background:#FFF3E0;color:#E65100;border:1px solid #FFCC80}}
+.db-info{{background:#E3F2FD;color:#1565C0;border:1px solid #90CAF9}}
+.ut-item{{padding:4px 10px;border-bottom:1px solid #F5F6F8;border-right:1px solid #F5F6F8;vertical-align:middle;word-break:break-word}}
+.ut-item:nth-child(3n){{border-right:none}}
+.ut-name{{font-size:9.5px;color:#344054;font-family:'Cascadia Code','Consolas',monospace;vertical-align:middle}}
+.ut-dot{{display:inline-block;width:6px;height:6px;border-radius:50%;background:#C62828;vertical-align:middle;margin-right:4px}}
+.st{{width:100%;border-collapse:collapse}}
+.st th{{padding:5px 12px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#6B7A8D;text-align:left;border-bottom:1px solid #E8EBF0;background:#FAFBFC}}
+.st td{{padding:5px 12px;font-size:11px;border-bottom:1px solid #F5F6F8;vertical-align:middle;word-break:break-word}}
+.st tr:last-child td{{border-bottom:none}}
+.st tr:hover td{{background:#FAFBFC}}
+.sys{{font-weight:600;color:#1A2332}}
+.ft{{text-align:center;font-size:10px;color:#BDBDBD;padding:10px 0 0}}
+</style>
+</head>
+<body style="margin:0;padding:0;background:#F0F2F5;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#F0F2F5;">
+<tr><td align="center" style="padding:16px;">
+<table width="1100" cellpadding="0" cellspacing="0" style="max-width:1100px;width:100%;">
+<tr><td>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="hd"><tr>
+  <td width="50" style="padding:16px 0 16px 20px"><div class="hd-icon">&#128276;</div></td>
+  <td style="padding:16px 0">
+    <div class="hd-title">Silenced alerts digest — all groups</div>
+    <div class="hd-sub">Reserve Bank of Zimbabwe &middot; RBZ Monitoring Console</div>
+  </td>
+  <td style="padding:16px 20px 16px 0;text-align:right">
+    <div class="hd-ts">Generated {generated_at.strftime("%d %b %Y, %H:%M")}</div>
+    <div class="hd-window">Last 24 hours</div>
+  </td>
 </tr></table>
-</td></tr>"""
-
-
-def render_silenced_digest(rows: list, *, group_name: str, for_browser: bool = False) -> tuple:
-    """Renders ONE daily digest for ONE AlertGroup -- the FOURTH notification family
-    (2026-09-19: "reduce the intrusiveness of alerts"), alongside render_fired (a value over a
-    threshold), render_event (a discrete occurrence) and render_system_alert (a monitoring
-    source gone quiet). Answers "what did a KNOWN, already-accepted noisy check do in roughly
-    the last day", batched once instead of paged every time it fired or cleared -- slate-teal,
-    deliberately the calmest colour of the four, since intrusiveness is exactly what this
-    exists to reduce.
-
-    `rows`: [(label, detail, still_open), ...] -- label is "system · category", detail is an
-    already-human-readable line (e.g. "Fired 6 times in the last 24h, still open now"),
-    still_open is a plain bool driving the "Open now"/"Clear" chip. See
-    alerting.build_silenced_digest, this function's only caller, for how rows are built."""
-    group_name_esc = html.escape(group_name)
-    rows_html = [_silenced_row(label, detail, still_open, last=(i == len(rows) - 1))
-                for i, (label, detail, still_open) in enumerate(rows)]
-    body_html = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">'
-                f'{"".join(rows_html)}</table>')
-    banner_text = f"SILENCED ALERTS &middot; {len(rows)} known, self-resolving check(s) — last 24h"
-    html_out, inline_images = _shell(
-        title=f"Silenced alerts digest — {group_name_esc}", banner_bg=SILENCED_SOFT,
-        banner_fg=SILENCED, banner_text=banner_text, body_html=body_html,
-        group_name=group_name_esc, min_severity="", hero_images={}, for_browser=for_browser,
-        compact=True,
-        detail_text="These checks are known to self-resolve and are silenced from individual "
-                    "notifications — see Alerting configuration to review or un-silence any "
-                    "of them.")
-    return html_out, inline_images
+{summary}
+{body_sections}
+<div class="ft">RBZ Monitoring Console &middot; Automated digest &middot; {total_silences} active silence(s) configured</div>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>"""
+    return html_out, {}

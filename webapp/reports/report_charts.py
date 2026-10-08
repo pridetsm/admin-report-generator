@@ -545,7 +545,7 @@ def resource_percent_series(system: str, flag_key: str, category: str, days: int
     if not label or (category == "disk" and not mount):
         return None
 
-    from . import services
+    from . import metric_registry, services
     from .metric_history import _metric_key
     from .models import MetricSample
 
@@ -568,7 +568,10 @@ def resource_percent_series(system: str, flag_key: str, category: str, days: int
 
     end = dj_timezone.now()
     start = end - _dt.timedelta(days=days)
-    key = _metric_key(category, comp.instance, mount)
+    entry = next((e for e in metric_registry.REGISTRY if e.key == category), None)
+    if not entry:
+        return None
+    key = _metric_key(entry, comp.instance, mount)
     rows = list(MetricSample.objects.filter(metric_key=key, taken_at__gte=start, taken_at__lte=end)
                .order_by("taken_at").values_list("taken_at", "value"))
     if not rows:
@@ -965,7 +968,9 @@ def heatmap_grid(systems: list) -> dict | None:
 # still gets a readable column instead of silently vanishing from the grid.
 _CATEGORY_LABELS = {
     "cpu": "High CPU", "ram": "High RAM", "disk": "High Disk",
-    "unreachable": "Unreachable", "service": "Service Down", "backup": "Missing Backup",
+    "unreachable": "Unreachable", "service": "Service Down", "degraded": "Degraded",
+    "degrading": "Degrading", "potentially_degrading": "Potentially Degrading",
+    "backup": "Missing Backup",
 }
 
 
@@ -977,7 +982,9 @@ _CATEGORY_LABELS = {
 # so neither mapping has to know about the other's phrasing.
 _RESOURCE_TYPE_LABELS = {
     "cpu": "CPU", "ram": "RAM", "disk": "Disk",
-    "unreachable": "Unreachable", "service": "Service", "backup": "Backup",
+    "unreachable": "Unreachable", "service": "Service", "degraded": "Degraded",
+    "degrading": "Degrading", "potentially_degrading": "Potentially degrading",
+    "backup": "Backup",
 }
 
 

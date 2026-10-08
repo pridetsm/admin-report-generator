@@ -54,7 +54,7 @@
   @media (max-width: 700px) { .sod-name { white-space: normal; } }
 </style>
 
-<form method="post" action="{{ generate_url }}" id="sodForm">
+<form method="post" action="{{ generate_url }}" id="sodForm" class="xlsx-download-form">
 {% csrf_token %}
 <input type="hidden" name="theme" value="{{ report_theme }}">
 

@@ -293,18 +293,23 @@ class Command(BaseCommand):
             # failures, not add coverage. Genuinely redundant once merged, unlike Cluster
             # count/Cluster nodes above (a different granularity, not a duplicate finding).
             infra_immediate = infra_snapshot.overview.get("immediate", []) if infra_snapshot else []
+            # "Unreachable components" (2026-10-03: network._infra_overview's own tile was
+            # renamed from "Components down" -- see that function's own comment -- "just to
+            # standardise things" against the identically-renamed Systems/Network tiles; this
+            # extraction, and views.py's own twin copy of this exact block, were both updated
+            # in the same pass so they keep finding the tile under its new name).
             components_down = next(
                 (int(str(t["value"]).split(" | ")[0]) for t in infra_immediate
-                if t["label"] == "Components down"), 0)
+                if t["label"] == "Unreachable components"), 0)
             # extra_disk/extra_disk_total now read "Storage critical" (immediate tier), not
             # "Storage at capacity" -- that watch-tier tile is GONE (2026-09-18, on request:
             # "storage capacity and storage critical are the same metric... combine every
             # occurrence", confirmed after a first pass: "infrastructure still views these as
             # separate" -- see network._infra_overview's own comment on the removal). "Storage
             # critical" is excluded from immediate_tiles' own generic "others" loop below for
-            # the same reason "Components down"/"Nodes down" already are: it's merged into
-            # render_html's own "High disk usage" tile via extra_disk AND still gets its own
-            # dedicated red banner (storage_critical_items / mail_report._cluster_storage_
+            # the same reason "Unreachable components"/"Nodes down" already are: it's merged
+            # into render_html's own "High disk usage" tile via extra_disk AND still gets its
+            # own dedicated red banner (storage_critical_items / mail_report._cluster_storage_
             # critical_block) -- rendering it a THIRD time as a plain generic tile here would
             # be exactly the redundancy this whole change is about removing.
             extra_disk = next((int(str(t["value"]).split(" | ")[0]) for t in infra_immediate
@@ -312,7 +317,7 @@ class Command(BaseCommand):
             extra_disk_total = next((int(str(t["value"]).split(" | ")[1]) for t in infra_immediate
                                      if t["label"] == "Storage critical"), 0)
             immediate_tiles = [t for t in infra_immediate
-                              if t["label"] not in ("Components down", "Nodes down", "Storage critical")]
+                              if t["label"] not in ("Unreachable components", "Nodes down", "Storage critical")]
             # "High CPU"/"High memory" pulled out of watch_tiles and folded into extra_cpu/
             # extra_ram instead (2026-09-17, corrected same day: "cpu and ram are different
             # metrics they still need different tiles i meant one tile for each metric[,]

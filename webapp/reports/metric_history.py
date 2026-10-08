@@ -1,76 +1,76 @@
-"""Captures hourly RAM/CPU/Disk %, SWIFT throughput, and COB duration readings into
-MetricSample, so the Hourly Activity / SWIFT / COB charts (report_charts.resource_percent_
-series / swift_transaction_series / cob_time_series) are no longer bounded by Prometheus's
-own retention window (2026-09-18, on request: "store this data in the database... so we can
-have a much longer retention window").
+"""Captures a fresh reading of every metric_registry.REGISTRY entry into MetricSample (now
+routed to its own database, "prometheus_snapshot_db" -- see reports.db_router and
+PROMETHEUS-RETENTION-PLAN.md), so the app's own charts/analytics are no longer bounded by
+Prometheus's own (now deliberately short, see reports.historical_query) retention window
+(2026-09-18, on request: "store this data in the database... so we can have a much longer
+retention window"; widened 2026-09-30 from 5 hardcoded series to the full metric_registry, on
+request: "we want the web app to have access to all historical data").
 
 Two entry points:
-  capture_now()   -- one hourly reading per series (RAM/CPU/Disk for every instance in the
-                     business topology, plus SWIFT and COB), scheduled via deploy/gms/
-                     folder_exporter.yml (job metric_history_capture) the same way the alert/
-                     event/system-alert pollers already are -- see webapp/run_metric_history_
-                     capture.bat.
-  backfill(days)  -- a ONE-TIME catch-up pull of everything Prometheus still has (confirmed
-                     live 2026-09-18: its own retention reaches back 14 days), meant to be run
-                     once by hand right after this ships, so capture_now doesn't have to build
-                     up two weeks of history one hourly point at a time.
+  capture_now()   -- one fresh reading per registry entry, across the whole estate, scheduled
+                     via deploy/gms/folder_exporter.yml (job metric_history_capture) the same
+                     way the alert/event/system-alert pollers already are -- see webapp/
+                     run_metric_history_capture.bat.
+  backfill(days)  -- a ONE-TIME catch-up pull of everything Prometheus still has, meant to be
+                     run once by hand right after a new registry entry ships (or after this
+                     module itself is deployed), so capture_now doesn't have to build up
+                     history one point at a time.
 
-Both walk the WHOLE business topology every run -- every instance's RAM/CPU/every disk mount,
-plus SWIFT and COB -- not just whatever happens to be "currently flagged" in one report. See
-MetricSample's own docstring for why: which components end up newsworthy in some FUTURE report
-can't be known in advance, so capture has to be unconditional to be useful later.
+Both loop over metric_registry.REGISTRY uniformly -- adding a new metric family means adding
+one entry there, nothing here needs editing. See MetricSample's own docstring for why capture
+is unconditional (every instance, every run) rather than scoped to whatever happens to be
+"currently flagged" in one report: which components become newsworthy in some FUTURE report
+can't be known in advance.
 """
 from __future__ import annotations
 
 import datetime
 import math
 
-import generate_report as gr
-
-#: Global (no instance filter, one number for the whole estate) scalar metrics -- SWIFT's own
-#: daily running total and COB's own last-run duration (seconds). Added to together in one
-#: loop (2026-09-18, on request: "add the superimposed one for cob time same style"), since
-#: both are captured/backfilled identically: one prom.query()/query_range() call, no per-
-#: instance/per-mount splitting the way ram/cpu/disk need.
-SCALAR_METRICS = {"swift": "swift_transactions_total", "cob": "cob_time"}
-
-
-def _metric_key(category: str, instance: str, mount: str | None = None) -> str:
-    """The exact same join key report_charts.resource_percent_series/swift_transaction_series/
-    cob_time_series build on the READ side -- see MetricSample's own docstring for why it's
-    instance-based, not system/label-based."""
-    if category in SCALAR_METRICS:
-        return category
-    if category == "disk":
-        return f"disk:{instance}:{mount}"
-    return f"{category}:{instance}"
-
-
-#: One GLOBAL (no instance filter) PromQL expression per percentage category -- linux/windows
-#: variants combined with `or`, same style _percent_expr already uses per-instance, so ONE
-#: query captures every instance's reading in one call instead of looping per component.
-#: Copied from generate_report.capture()'s own disk/ram/cpu expressions (that function issues
-#: the linux/windows halves as two separate calls into a shared dict; combining them with `or`
-#: here is equivalent -- the two metric families never share an instance -- and halves the
-#: number of HTTP round trips this makes per run).
-def _global_expressions() -> dict:
-    return {
-        "ram": ("100*(1-node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes) or "
-               "100*(1-windows_memory_physical_free_bytes/windows_memory_physical_total_bytes)"),
-        "cpu": ('100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) or '
-               '100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100)'),
-        "disk": (f"100*(1-node_filesystem_avail_bytes{{{gr._FS}}}/node_filesystem_size_bytes{{{gr._FS}}}) or "
-                f"100*(1-windows_logical_disk_free_bytes{{{gr._VOL}}}/windows_logical_disk_size_bytes{{{gr._VOL}}})"),
-    }
+from . import metric_registry
 
 
 def _mount_of(labels: dict) -> str | None:
     """Linux disk series label their mount `mountpoint`, Windows series label it `volume` --
-    the same split _percent_expr's own disk branch has to account for."""
+    the same split generate_report.py's own disk-percent expression has to account for."""
     return labels.get("mountpoint") or labels.get("volume")
 
 
-def _instant_rows_to_samples(rows: list, category: str, taken_at: datetime.datetime) -> list:
+def _extra_of(entry: "metric_registry.MetricRegistryEntry", labels: dict) -> str | None:
+    """The third key segment for entries that need one beyond bare instance -- disk's mount
+    (mount_label), folder monitoring's target (target_label, confirmed live: folder_files
+    carries both `instance` AND `target`, since one folder_exporter instance monitors MULTIPLE
+    folders -- instance alone is not unique for those), or any other single-named label
+    (extra_label, e.g. HCI CSV volumes' own `volume` label). An entry only ever sets one of
+    these three, never more than one."""
+    if entry.mount_label:
+        return _mount_of(labels)
+    if entry.target_label:
+        return labels.get("target")
+    if entry.extra_label:
+        return labels.get(entry.extra_label)
+    return None
+
+
+def _metric_key(entry: "metric_registry.MetricRegistryEntry", instance: str,
+                extra: str | None = None) -> str:
+    """The exact same join key report_charts.py / reports.historical_query build on the READ
+    side -- see MetricSample's own docstring for why it's instance-based, not system/label-
+    based. Unchanged shape from the pre-registry version (ram:{instance}, disk:{instance}:
+    {mount}, swift) so existing archived rows/readers keep working without a rename."""
+    if entry.kind == "scalar":
+        return entry.key
+    if entry.mount_label or entry.target_label or entry.extra_label:
+        return f"{entry.key}:{instance}:{extra}"
+    return f"{entry.key}:{instance}"
+
+
+def _needs_extra(entry: "metric_registry.MetricRegistryEntry") -> bool:
+    return bool(entry.mount_label or entry.target_label or entry.extra_label)
+
+
+def _instant_rows_to_samples(rows: list, entry: "metric_registry.MetricRegistryEntry",
+                             taken_at: datetime.datetime) -> list:
     from .models import MetricSample
 
     out = []
@@ -78,15 +78,15 @@ def _instant_rows_to_samples(rows: list, category: str, taken_at: datetime.datet
         instance = row["labels"].get("instance")
         if not instance:
             continue
-        mount = _mount_of(row["labels"]) if category == "disk" else None
-        if category == "disk" and not mount:
+        extra = _extra_of(entry, row["labels"]) if _needs_extra(entry) else None
+        if _needs_extra(entry) and not extra:
             continue
-        out.append(MetricSample(metric_key=_metric_key(category, instance, mount),
+        out.append(MetricSample(metric_key=_metric_key(entry, instance, extra),
                                 taken_at=taken_at, value=row["value"]))
     return out
 
 
-def _range_rows_to_samples(rows: list, category: str) -> list:
+def _range_rows_to_samples(rows: list, entry: "metric_registry.MetricRegistryEntry") -> list:
     from .models import MetricSample
 
     out = []
@@ -94,10 +94,10 @@ def _range_rows_to_samples(rows: list, category: str) -> list:
         instance = row["labels"].get("instance")
         if not instance:
             continue
-        mount = _mount_of(row["labels"]) if category == "disk" else None
-        if category == "disk" and not mount:
+        extra = _extra_of(entry, row["labels"]) if _needs_extra(entry) else None
+        if _needs_extra(entry) and not extra:
             continue
-        key = _metric_key(category, instance, mount)
+        key = _metric_key(entry, instance, extra)
         for t, v in row["values"]:
             out.append(MetricSample(
                 metric_key=key,
@@ -114,19 +114,19 @@ def _save(samples: list) -> int:
     # ignore_conflicts: capture_now (hourly) and backfill (one-time, same window) can overlap
     # a point for the same series/hour -- the UniqueConstraint on (metric_key, taken_at) makes
     # a re-capture a silent no-op instead of a duplicate row or a failed batch.
-    MetricSample.objects.bulk_create(samples, batch_size=1000, ignore_conflicts=True)
+    MetricSample.objects.using("metrics").bulk_create(samples, batch_size=1000, ignore_conflicts=True)
     return len(samples)
 
 
 def capture_now() -> dict:
-    """One fresh instant reading per series, across the whole business topology, right now.
-    Returns {"ram": n, "cpu": n, "disk": n, "swift": n, "cob": n, "error": None} (n = samples
-    written; "error" set instead if Prometheus couldn't be reached at all, matching every
-    other chart builder in this app's own "never raise, one bad run doesn't take the estate
-    down" pattern)."""
+    """One fresh instant reading per registry entry, across the whole estate, right now.
+    Returns {entry.key: n, ..., "error": None} (n = samples written; "error" set instead if
+    Prometheus couldn't be reached at all, matching every other chart builder in this app's
+    own "never raise, one bad run doesn't take the estate down" pattern)."""
     from . import services
 
-    result = {"ram": 0, "cpu": 0, "disk": 0, "swift": 0, "cob": 0, "error": None}
+    result = {entry.key: 0 for entry in metric_registry.REGISTRY}
+    result["error"] = None
     try:
         prom, cfg, systems = services.live_prom_client()
     except Exception as exc:
@@ -136,71 +136,75 @@ def capture_now() -> dict:
     import django.utils.timezone as dj_timezone
 
     now = dj_timezone.now()
-    for category, expr in _global_expressions().items():
+    for entry in metric_registry.REGISTRY:
         try:
-            rows = prom.query(expr)
+            rows = prom.query(entry.bulk_promql)
         except Exception:
             continue
-        result[category] = _save(_instant_rows_to_samples(rows, category, now))
+        if entry.kind == "scalar":
+            # NaN filtered here (cob_time reads NaN once its own checker script itself goes
+            # stale -- see generate_report.py's own comment on that) -- a NaN sample would just
+            # be an unplottable gap in the chart, and better skipped than stored.
+            if rows and not math.isnan(rows[0]["value"]):
+                from .models import MetricSample
 
-    from .models import MetricSample
-
-    for key, expr in SCALAR_METRICS.items():
-        try:
-            rows = prom.query(expr)
-        except Exception:
-            continue
-        # NaN filtered here (cob_time reads NaN once its own checker script itself goes stale
-        # -- see generate_report.py's own comment on that) -- a NaN sample would just be an
-        # unplottable gap in the chart, and better skipped than stored.
-        if rows and not math.isnan(rows[0]["value"]):
-            value = max(0.0, rows[0]["value"]) if key == "swift" else rows[0]["value"]
-            result[key] = _save([MetricSample(metric_key=key, taken_at=now, value=value)])
+                value = max(0.0, rows[0]["value"]) if entry.floor_zero else rows[0]["value"]
+                result[entry.key] = _save([MetricSample(metric_key=entry.key, taken_at=now, value=value)])
+        else:
+            result[entry.key] = _save(_instant_rows_to_samples(rows, entry, now))
     return result
 
 
 def backfill(days: int = 15) -> dict:
-    """A ONE-TIME catch-up pull of every series' full history Prometheus still has, meant to be
-    run once by hand (`manage.py backfill_metric_history`) right after this ships -- see this
-    module's own docstring. Safe to re-run (ignore_conflicts), so re-running it after a gap
-    costs nothing beyond the query time."""
+    """A ONE-TIME catch-up pull of every registry entry's full history Prometheus still has,
+    meant to be run once by hand (`manage.py backfill_metric_history`) after this ships, or
+    after a new registry entry is added -- see this module's own docstring. Safe to re-run
+    (ignore_conflicts), so re-running it after a gap costs nothing beyond the query time.
+
+    Uses a LONGER Prometheus client timeout than the app's usual live_prom_client() -- a
+    heavier registry entry's range query (iface_errors' nested per-ifIndex sum, evaluated at
+    every one of ~360 hourly steps across 15 days, confirmed live 2026-09-30: 51 seconds) blows
+    straight through the shared 20s cfg.http_timeout every OTHER live query in this app uses,
+    and the caller here has no reason to share that budget -- this is a one-time, run-by-hand
+    operation, not a page load. The shared timeout stays untouched for every other caller."""
     from . import services
 
-    result = {"ram": 0, "cpu": 0, "disk": 0, "swift": 0, "cob": 0, "error": None}
+    result = {entry.key: 0 for entry in metric_registry.REGISTRY}
+    result["error"] = None
     try:
         prom, cfg, systems = services.live_prom_client()
     except Exception as exc:
         result["error"] = str(exc)
         return result
 
+    import generate_report as gr
+
+    prom = gr.Prometheus(cfg.prom, 120, cfg.verify_tls)
+
     import time as _time
 
     end = _time.time()
     start = end - days * 24 * 3600
-    for category, expr in _global_expressions().items():
+    for entry in metric_registry.REGISTRY:
         try:
-            rows = prom.query_range(expr, start, end, "1h")
+            rows = prom.query_range(entry.bulk_promql, start, end, "1h")
         except Exception:
             continue
-        result[category] = _save(_range_rows_to_samples(rows, category))
-
-    from .models import MetricSample
-
-    for key, expr in SCALAR_METRICS.items():
-        try:
-            rows = prom.query_range(expr, start, end, "1h")
-        except Exception:
-            rows = []
-        if not rows:
-            continue
-        samples = []
-        for t, v in rows[0]["values"]:
-            if math.isnan(v):
+        if entry.kind == "scalar":
+            if not rows:
                 continue
-            value = max(0.0, v) if key == "swift" else v
-            samples.append(MetricSample(
-                metric_key=key,
-                taken_at=datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc),
-                value=value))
-        result[key] = _save(samples)
+            from .models import MetricSample
+
+            samples = []
+            for t, v in rows[0]["values"]:
+                if math.isnan(v):
+                    continue
+                value = max(0.0, v) if entry.floor_zero else v
+                samples.append(MetricSample(
+                    metric_key=entry.key,
+                    taken_at=datetime.datetime.fromtimestamp(t, tz=datetime.timezone.utc),
+                    value=value))
+            result[entry.key] = _save(samples)
+        else:
+            result[entry.key] = _save(_range_rows_to_samples(rows, entry))
     return result

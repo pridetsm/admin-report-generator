@@ -18,6 +18,7 @@
   }
   .badge-state .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .badge-state.unk { background: var(--panel-2); color: var(--muted); }
+  .badge-state.cfg { background: var(--amber-bg); color: var(--amber); }
   .badge-kind {
     display: inline-flex; align-items: center; margin-left: 6px;
     font-size: 10.5px; font-weight: 650; padding: 1px 7px; border-radius: 999px;
@@ -78,7 +79,9 @@
         <span class="sys-body">
           <span class="sys-name">{{ d.name }}<span class="badge-kind">{{ d.kind }}</span></span>
           <span class="sys-sub">{{ d.iface_count }} interface{{ d.iface_count|pluralize }}</span>
-          {% if not d.known %}
+          {% if d.snmp_unconfigured %}
+          <span class="badge-state cfg" title="SNMP has not been set up on this device yet"><span class="dot"></span>not configured</span>
+          {% elif not d.known %}
           <span class="badge-state unk" title="Prometheus has no scrape for this target"><span class="dot"></span>not scraped</span>
           {% elif not d.reachable %}
           <span class="badge-state" title="The target is not answering SNMP"><span class="dot"></span>not responding</span>

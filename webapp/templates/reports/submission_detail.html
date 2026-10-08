@@ -67,7 +67,8 @@
   {% endif %}
 
   {# ---- 4. Comments entered by the admin ----------------------------------- #}
-  <div class="section-label sub">Comments (entered by {{ sub.author|default:sub.generated_by.get_username }})</div>
+  <div class="section-label sub">Comments (entered by
+    {% if sub.author %}{{ sub.author }}{% elif sub.generated_by %}{{ sub.generated_by.get_username }}{% else %}—{% endif %})</div>
   <table class="dt kv">
     {% for c in comments %}<tr><th>{{ c.label }}</th><td>{{ c.text }}</td></tr>
     {% empty %}<tr><td colspan="2" class="muted">No comments were entered.</td></tr>{% endfor %}

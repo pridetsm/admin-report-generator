@@ -32,6 +32,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.utils.safestring import mark_safe
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_POST
 
@@ -55,7 +56,8 @@ from .models import (AlertGroup, AlertSilence, AutomatedReportGroup, AutomatedRe
 from .roles import (ALL_ROLES, ALL_ROLES_DESCRIPTION, ALL_ROLES_ICON, ALL_ROLES_LABEL,
                     ROLE_DESCRIPTIONS, ROLE_HOME, ROLE_NAMES, ROLE_PAGES,
                     SESSION_KEY as ROLE_SESSION_KEY, SYSTEM_ADMIN_ROLE, roles_without_screens,
-                    active_role, held_roles, is_infra_admin, is_management, is_network_admin,
+                    active_role, can_view_alert_dashboard, held_roles, is_infra_admin,
+                    is_management, is_network_admin,
                     is_role_admin, effective_roles, is_security_admin, reports_for,
                     role_icon, role_screens,
                     is_superuser, is_system_admin,
@@ -68,6 +70,11 @@ from .services import (
     OsInventoryUnavailable,
     build_os_inventory,
     default_os_inventory_filename,
+    BackupHistoryUnavailable,
+    build_backup_history_report,
+    default_backup_history_filename,
+    earliest_backup_history_date,
+    mark_xlsx_download,
     EmailNotConfigured,
     PrometheusUnavailable,
     build_report,
@@ -173,6 +180,16 @@ def role_empty(request):
     })
 
 
+# Domains with no report/data source at all -- shown honestly as such (on request, matching
+# design_prompt.md's own explicit instruction), not silently omitted or fabricated a "clean"
+# reading from data that doesn't exist. Module-level (2026-10-07, on request, incident
+# calendar package: "Derive it from the same source Domain Health uses; do not hard-code if
+# that source exists") so build_incident_calendar_context can reuse the EXACT same list
+# _management_dashboard_context's own no_data_domains is built from, rather than a second,
+# driftable copy of "Security" typed out twice.
+NO_DATA_DOMAIN_NAMES = ["Security"]
+
+
 def _live_report_sections() -> list:
     """The SAME shape report_sections has always had ({"kind", "label", "generated_at",
     "author", "overview", "systems"}), now read from LiveEstateOverview -- the alert poller's
@@ -236,7 +253,193 @@ def _live_report_sections() -> list:
     return sections
 
 
-def _management_dashboard_context(request):
+def _incident_device_label(occurrence) -> str:
+    """"RTGS — Database" from an IssueOccurrence's own (system, flag_key) -- flag_key is
+    "backup:{component}" (generate_report.Flag.key's own convention for this category), and
+    the system name alone is ambiguous once two different business systems both have a
+    component named e.g. "Database" -- the spec's own example devices ("T24-APP01") assumed
+    per-host identifiers this estate's real backup check doesn't have at component
+    granularity; "System — Component" is the same disambiguating shape every other flagged-
+    item list in this app already uses (see submission_detail.html's own "CRB — DB" rows)."""
+    component = occurrence.flag_key.split(":", 1)[1] if ":" in occurrence.flag_key else occurrence.flag_key
+    return f"{occurrence.system} — {component}"
+
+
+def _admin_comment_for_incident_day(system: str, category: str, flag_key: str,
+                                    day: "datetime.date") -> tuple:
+    """The administrator's own real comment explaining why an incident happened, found the
+    SAME way alert_catalog._walk_comment_history already does for the Alert Dashboard's own
+    comment drill-down -- reused, not reinvented, so the two can never disagree about what
+    counts as a genuinely relevant comment (2026-10-08, on request: "we need the
+    administrator's comments on why the incident happened in the incident calendar[.] check
+    issues that happened on the day and find one that included that system then check if
+    there is a comment").
+
+    Scoped to the exact day the incident started, rather than walking all history the way the
+    Alert Dashboard's own version does -- the calendar already knows precisely which day to
+    look at, so there's no need for a running multi-comment search. Checks every REAL report
+    submitted that day (earliest first), for a system-level comment that
+    models.comment_relevant_flag_keys can confidently attribute to this exact finding or one
+    of its severity-tier siblings (models.sibling_flag_keys) -- same precision-over-recall
+    rule that already prevents a comment about one mount/component being wrongly attributed to
+    another. Returns (comment_text, author) or (None, None) when no report that day mentioned
+    this system with a comment that's actually about this finding."""
+    from .models import ReportSubmission, comment_relevant_flag_keys, sibling_flag_keys
+
+    flag_keys = sibling_flag_keys(category, flag_key)
+    for sub in (ReportSubmission.objects
+               .filter(created_at__date=day)
+               .only("created_at", "author", "generated_by", "report_content")
+               .order_by("created_at")):
+        for sysd in (sub.report_content or {}).get("systems", []):
+            if sysd.get("name") != system:
+                continue
+            relevant = comment_relevant_flag_keys(sysd)
+            matched = next((k for k in relevant if k in flag_keys), None)
+            if matched:
+                author = sub.author or (sub.generated_by.get_username() if sub.generated_by_id else "")
+                return relevant[matched], author
+    return None, None
+
+
+def build_incident_calendar_context(today: datetime.date, include_security: bool = True) -> dict:
+    """Incident Calendar panel data (2026-10-07, incident-calendar.zip package). Deliberately
+    reuses IssueOccurrence -- the existing, real, already-unconditionally-written (system,
+    flag_key) occurrence ledger (reports.alerting.record_occurrences, every ~5 minutes, for
+    every category including "backup") -- as the incident source, rather than a new model: it
+    already has everything the spec's own suggested Incident model would need (system, domain,
+    category, started_at, resolved_at), already reliably populated, with no new lifecycle-
+    writing code to keep in sync. "Create (or extend, if a suitable one exists)" -- the spec's
+    own wording -- confirmed live, 2026-10-07: a suitable one already exists.
+
+    One incident entry per (domain, day) -- every IssueOccurrence row whose RED/"bad" band
+    started on that calendar day is merged into one entry, its affected components collected
+    into `devices` (section 3.2 point 1: "one incident per domain per day per type, merging
+    all affected devices"). `resolved` is True only once EVERY merged occurrence has its own
+    resolved_at set; if any one is still open the whole day's entry reads unresolved, matching
+    the three-colour rule the template's own JS applies (only-unresolved / mixed / only-
+    resolved). `note` is an honest, non-fabricated status line -- IssueOccurrence carries no
+    human-authored resolution comment at all (unlike the spec's own hypothetical Incident
+    model, which assumed one pulled from admin report comments); inventing one would misattribute
+    real commentary no one wrote.
+
+    "Missing backups" is the only tracked type today, and real data confirms it is ALWAYS
+    domain="Systems" (reports.alerting.record_occurrences' own Systems-loop call hardcodes
+    this) -- Network/Infrastructure/Security rows will always read clear for this type until a
+    second type exists; this is real estate shape, not a gap in the query.
+
+    include_security (2026-10-07, on request: "remove the domain for which we have nothing
+    monitored i.e security domain" for the landing-page variant specifically) drops "Security"
+    from `domains` and from each month's own `nodata` list entirely -- the caller just never
+    asked for that column, not a domain that exists but renders empty. Defaults True so every
+    OTHER caller (management_dashboard_pretty_analytical, the reference copy this request was
+    split off from) is unaffected.
+    """
+    import calendar as _calendar
+
+    from .models import IssueOccurrence
+
+    def month_key(d: datetime.date) -> str:
+        return f"{d.year:04d}-{d.month:02d}"
+
+    cur_key = month_key(today)
+    prev_key = month_key(today.replace(day=1) - datetime.timedelta(days=1))
+    domains = ["Systems", "Network", "Infrastructure"] + (["Security"] if include_security else [])
+    types = ["Missing backups"]
+
+    months = {}
+    for key, is_current in ((prev_key, False), (cur_key, True)):
+        year, mon = (int(x) for x in key.split("-"))
+        days_in_month = _calendar.monthrange(year, mon)[1]
+        month_start = datetime.date(year, mon, 1)
+        month_end = datetime.date(year, mon, days_in_month)
+
+        occurrences = (IssueOccurrence.objects
+                      .filter(category="backup", band__in=("red", "bad"),
+                             started_at__date__gte=month_start, started_at__date__lte=month_end)
+                      .order_by("started_at"))
+
+        grouped = {}
+        for occ in occurrences:
+            k = (occ.domain or "Systems", occ.started_at.date().day)
+            grouped.setdefault(k, []).append(occ)
+
+        incidents = []
+        for (domain, day), occs in sorted(grouped.items()):
+            resolved = all(o.resolved_at is not None for o in occs)
+            devices = sorted({_incident_device_label(o) for o in occs})
+            desc = (f"No recent backup found for {devices[0]}." if len(devices) == 1 else
+                   f"No recent backup found for {len(devices)} component(s).")
+            # The real administrator's own comment, when one exists, in place of the honest
+            # but generic fallback (2026-10-08, see _admin_comment_for_incident_day's own
+            # docstring for the request and the reused Alert-Dashboard-drill-down mechanism).
+            # Checked per UNDERLYING occurrence, not once per merged incident -- a multi-device
+            # incident can have a real comment for one device and none for another, and each
+            # must be attributed to the right one rather than a single blended guess.
+            real_comments = []
+            seen_occ = set()
+            for o in occs:
+                if o.pk in seen_occ:
+                    continue
+                seen_occ.add(o.pk)
+                comment, author = _admin_comment_for_incident_day(
+                    o.system, o.category, o.flag_key, o.started_at.date())
+                if comment:
+                    device = _incident_device_label(o)
+                    prefix = f"{device} — " if len(devices) > 1 else ""
+                    real_comments.append(f"{prefix}{comment}" + (f" ({author})" if author else ""))
+            if real_comments:
+                note = " | ".join(real_comments)
+            else:
+                note = ("Backup check found a fresh backup again — cleared automatically."
+                        if resolved else "Awaiting resolution.")
+            incidents.append({"domain": domain, "day": day, "type": "Missing backups",
+                             "desc": desc, "devices": devices, "resolved": resolved, "note": note})
+
+        months[key] = {"today": today.day if is_current else days_in_month,
+                      "nodata": [d for d in NO_DATA_DOMAIN_NAMES if include_security or d != "Security"],
+                      "incidents": incidents}
+
+    # Banner colour, averaged across EVERY day this panel holds (both tabs combined), not
+    # just whichever month tab is open (2026-10-07, on request: "average out the banner color
+    # in a way that is significant [over] all monthly data thus far... it needs to have a
+    # wholistic look"). FIRST version of this scored resolved/total incidents (17 of 18
+    # resolved -> 94% green) and was rightly rejected on request: "he have recorded an
+    # incident every single day thus far exept for one[,] yes some are resolved but
+    # still...how does this tranlate to a green" -- resolved/total measures whether a backup
+    # miss eventually got fixed, not whether the estate was actually quiet; a failure that
+    # recurs daily and gets cleared same-day every time is a chronic problem, not health, and
+    # scoring it by resolution rate alone painted it green. The real signal for "how healthy
+    # has this been" is day COVERAGE: of every calendar day elapsed in this panel's own
+    # two-month window, what fraction had zero incidents anywhere (confirmed live, 2026-10-07:
+    # only 19 of 37 elapsed days were actually clear). A currently-open incident additionally
+    # hard-caps the score at 40% green -- "still broken right now" can never read as mostly
+    # green no matter how clean the history is.
+    window_start = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
+    window_days = (today - window_start).days + 1
+    incident_days = set()
+    for key, m in months.items():
+        year, mon = (int(x) for x in key.split("-"))
+        for inc in m["incidents"]:
+            incident_days.add(datetime.date(year, mon, inc["day"]))
+    clear_days = window_days - len(incident_days)
+    clear_pct = round(100 * clear_days / window_days) if window_days else 100
+
+    all_incidents = [inc for m in months.values() for inc in m["incidents"]]
+    total_n = len(all_incidents)
+    resolved_n = sum(1 for i in all_incidents if i["resolved"])
+    open_n = total_n - resolved_n
+    green_pct = min(clear_pct, 40) if open_n else clear_pct
+
+    return {"domains": domains, "types": types, "months": months,
+            "health": {"green_pct": green_pct, "clear_pct": clear_pct,
+                      "window_days": window_days, "clear_days": clear_days,
+                      "incident_days": len(incident_days),
+                      "total": total_n, "resolved": resolved_n, "open": open_n}}
+
+
+def _management_dashboard_context(request, exclude_labels: frozenset = frozenset(),
+                                  include_security: bool = True):
     """Shared context builder behind both Executive Dashboard pages -- Full and Focused
     (2026-09-16, on request: "save current dashboard as is well move it to a page... called
     Executive - Full... add another such page and make it the landing page... called
@@ -270,6 +473,18 @@ def _management_dashboard_context(request):
 
     Returns None when the viewer isn't Management -- callers redirect on that themselves,
     same as the single view function did before this was split into Full/Focused.
+
+    `exclude_labels` (2026-10-03, on request: "remove heavy discards unencripted links and
+    some discards from the focused managerial dashboard" -- management_dashboard_focused's own
+    caller passes its own trim set; Full/Analytical pass nothing, so their own callers are
+    completely unaffected). Applied at the SAME three places a tile's label can surface here --
+    _domain_pill (so an excluded tile can never leave behind an unexplained warn/bad pill with
+    nothing visible underneath it), _domain_bars, and the exceptions loop below -- not a late
+    filter on the finished lists, which would have left the Domain Health card's own severity
+    pill still reacting to a tile the page no longer shows a reason for. Does NOT touch the
+    underlying report's own glance/immediate/watch tiles themselves (System Admin Report,
+    Network Report, etc. still show every tile as always) or report_sections -- this only
+    changes what THIS summary view, specifically, chooses to surface.
     """
     if not is_management(request.user):
         return None
@@ -297,22 +512,219 @@ def _management_dashboard_context(request):
         n, total = int(m.group(1)), int(m.group(2))
         return (n, total, round(n / total * 100)) if total > 0 else None
 
-    def _domain_pill(overview):
-        immediate, watch = overview.get("immediate", []), overview.get("watch", [])
-        if any(i.get("state") == "bad" for i in immediate + watch):
+    def _domain_pill(sec):
+        """Takes the whole report section now, not just its overview (2026-10-08, on request:
+        "it has already expired from the needs attention now banner why is it still active in
+        individual domain banners") -- needs `sec["systems"]` to apply the SAME 2-hour
+        freshness override _domain_bars already does below, so a card's own pill can never
+        again claim "bad" off a stale Missing-backups reading with no bad bar left to explain
+        it (confirmed live: Full's own Systems card read pill="bad" with ZERO bad bars
+        underneath, once the bars themselves were fixed -- the pill had its own, separate,
+        still-unfixed copy of the same raw-state bug)."""
+        overview = sec["overview"]
+        immediate = [i for i in overview.get("immediate", []) if i["label"] not in exclude_labels]
+        watch = [i for i in overview.get("watch", []) if i["label"] not in exclude_labels]
+        states = [_fresh_backup_miss_override(sec, i)[1] for i in immediate + watch]
+        if "bad" in states:
             return "bad"
-        if any(i.get("state") == "warn" for i in immediate + watch):
+        if "warn" in states:
             return "warn"
         return "ok"
 
-    def _domain_bars(overview):
+    # Click an exception to see its exact source -- which system, which component (2026-09-16,
+    # on request: "clicking it should reveal the exact source of that error which system,
+    # system component is giving that error"). The exception rows above are DOMAIN-level
+    # aggregates ("Missing backups: 1 | 12"); the actual per-system detail already lives in
+    # report_content["systems"][*]["flags"] (every report kind stores this the same way -- see
+    # e.g. generate_active_directory_report.py's own report_content dict), just one level down
+    # from what the aggregate tiles read. There's no shared key to join the two on precisely
+    # (the aggregate's own "label" is free text, a flag's "category" is a coarse bucket several
+    # unrelated labels can share -- Network's own links_failed/iface_discards_heavy are BOTH
+    # category "service"), so this matches on significant words the label and a flag's own
+    # key/category/text have in common. A best-effort hint, not a guaranteed join -- a label
+    # with no real per-system counterpart (Expired certs, Undrained queues -- rollups that
+    # were never recorded as a per-system flag) simply shows no detail, rather than a wrong one.
+    # A length>=4 floor originally dropped "cpu"/"ram" outright (2026-09-16, on request: "High
+    # CPU and High RAM tiles do not open these boxes" -- both boiled down to just the word
+    # "high", too generic to match anything, since "cpu"/"ram" are only 3 letters). A stopword
+    # list instead of a length floor keeps short-but-specific words like these.
+    #
+    # Moved up ahead of _domain_bars (2026-10-06, on request: "make the domain tiles in
+    # managerial dashboard make their bar graphs clickable just li[k]e the tiles in needs
+    # attention now so we see the actual error") -- _domain_bars now calls this SAME join for
+    # every bar it builds, not just the flat exceptions table further down, so a Domain
+    # Health mini-bar opens the identical per-system detail a Needs Attention Now row already
+    # does. Had to move: a nested function can only reference an enclosing-scope name that's
+    # already bound by the time it's actually CALLED, and _domain_bars is called by the
+    # domain_cards loop immediately below, well before this used to be defined.
+    _DETAIL_STOPWORDS = {"high", "down", "total", "with", "that", "this"}
+
+    # A flag's own text is free-form prose, sometimes with a comma-separated tail bolted on
+    # (a device list, a metric list) that reads as a wall of jargon once several wrap across a
+    # narrow box (2026-09-16, on request: "is there too much text data, if yes can data be
+    # tabulated"). This splits "headline — a, b, c" or "headline: a, b, c" into a plain
+    # headline plus a real list of items the template renders as small wrapped tags instead of
+    # one long run-on sentence -- text with no such tail (most flags: "RAM 95%") is left alone.
+    def _split_detail_text(text):
+        for sep in (" — ", ": "):
+            if sep in text:
+                head, _, tail = text.partition(sep)
+                if "," in tail:
+                    items = [i.strip() for i in tail.split(",") if i.strip()]
+                    return head.strip(), items
+        return text, None
+
+    def _exception_detail(sec, label):
+        words = {w[:-1] if w.endswith("s") and len(w) > 4 else w
+                 for w in re.findall(r"[a-z]{3,}", label.lower())
+                 if w not in _DETAIL_STOPWORDS}
+        if not words:
+            return []
+        # "Missing backups" popup stays consistent with its own tile's 2-hour freshness rule
+        # (2026-10-07, see _fresh_backup_miss_override's own comment) -- otherwise the tile
+        # could read "0" while clicking it still listed stale, >2h-old entries.
+        backup_cutoff = None
+        if label == "Missing backups":
+            from .models import IssueOccurrence
+
+            backup_cutoff = timezone.now() - datetime.timedelta(hours=2)
+            backup_started = {
+                (o.system, o.flag_key): o.started_at
+                for o in IssueOccurrence.objects.filter(category="backup", resolved_at__isnull=True)
+            }
+        found = []
+        for s in sec["systems"]:
+            for f in s.get("flags", []):
+                # category="untracked" ("no backup check configured at all") is explicitly
+                # excluded from every detail popup here, never just the ones it's actually
+                # about (2026-10-08, on request: "the untracked backup metric is not a
+                # relevant enough kpi to be showing to management" -- found while investigating
+                # a real cross-contamination bug: GTMS's own untracked finding's text contains
+                # the word "backup", so it was word-matching into "Missing backups"' own
+                # popup too, even while that row itself read "ok" -- clicking a tile that
+                # claimed to be healthy showed GTMS as if something there was wrong. No label
+                # in this app's own managerial displays is actually ABOUT "untracked" (it has
+                # no row of its own in _MATRIX_ROW_LABELS/_STANDING_LABELS), so excluding it
+                # here removes a no-legitimate-home bleed risk everywhere, not just this one
+                # instance of it.
+                if f.get("category") == "untracked":
+                    continue
+                # "Backup tracking" (whether a system has a backup check CONFIGURED at all)
+                # and "Missing backups" (category="backup" -- a configured check that found no
+                # fresh file) are two different questions that happen to share the word
+                # "backup" -- found live, 2026-10-08, on request "why do we get a missing
+                # backup from this tile": RTGS's real category="backup" NO BACKUP finding was
+                # word-matching into "Backup tracking"'s own popup too. Scoped the same
+                # explicit way "Missing backups" already is below, rather than trusting the
+                # word-match to keep two lexically-overlapping categories apart. In practice
+                # this now leaves "Backup tracking"'s own popup always empty (its one real
+                # subject, category="untracked", is excluded everywhere just above) -- correct
+                # and intentional, not a bug: the tile itself stays visible only on Executive -
+                # Full, with nothing further to drill into, consistent with "not a relevant
+                # enough kpi to be showing to management" applying to the whole category.
+                if label == "Backup tracking" and f.get("category") != "untracked":
+                    continue
+                if backup_cutoff is not None and f.get("category") == "backup":
+                    started = backup_started.get((s["name"], f.get("key")))
+                    if started is None or started < backup_cutoff:
+                        continue
+                # "note" (2026-10-07, on request: "managerial dashboard still not telling us
+                # which folder did not drain") -- a genuinely healthy finding (e.g. a queue
+                # folder with fresh files waiting, services.queue_waiting_folder_flags_by_
+                # system's own output) that a standing tile's own count still includes. Shown
+                # with the popup's real "ok" (green) severity, never "warn" -- it would be
+                # dishonest to paint a healthy reading amber just because it shares a category
+                # with real problems.
+                if f.get("band") not in ("red", "amber", "bad", "warn", "note"):
+                    continue
+                haystack = f"{f.get('key', '')} {f.get('category', '')} {f.get('text', '')}".lower()
+                if any(w in haystack for w in words):
+                    headline, items = _split_detail_text(f.get("text", ""))
+                    band = ("bad" if f.get("band") in ("red", "bad") else
+                           "ok" if f.get("band") == "note" else "warn")
+                    found.append({"system": s["name"], "headline": headline, "items": items,
+                                  "band": band})
+        return found
+
+    def _fresh_backup_miss_override(sec, item):
+        """Needs Attention Now shows a missing-backup finding for its first 2 hours only
+        (2026-10-07, incident calendar package, on request: "keep both occurances, just stop
+        firing in needs attention now after 2 hours") -- past that it's a known, tracked,
+        recurring issue better reviewed in the Incident Calendar (build_incident_calendar_
+        context) than repeated in the urgent panel every poll. Recomputes the REAL value/state
+        from the real per-system flags (category="backup") cross-referenced against
+        IssueOccurrence's own real started_at -- NEVER touches services.build_overview's own
+        nmiss (the System Admin Report's own form/xlsx tile keeps showing the TRUE, full,
+        un-time-filtered count; see that function's own "Totals... must stay based on the
+        fixed register" comment) -- this only overrides what THIS panel displays. Returns
+        (value, state) for "Missing backups", the item's own (value, state) unchanged for
+        every other label.
+
+        Moved ahead of _domain_bars (2026-10-08, on request: "it has already expired from the
+        needs attention now banner why is it still active in individual domain banners") --
+        _domain_bars now calls this SAME override too, so Domain Health's own "Missing
+        backups" bar can never again disagree with its own popup: before this, the bar's
+        colour read the tile's raw, un-gated state directly while _exception_detail (building
+        that same bar's own alerts list) already silently applied this exact 2-hour cutoff --
+        a stale (>2h) finding painted the bar red with an EMPTY popup underneath it, no
+        visible reason at all ("its no longer showing the actual reason which is why I had to
+        ask you"). Had to move for the same reason _domain_bars itself once did: a nested
+        function can only reference an enclosing-scope name that's already bound by the time
+        it's actually CALLED, and _domain_bars is invoked (building domain_cards) well before
+        this used to be defined."""
+        if item["label"] != "Missing backups":
+            return item["value"], item.get("state", "good")
+        from .models import IssueOccurrence
+
+        cutoff = timezone.now() - datetime.timedelta(hours=2)
+        open_started = {
+            (o.system, o.flag_key): o.started_at
+            for o in IssueOccurrence.objects.filter(category="backup", resolved_at__isnull=True)
+        }
+        fresh = 0
+        for s in sec["systems"]:
+            for f in s.get("flags", []):
+                if f.get("category") != "backup" or f.get("band") not in ("red", "bad"):
+                    continue
+                started = open_started.get((s["name"], f.get("key")))
+                if started is not None and started >= cutoff:
+                    fresh += 1
+        raw_value = str(item["value"])
+        total = raw_value.split("|", 1)[1].strip() if "|" in raw_value else ""
+        value = f"{fresh} | {total}" if total else str(fresh)
+        state = "bad" if fresh else "good"
+        return value, state
+
+    # Each bar now carries its own "id" (clicked to open its own popup, same pattern as
+    # _needs_attention_matrix's own cells) and "detail" (via _exception_detail above, same
+    # best-effort word-match join the flat exceptions table already used) -- takes `sec`, not
+    # just its own `overview`, since _exception_detail needs the section's real per-system
+    # flags, one level down from overview.immediate/watch. sec["kind"] (a stable, always-unique
+    # report kind like "system_admin") anchors the id instead of a domain display name, since
+    # _domain_bars itself has no idea yet whether it's building Systems' own card or one of
+    # Infrastructure's two merged components.
+    def _domain_bars(sec):
+        overview = sec["overview"]
         bars = []
-        for item in overview.get("immediate", []) + overview.get("watch", []):
-            if item.get("state") not in ("bad", "warn"):
+        for idx, item in enumerate(overview.get("immediate", []) + overview.get("watch", [])):
+            if item["label"] in exclude_labels:
                 continue
-            ratio = _ratio(item.get("value"))
-            bars.append({"label": item["label"], "value": item["value"],
-                        "band": item["state"], "pct": ratio[2] if ratio else None})
+            item_value, item_state = _fresh_backup_miss_override(sec, item)
+            if item_state not in ("bad", "warn"):
+                continue
+            ratio = _ratio(item_value)
+            # Same {sev, system, desc, time, pills} shape _needs_attention_matrix's own cells
+            # build their "alerts" list in (2026-10-05) -- template reuses that identical
+            # alert-row partial verbatim for a bar's own popup, rather than inventing a second
+            # shape/template block to render one detail row.
+            alerts = [{"sev": "red" if d["band"] in ("red", "bad") else "amb",
+                      "system": d["system"], "desc": d["headline"],
+                      "time": sec["generated_at"], "pills": d.get("items") or []}
+                     for d in _exception_detail(sec, item["label"])]
+            bars.append({"label": item["label"], "value": item_value,
+                        "band": item_state, "pct": ratio[2] if ratio else None,
+                        "id": _matrix_slug(f"bar-{sec['kind']}-{item['label']}-{idx}"),
+                        "alerts": alerts})
         return bars
 
     # Shorter domain names in the exception-based view only (2026-09-14, on request: "drop
@@ -342,8 +754,8 @@ def _management_dashboard_context(request):
             continue
         ov = sec["overview"]
         domain_cards.append({
-            "name": name, "pill": _domain_pill(ov), "glance": ov.get("glance", []),
-            "bars": _domain_bars(ov), "components": [], "generated_at": sec["generated_at"],
+            "name": name, "pill": _domain_pill(sec), "glance": ov.get("glance", []),
+            "bars": _domain_bars(sec), "components": [], "generated_at": sec["generated_at"],
         })
 
     # Infrastructure is the domain; Clusters (the report still tagged "infrastructure" --
@@ -360,8 +772,8 @@ def _management_dashboard_context(request):
             continue
         ov = sec["overview"]
         infra_components.append({
-            "name": comp_name, "pill": _domain_pill(ov), "glance": ov.get("glance", []),
-            "bars": _domain_bars(ov), "generated_at": sec["generated_at"],
+            "name": comp_name, "pill": _domain_pill(sec), "glance": ov.get("glance", []),
+            "bars": _domain_bars(sec), "generated_at": sec["generated_at"],
         })
     if infra_components:
         combined_bars = [{**b, "label": f"{comp['name']} — {b['label']}"}
@@ -393,103 +805,90 @@ def _management_dashboard_context(request):
     # Two domains with no report/data source at all -- shown honestly as such (on request,
     # matching design_prompt.md's own explicit instruction), not silently omitted or
     # fabricated a "clean" reading from data that doesn't exist.
+    # include_security (2026-10-07, "remove the domain for which we have nothing monitored i.e
+    # security domain" -- the landing-page variant specifically, see management_dashboard_
+    # pretty's own docstring) drops Security from here entirely rather than showing an empty
+    # "nodata" card for it -- the caller asked for a domain that doesn't exist on this page at
+    # all, not one that exists and renders blank.
     no_data_domains = [
-        {"name": "Security", "note": "No monitoring data source yet."},
+        {"name": name, "note": "No monitoring data source yet."} for name in NO_DATA_DOMAIN_NAMES
+        if include_security or name != "Security"
     ]
     excluded_domain_note = ("Government Systems isn't included yet -- no monitoring data "
                             "is available for that domain.")
-
-    # Click an exception to see its exact source -- which system, which component (2026-09-16,
-    # on request: "clicking it should reveal the exact source of that error which system,
-    # system component is giving that error"). The exception rows above are DOMAIN-level
-    # aggregates ("Missing backups: 1 | 12"); the actual per-system detail already lives in
-    # report_content["systems"][*]["flags"] (every report kind stores this the same way -- see
-    # e.g. generate_active_directory_report.py's own report_content dict), just one level down
-    # from what the aggregate tiles read. There's no shared key to join the two on precisely
-    # (the aggregate's own "label" is free text, a flag's "category" is a coarse bucket several
-    # unrelated labels can share -- Network's own links_failed/iface_discards_heavy are BOTH
-    # category "service"), so this matches on significant words the label and a flag's own
-    # key/category/text have in common. A best-effort hint, not a guaranteed join -- a label
-    # with no real per-system counterpart (Expired certs, Undrained queues -- rollups that
-    # were never recorded as a per-system flag) simply shows no detail, rather than a wrong one.
-    # A length>=4 floor originally dropped "cpu"/"ram" outright (2026-09-16, on request: "High
-    # CPU and High RAM tiles do not open these boxes" -- both boiled down to just the word
-    # "high", too generic to match anything, since "cpu"/"ram" are only 3 letters). A stopword
-    # list instead of a length floor keeps short-but-specific words like these.
-    _DETAIL_STOPWORDS = {"high", "down", "total", "with", "that", "this"}
-
-    # A flag's own text is free-form prose, sometimes with a comma-separated tail bolted on
-    # (a device list, a metric list) that reads as a wall of jargon once several wrap across a
-    # narrow box (2026-09-16, on request: "is there too much text data, if yes can data be
-    # tabulated"). This splits "headline — a, b, c" or "headline: a, b, c" into a plain
-    # headline plus a real list of items the template renders as small wrapped tags instead of
-    # one long run-on sentence -- text with no such tail (most flags: "RAM 95%") is left alone.
-    def _split_detail_text(text):
-        for sep in (" — ", ": "):
-            if sep in text:
-                head, _, tail = text.partition(sep)
-                if "," in tail:
-                    items = [i.strip() for i in tail.split(",") if i.strip()]
-                    return head.strip(), items
-        return text, None
-
-    def _exception_detail(sec, label):
-        words = {w[:-1] if w.endswith("s") and len(w) > 4 else w
-                 for w in re.findall(r"[a-z]{3,}", label.lower())
-                 if w not in _DETAIL_STOPWORDS}
-        if not words:
-            return []
-        found = []
-        for s in sec["systems"]:
-            for f in s.get("flags", []):
-                if f.get("band") not in ("red", "amber", "bad", "warn"):
-                    continue
-                haystack = f"{f.get('key', '')} {f.get('category', '')} {f.get('text', '')}".lower()
-                if any(w in haystack for w in words):
-                    headline, items = _split_detail_text(f.get("text", ""))
-                    found.append({"system": s["name"], "headline": headline, "items": items,
-                                  "band": "bad" if f.get("band") in ("red", "bad") else "warn"})
-        return found
 
     exceptions = []
     for sec in report_sections:
         ov = sec["overview"]
         for tier in ("immediate", "watch"):
             for item in ov.get(tier, []):
+                if item["label"] in exclude_labels:
+                    continue
                 # "Storage at capacity" no longer exists as its own tile at all (2026-09-18,
                 # on request -- see network._infra_overview's own comment on its own removal),
                 # so there's nothing left to filter out here; "Storage critical" alone covers
                 # this table's own storage row now, same as it always has for every other
                 # caller of _infra_overview.
-                if item.get("state") in ("bad", "warn"):
+                item_value, item_state = _fresh_backup_miss_override(sec, item)
+                if item_state in ("bad", "warn"):
                     exceptions.append({"domain": _domain_display_name(sec["label"]),
-                                       "label": item["label"], "value": item["value"],
-                                       "band": item["state"],
+                                       "label": item["label"], "value": item_value,
+                                       "band": item_state,
                                        "generated_at": sec["generated_at"],
                                        "detail": _exception_detail(sec, item["label"])})
-    # Unreachable components -- ALWAYS shown, unlike every row above (2026-09-18, on request:
+    # Standing status rows -- ALWAYS shown, unlike every row above (2026-09-18, on request:
     # "one of the most important metrics to add... is the unreachable components, even if
-    # things are reachable we still need that green [not] showing that all is well"). Every
-    # other row here is a pure problem list, silently absent when nothing's wrong; this one is
-    # a standing status line instead, so "reachability" is never a metric you have to infer
-    # from its own ABSENCE. Reuses generate_report's own "Unreachable components" immediate
-    # tile (System Admin Report's own component-reachability count) rather than inventing a
-    # second, parallel definition of "unreachable". Skipped if the main loop above already
-    # added it (its own state was bad/warn) -- never duplicated.
-    _unreachable_domains = {e["domain"] for e in exceptions if e["label"] == "Unreachable components"}
+    # things are reachable we still need that green [not] showing that all is well"; "Services
+    # down" added to this same set 2026-10-03, on request: "add services down permanantly to
+    # that dashboard if its zero make it green like unreachable components" -- identical
+    # reasoning, just a second label; then, same day, "if we can have Unreachable components
+    # for other domains also show up in the needs attention now panel if clean leave it green"
+    # -- Network's own "Not responding" and Infrastructure's/Active Directory's own "Components
+    # down" each got their own standing row here too, at the time under their OWN original
+    # label text, since "Unreachable components" was a System Admin Report-only label back
+    # then. Same day, once all three were already behaving identically: "can we rename all not
+    # responding or component down to be Unreachable components just to standardise things" --
+    # network.py's own three tile definitions were renamed to match (see each one's own
+    # comment there), so this list collapses back down to the two real label STRINGS now in
+    # use; the per-domain row count is unaffected -- Infrastructure · Clusters and
+    # Infrastructure · Active Directory (both fed by network._infra_overview, called once per
+    # device scope -- see alerting.run_alert_cycle's own _KIND_DOMAIN map) still produce two
+    # separate standing rows, each reading its own real count, not one shared between them --
+    # only the text displayed changed, not which sections contribute a row. "Undrained queues"
+    # added 2026-10-05, on request: "add the queue clearing metric to the managerial dashboard
+    # permanantly is there is no issues make it 0/5 green" -- already the identical "good" at
+    # 0/warn otherwise two-state shape every other standing label uses (see services.py's own
+    # comment on this tile: "0 undrained of 5" is deliberately the healthy reading), so it
+    # needed nothing extra beyond joining this same set. "Missing backups" added the same day,
+    # after the Voice Recorder backup checker fix cleared it and the row simply vanished from
+    # the page (its own normal behaviour -- the main exceptions loop above only ever shows
+    # bad/warn rows) -- on request: "why has the missing backups flag disappeared keep it
+    # there". Same "good" at 0/bad-or-warn otherwise shape as every other standing label (see
+    # generate_report.backup_missing_band's own docstring: "No misses -> good (green)"), so
+    # again nothing extra needed beyond joining this set. Every other row here is a pure
+    # problem list, silently absent when nothing's wrong; these are standing status lines
+    # instead, so none of these is ever a metric you have to infer from its own ABSENCE. Reuses
+    # each report's own existing immediate tile rather than inventing a second, parallel
+    # definition of any of them. Skipped per (domain, label) if the main loop above already
+    # added that exact row (its own state was bad/warn) -- never duplicated.
+    _STANDING_LABELS = ("Unreachable components", "Services down", "Undrained queues", "Missing backups")
+    _standing_shown = {(e["domain"], e["label"]) for e in exceptions if e["label"] in _STANDING_LABELS}
     for sec in report_sections:
-        if _domain_display_name(sec["label"]) in _unreachable_domains:
-            continue
+        domain = _domain_display_name(sec["label"])
         for item in sec["overview"].get("immediate", []):
-            if item["label"] == "Unreachable components":
-                exceptions.append({"domain": _domain_display_name(sec["label"]),
-                                   "label": item["label"], "value": item["value"],
-                                   "band": "ok" if item.get("state") == "good" else item.get("state", "ok"),
-                                   "generated_at": sec["generated_at"],
-                                   "detail": _exception_detail(sec, item["label"])})
+            if item["label"] not in _STANDING_LABELS:
+                continue
+            if (domain, item["label"]) in _standing_shown:
+                continue
+            item_value, item_state = _fresh_backup_miss_override(sec, item)
+            exceptions.append({"domain": domain,
+                               "label": item["label"], "value": item_value,
+                               "band": "ok" if item_state == "good" else item_state,
+                               "generated_at": sec["generated_at"],
+                               "detail": _exception_detail(sec, item["label"])})
     exceptions.sort(key=lambda r: {"bad": 0, "warn": 1}.get(r["band"], 2))
 
-    donut = {"ok": 1 + sum(1 for c in domain_cards if c["pill"] == "ok"),   # +1 = Security
+    donut = {"ok": (1 if include_security else 0) + sum(1 for c in domain_cards if c["pill"] == "ok"),
             "warn": sum(1 for c in domain_cards if c["pill"] == "warn"),
             "bad": sum(1 for c in domain_cards if c["pill"] == "bad")}
 
@@ -564,6 +963,8 @@ def _management_dashboard_context(request):
         # style") -- same days=30 window as swift_chart, same reason.
         "cob_chart": report_charts.cob_time_line_data(days=30),
         "generated_at": timezone.localtime(),
+        "incident_data": build_incident_calendar_context(timezone.localtime().date(),
+                                                         include_security=include_security),
     }
 
 
@@ -604,6 +1005,69 @@ def _trimmed_dashboard_exceptions(ctx):
     return [e for e in ctx["exceptions"] if not e["label"].startswith(_HIDDEN_EXCEPTION_PREFIXES)]
 
 
+def _pill_from_bars(bars) -> str:
+    if any(b["band"] == "bad" for b in bars):
+        return "bad"
+    if any(b["band"] == "warn" for b in bars):
+        return "warn"
+    return "ok"
+
+
+def _trimmed_domain_cards(domain_cards):
+    """Domain Health's own bars, trimmed to the SAME set _trimmed_dashboard_exceptions already
+    hides from Needs Attention Now, with each card's pill RECOMPUTED from what's left
+    (2026-10-05, on request: "now the domain panels must reflect only the metrics from the
+    needs attention now section not their own..things like cpu usage is not needed at this
+    dashboard its for managers").
+
+    Before this, Domain Health's mini-bars were built straight from _domain_bars -- every bad/
+    warn immediate+watch tile except this page's own `exclude_labels` -- a DIFFERENT, wider
+    set than what Needs Attention Now actually shows (that table also drops
+    _HIDDEN_EXCEPTION_PREFIXES: High CPU/RAM/disk, Metrics not collected, Links shut -- "usage-
+    noise and collection-gap tiles", see that constant's own comment). Confirmed live: Systems
+    was showing "High CPU"/"High RAM"/"High disk ≥85%" bars that never appeared in the
+    exceptions table at all -- the two panels disagreeing about what counts as worth a
+    manager's attention.
+
+    Only `c["bars"]` is touched -- the one list the template actually renders as mini-bars, for
+    every card including the merged Infrastructure one (`components` exists only to drive each
+    component's own 3-line glance text above the bars; `comp["bars"]` is never itself rendered,
+    see management_dashboard_focused.html's own domain-grid2 loop). Infrastructure's own bars
+    are each pre-prefixed with their component's name ("Clusters — High CPU", see
+    _management_dashboard_context's own combined_bars) -- stripped back off before the prefix
+    match so it's matched by the SAME rule as every other domain's unprefixed bars, not left
+    exempt by accident.
+
+    Pill is NOT just inherited -- recomputing it from the trimmed bars is what the "Needs
+    Attention Now banner colour blend"/.ok-banner-contrast fixes earlier this session already
+    established as the rule: a card's own severity pill must never claim something's wrong (or
+    hide that something's wrong) with no visible bar underneath it to explain why. "nodata"
+    (Security) is left completely untouched -- it never had bars to begin with."""
+    component_names = {c["name"] for card in domain_cards for c in card.get("components", [])}
+
+    def visible(bars):
+        kept = []
+        for b in bars:
+            label = b["label"]
+            for name in component_names:
+                prefix = f"{name} — "
+                if label.startswith(prefix):
+                    label = label[len(prefix):]
+                    break
+            if not label.startswith(_HIDDEN_EXCEPTION_PREFIXES):
+                kept.append(b)
+        return kept
+
+    trimmed = []
+    for c in domain_cards:
+        c = dict(c)
+        c["bars"] = visible(c["bars"])
+        if c.get("pill") != "nodata":
+            c["pill"] = _pill_from_bars(c["bars"])
+        trimmed.append(c)
+    return trimmed
+
+
 @never_cache
 @login_required
 def management_dashboard_analytical(request):
@@ -615,46 +1079,181 @@ def management_dashboard_analytical(request):
     exactly what "Executive - Focused" used to render: the exception-grouped (clean/issues)
     Domain Health cards and the two SWIFT/COB week-over-week comparison charts. See
     management_dashboard_focused for what replaced it as the landing page.
-    """
-    ctx = _management_dashboard_context(request)
+
+    "Backup tracking" excluded (2026-10-08, on request: "stop tracking the backups untracked
+    backups in managerial dashboards") -- Focus/Pretty/Pretty Analytical already had this
+    hidden via _focus_style_context's own _FOCUSED_EXCLUDE_LABELS (2026-10-03, "even backup
+    tracking"), but Analytical was cloned from Focused on 2026-09-19 -- BEFORE that request
+    existed -- so it never inherited it; this was a backport gap, not a deliberate difference.
+    Passed as exclude_labels (not just _trimmed_dashboard_exceptions' own narrower post-hoc
+    filter below, which only touches the flat exceptions list) so it also disappears from
+    Domain Health's own bars/pill, same complete removal Focus/Pretty already get -- see
+    _management_dashboard_context's own exclude_labels docstring for the three places this
+    applies. Executive - Full deliberately keeps this (and everything else) unfiltered, by its
+    own long-standing design -- not touched here."""
+    ctx = _management_dashboard_context(request, exclude_labels=frozenset({"Backup tracking"}))
     if ctx is None:
         return redirect("report_form")
     ctx = dict(ctx, exceptions=_trimmed_dashboard_exceptions(ctx))
     return render(request, "reports/management_dashboard_analytical.html", ctx)
 
 
-@never_cache
-@login_required
-def management_dashboard_focused(request):
-    """Executive - Focused: Management's landing page (2026-09-16, on request: "add another
-    such page and make it the landing page..."; redesigned 2026-09-19, on request: "remove the
-    original domain grouping mechanism and just place them in a simple 2x2 grid, starting with
-    security then infrastructure then networks then systems... remove [the weekly comparison
-    graphs]... swap in the scrollable line graph for swift transactions from the full
-    dashboard... replace the overview and domain health section heading with just domain
-    health" -- the former content of this page, unchanged, now lives at Executive - Analytical,
-    see management_dashboard_analytical). Same shared context as Full/Analytical -- see
-    _management_dashboard_context -- this view just also reshapes domain_cards into a fixed
-    four-cell grid for its own template to render.
+def _weighted_color_blend(exceptions) -> tuple:
+    """(green_pct, red_vs_amber_pct) -- the robust, continuous colour-blend algorithm built
+    2026-10-03 for the Needs Attention Now banner (see _focus_style_context's own "Needs
+    Attention Now banner colour blend" comment for the full history/reasoning), factored out
+    here 2026-10-06 so it has exactly ONE implementation shared by every banner that wants a
+    "how healthy is this panel, right now" colour instead of a flat per-row vote or a discrete
+    3-way state switch: weighted by each row's own "N | total" ratio (a metric affecting 20 of
+    59 pulls far harder toward red than one affecting 1 of 59), never a flat count of how many
+    rows are which colour. green_pct is the MEAN of every row's own greenness
+    (1 - affected/total, so a clean "0 | N" row always contributes full 1.0); red_vs_amber_pct
+    is red's own share of the red+amber "problem" mass specifically, both weighted the same
+    way. 50/100 are the neutral fallbacks for an empty or fully-clean `exceptions` list."""
+    ratio_re = re.compile(r"^\s*(\d+)\s*\|\s*(\d+)\s*$")
+    greenness_sum = 0.0
+    red_mass = 0.0
+    amber_mass = 0.0
+    n_rows = len(exceptions)
+    for e in exceptions:
+        m = ratio_re.match(str(e["value"]))
+        # Falls back to the old all-or-nothing reading only for the rare row whose value isn't
+        # itself an "N | total" ratio (none exist on this page today -- every tile here follows
+        # that shape -- but this keeps a non-conforming row from crashing the blend outright).
+        ratio = (int(m.group(1)) / int(m.group(2)) if m and int(m.group(2)) > 0
+                else (0.0 if e["band"] == "ok" else 1.0))
+        greenness_sum += 1 - ratio
+        if e["band"] == "bad":
+            red_mass += ratio
+        elif e["band"] == "warn":
+            amber_mass += ratio
+    green_pct = round(100 * greenness_sum / n_rows) if n_rows else 100
+    problem_mass = red_mass + amber_mass
+    red_vs_amber_pct = round(100 * red_mass / problem_mass) if problem_mass else 50
+    return green_pct, red_vs_amber_pct
+
+
+def _focus_style_context(request, include_security: bool = True):
+    """Shared setup behind BOTH "Focused-style" landing pages -- management_dashboard_focus
+    (the original exception-first 2x2-grid design) and management_dashboard_pretty (2026-10-05,
+    the cosmetic matrix redesign of its own Needs Attention Now panel that replaced it as the
+    landing page, see management_dashboard_pretty's own docstring) -- everything through
+    building domain_grid/banner_tier/banner_blend_style is IDENTICAL between the two; only the
+    Needs Attention Now panel's own markup (and, for Pretty, its own separate matrix data --
+    see _needs_attention_matrix) differs. Extracted here so the two views, and their own
+    templates' Domain Health/Live Activity sections, can never quietly drift apart on what
+    "the focused view" actually shows. Returns None when the viewer isn't Management, same
+    contract as _management_dashboard_context itself.
+
+    Trims a handful of lower-signal tiles entirely off this page specifically (2026-10-03, on
+    request: "remove heavy discards unencripted links and some discards from the focused
+    managerial dashboard" -> "even backup tracking" -> "metrics not collected doesnt matter"
+    -> "remove high temperature here" -- a standing exposure/known-QoS-noise/tracking-coverage/
+    data-coverage-gap/watch-tier environmental reading, not an active incident, so it's judged
+    too granular for the exception-first landing page; Full/Analytical still show all of these,
+    unchanged, for whoever wants the complete picture). See _management_dashboard_context's own
+    `exclude_labels` docstring for exactly where this is applied.
+
+    include_security (2026-10-07, see management_dashboard_pretty's own docstring) is passed
+    straight through to _management_dashboard_context and additionally drops "Security" out of
+    the fixed 2x2 domain_grid order below -- Focus and Pretty Analytical both leave it True
+    (unchanged, Security still shown as its own "no data" card); only Pretty itself passes
+    False now that it's the landing page and the domain never had a real monitoring source.
     """
-    ctx = _management_dashboard_context(request)
+    _FOCUSED_EXCLUDE_LABELS = frozenset({
+        "Heavy discards", "Some discards", "Unencrypted links", "Backup tracking",
+        "Metrics not collected", "High Temperature",
+    })
+    ctx = _management_dashboard_context(request, exclude_labels=_FOCUSED_EXCLUDE_LABELS,
+                                       include_security=include_security)
     if ctx is None:
-        return redirect("report_form")
+        return None
     ctx = dict(ctx, exceptions=_trimmed_dashboard_exceptions(ctx))
+    # Domain Health's own bars, trimmed to match Needs Attention Now exactly -- see
+    # _trimmed_domain_cards' own docstring (2026-10-05, "the domain panels must reflect only
+    # the metrics from the needs attention now section not their own").
+    ctx["domain_cards"] = _trimmed_domain_cards(ctx["domain_cards"])
+    # banner_tier RECOMPUTED from the now-trimmed cards' own pills, same worst-of formula
+    # _management_dashboard_context used for its own (pre-trim) value -- that original value is
+    # now stale: it could still say "warn" off a High CPU pill this page no longer shows a
+    # single bar for, which would make the Needs Attention Now heading claim a problem exists
+    # with nothing underneath it to point to (the exact inconsistency the .ok-banner-contrast
+    # fix earlier this session already ruled out for the pill/bar relationship -- this is the
+    # same rule applied one level up, to the heading text itself).
+    if any(c["pill"] == "bad" for c in ctx["domain_cards"]):
+        ctx["banner_tier"] = "bad"
+    elif any(c["pill"] == "warn" for c in ctx["domain_cards"]):
+        ctx["banner_tier"] = "warn"
+    else:
+        ctx["banner_tier"] = "ok"
+
+    # Needs Attention Now banner colour blend (2026-10-03, on request: "establish a color
+    # system for the top banner pick an appropriate green color that matches the current
+    # theme...for every green metric recorde on this panel shift hue by a set ammount towards
+    # green....for every red or amber metric shift hue by a set amount towards the current
+    # color"). The banner used to be a hard 3-way switch (all-red/all-amber/all-green) keyed
+    # only off banner_tier -- worst-of-ANY-domain, so a single stray finding against 20 clean
+    # rows painted the whole banner solid red. This computes a CONTINUOUS blend instead, over
+    # the exact rows the panel itself renders (ctx["exceptions"], post-trim -- "recorded on
+    # this panel", not the wider estate) toward --ehgreen (this theme's own established green
+    # token -- the SAME one status-pill2.ok/sev2.ok already use, not a new invented colour) or
+    # --ehred/--ehamber. banner_tier (worst-of) is UNCHANGED and still decides the heading's
+    # own wording (Critical/Warning/Healthy) -- a factual classification, not a cosmetic one;
+    # only the background colour becomes this continuous read instead of matching 1:1 with
+    # that text.
+    #
+    # Weighted by each row's OWN "N | total" ratio, not a flat per-row vote (corrected same
+    # day, on request: "blindly counting a metric as green or red is ineffective we should
+    # weigh how many green bricks to add based on the percentage of how red it is[,] 1/59 is
+    # different from 20/59" -- the first version counted "Missing backups: 2 | 27" and
+    # "Unreachable components: 0 | 59" as equally-sized red/green votes, when the first is
+    # really ~93% healthy on its own and the second is 100% healthy; averaging raw row counts
+    # instead of each row's own severity badly understated how clean the estate actually was).
+    # Every tile on this page already reads "affected | total" (see services.py/network.py's
+    # own "a count can never be mistaken for the whole estate" comment), so each row's own
+    # greenness is 1 - (affected/total) -- an "ok" row's affected is always 0, so this still
+    # gives it full greenness(1.0) under the exact same formula, no separate ok/not-ok branch
+    # needed. The final blend is the MEAN of every row's own greenness, i.e. a metric affecting
+    # 20 of 59 pulls the banner far harder toward red than one affecting 1 of 59, matching the
+    # weight a reader would actually give each finding.
+    #
+    # Factored into _weighted_color_blend (2026-10-06) so management_dashboard_pretty's own
+    # matrix banner can reuse this EXACT same algorithm against its own colour palette, rather
+    # than the discrete 3-state (healthy/warning/critical) switch the cosmetic matrix redesign
+    # had replaced it with outright -- on request: "this change was meant to be cosmetic only
+    # we designed a robust color change algorithm that has since been set asside... we designed
+    # an algorithim to change colors as things happen". See that function's own docstring.
+    _green_pct, _red_vs_amber_pct = _weighted_color_blend(ctx["exceptions"])
+    # Two chained color-mix() calls, not a server-computed hex/hsl string -- stays theme-
+    # reactive (recomputes under :root[data-theme="dark"] for free, since it reads the live
+    # custom properties) the same way --grad-red/--grad-amber/--grad-green already do. The
+    # dark gradient stop reuses THEIR OWN "88% colour, 12% black" darkening ratio for visual
+    # consistency with those three. Built once here (not per-branch in the template) since all
+    # three banner_tier branches apply the identical blend -- only the heading text differs.
+    _blend = (f"color-mix(in srgb, var(--ehgreen) {_green_pct}%, "
+             f"color-mix(in srgb, var(--ehred) {_red_vs_amber_pct}%, var(--ehamber)))")
+    ctx["banner_blend_style"] = mark_safe(
+        f"--banner-blend:{_blend}; background:linear-gradient(135deg, var(--banner-blend), "
+        f"color-mix(in srgb, var(--banner-blend) 88%, black 12%));")
 
     # Fixed 2x2 order regardless of status or which domains happen to have real data this poll
     # (2026-09-19, on request: "starting with security then infrastructure then networks then
-    # systems") -- Security has no monitoring source at all (see _management_dashboard_context's
-    # own no_data_domains), so it's normalised into the SAME card shape as a real domain here,
-    # with a distinct "nodata" pill/band the template styles neutrally rather than green/amber/
-    # red. Went green->neutral->green->neutral over three quick rounds on 2026-09-19 ("you
-    # removed green coloring from security domain", then "i think i like no data source
-    # better") -- neutral is the settled choice; a Security card that's never actually measured
-    # anything shouldn't look identical to one that measured everything and found it healthy.
+    # systems"; Systems/Security swapped 2026-10-05, on request: "swap the system and security
+    # domain tile together in managerial dashboard" -- Systems now leads, top-left, Security
+    # moves to bottom-right; Infrastructure/Network stay exactly where they were). Security has
+    # no monitoring source at all (see _management_dashboard_context's own no_data_domains), so
+    # it's normalised into the SAME card shape as a real domain here, with a distinct "nodata"
+    # pill/band the template styles neutrally rather than green/amber/red. Went green->neutral-
+    # >green->neutral over three quick rounds on 2026-09-19 ("you removed green coloring from
+    # security domain", then "i think i like no data source better") -- neutral is the settled
+    # choice; a Security card that's never actually measured anything shouldn't look identical
+    # to one that measured everything and found it healthy.
     _domain_by_name = {c["name"]: c for c in ctx["domain_cards"]}
     _no_data_by_name = {nd["name"]: nd for nd in ctx["no_data_domains"]}
     domain_grid = []
-    for name in ("Security", "Infrastructure", "Network", "Systems"):
+    _grid_names = (("Systems", "Infrastructure", "Network", "Security") if include_security else
+                   ("Systems", "Infrastructure", "Network"))
+    for name in _grid_names:
         if name in _domain_by_name:
             domain_grid.append(_domain_by_name[name])
         elif name in _no_data_by_name:
@@ -662,7 +1261,822 @@ def management_dashboard_focused(request):
                                 "components": [], "note": _no_data_by_name[name]["note"]})
     ctx["domain_grid"] = domain_grid
 
-    return render(request, "reports/management_dashboard_focused.html", ctx)
+    return ctx
+
+
+@never_cache
+@login_required
+def management_dashboard_focus(request):
+    """Executive - Focus: the exception-first 2x2-grid design, kept verbatim under a new
+    name/URL (2026-10-05, on request: "added a new zip to apply cosmatic changes to the
+    managerial dashboard needs attention now panel....save the current dashboard as -focus....
+    then this new one call it -pretty and make it the landing page" -- the SAME "preserve the
+    outgoing landing page under its own new name" move already used once before, 2026-09-19,
+    when this page's own former content became Executive - Analytical; see
+    management_dashboard_pretty for what replaced THIS page as the landing page this time).
+    management_dashboard_focused.html was cloned byte-for-byte into
+    management_dashboard_focus.html before the new page's own template was built, so this is
+    exactly what "Executive - Focused" rendered the moment before this change -- including
+    every Needs Attention Now/Domain Health fix made earlier on 2026-10-03 through 2026-10-05
+    (the colour blend, the domain-panel/exceptions-table consistency fix, the Systems/Security
+    swap, all still live here, unchanged)."""
+    ctx = _focus_style_context(request)
+    if ctx is None:
+        return redirect("report_form")
+    return render(request, "reports/management_dashboard_focus.html", ctx)
+
+
+# Needs Attention Now matrix rows -- the SAME 4 standing labels _STANDING_LABELS already
+# established (2026-10-05, reused rather than re-picked: "domains on X axis, issue types on Y
+# axis" needed some fixed, small set of real issue types, and these 4 are already this app's
+# own settled definition of "always-shown, managerial-relevant" metrics -- see
+# _management_dashboard_context's own `_STANDING_LABELS` docstring for why each one earned
+# that status). No Tabler icon font (the redesign package's own reference HTML loads one from
+# a public CDN) -- this app vendors every other script/library locally (see
+# management_dashboard_focused.html's own chart.umd.min.js) and has no existing dependency on
+# an external icon CDN, so row labels are plain text here instead of adding a first one just
+# for this.
+_MATRIX_ROW_LABELS = ("Missing backups", "Unreachable components", "Services down", "Undrained queues")
+
+# Needs Attention Now matrix columns -- the real domain names _management_dashboard_context's
+# own exceptions already carry, each mapped to the underlying exception "domain" string(s) it
+# draws from. Infrastructure's two sub-domains (Clusters/Active Directory) are now ONE merged
+# column (2026-10-06, on request: "combine infra clusters and infra ad into one infrastructure
+# domain leave delineation to the pop up when clicked add all components" -- reversing the
+# 2026-10-05 decision to keep them separate columns, same "one merged domain, worst-of status
+# wins" treatment _management_dashboard_context's own domain_cards merge already applies to
+# Domain Health/Estate at a Glance -- see that merge's own comment). The per-component
+# delineation this drops from the column header moves into each alert row instead (see the
+# loop below, which prefixes a merged cell's own alerts with their source component's name) --
+# nothing is actually lost, it just lives one level deeper, behind the cell's own popup, same
+# as the brief asked. Security is still included as its own column, all dashes (no matching
+# exceptions rows exist for it, since it has no monitoring source at all) -- shown honestly as
+# a real, always-present column rather than silently dropped, matching how Domain Health
+# already treats it (see that section's own "nodata" card).
+_MATRIX_COLUMNS = (
+    ("Systems", "Systems", ("Systems",)),
+    ("Network", "Network", ("Network",)),
+    ("Infrastructure", "Infrastructure",
+     ("Infrastructure · Clusters", "Infrastructure · Active Directory")),
+    ("Security", "Security", ("Security",)),
+)
+
+
+def _matrix_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def _needs_attention_matrix(ctx, include_security: bool = True):
+    """The Needs Attention Now panel's own domain x issue-type matrix (2026-10-05, see
+    management_dashboard_pretty's own docstring for the request this implements) --
+    {"rows": [{"label","cells":[cell_or_None, ...]}, ...], "columns": [...], "state":
+    "ok"/"amb"/"red", "n_domains", "n_domains_affected", "n_issue_types",
+    "n_issue_types_affected", "health_pct", "n_errors", "n_checked"}.
+
+    Built entirely from ctx["exceptions"] -- the SAME already-trimmed, already-detail-attached
+    rows the existing flat Needs Attention Now table reads (see _exception_detail, called once
+    per row when _management_dashboard_context first builds that list) -- not a second,
+    parallel query. A cell is None (rendered as an empty "—" dash) whenever no exceptions row
+    exists for that exact (domain, label) pair -- the same "not applicable here" meaning the
+    reference design's own empty cells carry, e.g. "Undrained queues" has no Network/
+    Infrastructure/Security equivalent tile at all. Each cell's own `alerts` list IS
+    _exception_detail's own `detail` list, reshaped into the popup's row shape -- never
+    fabricated: a clean cell's alerts list is genuinely empty, shown as "0 alerts" rather than
+    a made-up success message, since this app has no real per-finding "all clear" text to show.
+
+    include_security=False (2026-10-07, see management_dashboard_pretty's own docstring) drops
+    the Security column out of _MATRIX_COLUMNS entirely for this call -- it was always every
+    cell showing a dash anyway (Security has no monitoring source at all), so dropping it
+    changes nothing about what the matrix actually SAYS, only removes a column that could never
+    say anything."""
+    _columns_src = (_MATRIX_COLUMNS if include_security else
+                    tuple(c for c in _MATRIX_COLUMNS if c[0] != "Security"))
+    by_domain_label = {(e["domain"], e["label"]): e for e in ctx["exceptions"]}
+    ratio_re = re.compile(r"^\s*(\d+)\s*\|\s*(\d+)\s*$")
+    band_map = {"ok": "ok", "warn": "amb", "bad": "red"}
+    rows = []
+    n_errors = 0
+    n_checked = 0
+    worst = "ok"
+    domains_affected = set()
+    issue_types_affected = set()
+    for label in _MATRIX_ROW_LABELS:
+        cells = []
+        for col, _col_label, source_domains in _columns_src:
+            # One or more underlying exception rows feed this column -- exactly one for every
+            # plain column (source_domains is just (col,) itself), two for the merged
+            # Infrastructure column. Looping uniformly over source_domains, rather than special-
+            # casing the merge, means a single-source column and a multi-source one build their
+            # cell the exact same way -- the only thing that changes is whether anything ever
+            # gets prefixed with a component name below.
+            matched = []
+            for dom in source_domains:
+                e = by_domain_label.get((dom, label))
+                if e is not None:
+                    comp = dom.split(" · ", 1)[1] if " · " in dom else None
+                    matched.append((comp, e))
+            if not matched:
+                cells.append(None)
+                continue
+            errors = total = 0
+            band = "ok"
+            alerts = []
+            for comp, e in matched:
+                m = ratio_re.match(str(e["value"]))
+                e_errors, e_total = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+                e_band = band_map.get(e["band"], "ok")
+                errors += e_errors
+                total += e_total
+                if e_band == "red":
+                    band = "red"
+                elif e_band == "amb" and band != "red":
+                    band = "amb"
+                for d in e["detail"]:
+                    # Delineation moved here from the column header (2026-10-06, see
+                    # _MATRIX_COLUMNS' own comment) -- a merged cell's alert rows are
+                    # prefixed with their source component's name so clicking into a combined
+                    # "Infrastructure" cell still tells Clusters and Active Directory findings
+                    # apart; a single-source column's own comp is None, so its alerts render
+                    # exactly as before.
+                    system = f"{comp} · {d['system']}" if comp else d["system"]
+                    alerts.append({
+                        "sev": "red" if d["band"] in ("red", "bad") else "amb",
+                        "system": system, "desc": d["headline"],
+                        "time": e["generated_at"], "pills": d.get("items") or [],
+                    })
+            if band == "red":
+                worst = "red"
+            elif band == "amb" and worst != "red":
+                worst = "amb"
+            if band != "ok":
+                domains_affected.add(col)
+                issue_types_affected.add(label)
+            n_errors += errors
+            n_checked += total
+            cells.append({
+                "id": f"{_matrix_slug(label)}--{_matrix_slug(col)}",
+                "domain": col, "label": label,
+                "errors": errors, "total": total, "band": band, "alerts": alerts,
+                "health_pct": round(100 * (total - errors) / total) if total else 100,
+            })
+        rows.append({"label": label, "cells": cells})
+    n_domains = sum(1 for col, _lbl, source_domains in _columns_src
+                    if any(by_domain_label.get((dom, lbl))
+                           for dom in source_domains for lbl in _MATRIX_ROW_LABELS))
+    n_issue_types = len(_MATRIX_ROW_LABELS)
+    n_domains_affected = len(domains_affected)
+    n_issue_types_affected = len(issue_types_affected)
+    # Item-weighted again, NOT the whole-domain-affected ratio (2026-10-06, reverted on request:
+    # "75 percent is also wrong because it assumes one whole domain all its services and kpis
+    # are down" -- the (n_domains - n_domains_affected) / n_domains version this replaced was
+    # its own overcorrection: 1 dead service out of Systems' own 91 made the ENTIRE Systems
+    # domain count as 0% healthy, understating things just as badly as the original bug
+    # overstated them. Back to the real proportion of individually-checked items that are
+    # clean (n_errors/n_checked) -- 1 of 251 here, a genuinely small, honest fraction -- but
+    # with the ORIGINAL bug's actual defect fixed directly instead of worked around: never
+    # ROUND UP to a flat "100%" while a real error exists. 99.6% floors to 99%, not 100%, so
+    # the stat can never again claim "all clear" in the same breath the banner above it says
+    # "Critical". n_errors==0 is the only path that ever shows literal 100.
+    if n_checked == 0:
+        health_pct = 100
+    elif n_errors == 0:
+        health_pct = 100
+    else:
+        health_pct = min(99, round(100 * (n_checked - n_errors) / n_checked))
+    columns = [{"key": col, "label": lbl} for col, lbl, _src in _columns_src]
+    return {
+        "rows": rows, "columns": columns, "state": worst,
+        "n_domains": n_domains, "n_domains_affected": n_domains_affected,
+        "n_issue_types": n_issue_types, "n_issue_types_affected": n_issue_types_affected,
+        "health_pct": health_pct, "n_errors": n_errors, "n_checked": n_checked,
+    }
+
+
+def _matrix_scoped_domain_grid(domain_grid):
+    """Domain Health's bars on the Pretty page specifically, narrowed to EXACTLY the labels
+    its own Needs Attention Now matrix shows -- _MATRIX_ROW_LABELS, the fixed 4 rows (Missing
+    backups/Unreachable components/Services down/Undrained queues) -- not the broader "every
+    bad/warn tile except the 5 usage-noise prefixes" _trimmed_domain_cards already applied
+    further up in _focus_style_context (2026-10-06, on request: "we said only the errors
+    monitored in needs attention now should appear in domain tiles not every error").
+
+    Focus's own Needs Attention Now is a flat table of every bad/warn exception (minus the
+    hidden usage-noise prefixes) -- _trimmed_domain_cards' existing scope is already the right
+    match for it, so Focus/Full/Analytical (which all reuse that same function, unchanged)
+    keep showing any such bar. Pretty's own Needs Attention Now is narrower -- a fixed 4-row
+    matrix, nothing else, ever -- so a Domain Health card here showing a bar for, say,
+    "Expired certs" (a real bad/warn tile, not hidden-prefix-trimmed, but not one of the 4 rows
+    either) would be showing the manager something Needs Attention Now right above it never
+    displays, the exact disagreement-between-panels problem the original 2026-10-05 trim was
+    built to prevent in the first place -- just one level narrower here than there.
+
+    Applied ON TOP OF the existing trim (domain_grid arrives here already past
+    _trimmed_domain_cards), not instead of it -- this only ever REMOVES bars the broader trim
+    already let through, never adds any back. Same component-prefix-strip-before-matching and
+    pill-recompute-from-what's-left pattern _trimmed_domain_cards itself established, reused
+    verbatim rather than re-invented: a card's own DEGRADED/NORMAL pill must never claim
+    something's wrong with no visible bar left to explain why, and now must never disagree with
+    the matrix sitting directly above it either."""
+    component_names = {c["name"] for card in domain_grid for c in card.get("components", [])}
+    scoped = []
+    for card in domain_grid:
+        card = dict(card)
+        kept = []
+        for b in card.get("bars", []):
+            label = b["label"]
+            for name in component_names:
+                prefix = f"{name} — "
+                if label.startswith(prefix):
+                    label = label[len(prefix):]
+                    break
+            if label in _MATRIX_ROW_LABELS:
+                kept.append(b)
+        card["bars"] = kept
+        if card.get("pill") != "nodata":
+            card["pill"] = _pill_from_bars(kept)
+        scoped.append(card)
+    return scoped
+
+
+@never_cache
+@login_required
+def management_dashboard_pretty(request):
+    """Executive - Pretty: Management's landing page (2026-10-05, on request: "added a new zip
+    to apply cosmatic changes to the managerial dashboard needs attention now panel....save the
+    current dashboard as -focus....then this new one call it -pretty and make it the landing
+    page" -- needs-attention-package.zip's own NEEDS_ATTENTION_REDESIGN_PROMPT.md, a cosmetic/
+    structural redesign of JUST the Needs Attention Now panel: a domain x issue-type matrix
+    instead of a flat list, a state-driven animated banner, and clickable cells that open a
+    scrollable popup of the real underlying findings -- see that package's own 3 reference HTML
+    files, built directly from, same "follow the reference file" precedent the digest redesign
+    already established). Domain Health and Live Activity (the SWIFT chart) are UNCHANGED from
+    Executive - Focus -- the redesign package's own request was scoped to the Needs Attention
+    Now panel specifically, not the whole page -- so this view reuses the exact same
+    _focus_style_context every other field in ctx comes from; only the matrix (
+    _needs_attention_matrix) is new.
+
+    include_security=False below (2026-10-07, on request: "rename this one to Pretty Analytical
+    then duplicate it and remove the domain for which we have nothing monitored i.e security
+    domain...this duplicate make it landing page") -- this page's own prior, unmodified content
+    (Security domain included) is preserved verbatim as management_dashboard_pretty_analytical
+    instead; THIS view/URL/template keep their original name and the landing-page slot, but now
+    render the Security-free variant. Security never had a real monitoring source to begin with
+    (NO_DATA_DOMAIN_NAMES) -- every one of its cells across Domain Health/the matrix/the
+    Incident Calendar was always an honest "no data" placeholder, never a real reading, so
+    dropping the column changes what's SHOWN, never what's actually being measured."""
+    ctx = _focus_style_context(request, include_security=False)
+    if ctx is None:
+        return redirect("report_form")
+    ctx["domain_grid"] = _matrix_scoped_domain_grid(ctx["domain_grid"])
+    ctx["matrix"] = _needs_attention_matrix(ctx, include_security=False)
+    # The SAME continuous weighted blend _focus_style_context already computes for the old
+    # Focus-style banner (ctx["banner_blend_style"], against --ehgreen/--ehred/--ehamber) --
+    # reused here against the matrix redesign's own dark palette instead (2026-10-06, on
+    # request: "this change was meant to be cosmetic only we designed a robust color change
+    # algorithm that has since been set asside... yes i like the new colors but we desined al
+    # algorithim to change colors as things happen" -- the cosmetic redesign had swapped this
+    # real, continuous computation out for a discrete 3-state healthy/warning/critical switch
+    # on the banner's own background/glow; the state classification itself -- matrix["state"],
+    # driving the heading text/badge wording -- stays discrete on purpose, same "text is
+    # factual, colour is the continuous nuance" split the original algorithm already used).
+    # Literal hex anchors, not var(--eh*) tokens -- this palette was never tied to the page's
+    # own light/dark theme toggle (the matrix panel is intentionally always-dark), so there are
+    # no matching custom properties to blend against here the way the Focus banner has.
+    _na_green_pct, _na_red_vs_amber_pct = _weighted_color_blend(ctx["exceptions"])
+    _na_blend = (f"color-mix(in srgb, #10b981 {_na_green_pct}%, "
+                f"color-mix(in srgb, #ef4444 {_na_red_vs_amber_pct}%, #f59e0b))")
+    ctx["na_blend_style"] = mark_safe(f"--na-blend:{_na_blend};")
+    return render(request, "reports/management_dashboard_pretty.html", ctx)
+
+
+@never_cache
+@login_required
+def management_dashboard_pretty_analytical(request):
+    """Executive - Pretty Analytical: the reference copy of Executive - Pretty kept exactly as
+    it was before 2026-10-07's Security-domain removal (see management_dashboard_pretty's own
+    docstring) -- same matrix/banner/Incident Calendar/SWIFT content, Security domain included,
+    just no longer the landing page. Deliberately a near-duplicate of the view above rather than
+    a parameterised single view the URLconf dispatches on: these two are allowed to actually
+    diverge over time (e.g. if Pretty itself gets Security-shaped changes later that Pretty
+    Analytical has no reason to inherit), where a single shared view would quietly couple them
+    again. include_security defaults True on every helper below -- unchanged behaviour."""
+    ctx = _focus_style_context(request)
+    if ctx is None:
+        return redirect("report_form")
+    ctx["domain_grid"] = _matrix_scoped_domain_grid(ctx["domain_grid"])
+    ctx["matrix"] = _needs_attention_matrix(ctx)
+    _na_green_pct, _na_red_vs_amber_pct = _weighted_color_blend(ctx["exceptions"])
+    _na_blend = (f"color-mix(in srgb, #10b981 {_na_green_pct}%, "
+                f"color-mix(in srgb, #ef4444 {_na_red_vs_amber_pct}%, #f59e0b))")
+    ctx["na_blend_style"] = mark_safe(f"--na-blend:{_na_blend};")
+    return render(request, "reports/management_dashboard_pretty_analytical.html", ctx)
+
+
+def _alert_dashboard_context(request):
+    """The Alert Dashboard's own context -- deliberately NOT built on
+    _management_dashboard_context (that function's whole contract is verbatim glance/
+    immediate/watch tiles pulled from LiveEstateOverview; this screen needs a different
+    shape entirely: a severity-tiered incident catalog, muted list, and trend charts, all
+    sourced from IssueOccurrence/AlertSilence via reports.alert_catalog). Returns None when
+    the viewer can't view it (roles.can_view_alert_dashboard -- 2026-10-01, moved off
+    Management onto the five estate/admin roles, see that function's own docstring), same
+    contract as _management_dashboard_context, so the caller redirects the same way every
+    other role-gated screen does."""
+    if not can_view_alert_dashboard(request.user):
+        return None
+
+    from . import alert_catalog
+    from django.utils import timezone
+
+    state = alert_catalog.current_state()
+    notif = alert_catalog.notification_activity()
+    resolve_time = alert_catalog.avg_resolve_time()
+
+    # Every dict below carries its own pre-resolved CSS bits (a "css"/"fg"/"bg" style key,
+    # already looked up from alert_catalog.TIER_STYLE/DOMAIN_STYLE) rather than a bare tier/
+    # domain NAME -- Django templates cannot index a dict by a variable ({{ d[tier] }} isn't
+    # valid template syntax), so resolving colour/class lookups here, once, keeps the template
+    # to plain dot-lookups only and avoids a same-lookup if/elif chain repeated at every one
+    # of the mockup's many colour references.
+
+    # Domain bars: flex-grow proportional to each tier's raw count within that domain's own
+    # row (mockup's own `style="flex:N"` convention) -- 0 special-cased to a hairline sliver
+    # so an empty tier still renders as a visible (colourless) gap, not collapse the row's
+    # total width the way flex:0 silently would.
+    domain_rows = []
+    for d in state["domains"]:
+        css = alert_catalog.DOMAIN_STYLE[d["name"]]
+        if "tiers" not in d:            # Security placeholder -- no bars at all
+            domain_rows.append({"name": d["name"], "css": css, "note": d["note"]})
+            continue
+        # `label`/`title` (2026-10-01, on request: "make alert domains... interactive a bit")
+        # -- a native title="" tooltip needs the tier's own display name on the segment itself;
+        # TIER_LABEL/TIER_STYLE are keyed by the same tier string, so this is a plain lookup,
+        # not new data.
+        segments = [{"css": alert_catalog.TIER_STYLE[t]["css"], "count": d["tiers"][t],
+                    "flex": d["tiers"][t] or 0.001, "label": alert_catalog.TIER_LABEL[t],
+                    "title": f"{alert_catalog.TIER_LABEL[t]}: {d['tiers'][t]}"}
+                   for t in alert_catalog.TIER_ORDER]
+        domain_rows.append({"name": d["name"], "css": css, "total": d["total"], "segments": segments})
+
+    # Severity trend: the mockup's bars assume a fixed 0-40 scale, meaningless at this app's
+    # real volumes (a single day's "warning" count alone can run into the thousands, confirmed
+    # live) -- compute the axis max from the ACTUAL window instead, four evenly-spaced y-axis
+    # labels under it, same shape the mockup's own <div class="yax"> expects.
+    trend = alert_catalog.severity_trend(days=7)
+    trend_max = max((max(series) for series in trend["series"].values()), default=0) or 1
+    trend_days = []
+    for i, day in enumerate(trend["days"]):
+        day_label = day.strftime("%a")
+        trend_days.append({
+            "label": day_label,
+            # `title` (2026-10-01, interactivity) -- the bar's own height is a PERCENTAGE of
+            # this chart's own max (meaningless on its own, see this block's own comment
+            # above), so the tooltip needs the real count, not pct, to be useful on hover.
+            "bars": [{"css": alert_catalog.TIER_STYLE[t]["css"],
+                     "pct": round(100 * trend["series"][t][i] / trend_max, 1),
+                     "title": f"{day_label} · {alert_catalog.TIER_LABEL[t]}: {trend['series'][t][i]}"}
+                    for t in alert_catalog.TIER_ORDER],
+        })
+    trend_yaxis = [round(trend_max * f) for f in (1, 0.75, 0.5, 0.25, 0)]
+
+    # Severity panels: one per tier, each already carrying its own label/style/firing count/
+    # matrix -- so the template's own {% for panel in tier_panels %} never needs to look
+    # anything up by the loop variable. Grid DISPLAY order only -- originally matched the
+    # supplied mockup's own panel layout (Critical before Imminent, 2026-09-30), swapped
+    # 2026-10-02 on request ("swap imminent and and critical matrix panels on dashboard") to
+    # now match alert_catalog.TIER_ORDER's own imminent-first severity ranking instead (the
+    # same order the legends/domain-bar segments/trend bars already use) -- still kept as its
+    # own separate list rather than importing TIER_ORDER directly, since this is the grid's
+    # own left-to-right arrangement and the two happening to agree now is not a guarantee
+    # they must stay coupled if either changes again later.
+    #
+    # Every tier uses the Alert Matrix now (2026-10-01: Imminent/Critical/Warning from the
+    # original spec, Note added on explicit follow-up request) -- severity_tables()/the classic
+    # per-row table markup this loop used to also build are gone, not just unused: the
+    # template's own {% else %} branch for a non-matrix tier is dead code with nothing left to
+    # reach it. Muted stays OUT of this loop entirely (the requester separately confirmed "do
+    # not apply matrix to muted alerts table") -- it isn't a severity tier at all (no band/
+    # category to classify by), so severity_matrix(), keyed on alert_catalog._tier(), has no
+    # equivalent for it anyway; it gets its own muted_matrix() below instead.
+    PANEL_GRID_ORDER = ["imminent", "critical", "warning", "note"]
+    tier_panels = []
+    for t in PANEL_GRID_ORDER:
+        tier_panels.append({
+            "tier": t, "label": alert_catalog.TIER_LABEL[t], "style": alert_catalog.TIER_STYLE[t],
+            "firing_count": state["firing"][t],
+            "matrix": alert_catalog.severity_matrix(t), "matrix_id": f"mxData_{t}",
+        })
+
+    # Alert Matrix popup footer's second button (2026-10-01, on request: "instead of open in
+    # grafana button put open alert groups button, this should open the alert groups that the
+    # user has access to"). ALWAYS my_alert_groups, never config_alerts (2026-10-02 fix, on
+    # request: "the open alert groups panel navigates to the main alerting configuration
+    # screen and not the alert groups config page at each admin's side nav panel this is a
+    # risk") -- config_alerts is the ENTIRE Alerting hub (thresholds, templates, System
+    # Alerting config too), while my_alert_groups is the focused screen the side nav itself
+    # links to and already shows every group to a full Administrator (its own docstring: "A
+    # full Administrator sees every group, same as the hub's own list, since nothing here is
+    # a restriction for them") -- there is no viewer for whom config_alerts was ever the
+    # right target from this button specifically. Anyone who can't reach even that screen
+    # gets no button at all rather than one that goes nowhere -- same "don't offer a tile
+    # that does nothing when picked" discipline SELECTABLE_ROLE_NAMES already applies to Sub
+    # Admin itself.
+    alert_groups_url = reverse("my_alert_groups") if can_reach_my_alert_groups(request.user) else None
+
+    muted = [dict(m, css=alert_catalog.DOMAIN_STYLE.get(m["domain"], "dsy")) for m in alert_catalog.muted_alerts()]
+    # Muted matrix (2026-10-01, on request: "apply matrix to muted alerts table") -- `muted`
+    # above still drives the panel's own "N silenced" badge/footer count (a count of SILENCES);
+    # muted_matrix is a completely separate, matrix-shaped view of the SUPPRESSED VOLUME those
+    # silences cover -- see alert_catalog.muted_matrix's own docstring for why the two numbers
+    # are deliberately different things.
+    muted_matrix_data = alert_catalog.muted_matrix()
+    # The top MUTED stat tile originally showed state.muted (the rule count, same "3" as the
+    # panel badge) -- reported twice (2026-10-01) as a confusing mismatch against the matrix's
+    # own "4". Every OTHER top-row tile counts things actually HAPPENING (Currently Firing,
+    # Total Firings, ...), not configuration rows, so the tile now matches that pattern instead
+    # of re-explaining the distinction again: its big number is the SAME suppressed-volume
+    # total the matrix shows, and the rule count moves to the subtitle, where its different
+    # meaning is explicit rather than implied by two tiles disagreeing.
+    muted_suppressed_total = sum(row[3] for row in muted_matrix_data["data"])
+
+    generated_at = timezone.localtime()
+    return {
+        "state": state,
+        "notif": notif,
+        "resolve_hours": resolve_time["hours"],
+        "domain_rows": domain_rows,
+        "tier_panels": tier_panels,
+        "muted": muted,
+        "muted_matrix": muted_matrix_data,
+        "muted_suppressed_total": muted_suppressed_total,
+        "trend_days": trend_days,
+        "trend_yaxis": trend_yaxis,
+        "generated_at": generated_at,
+        # The matrix panels' own "previous alert window" (severity_matrix()'s own docstring:
+        # count_prev is the same currently-open snapshot taken exactly 24h earlier) -- was
+        # labelled just "(24h)" on every panel, a real duration but not an actual clock range
+        # (2026-10-01, on request: "all alerts have an alert window which is an actual time
+        # from what time to what time go check" -- the SAME real 24h-rolling window
+        # severity_matrix() already computes, not a separately invented one).
+        "prev_window_start": generated_at - datetime.timedelta(hours=24),
+        # The estate-wide default notification window (2026-10-02, on request: "make every
+        # alert share Innocent Nyama Alert group alert window and have this reflect cleanly
+        # on our alert dashboard") -- SystemConfig.default_alert_window_*, see
+        # AlertGroup.in_schedule's own docstring for exactly when this applies (a Monitoring
+        # group with no schedule of its own).
+        "default_window": SystemConfig.get(),
+        "alert_groups_url": alert_groups_url,
+        "comment_history_url": reverse("alert_comment_history"),
+        "mute_url": reverse("alert_mute_from_comment"),
+        "mute_bulk_url": reverse("alert_mute_bulk"),
+        "unmute_url": reverse("alert_unmute"),
+        # Page-level "can this viewer ever mute anything from here" gate for the "Mute
+        # recurring" button (2026-10-02, on request: broaden mute access beyond full admins,
+        # "filter through the permissions you have as per your designated alert group") -- a
+        # full Administrator, or any Sub-Admin-shaped user who is a stakeholder on at least
+        # one Alert Group (same roles.can_reach_my_alert_groups the side nav's own "My Alert
+        # Groups" link uses). The PER-FINDING mute-with-comment button has its own, narrower,
+        # per-group check (see alert_comment_history's own comment) -- this flag only governs
+        # the estate-wide sweep button, which run_recurring_auto_mute itself further scopes to
+        # this user's own editable groups when they're not a full admin.
+        "can_mute": is_role_admin(request.user) or can_reach_my_alert_groups(request.user),
+        "mute_recurring_url": reverse("alert_mute_recurring"),
+    }
+
+
+@never_cache
+@login_required
+def management_dashboard_alerts(request):
+    """Executive - Alerts: a NEW, standalone 4th Management view (2026-09-30, on request,
+    correcting an externally-supplied design spec that assumed raw Prometheus ALERTS/
+    Alertmanager -- neither exists in this app; see reports.alert_catalog's own docstring).
+    Deliberately does NOT touch or replace Full/Analytical/Focused -- those three had their
+    own alert tiles removed on 2026-09-18 at the team's own request ("remove the alert table
+    from both exec dashboards"), a decision this screen respects rather than reverses. Reached
+    the same way as the other three: same is_management() gate, same nav drawer."""
+    ctx = _alert_dashboard_context(request)
+    if ctx is None:
+        return redirect("report_form")
+    return render(request, "reports/management_dashboard_alerts.html", ctx)
+
+
+@never_cache
+@login_required
+def alert_comment_history(request):
+    """AJAX drill-down for the Alert Dashboard's matrix popup (2026-10-01, on request: a
+    clickable "third screen" from an affected item showing the last 10 admin comments on
+    record for that exact issue). Same role gate as the dashboard itself -- this is purely a
+    deeper look into data that screen already shows, not a new surface of its own.
+
+    Also returns the candidate Monitoring groups for a quick "mute with this reason" action
+    (2026-10-01, on request: "for those issues where admins affirm normal behaviour mute alert
+    and use one of their comments as mute reason") when the caller passes `category` -- folded
+    into this same response rather than a separate round-trip, since both need nothing more
+    than `system` to look up, and computing the group list is cheap (AlertGroup is a small
+    table; see monitoring_groups_for's own docstring).
+
+    Permission-filtered PER FINDING, not just gated on a role (2026-10-02, on request: "we
+    need to add some level of configuration access to the alert dashboard... admins only have
+    controlled access even over their own alert groups... when you... try to mute an alert
+    this would have to filter through the permissions you have as per your designated alert
+    group"). A full Administrator sees every candidate group, same as before. A Sub-Admin-
+    shaped user (roles.can_edit_alert_group -- holds a role with can_edit_own_alert_groups=True
+    AND is personally a stakeholder on that specific group) only ever sees the groups they
+    personally hold edit rights on; `groups` comes back empty, and `can_mute` False, for a
+    finding that belongs to a group they're not on -- the popup never shows a mute button that
+    would just 403, rather than showing one and explaining the rejection after the fact."""
+    if not can_view_alert_dashboard(request.user):
+        return JsonResponse({"ok": False, "error": "forbidden"}, status=403)
+
+    from . import alert_catalog
+    from .models import AlertGroup
+
+    system = (request.GET.get("system") or "").strip()
+    flag_key = (request.GET.get("flag_key") or "").strip()
+    category = (request.GET.get("category") or "").strip()
+    if not system or not flag_key:
+        return JsonResponse({"ok": False, "error": "system and flag_key are required"}, status=400)
+
+    comments = alert_catalog.comment_history(system, flag_key, category=category)
+    all_candidates = alert_catalog.monitoring_groups_for(system, category) if category else []
+    if is_role_admin(request.user):
+        groups = all_candidates
+    else:
+        editable_ids = {g.pk for g in AlertGroup.objects.filter(pk__in=[c["id"] for c in all_candidates])
+                        if can_edit_alert_group(request.user, g)}
+        groups = [c for c in all_candidates if c["id"] in editable_ids]
+    can_mute = bool(groups)
+    # Explain, not just omit, when the mute button won't show (2026-10-02, reported twice:
+    # "still no clealy labelled mute button"). A PAUSED group's own findings can't land here
+    # any more (2026-10-02, "muted should mean the same thing" -- AlertGroup.save() now writes
+    # a real whole-category silence the instant a group pauses, so those findings are already
+    # muted, not firing-with-a-missing-button) -- the two real cases left are a genuine
+    # coverage gap (no AlertGroup names this system/category at all, active or not -- found
+    # live on "Voice Recorder") and a Sub-Admin viewing a group they don't personally hold
+    # edit rights on.
+    mute_unavailable_reason = None
+    if not can_mute and comments and category:
+        if all_candidates:
+            mute_unavailable_reason = "Mute isn't available — you're not a stakeholder on the alert group that covers this."
+        else:
+            mute_unavailable_reason = (
+                f"Mute isn't available — no Alert Group covers {system} for this category at "
+                f"all, so there's nobody for a silence to roll into. This also means nobody is "
+                f"notified for it today; add {system} to an Alert Group in Alert Groups config "
+                f"first.")
+    return JsonResponse({"ok": True, "comments": comments, "can_mute": can_mute, "groups": groups,
+                        "mute_unavailable_reason": mute_unavailable_reason})
+
+
+@never_cache
+@login_required
+@require_POST
+def alert_mute_from_comment(request):
+    """Create an AlertSilence straight from the comment drill-down popup, using one of the
+    admin's own past comments as the mute reason verbatim (2026-10-01, on request: "for those
+    issues where admins affirm normal behaviour mute alert and use one of their comments as
+    mute reason"). Same validation and same AlertSilence.objects.create(...) shape as
+    config_alerts' own "silence" section -- this is a second ENTRY POINT into identical
+    behaviour, not a parallel implementation, so the two can never quietly diverge on what
+    counts as a valid silence.
+
+    Deliberately re-validates `group` against monitoring_groups_for(system, category) itself
+    rather than trusting whatever group id the client posted back -- the client only ever saw
+    that list to populate its own picker, but a request body is never trusted input.
+
+    Permission-checked per GROUP, not just role (2026-10-02, on request: "when you open the
+    dashboard and try to... mute an alert this would have to filter through the permissions
+    you have as per your designated alert group, a cleanly designed error... should pop up
+    when you try to mute an alert that does not belong to your group"). The comment popup's
+    own group picker already only ever offers groups roles.can_edit_alert_group approves for
+    this user (see alert_comment_history's own comment), so this re-check is a defence against
+    a stale/tampered request, not the normal path -- but when it DOES trip, it returns the
+    specific access_denied case the request asked for, distinct from "that group doesn't even
+    cover this finding" (a genuinely different, plain-400 mistake)."""
+    if not (is_role_admin(request.user) or can_reach_my_alert_groups(request.user)):
+        return JsonResponse({"ok": False, "error": "forbidden"}, status=403)
+
+    from . import alert_catalog
+    from .models import AlertGroup, AlertSilence
+
+    system = (request.POST.get("system") or "").strip()
+    category = (request.POST.get("category") or "").strip()
+    flag_key = (request.POST.get("flag_key") or "").strip()
+    reason = (request.POST.get("reason") or "").strip()
+    try:
+        group_id = int(request.POST.get("group") or "0")
+    except ValueError:
+        group_id = 0
+    try:
+        days = int(request.POST.get("expires_days") or "60")
+    except ValueError:
+        days = 60
+
+    category_labels = dict(AlertGroup.CATEGORY_CHOICES)
+    if not (system and category in category_labels and flag_key and reason):
+        return JsonResponse({"ok": False, "error": "System, category, flag_key and a reason are all required."}, status=400)
+    if days <= 0:
+        return JsonResponse({"ok": False, "error": "Expires in: enter a whole number of days greater than zero."}, status=400)
+
+    allowed_groups = {g["id"]: g["name"] for g in alert_catalog.monitoring_groups_for(system, category)}
+    if group_id not in allowed_groups:
+        return JsonResponse({"ok": False, "error": "Pick a monitoring alert group that actually covers this system/category."}, status=400)
+    group = AlertGroup.objects.get(pk=group_id)
+    if not can_edit_alert_group(request.user, group):
+        return JsonResponse({
+            "ok": False, "access_denied": True, "group_name": group.name,
+            "error": f"You can mute alerts for your own Alert Group's systems — this one belongs to “{group.name}”, which you're not a stakeholder of.",
+        }, status=403)
+
+    if AlertSilence.objects.filter(system=system, category=category, flag_key=flag_key, active=True).exists():
+        return JsonResponse({"ok": False, "error": f"{system} — {flag_key} is already silenced."}, status=400)
+
+    AlertSilence.objects.create(
+        system=system, category=category, flag_key=flag_key, group=group,
+        reason=reason, created_by=request.user,
+        expires_at=timezone.now() + datetime.timedelta(days=days))
+    return JsonResponse({"ok": True, "message": f"Silenced {system} — {flag_key}. {group.name} will get a daily digest instead."})
+
+
+@never_cache
+@login_required
+@require_POST
+def alert_mute_bulk(request):
+    """Bulk version of alert_mute_from_comment (2026-10-02, on request: "way too many to mute
+    one by one allow a select then mute option" -- the comment-popup's own per-item flow asks
+    for a reason/group/expiry on every single finding, workable for one or two, not the 10
+    Degraded/Network findings that prompted this). ONE shared reason/expiry across every
+    selected item -- the GROUP is still resolved per item (monitoring_groups_for), same auto-
+    pick-the-one-candidate logic the single-item popup already uses, since items selected
+    together can still belong to different Alert Groups; there's no single group field to ask
+    for here the way the one-item form has one.
+
+    Each item is independently validated and muted or skipped -- one item failing (ambiguous
+    group, access denied, already muted, invalid) never blocks the rest, and the response
+    names exactly which and why, same "never fail silently" standard as every other mute/
+    unmute action on this page. `items` is a JSON array of {"system","category","flag_key",
+    "label"} the client already has on hand from the SAME affected-items list the popup
+    renders, not re-derived here."""
+    if not (is_role_admin(request.user) or can_reach_my_alert_groups(request.user)):
+        return JsonResponse({"ok": False, "error": "forbidden"}, status=403)
+
+    import json
+
+    from . import alert_catalog
+    from .models import AlertGroup, AlertSilence
+
+    reason = (request.POST.get("reason") or "").strip()
+    try:
+        days = int(request.POST.get("expires_days") or "60")
+    except ValueError:
+        days = 60
+    try:
+        items = json.loads(request.POST.get("items") or "[]")
+    except (ValueError, TypeError):
+        items = []
+    if not isinstance(items, list):
+        items = []
+
+    if not reason:
+        return JsonResponse({"ok": False, "error": "A reason is required."}, status=400)
+    if days <= 0:
+        return JsonResponse({"ok": False, "error": "Expires in: enter a whole number of days greater than zero."}, status=400)
+    if not items:
+        return JsonResponse({"ok": False, "error": "Select at least one finding."}, status=400)
+
+    category_labels = dict(AlertGroup.CATEGORY_CHOICES)
+    expires_at = timezone.now() + datetime.timedelta(days=days)
+    muted, skipped = [], []
+    for item in items[:200]:   # a sane upper bound -- never trust a client-supplied list length
+        if not isinstance(item, dict):
+            continue
+        system = (item.get("system") or "").strip()
+        category = (item.get("category") or "").strip()
+        flag_key = (item.get("flag_key") or "").strip()
+        label = (item.get("label") or "").strip() or f"{system} — {flag_key or category}"
+        if not (system and category in category_labels and flag_key):
+            skipped.append({"label": label, "reason": "Invalid finding."})
+            continue
+        if AlertSilence.objects.filter(system=system, category=category, flag_key=flag_key, active=True).exists():
+            skipped.append({"label": label, "reason": "Already silenced."})
+            continue
+        candidates = alert_catalog.monitoring_groups_for(system, category)
+        if len(candidates) != 1:
+            skipped.append({"label": label, "reason": "More than one Alert Group covers this — "
+                                                       "mute it individually to pick one." if candidates
+                                                       else "No Alert Group covers this."})
+            continue
+        group = AlertGroup.objects.get(pk=candidates[0]["id"])
+        if not can_edit_alert_group(request.user, group):
+            skipped.append({"label": label, "reason": f"Not your Alert Group ({group.name})."})
+            continue
+        AlertSilence.objects.create(
+            system=system, category=category, flag_key=flag_key, group=group,
+            reason=reason, created_by=request.user, expires_at=expires_at)
+        muted.append(label)
+    return JsonResponse({"ok": True, "muted": muted, "skipped": skipped})
+
+
+@never_cache
+@login_required
+@require_POST
+def alert_unmute(request):
+    """Reverse of alert_mute_from_comment -- turn a real AlertSilence back off, straight from
+    the Muted panel's own affected-items popup (2026-10-02, on request: "what about the
+    ability to mute and unmute from alert dashboard we described" -- the dashboard could mute
+    but never undo it). Same per-GROUP permission check as muting
+    (roles.can_edit_alert_group), same access_denied shape when it fails -- an admin can only
+    ever unmute what they could have muted themselves.
+
+    Turns off a REAL AlertSilence row, full stop -- exact-flag_key match first, falling back
+    to the whole-category silence that would also cover it (the same two shapes
+    AlertSilence.is_category_wide already distinguishes). This used to branch into a whole
+    second path for findings muted by a PAUSED AlertGroup, which had no AlertSilence row to
+    toggle at all (2026-10-02, "muted should mean the same thing we cant have a muted unmuted
+    transient state... when i tell you to pause a notification... this should translate to a
+    mute") -- AlertGroup.save() now WRITES a real whole-category silence the moment a
+    Monitoring group is paused (see that method's own docstring), so a pause-muted finding is
+    just a silence like any other by the time this view runs. Unmuting one here only releases
+    that ONE (system, category) -- it does not reactivate the group, and the group stays
+    paused for everything else still covered by its own pause-silences, which is the more
+    literal reading of "a mute is a mute": every mute, whatever created it, is the same single
+    row, independently toggleable, nothing special about this one's origin."""
+    if not (is_role_admin(request.user) or can_reach_my_alert_groups(request.user)):
+        return JsonResponse({"ok": False, "error": "forbidden"}, status=403)
+
+    from .models import AlertSilence
+
+    system = (request.POST.get("system") or "").strip()
+    category = (request.POST.get("category") or "").strip()
+    flag_key = (request.POST.get("flag_key") or "").strip()
+    if not system or not category:
+        return JsonResponse({"ok": False, "error": "System and category are required."}, status=400)
+
+    silence = AlertSilence.objects.filter(
+        system=system, category=category, flag_key=flag_key, active=True).first()
+    if not silence and flag_key:
+        silence = AlertSilence.objects.filter(
+            system=system, category=category, flag_key="", active=True).first()
+    if not silence:
+        # This button only ever renders on an item the popup is already showing as muted, so
+        # landing here means the real state moved since that popup loaded (the silence
+        # expired, or someone else already unmuted it) -- never a dead end with no explanation
+        # (2026-10-02, reported twice on the mute side before every case there got a reason).
+        return JsonResponse({
+            "ok": False,
+            "error": "This isn't muted anymore — the silence may have expired, or someone "
+                    "else already unmuted it. Refresh the dashboard to see the current state.",
+        }, status=400)
+
+    if not can_edit_alert_group(request.user, silence.group):
+        return JsonResponse({
+            "ok": False, "access_denied": True, "group_name": silence.group.name,
+            "error": f"You can unmute alerts for your own Alert Group's systems — this one belongs to “{silence.group.name}”, which you're not a stakeholder of.",
+        }, status=403)
+
+    silence.active = False
+    silence.save(update_fields=["active"])
+    scope = flag_key or f"{category} (all)"
+    return JsonResponse({"ok": True, "message": f"Unmuted {system} — {scope}."})
+
+
+@never_cache
+@login_required
+@require_POST
+def alert_mute_recurring(request):
+    """"Mute recurring" dashboard button (2026-10-01, on request, right after the recurring-
+    comment auto-mute mechanism itself was built: a button "that triggers the mechanism we
+    just defined"). An on-demand sweep of every currently open finding via
+    alert_catalog.run_recurring_auto_mute -- the normal path only checks whatever a just-
+    submitted report touched, so this is how a finding that ALREADY qualifies right now (no
+    new report needed) gets caught without waiting for one. Same is_role_admin gate as every
+    other silence-creating surface on this page.
+
+    Two-step confirm (2026-10-02, on request: "the mute recurring button should also open a
+    confirmation dialog where it shows the results of its assessments... and a confirmation
+    button") -- POST without `confirm` previews (dry_run=True, nothing written, returns
+    `candidates`); POST with `confirm=1` applies the SAME evaluation for real (returns
+    `muted`). Two separate requests rather than a single one returning both, so a slow click
+    between preview and confirm can never apply a stale assessment silently -- the confirm
+    request re-runs the real criteria at the moment it's clicked, not just replays a cached
+    preview.
+
+    Open to any Sub-Admin-shaped user now, not just a full Administrator (2026-10-02, on
+    request: muting "would have to filter through the permissions you have as per your
+    designated alert group") -- run_recurring_auto_mute's own `user` param scopes the sweep
+    to findings whose covering group this specific user holds edit rights on; a full admin's
+    own sweep is completely unchanged (every finding, as before)."""
+    if not (is_role_admin(request.user) or can_reach_my_alert_groups(request.user)):
+        return JsonResponse({"ok": False, "error": "forbidden"}, status=403)
+
+    from . import alert_catalog
+
+    confirm = request.POST.get("confirm") == "1"
+    result = alert_catalog.run_recurring_auto_mute(dry_run=not confirm, user=request.user)
+    if confirm:
+        return JsonResponse({"ok": True, "checked": result["checked"], "muted": result["muted"]})
+    return JsonResponse({"ok": True, "checked": result["checked"], "candidates": result["candidates"]})
 
 
 @never_cache
@@ -763,7 +2177,8 @@ _OPEN_UNTIL = {"systems": "report_expires_at",
               "core_switches": "core_switches_report_expires_at",
               "routers": "routers_report_expires_at",
               "wireless_controller": "wireless_controller_report_expires_at",
-              "access_switches": "access_switches_report_expires_at"}
+              "access_switches": "access_switches_report_expires_at",
+              "firewalls": "firewalls_report_expires_at"}
 
 #: session keys an estate's open report claims, cleared together once it lapses or is closed.
 _ESTATE_SESSION_KEYS = {
@@ -778,6 +2193,7 @@ _ESTATE_SESSION_KEYS = {
                             "wireless_controller_report_expires_at"},
     "access_switches": {"access_switches_devices", "access_switches_token",
                         "access_switches_report_expires_at"},
+    "firewalls": {"firewalls_devices", "firewalls_token", "firewalls_report_expires_at"},
 }
 
 
@@ -900,11 +2316,108 @@ def os_inventory(request):
             data,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         response["Content-Disposition"] = f'attachment; filename="{filename}"'
-        return response
+        return mark_xlsx_download(response)
 
     return render(request, "reports/os_inventory.html", {
         "default_theme": getattr(getattr(request.user, "profile", None),
                                  "default_report_theme", "dark"),
+    })
+
+
+_BACKUP_HISTORY_MAX_DAYS = 92   # one quarter -- generous for the real use case (auditing a
+                               # recent stretch), bounded so a typo'd decade-wide range can't
+                               # trigger an unbounded sweep of per-day/per-instance queries.
+
+
+def _backup_history_defaults(earliest):
+    today = timezone.localtime().date()
+    default_from = today - datetime.timedelta(days=7)
+    if earliest and default_from < earliest:
+        default_from = earliest
+    return default_from, today
+
+
+@never_cache
+@login_required
+def backup_history_report(request):
+    """Backup History Report — a date range in, an estate-wide per-day/per-instance audit out
+    (reachable / current-backup-available / real filename+timestamp when archived / which
+    report that day traces back to). No system picker, same shape as os_inventory's own
+    "GET shows the form, POST regenerates and downloads" flow — see build_backup_history_report
+    in services.py for what the workbook actually contains and why.
+    """
+    if not (is_system_admin(request.user) or request.user.is_superuser):
+        return redirect("reports")
+
+    earliest = earliest_backup_history_date()
+    default_from, default_to = _backup_history_defaults(earliest)
+
+    if request.method == "POST":
+        theme = request.POST.get("theme")
+        if theme not in ("dark", "light"):
+            theme = getattr(getattr(request.user, "profile", None),
+                            "default_report_theme", "dark")
+        raw_from, raw_to = request.POST.get("from", ""), request.POST.get("to", "")
+        try:
+            date_from = datetime.date.fromisoformat(raw_from)
+            date_to = datetime.date.fromisoformat(raw_to)
+        except ValueError:
+            messages.error(request, "Enter two valid dates.")
+            return redirect("backup_history_report")
+        if date_from > date_to:
+            messages.error(request, "The \"from\" date must be on or before the \"to\" date.")
+            return redirect("backup_history_report")
+        if date_to > timezone.localtime().date():
+            messages.error(request, "The \"to\" date can't be in the future.")
+            return redirect("backup_history_report")
+        if (date_to - date_from).days + 1 > _BACKUP_HISTORY_MAX_DAYS:
+            messages.error(request, f"Pick a range of {_BACKUP_HISTORY_MAX_DAYS} days or fewer.")
+            return redirect("backup_history_report")
+        if earliest is None:
+            messages.error(request, "No backup data has been archived yet — nothing to report on.")
+            return redirect("backup_history_report")
+        if date_from < earliest:
+            messages.error(request, f"No backup data is archived before {earliest:%d %b %Y}.")
+            return redirect("backup_history_report")
+
+        try:
+            data, days, no_backup, no_report, rows = build_backup_history_report(
+                date_from, date_to, theme)
+        except BackupHistoryUnavailable as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+
+        filename = default_backup_history_filename(timezone.localtime())
+        ReportSubmission.objects.create(
+            generated_by=request.user,
+            author=_profile_author(request.user),
+            theme=theme,
+            delivery="download",
+            prom_url=SystemConfig.get().prometheus_url or gr.load_config().prom,
+            hosts_count=days,
+            immediate_count=no_backup,    # days×systems with no current backup -- red band
+            watch_count=no_report,        # days with no report at all that day -- amber band
+            filename=filename,
+            report_content={"kind": "backup_history", "date_from": str(date_from),
+                            "date_to": str(date_to), "rows": rows},
+        )
+        response = HttpResponse(
+            data,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return mark_xlsx_download(response)
+
+    return render(request, "reports/backup_history.html", {
+        "default_theme": getattr(getattr(request.user, "profile", None),
+                                 "default_report_theme", "dark"),
+        "default_from": default_from,
+        "default_to": default_to,
+        "min_date": earliest,              # None if the archive is completely empty -- the
+                                            # template just skips the min= attribute then,
+                                            # rather than rendering min="None".
+        "max_date": default_to,            # "today" -- the date picker shouldn't offer the
+                                            # future either, same rule the POST handler already
+                                            # enforces server-side.
+        "no_data_yet": earliest is None,
     })
 
 
@@ -1747,7 +3260,7 @@ def generate(request):
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     response["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return response
+    return mark_xlsx_download(response)
 
 
 @never_cache   # always reflect the newest submissions (no stale back/forward-cache copy)
@@ -2087,7 +3600,7 @@ def core_switches_generate(request):
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return resp
+    return mark_xlsx_download(resp)
 
 
 @never_cache
@@ -2285,7 +3798,7 @@ def routers_generate(request):
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return resp
+    return mark_xlsx_download(resp)
 
 
 @never_cache
@@ -2484,7 +3997,7 @@ def wireless_controller_generate(request):
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return resp
+    return mark_xlsx_download(resp)
 
 
 @never_cache
@@ -2683,7 +4196,207 @@ def access_switches_generate(request):
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return resp
+    return mark_xlsx_download(resp)
+
+
+@never_cache
+@login_required
+def firewalls_form(request):
+    """The Firewall Report's own landing page -- a fifth member of the Networks Report
+    category (2026-09-29, on request: "add these firewalls to a new firewall report which is
+    part of the network reports group"). Scoped to network.firewall_device_keys() -- today
+    four devices, none of which answer SNMP yet (see their own DEVICES comment): they were
+    added anyway, on request ("firewalls not yet on snmp but just add them for now"), and
+    will show here, honestly, as unreachable -- but `kind: "Firewall"` keeps them out of
+    switches_routers_device_keys() entirely, so this gap never reaches the alert poller or
+    the Executive Dashboard's Network tile (see firewall_device_keys' own comment).
+
+    Dual-role visibility, same idiom as the other three narrow pickers: owned by Network
+    Admin (this is squarely their estate), Infrastructure Admin has view access too.
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+    try:
+        keys = network.firewall_device_keys()
+        devices = [d for d in network.device_inventory() if d["key"] in keys]
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    open_seconds = _open_report_seconds(request, "firewalls")
+    open_keys = (request.session.get("firewalls_devices") or []) if open_seconds else []
+    by_key = {d["key"]: d for d in devices}
+    return render(request, "reports/firewalls_select.html", {
+        "devices": [dict(d, mono_hue=_mono_hue(d["name"])) for d in devices],
+        "total_interfaces": sum(d["iface_count"] for d in devices),
+        "unreachable_count": sum(1 for d in devices if d["known"] and not d["reachable"]),
+        "open_report": [by_key[k]["name"] for k in open_keys if k in by_key],
+        "open_seconds": open_seconds,
+    })
+
+
+@login_required
+def firewalls_report(request):
+    """The annotation screen for the SELECTED firewall(s) -- network_report's own twin (same
+    simple shape, no windows-exporter connect-strip machinery needed), scoped to
+    network.firewall_device_keys() and posting to its own firewalls_generate.
+
+    GET: ALWAYS captures a fresh live snapshot -- same rule network_report's own docstring
+    establishes and for the same reason (a Refresh click, or any other way of landing back on
+    this URL, must never quietly serve numbers that aged past the countdown).
+    """
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    if request.method == "POST":
+        keys = [k for k in request.POST.getlist("include_device") if k]
+        known = network.firewall_device_keys()
+        keys = [k for k in keys if k in known]
+        if not keys:
+            messages.error(request, "Select at least one device to include in the report.")
+            return redirect("firewalls_form")
+        request.session["firewalls_devices"] = keys
+        request.session.pop("firewalls_token", None)   # new selection -> fresh capture
+        return redirect("firewalls_report")
+
+    keys = request.session.get("firewalls_devices")
+    if not keys:
+        return redirect("firewalls_form")
+
+    token = uuid.uuid4().hex
+    try:
+        snapshot = network.capture_snapshot(token, only=set(keys), mode="switches_routers")
+    except network.NetworkUnavailable as exc:
+        return render(request, "reports/error.html", {"detail": str(exc)}, status=502)
+    if not snapshot.systems:
+        messages.error(request, "Those devices are no longer being monitored. Please choose again.")
+        request.session.pop("firewalls_devices", None)
+        return redirect("firewalls_form")
+    snapshot.systems.sort(key=lambda s: s.name.lower())
+    cache.set(_cache_key(token), snapshot, settings.SNAPSHOT_TTL)
+    request.session["firewalls_token"] = token
+    request.session["firewalls_report_expires_at"] = time.time() + settings.SNAPSHOT_TTL
+
+    elapsed = (datetime.datetime.now() - snapshot.captured_at).total_seconds()
+    remaining = max(0, int(settings.SNAPSHOT_TTL - elapsed))
+
+    return render(request, "reports/form.html", {
+        "snapshot": snapshot,
+        "token": token,
+        "selected_count": len(snapshot.systems),
+        "suggested_author": _profile_author(request.user),
+        "suggested_recipients": default_recipients(),
+        "recipient_options": recipient_options(),
+        "default_filename": network.firewalls_report_filename(
+            getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")),
+        "alpha_grouped": True,
+        "letter_index": sorted({s.name[0].upper() for s in snapshot.systems if s.name}),
+        "ttl_minutes": settings.SNAPSHOT_TTL // 60,
+        "ttl_seconds": settings.SNAPSHOT_TTL,
+        "remaining_seconds": remaining,
+        "report_theme": getattr(getattr(request.user, "profile", None), "default_report_theme", "dark"),
+        "dash_title": "Firewall Report",
+        "subject": "device",
+        "draft_key": "draft:firewalls:" + ",".join(sorted(keys)),
+        "picker_url": reverse("firewalls_form"),
+        "generate_url": reverse("firewalls_generate"),
+        "generate_default": reverse("generate"),
+    })
+
+
+@login_required
+@require_POST
+def firewalls_generate(request):
+    """Build the Firewall Report from the reviewed snapshot -- network_generate's own twin,
+    calling network.build_report with title="Firewall Report" (NOT the default
+    "Infrastructure Report" -- see build_report's own docstring) so the downloaded xlsx never
+    claims to be a report it isn't."""
+    if not (is_network_admin(request.user) or is_infra_admin(request.user)):
+        return redirect("report_form")
+
+    token = request.POST.get("token", "") or request.session.get("firewalls_token", "")
+    snapshot = cache.get(_cache_key(token)) if token else None
+    if snapshot is None:
+        messages.error(request, "That snapshot has expired. Capture a fresh one.")
+        return redirect("firewalls_report")
+
+    action = request.POST.get("action", "download")
+    if action not in ("download", "email"):
+        action = "download"
+    recipients_raw = request.POST.get("recipients", "").strip()
+    recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]
+    if action == "email" and not recipients:
+        return render(request, "reports/error.html", {
+            "detail": "Add at least one recipient to e-mail the report.",
+        }, status=400)
+
+    theme = request.POST.get("theme", "").strip().lower()
+    if theme not in gr.PALETTES:
+        theme = getattr(getattr(request.user, "profile", None), "default_report_theme", "dark")
+    if theme not in gr.PALETTES:
+        theme = "dark"
+    author = request.POST.get("author", "").strip() or _profile_author(request.user)
+    summary_comment = request.POST.get("summary_comment", "").strip()
+
+    annotations: dict = {}
+    for si, sysvm in enumerate(snapshot.systems):
+        answers = {}
+        for fi, flag in enumerate(sysvm.flags):
+            ans = request.POST.get(f"fix__{si}__{fi}", "")
+            if ans in ("Yes", "No"):
+                answers[flag.key] = ans
+        comment = request.POST.get(f"comment__{si}", "").strip()
+        if answers or comment:
+            annotations[sysvm.name] = {"flags": answers, "comment": comment}
+
+    data = network.build_report(snapshot, theme=theme, author=author,
+                                annotations=annotations, summary_comment=summary_comment,
+                                title="Firewall Report")
+    filename = network.firewalls_report_filename(theme, timezone.localtime())
+
+    report_content = {
+        "kind": "firewalls",
+        "overview": snapshot.overview,
+        "systems": [{
+            "name": s.name, "hosts": s.hosts,
+            "flags": [{"key": f.key, "text": f.text, "band": f.band, "category": f.category,
+                       "answer": annotations.get(s.name, {}).get("flags", {}).get(f.key, "")}
+                      for f in s.flags],
+            "comment": annotations.get(s.name, {}).get("comment", ""),
+        } for s in snapshot.systems],
+    }
+
+    # Email path: send first — only record + consume the snapshot if it actually went out,
+    # same contract every other generate view here follows.
+    subject = ""
+    if action == "email":
+        try:
+            subject = network.email_windows_report(
+                snapshot, data, recipients=recipients, author=author,
+                filename=filename, title="FIREWALL REPORT")
+        except EmailNotConfigured as exc:
+            return render(request, "reports/error.html", {"detail": str(exc)}, status=500)
+        except Exception as exc:   # noqa: BLE001 — SMTP/network errors surfaced to the admin
+            return render(request, "reports/error.html", {
+                "detail": f"Could not send the e-mail: {exc}",
+            }, status=502)
+
+    ReportSubmission.objects.create(
+        generated_by=request.user, author=author, theme=theme,
+        delivery=action, recipients=recipients_raw,
+        annotations=annotations, report_content=report_content,
+        immediate_count=snapshot.immediate_count, watch_count=snapshot.watch_count,
+        summary_comment=summary_comment,
+    )
+
+    if action == "email":
+        return render(request, "reports/sent.html", {
+            "recipients": recipients, "author": author,
+            "filename": filename, "subject": subject,
+        })
+
+    resp = HttpResponse(
+        data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return mark_xlsx_download(resp)
 
 
 @never_cache
@@ -2834,7 +4547,7 @@ def network_sod_generate(request):
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = (
         'attachment; filename="{}"'.format(network_sod.sod_report_filename(theme, when)))
-    return resp
+    return mark_xlsx_download(resp)
 
 
 @never_cache
@@ -3076,7 +4789,7 @@ def infra_generate(request):
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return resp
+    return mark_xlsx_download(resp)
 
 
 @never_cache
@@ -3302,7 +5015,7 @@ def active_directory_generate(request):
     resp = HttpResponse(
         data, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return resp
+    return mark_xlsx_download(resp)
 
 
 @login_required
@@ -3529,7 +5242,22 @@ def _alert_group_health(group) -> dict:
     alerts that are set to fire... a glowing green halo... If an alert was configured, for
     example but has no recipients or has not proper notification config it must have a red
     halo... tell you exactly whats wrong." Pure config inspection (no live Prometheus call) --
-    "live" here means "correctly configured to fire", not "currently firing"."""
+    "live" here means "correctly configured to fire", not "currently firing".
+
+    THREE states, not two (2026-10-01, on request: "how come the alert groups we added for
+    networks and infrastructure teams show green but they are not yet sending to these
+    teams... they should not be green unless already sending") -- found that Network Team/
+    Infrastructure Team were perfectly configured (active, systems, real recipients) yet had
+    sent exactly zero notifications ever, because the alert-poller's "kind" loop (Infrastructure/
+    AD/Switches & Routers) never actually evaluated AlertGroup matching until that same date's
+    pipeline fix (see alerting._evaluate_for_groups' own docstring). "Correctly configured" and
+    "confirmed to have actually notified someone" are different claims; green must mean the
+    second one, not just the first. `AlertFinding.last_notified_at` is the one real signal of
+    confirmed delivery (set only once send_email has actually succeeded, see
+    alerting.run_alert_cycle's own comment) -- NOT the presence of matching IssueOccurrence
+    rows, which get written unconditionally for every system regardless of any AlertGroup."""
+    from .models import AlertFinding
+
     problems = []
     if not group.active:
         problems.append("Paused — nothing will fire until it's reactivated.")
@@ -3537,7 +5265,14 @@ def _alert_group_health(group) -> dict:
         problems.append("No systems selected — it has nothing to watch.")
     if not group.recipient_emails():
         problems.append("No stakeholders with a valid e-mail address.")
-    return {"group": group, "is_live": not problems, "problems": problems}
+    if problems:
+        return {"group": group, "is_live": False, "is_unconfirmed": False, "problems": problems}
+
+    if not AlertFinding.objects.filter(group=group, last_notified_at__isnull=False).exists():
+        return {"group": group, "is_live": False, "is_unconfirmed": True, "problems": [
+            "Configured correctly, but has never actually sent a notification yet — "
+            "waiting for a qualifying finding and its next poll cycle."]}
+    return {"group": group, "is_live": True, "is_unconfirmed": False, "problems": []}
 
 
 def _grouped_alert_groups(groups) -> list:
@@ -3880,14 +5615,18 @@ def config_alerts(request):
     # ---- Alert Silencing: known, self-resolving findings rolled into ONE daily digest
     # instead of individual new/reminder e-mails (2026-09-19, on request: "reduce the
     # intrusiveness of alerts" for alerts "not being actioned at all by admins... that self
-    # resolve and then start again"). See AlertSilence's own docstring for the full design --
-    # `flag_key` is free text, matching alerting.ALERT_FLAG_SUPPRESSED's own established
-    # precedent (copy it from a fired alert e-mail or the System Admin Report's own flag
-    # list) -- there is no enumerated picker for it today. Monitoring groups only: System
-    # Alert (staleness) findings go through a completely separate pipeline
-    # (reports.system_alerts) this feature does not touch yet. ---------------------------------
+    # resolve and then start again"). See AlertSilence's own docstring for the full design.
+    # Component picker (2026-09-30, on request: "in config allow to select which mount or
+    # component before muting") -- `flag_key` is now chosen from a real, live-derived list
+    # (see silence_component_map below), not typed free text. Leaving it blank silences the
+    # WHOLE `category` for this system instead of one component -- current AND future ones
+    # (2026-09-30, on request: "mute crb disk usage rtgs disk usage, ebis disk usage", "add a
+    # new config in alerting to mute specific alert"). Monitoring groups only: System Alert
+    # (staleness) findings go through a completely separate pipeline (reports.system_alerts)
+    # this feature does not touch yet. -----------------------------------------------------
     elif section == "silence":
         system_name = (request.POST.get("system") or "").strip()
+        category_name = (request.POST.get("category") or "").strip()
         flag_key = (request.POST.get("flag_key") or "").strip()
         group_id = request.POST.get("group")
         reason = (request.POST.get("reason") or "").strip()
@@ -3897,17 +5636,22 @@ def config_alerts(request):
             days = 60
         group = AlertGroup.objects.filter(
             pk=group_id, alert_type=AlertGroup.ALERT_TYPE_MONITORING).first()
-        if not (system_name and flag_key and group):
-            messages.error(request, "System, flag key and a Monitoring alert group are all required.")
+        category_labels = dict(AlertGroup.CATEGORY_CHOICES)
+        if not (system_name and category_name in category_labels and group):
+            messages.error(request, "System, category and a Monitoring alert group are all required.")
         elif days <= 0:
             messages.error(request, "Expires in: enter a whole number of days greater than zero.")
-        elif AlertSilence.objects.filter(system=system_name, flag_key=flag_key, active=True).exists():
-            messages.error(request, f"{system_name} — {flag_key} is already silenced.")
+        elif AlertSilence.objects.filter(system=system_name, category=category_name,
+                                         flag_key=flag_key, active=True).exists():
+            scope = flag_key or f"ALL {category_labels[category_name]}"
+            messages.error(request, f"{system_name} — {scope} is already silenced.")
         else:
             AlertSilence.objects.create(
-                system=system_name, flag_key=flag_key, group=group, reason=reason,
-                created_by=request.user, expires_at=timezone.now() + datetime.timedelta(days=days))
-            messages.success(request, f"Silenced {system_name} — {flag_key}. "
+                system=system_name, category=category_name, flag_key=flag_key, group=group,
+                reason=reason, created_by=request.user,
+                expires_at=timezone.now() + datetime.timedelta(days=days))
+            scope = flag_key or f"ALL {category_labels[category_name]} components (current + future)"
+            messages.success(request, f"Silenced {system_name} — {scope}. "
                                       f"{group.name} will get a daily digest instead.")
         return redirect("config_alerts")
 
@@ -3934,6 +5678,26 @@ def config_alerts(request):
 
     template_rows = [{"category": cat, "label": lbl, "available": cat in alert_email_templates.FILE_BY_CATEGORY}
                      for cat, lbl in AlertGroup.CATEGORY_CHOICES]
+
+    # {system: {category: [flag_key, ...]}} -- powers the Component picker's cascading select
+    # (2026-09-30, on request: "in config allow to select which mount or component before
+    # muting"). Sourced from real IssueOccurrence history, not hand-maintained, same "never a
+    # catalog that can drift" discipline as metric_registry.py/IssueOccurrence.domain -- a
+    # mount that has never actually fired simply never appears as a choice, and one added next
+    # month appears here the first time it does. 90 days is generous for a "has this ever
+    # happened recently" picker without scanning the table's full history every page load.
+    from .models import IssueOccurrence
+    silence_component_map = {}
+    since_90d = timezone.now() - datetime.timedelta(days=90)
+    for row in (IssueOccurrence.objects.filter(started_at__gte=since_90d)
+               .values("system", "category", "flag_key").distinct()):
+        by_cat = silence_component_map.setdefault(row["system"], {})
+        keys = by_cat.setdefault(row["category"], [])
+        if row["flag_key"] not in keys:
+            keys.append(row["flag_key"])
+    for by_cat in silence_component_map.values():
+        for keys in by_cat.values():
+            keys.sort()
 
     drainage_cfg = DrainageThresholdConfig.get()
     drainage_amber_s, drainage_red_s = drainage_cfg.effective_seconds
@@ -3977,6 +5741,8 @@ def config_alerts(request):
         "topology_systems": topology_systems,
         "alert_silences": alert_silences,
         "monitoring_groups": monitoring_groups,
+        "category_choices": AlertGroup.CATEGORY_CHOICES,
+        "silence_component_map": silence_component_map,
     })
 
 
@@ -4415,25 +6181,30 @@ def _send_xlsx_report_test(report_type: str, recipients: list) -> None:
         attachment_names.append(infra_filename)
 
     infra_immediate = infra_snapshot.overview.get("immediate", []) if infra_snapshot else []
+    # "Unreachable components" (2026-10-03: network._infra_overview's own tile was renamed
+    # from "Components down" -- see that function's own comment -- "just to standardise
+    # things" against the identically-renamed Systems/Network tiles; this extraction updated
+    # in the same pass so it keeps finding the tile under its new name).
     components_down = next(
         (int(str(t["value"]).split(" | ")[0]) for t in infra_immediate
-        if t["label"] == "Components down"), 0)
+        if t["label"] == "Unreachable components"), 0)
     # extra_disk/extra_disk_total now read "Storage critical" (immediate tier), not "Storage
     # at capacity" -- that watch-tier tile is GONE (2026-09-18, on request: "storage capacity
     # and storage critical are the same metric... combine every occurrence", confirmed after a
     # first pass: "infrastructure still views these as separate" -- see network._infra_
     # overview's own comment on the removal). "Storage critical" is excluded from
-    # immediate_tiles' own generic "others" loop below for the same reason "Components down"/
-    # "Nodes down" already are: it's merged into the AD report's own "High disk usage" tile via
-    # extra_disk AND still gets its own dedicated red banner (storage_critical_items /
-    # mail_report._cluster_storage_critical_block) -- rendering it a THIRD time as a plain
-    # generic tile here would be exactly the redundancy this whole change is about removing.
+    # immediate_tiles' own generic "others" loop below for the same reason "Unreachable
+    # components"/"Nodes down" already are: it's merged into the AD report's own "High disk
+    # usage" tile via extra_disk AND still gets its own dedicated red banner
+    # (storage_critical_items / mail_report._cluster_storage_critical_block) -- rendering it a
+    # THIRD time as a plain generic tile here would be exactly the redundancy this whole change
+    # is about removing.
     extra_disk = next((int(str(t["value"]).split(" | ")[0]) for t in infra_immediate
                        if t["label"] == "Storage critical"), 0)
     extra_disk_total = next((int(str(t["value"]).split(" | ")[1]) for t in infra_immediate
                              if t["label"] == "Storage critical"), 0)
     immediate_tiles = [t for t in infra_immediate
-                      if t["label"] not in ("Components down", "Nodes down", "Storage critical")]
+                      if t["label"] not in ("Unreachable components", "Nodes down", "Storage critical")]
     infra_watch = infra_snapshot.overview.get("watch", []) if infra_snapshot else []
     def _tile_num(label: str) -> int:
         return next((int(str(t["value"]).split(" | ")[0]) for t in infra_watch
@@ -4662,17 +6433,27 @@ def _require_admin(request):
 
 
 def _topology_systems() -> list:
-    """Every system name in the live prometheus.yml, for the role-scope picker.
+    """Every system name a role scope / alert group / event group / freshness check can be
+    pointed at -- every picker in Configuration that lists "systems" calls this one function,
+    so they all agree on what exists.
 
-    Read through promconfig so this screen and the configuration form always agree on which
-    file is the topology. Returns empty — never raises — if the file can't be read, so a
-    broken YAML degrades this screen instead of taking it down; the form's own load error
-    says what is wrong.
+    UNION of two real catalogues, not just prometheus.yml (2026-10-01 fix, found while trying
+    to put the 49 SNMP-monitored switches/routers/WLCs into a new AlertGroup: every one of
+    them was silently dropped on save, with no error, because this function only ever read
+    promconfig's own topology -- confirmed live, zero overlap between the two lists. The
+    Networks Report estate (network.DEVICES) has always been a SEPARATE catalogue from
+    prometheus.yml's business/infra topology (see network.DEVICES' own comment on why), so a
+    function named "every system" that only read one of them was quietly impossible to use
+    for the other -- not a one-off gap, every picker above shared the identical bug. Returns
+    empty on a promconfig read failure same as before -- never raises -- so a broken YAML
+    degrades this screen instead of taking it down; network.DEVICES is a plain Python list, so
+    it can't fail the same way.
     """
     try:
-        return promconfig.system_names(promconfig.load())
+        topo = promconfig.system_names(promconfig.load())
     except Exception:      # noqa: BLE001 — surfaced properly on the configuration form
-        return []
+        topo = []
+    return sorted(set(topo) | {d["name"] for d in network.DEVICES})
 
 
 @never_cache

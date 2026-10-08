@@ -5,6 +5,7 @@ from . import views
 urlpatterns = [
     path("reports/", views.reports, name="reports"),
     path("reports/os-inventory/", views.os_inventory, name="os_inventory"),
+    path("reports/backup-history/", views.backup_history_report, name="backup_history_report"),
     path("reports/automated/", views.automated_reports, name="automated_reports"),
     # BOTH of these MUST come before the greedy <str:report_type>/ pattern below -- a single-
     # segment literal path here (e.g. "finding-action") would otherwise match report_type's
@@ -32,9 +33,18 @@ urlpatterns = [
     path("folders/", views.folder_watch, name="folder_watch"),
     path("folders/temenos/", views.folder_watch_temenos, name="folder_watch_temenos"),
     path("folders/temenos/data/", views.folder_watch_data, name="folder_watch_data"),
-    path("management/", views.management_dashboard_focused, name="management_dashboard_focused"),
+    path("management/", views.management_dashboard_pretty, name="management_dashboard_pretty"),
+    path("management/pretty-analytical/", views.management_dashboard_pretty_analytical,
+        name="management_dashboard_pretty_analytical"),
+    path("management/focus/", views.management_dashboard_focus, name="management_dashboard_focus"),
     path("management/full/", views.management_dashboard_full, name="management_dashboard_full"),
     path("management/analytical/", views.management_dashboard_analytical, name="management_dashboard_analytical"),
+    path("management/alerts/", views.management_dashboard_alerts, name="management_dashboard_alerts"),
+    path("management/alerts/comments/", views.alert_comment_history, name="alert_comment_history"),
+    path("management/alerts/mute/", views.alert_mute_from_comment, name="alert_mute_from_comment"),
+    path("management/alerts/mute-bulk/", views.alert_mute_bulk, name="alert_mute_bulk"),
+    path("management/alerts/unmute/", views.alert_unmute, name="alert_unmute"),
+    path("management/alerts/mute-recurring/", views.alert_mute_recurring, name="alert_mute_recurring"),
     # The start-of-day checklist. Its own trio of URLs rather than a mode of a live report:
     # that one would capture live SNMP for the devices you pick, this one is hand-keyed from
     # four vendor consoles across a fixed estate — but it gets a picker of its own too, to
@@ -77,6 +87,12 @@ urlpatterns = [
     path("networks/access-switches/", views.access_switches_form, name="access_switches_form"),
     path("networks/access-switches/report/", views.access_switches_report, name="access_switches_report"),
     path("networks/access-switches/generate/", views.access_switches_generate, name="access_switches_generate"),
+    # Firewall Report (2026-09-29) -- fifth member of the Networks Report category, see
+    # network.firewall_device_keys' own comment on why none of its devices can leak a false
+    # "unreachable" into the alert poller or the Executive Dashboard's Network tile.
+    path("networks/firewalls/", views.firewalls_form, name="firewalls_form"),
+    path("networks/firewalls/report/", views.firewalls_report, name="firewalls_report"),
+    path("networks/firewalls/generate/", views.firewalls_generate, name="firewalls_generate"),
     path("history/", views.history, name="history"),
     path("history/<int:pk>/", views.submission_detail, name="submission_detail"),
     path("recipients/search/", views.recipient_search, name="recipient_search"),

@@ -1,3 +1,6 @@
+import datetime
+import re
+
 from django.conf import settings
 from django.core.validators import RegexValidator
 from django.db import models
@@ -128,6 +131,259 @@ class ReportSubmission(models.Model):
             for ans in (sysd.get("flags", {}) or {}).values()
             if ans in ("Yes", "No")
         )
+
+
+# Categories that are really the SAME monitored thing at a different severity tier -- a
+# finding's category prefix (and therefore its flag_key, which is always built "category:...")
+# changes as it escalates/de-escalates (disk -> high_disk -> very_high_disk, and the same for
+# cpu/ram/folder/drainage -- the 2026-09-30/10-01 severity-matrix redesign's whole point: a
+# NEW category per severity tier, not one category whose band varies, see alert_catalog's own
+# module docstring). CommentIndexEntry and reports.alert_catalog.comment_history() both need
+# to treat all of one group as the SAME real finding for comment-history purposes even though
+# they are different categories for alerting purposes -- discovered 2026-10-01 when an exact
+# flag_key match turned up "no comments" for RTGS's Database:/u01 (now "high_disk:...") despite
+# 54 real comments on record under "disk:Database:/u01" for the identical mount, days earlier
+# in the same escalation.
+_SEVERITY_SIBLING_GROUPS = [
+    {"disk", "high_disk", "very_high_disk"},
+    {"cpu", "high_cpu", "very_high_cpu"},
+    {"ram", "high_ram", "very_high_ram"},
+    {"folder", "very_high_folder"},
+    {"undrained_folders", "queue_stuck"},
+    {"backup_uncleared", "backup_overdue"},
+]
+_SIBLING_CATEGORIES_OF = {cat: group for group in _SEVERITY_SIBLING_GROUPS for cat in group}
+
+
+def comment_index_suffix(category: str, flag_key: str) -> str:
+    """flag_key with its OWN category prefix stripped off -- the stable identity a finding
+    keeps across a severity-tier category change (see _SEVERITY_SIBLING_GROUPS' own comment).
+    Falls back to flag_key verbatim when it doesn't start with "category:" (a few categories
+    were never built flag_key-prefixed that way, see reports.alert_catalog._parse_component's
+    own comment) -- those simply never had siblings to begin with, so an unchanged flag_key is
+    already its own correct, stable identity."""
+    prefix = category + ":"
+    return flag_key[len(prefix):] if category and flag_key.startswith(prefix) else flag_key
+
+
+def sibling_flag_keys(category: str, flag_key: str) -> set:
+    """Every flag_key this exact finding could have been recorded under at ANY severity tier
+    it has ever been at -- {flag_key} alone when `category` has no known siblings or the
+    prefix didn't match (safe no-op fallback, identical to the old exact-match behaviour)."""
+    suffix = comment_index_suffix(category, flag_key)
+    if suffix == flag_key:
+        return {flag_key}
+    return {f"{c}:{suffix}" for c in _SIBLING_CATEGORIES_OF.get(category, {category})}
+
+
+# Relevance filter (2026-10-01, on request: "are you sure the targetted comments are relevant
+# to the exact issue" / "comments picked for sc corporate actions service being down are
+# talking about ram") -- `comment` is a PER-SYSTEM field, one free-text box covering whatever
+# that system's report row looked like that day, not one box per flag. The naive "this flag
+# was present in the submission, so the comment must be about it" rule (which both the
+# original version of this feature AND the first sibling-category fix still used) turned out
+# to be WRONG in two different, both real, confirmed ways:
+#   1. Two flags of the SAME family present the same day (e.g. RTGS had Database:/u01 AND
+#      Backend:/perago both flagged) -- a comment plainly naming one mount
+#      ("Database - /u01 93%...") was being attributed to the OTHER, unrelated mount too,
+#      purely because both happened to be flagged in the same run.
+#   2. Only ONE flag present, but the comment box simply wasn't about it at all (Temenos had
+#      exactly one flag that day, "service:...:SC.CORPORATE.ACTIONS DOWN", yet the comment was
+#      "T24 DB - RAM threshold raised... buffer cache runs at 90-95% RAM by design" --
+#      evidently a standing/carried-forward note, not necessarily describing THAT day's
+#      specific flag). "Only one flag -> trust blindly" is not actually safe.
+# FAMILY_WORDS below is deliberately small and literal (no stemming/NLP) -- grounded in the
+# REAL category vocabulary this report form's own flag text already uses (reports.network's
+# own Flag.text strings), not guessed. It only needs to catch a STRONG, unambiguous signal
+# that a comment is about a *different* family than the flag being checked -- it is not trying
+# to be a general-purpose classifier.
+_FAMILY_OF_CATEGORY = {}
+for _fam, _cats in {
+    "disk": {"disk", "high_disk", "very_high_disk", "flash_storage_critical"},
+    "cpu": {"cpu", "high_cpu", "very_high_cpu"},
+    "ram": {"ram", "high_ram", "very_high_ram"},
+    "folder": {"folder", "very_high_folder", "undrained_folders", "queue_stuck"},
+    "backup": {"backup", "backup_uncleared", "backup_overdue", "staleness"},
+    "service": {"service", "degraded", "degrading", "potentially_degrading", "unreachable"},
+    "temperature": {"temperature"},
+}.items():
+    for _cat in _cats:
+        _FAMILY_OF_CATEGORY[_cat] = _fam
+
+_FAMILY_WORDS = {
+    "disk": {"disk", "utilization", "mount", "volume", "partition", "archiving"},
+    "cpu": {"cpu", "processor", "load average"},
+    "ram": {"ram", "memory", "buffer cache"},
+    "folder": {"folder", "queue", "drain", "draining"},
+    "backup": {"backup", "no backup"},
+    "service": {"service", "down", "stopped", "restart", "degraded", "unreachable"},
+    "temperature": {"temperature", "thermal", "overheating"},
+}
+
+
+def category_family(category: str) -> str:
+    return _FAMILY_OF_CATEGORY.get(category, category)
+
+
+def _comment_lines(comment: str) -> list:
+    return [l.strip() for l in re.split(r"[\r\n]+", comment) if l.strip()]
+
+
+def _trim_comment_for(comment: str, lines: list, family: str, needle: str = "") -> str:
+    """One multi-topic system-level comment, narrowed to just the line(s) actually about ONE
+    specific flag -- a real admin habit this report form's own users have (one line per topic,
+    confirmed across multiple real systems), confirmed necessary 2026-10-01 ("this is the disk
+    usage issue yet it also picked a comment related to no backup" -- a comment genuinely did
+    cover BOTH a disk mount AND a separate, real backup finding for the same system the same
+    day, each on its own line; showing the WHOLE blob -- including the unrelated finding's own
+    detail -- under "disk usage" specifically was exactly the complaint, and would have made a
+    useless verbatim "mute with this reason" for the disk alert). Falls back to the whole
+    comment when it isn't actually multi-line, or when no individual line matches (never
+    silently hides a comment comment_relevant_flag_keys already decided WAS relevant).
+
+    When `needle` (a specific resource) is given, ONLY it decides which lines match -- family
+    words are NOT also consulted here. Found necessary in the SAME real example: the backup
+    line explicitly says "...due to insufficient DISK space", so the disk family's own word
+    "disk" matched it too even though that line is about the backup finding, not the disk one
+    -- a specific resource ("/u01") is unambiguous where a generic family word plainly is not,
+    so once a needle is available it should be the ONLY signal, not just an additional one."""
+    if len(lines) <= 1:
+        return comment
+    if needle:
+        picked = [l for l in lines if needle.lower() in l.lower()]
+    else:
+        own_words = _FAMILY_WORDS.get(family, set())
+        picked = [l for l in lines if any(w in l.lower() for w in own_words)]
+    return "\n".join(picked) if picked else comment
+
+
+def comment_relevant_flag_keys(sysd: dict) -> dict:
+    """{flag_key: comment text} for whichever of this system's own flags (one submission) its
+    system-level `comment` can be confidently attributed to -- see this module's own comment
+    above for the two real, confirmed ways "every flag present that day" was wrong. Precision
+    over recall throughout: this feeds a "mute with this reason" action, so a missed-but-real
+    comment (shows as "not addressed yet") is a far safer failure than a wrongly-attributed one
+    (a believable-looking but factually unrelated mute justification).
+
+    Per flag: when another flag of the SAME family is ALSO present that day, only a comment
+    that names THIS flag's own resource (not component -- see _trim_comment_for's sibling fix
+    note below) counts. When this flag is the only one of its family that day, the comment
+    counts UNLESS it contains another family's own vocabulary without containing anything of
+    this flag's family (the Temenos/RAM case) -- a detected contradiction, not just an
+    unlabelled-but-plausible generic note. The TEXT returned is narrowed to the matching
+    line(s) only when the comment turned out to be genuinely multi-topic (see
+    _trim_comment_for) -- never the other topic's own detail, even when both are real."""
+    comment = (sysd.get("comment") or "").strip()
+    flags = sysd.get("flags", [])
+    if not comment or not flags:
+        return {}
+    low = comment.lower()
+    lines = _comment_lines(comment)
+    by_family: dict = {}
+    for f in flags:
+        by_family.setdefault(category_family(f.get("category", "")), []).append(f)
+
+    out: dict = {}
+    for f in flags:
+        key, category = f.get("key", ""), f.get("category", "")
+        family = category_family(category)
+        same_family = by_family.get(family, [])
+        if len(same_family) > 1:
+            # Resource specifically, not component -- siblings sharing one HOST/component but
+            # different mounts (e.g. "DB:D:" vs "DB:E:") would otherwise both match on the
+            # shared "DB" even though the comment only ever names one drive letter (2026-10-01
+            # fix, found while verifying the Temenos case: CRB's own disk:DB:D: was being
+            # pulled in by a comment that only discussed E: and RAM, purely because "DB" -- the
+            # component both mounts share -- is a substring of the comment).
+            suffix = comment_index_suffix(category, key)
+            component, _, resource = suffix.partition(":") if suffix != key else ("", "", "")
+            needle = resource or component
+            if needle and needle.lower() in low:
+                out[key] = _trim_comment_for(comment, lines, family, needle)
+            continue
+        own_words = _FAMILY_WORDS.get(family, set())
+        other_words = {w for fam, ws in _FAMILY_WORDS.items() if fam != family for w in ws}
+        has_own = any(w in low for w in own_words)
+        has_other = any(w in low for w in other_words)
+        if has_other and not has_own:
+            continue   # contradicts: names a DIFFERENT family's vocabulary, not this one's
+        out[key] = _trim_comment_for(comment, lines, family)
+    return out
+
+
+class CommentIndexEntry(models.Model):
+    """Fast lookup cache for reports.alert_catalog.comment_history() -- one row per (system,
+    suffix), `comments` holding up to the last 10 real admin comments on record for it, newest
+    first. `suffix` (see comment_index_suffix) rather than flag_key is the key, specifically so
+    a finding's comment history survives its own category changing across a severity escalation
+    (see _SEVERITY_SIBLING_GROUPS' own comment for the bug this fixes).
+
+    Built lazily: comment_history() does one full, genuinely comprehensive historical walk
+    across every sibling flag_key THE FIRST TIME a given (system, suffix) is ever looked up,
+    then persists the result here so every future lookup -- for a new comment on an escalated
+    OR de-escalated tier, or just the admin clicking the same tile again -- is a single indexed
+    row read, never another full-table walk. Kept current for free from then on by
+    `_index_new_report_submission` below, a post_save signal on ReportSubmission that fires for
+    EVERY report type's own submission view without needing to touch any of their (currently
+    ten separate) call sites individually (2026-10-01, on request: "set up a better mechanism
+    for new reports so you wont have to do the same comprehensive search again")."""
+    system = models.CharField(max_length=120)
+    suffix = models.CharField(max_length=255)
+    comments = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [("system", "suffix")]
+        verbose_name = "comment index entry"
+        verbose_name_plural = "comment index entries"
+
+    def __str__(self):
+        return f"{self.system} / {self.suffix} ({len(self.comments)} comments)"
+
+
+@receiver(post_save, sender=ReportSubmission)
+def _index_new_report_submission(sender, instance, created, **kwargs):
+    """Keeps CommentIndexEntry current for every NEW report submission, from whichever of the
+    report form's (currently ten) own views created it -- see CommentIndexEntry's own
+    docstring. Only ever PREPENDS: a freshly submitted report is always the newest comment for
+    whatever it touches, so there is never a need to re-sort, just cap at 10. Only indexes a
+    flag when comment_relevant_flag_keys says the comment is actually about it (see that
+    function's own comment for the two real misattributions this guards against).
+
+    Also where auto-mute (2026-10-01, on request: "in future set up a mechanism where if an
+    issue occurs and has 3 or more duplicate comments on different report runs automatically
+    mute alert") runs -- the natural point, since this is already the one place that fires for
+    EVERY new report submission regardless of which of the ten views created it, and it has
+    just finished computing this exact flag's own up-to-date comment history. See
+    alert_catalog.maybe_auto_mute's own docstring for the matching/safety rules."""
+    if not created:
+        return
+    from . import alert_catalog
+
+    for sysd in (instance.report_content or {}).get("systems", []):
+        system = sysd.get("name", "")
+        comment = (sysd.get("comment") or "").strip()
+        if not system or not comment:
+            continue
+        relevant_keys = comment_relevant_flag_keys(sysd)
+        if not relevant_keys:
+            continue
+        seen_suffixes = set()
+        for f in sysd.get("flags", []):
+            flag_key, category = f.get("key", ""), f.get("category", "")
+            if not flag_key or flag_key not in relevant_keys:
+                continue
+            suffix = comment_index_suffix(category, flag_key)
+            if suffix in seen_suffixes:
+                continue   # one system-level comment answers for every flag in this run
+            seen_suffixes.add(suffix)
+            entry, _ = CommentIndexEntry.objects.get_or_create(system=system, suffix=suffix)
+            author = instance.author or (instance.generated_by.get_username() if instance.generated_by_id else "")
+            new_row = {"created_at": instance.created_at.isoformat(), "comment": relevant_keys[flag_key],
+                      "author": author, "flag_key": flag_key}
+            entry.comments = [new_row] + list(entry.comments or [])[:9]
+            entry.save(update_fields=["comments", "updated_at"])
+            alert_catalog.maybe_auto_mute(system, category, flag_key, entry.comments)
 
 
 class AutomatedReportInstance(models.Model):
@@ -276,6 +532,22 @@ class SystemConfig(models.Model):
         default=False,
         help_text="Off = shadow mode: reports generate and store on schedule but are not "
                   "e-mailed. Review generated reports for accuracy before enabling.")
+    # Estate-wide default notification window (2026-10-02, on request: "have a default alert
+    # window set for each and every alert subject to any specific change from the admins...
+    # make every alert share Innocent Nyama Alert group alert window"). Innocent Nyama's own
+    # real window turned out to be 07:45-17:00 Mon-Fri, not what was recalled -- RTGS Team's
+    # and T24 Team's own 07:45-21:00-every-day pattern was confirmed as the actual default
+    # instead. Only applies to a Monitoring AlertGroup that has NOT set its own
+    # schedule_enabled=True -- see AlertGroup.in_schedule's own comment -- so an admin's own
+    # explicit per-group schedule always wins; this is a fallback, never an override.
+    default_alert_window_start = models.TimeField(
+        default=datetime.time(7, 45),
+        help_text="Default notification window start for any Monitoring Alert Group that "
+                  "hasn't set its own schedule. Overridden per-group by that group's own "
+                  "schedule, once set.")
+    default_alert_window_end = models.TimeField(
+        default=datetime.time(21, 0),
+        help_text="Default notification window end -- see default_alert_window_start.")
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
                                    null=True, blank=True, related_name="+")
@@ -791,15 +1063,112 @@ class AlertGroup(models.Model):
     # key would need a data migration for no behavioural gain.
     CATEGORY_CHOICES = [
         ("disk", "Disk usage"),
+        # THREE tiers now, three category keys (2026-10-01): "disk" (amber/Warning only --
+        # see _CATEGORY_BANDS' own comment), "high_disk" (Critical, <95%), "very_high_disk"
+        # (Imminent, >=95%). Started as a 2-way split ("for disk usage there is one that is
+        # imminent and a version of it that is critical... make these two alert types disk
+        # usage and Very high disk usage" -- 95% matching network.py's pre-existing
+        # flash_storage_critical precedent) then became 3-way the same day ("do not name them
+        # the exact same thing across severities" -- the old red/<95% band was still sharing
+        # "disk"'s own name with the amber band). See _tier()'s own category exception.
+        ("high_disk", "High disk usage"),
+        ("very_high_disk", "Very high disk usage"),
         ("ram", "Ram usage"),
+        # Same three-tier split, RAM instead of disk (2026-10-01, on request: "rename ram
+        # usage across severities"). See generate_report.RAM_IMMINENT_PCT's own comment.
+        ("high_ram", "High RAM usage"),
+        ("very_high_ram", "Very high RAM usage"),
         ("cpu", "Cpu usage"),
+        # Same three-tier split, CPU instead of disk (2026-10-01, on request: "cpu usage is
+        # also between 2 severities" -> "do not name them the exact same thing across
+        # severities"). CPU here is a 5-minute average, not an instant spike, so a sustained
+        # >=95% average is a real signal, not noise, even though CPU naturally spikes more
+        # often than disk fills up. See generate_report.CPU_IMMINENT_PCT's own comment.
+        ("high_cpu", "High CPU usage"),
+        ("very_high_cpu", "Very high CPU usage"),
         ("service", "Service down"),
+        # "degraded" (2026-10-01, on request: "reserve service down for actual services that
+        # are down") -- split out of "service", which network.py had been using since
+        # 2026-09-29 for EVERY reachable-device operational finding (OSPF adjacency loss,
+        # PSU/fan failure, interface errors/saturation/discards, temperature, recent reboot,
+        # interface/AP down-regressions) for lack of a dedicated bucket at the time (see that
+        # fix's own comment, still on network.py's FlagVM call sites, for the full history).
+        # "service" now means exactly what its label says: a NAMED service/process/listener/
+        # cluster-resource is down (generate_report.py's win_service/t24_service_up/
+        # oracle_listener checks, network.py's cluster_resource_failed). "degraded"/
+        # "degrading"/"potentially_degrading" are everything else read FROM a device that
+        # answered -- running, but impaired -- split further by severity (2026-10-01, on
+        # request: "some of these discards are too severe to lump all together") into the
+        # SAME three tiers the Alert Matrix's own panels already use: "degraded" = red/
+        # Critical, "degrading" = amber/Warning, "potentially_degrading" = note/Note. This is
+        # NOT a live recomputation for most flag_keys -- almost every one of them already has
+        # a FIXED band at its network.py call site (e.g. iface_discards is always amber,
+        # ospf_adjacency_lost is always red), so this just gives each one the distinct name
+        # its own fixed severity deserves. temp_high WAS the one exception (genuinely red
+        # above 75C, amber below), tracking its live band into "degraded"/"degrading" --
+        # pulled back OUT into its own "temperature" category the same day (on request:
+        # "create a new issue type called temperature") once a real temp_high finding (Core
+        # Switch) turned out to still be showing as "unreachable", traced to a genuinely
+        # orphaned IssueOccurrence row from BEFORE that switch was renamed "Core Switch (HQ)"
+        # and moved into the Network domain -- never touched since because nothing in any
+        # current topology still answers to the old name (see
+        # 0068_temperature_category_and_orphan_cleanup's own docstring). "temperature" behaves like
+        # every OTHER category here (disk/ram/cpu): ONE category, appearing as a row in
+        # whichever severity panel(s) its current band lands in -- not severity-encoded in
+        # the category name the way degraded/degrading/potentially_degrading are. That split
+        # stays for everything else in this family (interface/link/OSPF/PSU findings, which
+        # each have a genuinely FIXED band per flag_key); temperature is the one finding here
+        # whose band legitimately varies live, so giving it its own severity-coded name was
+        # actively confusing rather than clarifying.
+        ("degraded", "Degraded"),
+        ("degrading", "Degrading"),
+        ("potentially_degrading", "Potentially degrading"),
+        ("temperature", "Temperature"),
         ("backup", "Backup missing"),
         ("unreachable", "Component unreachable"),
         ("untracked", "Backup untracked"),
+        # "untracked_metrics" (2026-10-01, on request: "how does this error fit under backups
+        # untracked category" -> "make it untracked metrics instead") -- split out of
+        # "untracked", which network.py's metrics_missing/counter_width findings had been
+        # using too, for lack of a dedicated bucket: "untracked" ORIGINALLY meant exactly one
+        # thing -- generate_report.py's `Flag(f"untracked:{sysm.name}", "... UNTRACKED (no
+        # backup check on any host)", "amber", "untracked")` -- but network.py's per-device
+        # SNMP-coverage check ("N of 19 requested metrics are not collected: PoE power draw,
+        # BGP sessions, ...") and its 32-bit-counter-wrap warning reused the same category,
+        # which is not a backup gap at all. This had a REAL side effect, not just a confusing
+        # label: the Network/Infrastructure "no backups tracked" blanket silence (see
+        # [[project_category_wide_silence]]/[[project_alert_matrix]]) was silently muting
+        # metrics_missing findings too, since it shared the same category -- splitting this
+        # out stops that gap without touching that silence at all (it no longer matches).
+        ("untracked_metrics", "Untracked metrics"),
         ("folder", "Size monitoring"),
+        # "very_high_folder" (2026-10-01, on request: "same split for folder size too") --
+        # "folder" has no percentage-of-capacity reading the way disk/CPU/RAM do (a size-over-
+        # expected check is unbounded), so the equivalent severe line is a RATIO of actual to
+        # expected size instead of an absolute percent -- see
+        # alerting.FOLDER_IMMINENT_RATIO's own comment (2x expected, a judgment call, not an
+        # existing precedent like DISK_IMMINENT_PCT had).
+        ("very_high_folder", "Folder far over expected size"),
         ("backup_uncleared", "Backup & log drainage"),
+        # "backup_overdue" (2026-10-01, on request: "keep severity escalation but define
+        # newer alerts as they escalate... instead of having one issue have one alert that
+        # varies between multiple severity levels have one issue with multiple alerts
+        # depending on severity") -- split out of "backup_uncleared"'s own existing Warning-
+        # then-Critical-after-3-days ladder (alerting.MAX_BACKUP_OVERDUE_SECONDS, unchanged):
+        # the SAME trigger, but the escalated (>=3 days overdue) state is now a genuinely
+        # DIFFERENT category/flag_key, not the same one turning red -- closes the Warning
+        # finding and opens a new Critical one, the same "two alert types, not one that
+        # varies" pattern used for degraded/degrading. "backup_uncleared" itself is amber-only
+        # from here on.
+        ("backup_overdue", "Backup & log drainage overdue"),
         ("undrained_folders", "Drainage monitoring"),
+        # "queue_stuck" (2026-10-01, on request: "do not name them the exact same thing
+        # across severities") -- split out of "undrained_folders", which used to span BOTH
+        # amber/Warning (a queue running a little behind) and red/Imminent (a queue that has
+        # genuinely stopped draining) under the one name. "undrained_folders" is amber-only
+        # from here on; "queue_stuck" is the red/Imminent sibling. See
+        # alerting.undrained_folder_flags_by_system's own docstring for the full split.
+        ("queue_stuck", "Queue not draining"),
     ]
     # Purely a DISPLAY grouping for the categories checkbox grid (2026-09-07, on request:
     # "in the alert picker (checkboxes) we need to delineate between Interface queue folder
@@ -895,13 +1264,84 @@ class AlertGroup(models.Model):
         n = len(self.systems or [])
         return f"{self.name} → {n} system(s)" if n else f"{self.name} → no systems yet"
 
+    # "muted should mean the same thing we cant have a muted unmuted transient state... when
+    # i tell you to pause a notification... this should translate to a mute" (2026-10-02).
+    # Pausing/reactivating a Monitoring group now WRITES real AlertSilence rows at the moment
+    # it happens, rather than the dashboard re-deriving "is this paused right now" fresh on
+    # every request from `active` alone (alert_catalog._compute_paused_scope, now removed --
+    # that split "muted" into two parallel concepts: a real AlertSilence row, and a live-
+    # computed condition, each needing its own branch through current_state/severity_matrix/
+    # muted_alerts/muted_matrix/alert_unmute/alert_comment_history). One whole-category silence
+    # (flag_key="", the SAME shape AlertSilence already uses for "mute every component, current
+    # and future, under this category" -- see that field's own help_text) per (system,
+    # category) this group actually covers, so a NEW finding that starts while still paused is
+    # covered immediately, same guarantee the old live-computed version had, just real rows now
+    # instead of nothing on disk. `from_group_pause=True` marks these as this save's own doing,
+    # not an admin's independent silence that happens to reference the same group, so
+    # reactivating only ever releases exactly what pausing created.
+    def save(self, *args, **kwargs):
+        was_active = None
+        if self.pk and self.alert_type == self.ALERT_TYPE_MONITORING:
+            was_active = (type(self).objects.filter(pk=self.pk)
+                         .values_list("active", flat=True).first())
+        super().save(*args, **kwargs)
+        if self.alert_type != self.ALERT_TYPE_MONITORING:
+            return
+        if not self.active:
+            # Re-syncs to the CURRENT systems/categories on every save while paused, not just
+            # the one save that flips the switch -- a system or category added to an ALREADY-
+            # paused group needs its own pause-silence too, or the binding above has a gap for
+            # exactly the finding an admin just told it to cover (materialize is idempotent,
+            # see its own "already covered" skip, so re-running it on an unrelated field edit
+            # costs nothing and creates nothing new for what's already covered).
+            self._materialize_pause_silences()
+        elif was_active is False:   # explicitly WAS paused (not a brand-new group) -- reactivated
+            self._release_pause_silences()
+
+    def _materialize_pause_silences(self):
+        import datetime as _dt
+
+        from django.utils import timezone as dj_timezone
+
+        all_categories = [k for k, _ in self.CATEGORY_CHOICES]
+        # 10 years, not a short renewal window like a normal silence (AlertSilence's own
+        # "forced renewal" reasoning doesn't apply here -- this is released programmatically
+        # the moment the group reactivates, never by calendar date, so there's nothing for a
+        # short expiry to usefully force a review of.
+        expires = dj_timezone.now() + _dt.timedelta(days=3650)
+        for system in (self.systems or []):
+            for category in all_categories:
+                if not self.category_matches(system, category):
+                    continue
+                if AlertSilence.objects.filter(system=system, category=category, flag_key="",
+                                               active=True).exists():
+                    continue   # already covered -- an admin's own real silence, never duplicated
+                AlertSilence.objects.create(
+                    system=system, category=category, flag_key="", group=self,
+                    reason="Notification for this alert is paused.",
+                    created_by=self.updated_by, expires_at=expires, from_group_pause=True)
+
+    def _release_pause_silences(self):
+        AlertSilence.objects.filter(group=self, from_group_pause=True, active=True).update(active=False)
+
     def in_schedule(self, when) -> bool:
         """Whether `when` (an aware datetime already converted to LOCAL time by the caller --
         see reports.alerting/reports.system_alerts' own timezone.localtime(now) call) falls
-        inside this group's own schedule. Unscheduled groups (schedule_enabled=False, the
-        default -- every group's behaviour before this feature existed) are always in
-        schedule; this is an opt-in narrowing, never a new way to silence a group that hasn't
-        asked for one.
+        inside this group's own schedule.
+
+        Unscheduled groups (schedule_enabled=False) are an opt-in narrowing when a group HAS
+        set its own schedule -- never a new way to silence a group that hasn't asked for one.
+        But for a Monitoring group specifically, "hasn't asked for one" no longer means
+        unconditionally always-in-schedule (2026-10-02, on request: "have a default alert
+        window set for each and every alert... make every alert share Innocent Nyama Alert
+        group alert window" -- confirmed instead against SystemConfig.default_alert_window_*,
+        RTGS/T24 Team's own 07:45-21:00-every-day pattern, not Innocent Nyama's actual
+        07:45-17:00-weekdays one, which the request misremembered). An admin's own explicit
+        schedule on a specific group ALWAYS wins -- this is purely the fallback for a group
+        that has never set one. System Alert groups (alert_type=ALERT_TYPE_SYSTEM, e.g.
+        Staleness Alerts -- watching whether a CHECKER is still alive) are deliberately exempt
+        from the default: time-of-day has no bearing on whether a checker has gone silent, so
+        they keep the unconditional always-in-schedule behaviour this method always had.
 
         A day outside `schedule_days` fails outright regardless of time. With no days listed
         at all (empty list) every day qualifies -- "restrict the TIME only" is a real,
@@ -910,7 +1350,14 @@ class AlertGroup(models.Model):
         `schedule_end < schedule_start` are given, the window is read as crossing midnight
         (e.g. 22:00 -> 06:00 covers the whole overnight period, not zero hours)."""
         if not self.schedule_enabled:
-            return True
+            if self.alert_type != self.ALERT_TYPE_MONITORING:
+                return True
+            sc = SystemConfig.get()   # same module, defined earlier in this file -- no import needed
+            start, end = sc.default_alert_window_start, sc.default_alert_window_end
+            if start is None or end is None:
+                return True
+            t = when.time()
+            return start <= t <= end if start <= end else (t >= start or t <= end)
         if self.schedule_days and when.weekday() not in self.schedule_days:
             return False
         start, end = self.schedule_start, self.schedule_end
@@ -1062,9 +1509,24 @@ class AlertSilence(models.Model):
     Deliberately EXPIRES (`expires_at`, default 60 days out) rather than lasting forever for
     the same reason -- a silence nobody ever revisits is indistinguishable from a blind spot.
     Forcing a renewal keeps a human deciding, on a cadence, that this is still expected/
-    accepted behaviour, not something that was silenced once and forgotten."""
+    accepted behaviour, not something that was silenced once and forgotten.
+
+    `category` + `flag_key` together decide SCOPE (2026-09-30, on request: "mute crb disk
+    usage rtgs disk usage, ebis disk usage" -- a whole category, not one mount, and "add a new
+    config in alerting to mute specific alert"). A non-blank `flag_key` silences exactly that
+    one component, same as this table always worked. A BLANK `flag_key` with `category` set
+    silences EVERY component under that category for this system -- current ones AND any added
+    later (a 4th disk mount showing up next year is covered automatically, not just the ones
+    that existed the day this was created). `category` is always set, even for a single-
+    component silence, so alerting._silenced/build_silenced_digest never need a second lookup
+    to know what kind of finding this is."""
     system = models.CharField(max_length=120)             # System.name from prometheus.yml
-    flag_key = models.CharField(max_length=255)           # generate_report.Flag.key
+    category = models.CharField(max_length=32, choices=AlertGroup.CATEGORY_CHOICES, blank=True,
+                                help_text="What this silences (reports.alerting.Flag.category).")
+    flag_key = models.CharField(
+        max_length=255, blank=True,                       # generate_report.Flag.key
+        help_text="One specific component (e.g. disk:Database:/u01). Blank = every component "
+                  "under `category` for this system, including ones added later.")
     group = models.ForeignKey(AlertGroup, on_delete=models.CASCADE, related_name="silences",
                               help_text="Whose digest this rolls into -- normally the same "
                                         "group that would otherwise be notified for it.")
@@ -1076,17 +1538,35 @@ class AlertSilence(models.Model):
         help_text="Silencing stops automatically after this date -- a deliberate renewal, "
                   "not a permanent standing rule, keeps this reviewed periodically.")
     active = models.BooleanField(default=True)
+    # Materialized by AlertGroup.save() the moment a Monitoring group is paused -- a REAL row
+    # here, not a live-computed condition (2026-10-02, on request: "muted should mean the same
+    # thing we cant have a muted unmuted transient state... when i tell you to pause a
+    # notification... this should translate to a mute" -- replaces the first version of this
+    # binding, alert_catalog._compute_paused_scope(), which derived "muted" fresh on every
+    # request from AlertGroup.active instead of writing anything down, forcing current_state/
+    # severity_matrix/muted_alerts/muted_matrix/alert_unmute/alert_comment_history to each
+    # carry a second, parallel "or is it paused" branch alongside their real-silence one). Set
+    # True only on silences AlertGroup.save() itself creates; marks them as the group's own
+    # doing so reactivating that SAME group (and only that group) can find and release exactly
+    # these rows again, without touching a silence an admin separately created by hand that
+    # happens to reference the same group.
+    from_group_pause = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-created_at"]
         verbose_name = "alert silence"
 
     def __str__(self):
-        return f"{self.system} · {self.flag_key} (until {self.expires_at:%Y-%m-%d})"
+        scope = self.flag_key or f"{self.category} (all)"
+        return f"{self.system} · {scope} (until {self.expires_at:%Y-%m-%d})"
 
     @property
     def in_effect(self) -> bool:
         return self.active and self.expires_at > timezone.now()
+
+    @property
+    def is_category_wide(self) -> bool:
+        return not self.flag_key
 
 
 class IssueOccurrence(models.Model):
@@ -1118,8 +1598,20 @@ class IssueOccurrence(models.Model):
     system = models.CharField(max_length=120)             # System.name from prometheus.yml
     flag_key = models.CharField(max_length=255)            # generate_report.Flag.key
     category = models.CharField(max_length=40)             # generate_report.Flag.category
-    band = models.CharField(max_length=10)                 # last-seen "red" / "amber"
+    band = models.CharField(max_length=10)                 # last-seen "red" / "amber" / "note"
     text = models.CharField(max_length=500, blank=True)    # last-seen Flag.text
+    # "Systems" | "Infrastructure" | "Network" -- set by record_occurrences' OWN caller at
+    # write time (2026-09-30, for the Alert Dashboard's domain bars/tables), never inferred
+    # after the fact from category/flag_key: each of the two call sites already knows which
+    # estate it's capturing (the Systems-loop call is always "Systems"; the kind-loop call
+    # sits right next to the SAME LiveEstateOverview.update_or_create(kind=kind, ...) a few
+    # lines below it, so kind is already in scope). Deliberately NOT a hand-maintained
+    # flag_key-prefix catalog -- this session already paid down that exact mistake once for
+    # the Prometheus metric archive (a hand-picked list silently drifting from what the app
+    # actually produces); storing the true value at the one place it's already known avoids
+    # repeating it here. Blank for rows written before this field existed -- see the
+    # one-time backfill migration.
+    domain = models.CharField(max_length=32, blank=True)
     started_at = models.DateTimeField()
     last_seen_at = models.DateTimeField()
     resolved_at = models.DateTimeField(null=True, blank=True)
@@ -1556,6 +2048,97 @@ class MetricSample(models.Model):
         return f"{self.metric_key} @ {self.taken_at:%Y-%m-%d %H:%M} = {self.value:.1f}"
 
 
+class PrometheusRetentionRevision(models.Model):
+    """`live_window_days` -- the single setting that drives BOTH how long Prometheus itself
+    retains data locally (applied as --storage.tsdb.retention.time, see prometheus_admin.py)
+    AND where reports.historical_query.series() reads a given time range from (live Prometheus
+    for anything within this many days, prometheus_snapshot_db beyond it) -- see
+    PROMETHEUS-RETENTION-PLAN.md, "Phase 4: one setting, two consumers".
+
+    DELIBERATELY no separate saved-vs-applied state, unlike PrometheusConfigRevision/
+    BackupPolicyRevision's usual Save/Save & Apply split: a row here is only ever created AT
+    THE MOMENT an apply actually succeeds (prometheus_admin.write_retention_and_restart), so
+    `current()` is always "the value genuinely live on the Prometheus service right now", never
+    a staged draft. This is the fix for the plan's own logical-review finding #1: a routing
+    function reading a saved-but-unapplied value could ask live Prometheus for a window it
+    doesn't actually retain yet, silently returning partial/empty results instead of correctly
+    falling back to the archive. Two systems keying off one setting is only safe if there is
+    exactly one value to read, not a pending one and a live one that can disagree.
+    """
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True)
+    live_window_days = models.PositiveIntegerField(default=3)
+
+    class Meta:
+        verbose_name = "Prometheus retention revision"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.live_window_days}d @ {self.created_at:%Y-%m-%d %H:%M}"
+
+    @classmethod
+    def current_days(cls) -> int:
+        """The applied live_window_days, or the model's own default (3) before any revision
+        has ever been recorded -- see this model's own docstring on why "current" here always
+        means "applied", never "saved but not yet live"."""
+        row = cls.objects.first()
+        return row.live_window_days if row else cls._meta.get_field("live_window_days").default
+
+
+class MetricSampleRetentionRevision(models.Model):
+    """How many days of MetricSample rows (prometheus_snapshot_db) to keep before a daily
+    prune job deletes them -- see PROMETHEUS-RETENTION-PLAN.md Phase 3 step 6. Same lighter
+    revision shape as BackupPolicyRevision (a single Save IS the apply here -- there is no
+    live file/service layer for this setting, the prune job just reads `.current_days()`
+    fresh each run, the same live-DB-read idiom AlertGroup.reminder_minutes already uses for
+    alerting.py/system_alerts.py -- unlike PrometheusRetentionRevision above, there is no
+    second system that could drift out of sync with this one, so the extra apply step that
+    setting needs for correctness would just be friction here)."""
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+                                   null=True, blank=True, related_name="+")
+    note = models.CharField(max_length=200, blank=True)
+    retention_days = models.PositiveIntegerField(default=400)
+
+    class Meta:
+        verbose_name = "Metric history retention revision"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.retention_days}d @ {self.created_at:%Y-%m-%d %H:%M}"
+
+    @classmethod
+    def current_days(cls) -> int:
+        row = cls.objects.first()
+        return row.retention_days if row else cls._meta.get_field("retention_days").default
+
+
+class DatabaseBackupRun(models.Model):
+    """One row per weekly offline pg_dump attempt (admin_report AND prometheus_snapshot_db,
+    each gets its own row) -- see PROMETHEUS-RETENTION-PLAN.md Phase 5. Not admin-edited, just
+    a history log the config screen reads (same "audit trail, not a knob" role
+    PrometheusSnapshotRun would have played in this plan's earlier, since-dropped
+    native-snapshot design)."""
+    STATUS_CHOICES = [("running", "Running"), ("ok", "OK"), ("failed", "Failed")]
+
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    database = models.CharField(max_length=100)          # "admin_report" | "prometheus_snapshot_db"
+    destination_path = models.CharField(max_length=500, blank=True)
+    size_bytes = models.BigIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="running")
+    error = models.TextField(blank=True)
+
+    class Meta:
+        verbose_name = "Database backup run"
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"{self.database} @ {self.started_at:%Y-%m-%d %H:%M} ({self.status})"
+
+
 class LiveEstateOverview(models.Model):
     """One row per estate ("system_admin" | "network" | "infrastructure" | "active_directory")
     -- the Executive Dashboard's own poller-fed cache (2026-09-18, on request: "broaden alert
@@ -1636,3 +2219,38 @@ class MonitoredInterface(models.Model):
 
     def __str__(self):
         return f"{self.device}:{self.if_index} ({'up' if self.currently_up else 'DOWN'})"
+
+
+class MonitoredAccessPoint(models.Model):
+    """Sticky "should be joined" baseline for one wireless access point on a WLC (2026-09-29,
+    on request: "we need to monitor all access points connected to these wireless
+    contreollers whether they are connected ore have gone down") -- the SAME sticky-baseline
+    idea MonitoredInterface's own docstring already established for switch ports, applied to
+    APs for the same underlying reason: CISCO-LWAPP-AP-MIB's cLApTable only ever lists an AP
+    while it's actually JOINED to the controller -- an AP that loses power, reboots, or drops
+    its CAPWAP tunnel simply DISAPPEARS from the walk, the exact same "the one moment it fails
+    is the moment its own row vanishes" problem CDP neighbours have for interfaces. Without
+    this table, a downed AP would be invisible rather than flagged -- every AP that WAS seen
+    joined enters here and stays tracked for good; the report reads `currently_up` against
+    that history to tell "genuinely never known" apart from "was up, now missing."
+
+    No `is_scoped`-equivalent needed here, unlike MonitoredInterface: every AP CISCO-LWAPP-
+    AP-MIB ever reports IS the thing being asked for ("all access points"), not a narrowed
+    subset CDP has to identify a purpose for first.
+
+    Updated on every collect() the Switches & Routers estate produces, same cadence as
+    MonitoredInterface. See network._update_ap_baseline()."""
+
+    device = models.CharField(max_length=120)    # the SNMP target -- collect()'s own `instance`
+    ap_name = models.CharField(max_length=255)
+    first_seen_at = models.DateTimeField()
+    last_seen_at = models.DateTimeField()
+    last_checked_at = models.DateTimeField()
+    currently_up = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ("device", "ap_name")
+        verbose_name = "monitored access point baseline"
+
+    def __str__(self):
+        return f"{self.device}:{self.ap_name} ({'up' if self.currently_up else 'DOWN'})"

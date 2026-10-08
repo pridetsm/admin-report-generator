@@ -1,0 +1,1625 @@
+{% extends "base.html" %}
+{% block title %}Alert Dashboard{% endblock %}
+
+{% comment %}
+  Alert Dashboard (2026-09-30, on request: a dropped-in design spec, corrected against this
+  app's real architecture -- see reports.alert_catalog's own docstring for why raw Prometheus
+  ALERTS/Alertmanager, which the spec assumed, was discarded entirely in favour of
+  IssueOccurrence/AlertSilence, this app's own bespoke alerting engine.
+
+  Originally a 4th Management view ("Executive - Alerts"); moved OFF Management entirely onto
+  the five estate/admin roles (2026-10-01, on request: "remove the dashboard from the
+  management role and add it to all other roles") -- roles.can_view_alert_dashboard is the
+  real gate now, not is_management. Still does NOT touch or replace Full/Analytical/Focused
+  (those three had their own alert tiles deliberately removed 2026-09-18: "remove the alert
+  table from both exec dashboards" -- a decision this screen respects, not reverses), which
+  remain Management-only as before.
+
+  CSS below is a near-verbatim port of the supplied mockup's own self-contained <style> block
+  -- kept scoped to this page (its own --rd/--am/--pu/etc. custom properties), so it cannot
+  collide with this app's own .chip.note/.flag.bar.note convention (app.css) even though the
+  two use different colours for "Note" (mockup: purple: this app's convention elsewhere:
+  var(--accent)) -- visual fidelity to the supplied design was the explicit ask, so that stays
+  as given rather than being silently reconciled.
+
+  The mockup's own fake top bar (Dashboard/Active/History/Rules tabs, hardcoded avatar/email)
+  is dropped entirely -- base.html already supplies the real authenticated nav/topbar/role
+  drawer; this page is reached via that drawer's "Alert Dashboard" entry, not a duplicated
+  chrome.
+{% endcomment %}
+
+{% block body %}
+<style>
+.adk{
+  /* LIGHT (default) -- this page was built dark-only (2026-09-30), never responding to the
+     app's own light/dark toggle (base.html's #themeToggle, data-theme on <html>) the rest of
+     the console already honors (2026-10-01, on request: "make the whole page respond to
+     light and dark theme toggles"). Same structural roles as the dark set below (bg/s1/s2/s3
+     surface tiers, rd/rd2/am/pu/gn/cy severity+domain accents, t1/t2/t3 text tiers,
+     mu/dsy/di/dsc/dn/dself muted+domain pills) just re-tuned for a light surface -- neutrals
+     or borrowed outright from app.css's own existing light `:root` palette (--bg/--panel/
+     --ink/--muted/--line/--red/--amber/--green) so this page reads as part of the SAME app
+     instead of a second, disconnected visual identity switching independently.
+  */
+  --bg:#f6f4ef;--s1:#ffffff;--s2:#f2ede2;--s3:#ebe4d4;
+  --b:#dad4c6;--b2:#c7bfa9;
+  --rd:#b8291f;--rd-bg:#fdebea;--rd-b:#f0b8ae;
+  --rd2:#d14a3a;--rd2-bg:#fdebea;--rd2-b:#f0b8ae;
+  --am:#b8790a;--am-bg:#fff6e0;--am-b:#e8cd8a;
+  --pu:#7c5cd9;--pu-bg:#f1ecfc;--pu-b:#d4c4f5;
+  --gn:#0e9c74;--gn-bg:#e8f6f0;--gn-b:#a8dfc9;
+  --cy:#0089a3;--cy-bg:#e0f6fa;--cy-dim:#4fa8bd;
+  --t1:#16233a;--t2:#3d5a75;--t3:#73879c;
+  --mu:#5a7085;--mu-bg:#eef1f4;--mu-b:#c8d2db;
+  --dsy:#5a6e88;--dsy-bg:#eef1f5;--dsy-b:#c9d4e0;
+  --di:#3d6b5a;--di-bg:#e8f2ee;--di-b:#bedbd0;
+  --dsc:#8a6138;--dsc-bg:#f7efe3;--dsc-b:#e0c8a8;
+  --dn:#3d5f7d;--dn-bg:#e8f0f6;--dn-b:#c0d4e4;
+  --dself:#007a91;--dself-bg:#e0f4f7;--dself-b:#9adbe5;
+  --hover-line:rgba(22,35,58,.35);
+  /* Large-area fill variants (2026-10-02, on request: "light theme dashboard variants are
+     very difficult to see... everything looks like contrast and brightness manipulation") --
+     --rd/--rd2/--am/--pu above stay vivid (Tailwind ~600-700 shade territory) because TEXT
+     needs that much contrast against a pale surface (badge labels, trend arrows, matrix
+     borders). But a handful of places fill a genuinely LARGE area solid with one of those same
+     vars at full opacity -- the Alert Domains bar segments (.c-rd etc) and the Severity Trends
+     bars -- and a big flat block of a 600/700-shade colour reads as harsh/neon on a light
+     background even though the exact same hex looks fine as text or a thin border. Dedicated
+     "-fill" vars (Tailwind ~300-400 shade territory: softer, still clearly legible as
+     "red"/"amber"/"purple", not pastel-washed-out) used ONLY by those large-fill rules --
+     dark theme sets these equal to the normal vivid vars below (no change there, nothing was
+     reported wrong with dark). */
+  --rd-fill:#f87171;--rd2-fill:#fca5a5;--am-fill:#fbbf24;--pu-fill:#c4b5fd;
+  /* Matrix cell heat-tint ceiling (2026-10-02, same request as --rd-fill etc above) -- a
+     "hot" cell's own --a (set inline per-cell by JS, up to ~.88) washes a heat-tinted
+     rgba(var(--heat),a) fill that dark, with a dark background behind it, reads as a rich
+     deep tone; the identical alpha against a pale surface reads as a near-solid saturated
+     block. Capped via min() in the cell's own background rule below, not !important --
+     dark theme's cap is 1 (a no-op, real alpha here never reaches 1, so nothing changes
+     there). */
+  --fill-alpha-cap:.5;
+  /* Alert Matrix heat tints + the Imminent panel's always-dark header bar (2026-10-01 fix,
+     see alert_catalog.TIER_STYLE's own comment) -- RGB triplets (for rgba(var(--heat-x),a))
+     and a dedicated bg/fg pair re-tuned per theme instead of baked server-side as literal
+     dark-palette-only strings. */
+  --heat-imminent:184,41,31;--heat-critical:209,74,58;--heat-warning:184,121,10;
+  --heat-note:124,92,217;--heat-muted:90,112,133;
+  --imm-bar-bg:#2a0b08;--imm-bar-fg:#ff6b5e;
+  /* Matrix cell trend pill (2026-10-01 fix: "that gray pill color does not translate to the
+     white theme its too dark i cant read whats on it") -- was a flat rgba(5,10,18,.62), which
+     only reads as near-black when the backdrop behind it is already dark. In light mode that
+     same translucent black blends DOWN against the pale cell tint into a muddy mid-grey, and
+     .flat's own text colour (var(--t3), tuned for text-on-pale everywhere else on this page)
+     is close enough in tone to that muddy grey to be nearly unreadable. Now a solid, opaque,
+     theme-tuned colour instead of a translucent one, so it never depends on what is behind it
+     -- pale surface tone here (pairs correctly with --rd/--gn/--t3, all already tuned for
+     text-on-pale), solid near-black in dark mode (visually ~identical to the old blended
+     value, since dark-theme cells were already dark behind it). */
+  --pill-bg:#ebe4d4;
+  --r:6px;--g:8px;
+  background:var(--bg);color:var(--t1);font-family:'Segoe UI',system-ui,sans-serif;font-size:12px;
+  display:flex;flex-direction:column;height:100vh;overflow:hidden;
+}
+/* DARK -- the page's original, only palette until 2026-10-01; now an override instead of the
+   sole option, same dual-guard pattern app.css's own :root dark block uses (OS preference via
+   media query, explicit choice via data-theme -- see that block's own comment for why both
+   are needed: a toggle-click sets data-theme and must win over the OS setting either way). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .adk{
+    --bg:#080F17;--s1:#0D1B2A;--s2:#112233;--s3:#162840;
+    --b:#1E3A55;--b2:#243F5C;
+    --rd:#FF5252;--rd-bg:#1A0000;--rd-b:#3D0000;
+    --rd2:#E07070;--rd2-bg:#140606;--rd2-b:#4A1515;
+    --am:#FFB347;--am-bg:#1A0E00;--am-b:#3D2800;
+    --pu:#A78BFA;--pu-bg:#0F0A1A;--pu-b:#2A1A4A;
+    --gn:#00E5A0;--gn-bg:#00140B;--gn-b:#003D28;
+    --cy:#00D4FF;--cy-bg:#001E2B;--cy-dim:#005A80;
+    --t1:#F0F6FF;--t2:#8BBFE0;--t3:#4E6B82;
+    --mu:#6E8398;--mu-bg:#0B141E;--mu-b:#22364B;
+    --dsy:#7A8EA8;--dsy-bg:#0C1520;--dsy-b:#1A2E44;
+    --di:#5E8A7A;--di-bg:#0A1814;--di-b:#163428;
+    --dsc:#A07850;--dsc-bg:#180E04;--dsc-b:#3A2010;
+    --dn:#5A7E9E;--dn-bg:#0A1420;--dn-b:#163040;
+    --dself:#00B8D4;--dself-bg:#001A1E;--dself-b:#003840;
+    --hover-line:rgba(255,255,255,.75);
+    --rd-fill:var(--rd);--rd2-fill:var(--rd2);--am-fill:var(--am);--pu-fill:var(--pu);
+    --fill-alpha-cap:1;
+    --heat-imminent:255,82,82;--heat-critical:224,112,112;--heat-warning:255,179,71;
+    --heat-note:167,139,250;--heat-muted:110,131,152;
+    --imm-bar-bg:#120808;--imm-bar-fg:#FF5252;
+    --pill-bg:#050A12;
+  }
+}
+:root[data-theme="dark"] .adk{
+  --bg:#080F17;--s1:#0D1B2A;--s2:#112233;--s3:#162840;
+  --b:#1E3A55;--b2:#243F5C;
+  --rd:#FF5252;--rd-bg:#1A0000;--rd-b:#3D0000;
+  --rd2:#E07070;--rd2-bg:#140606;--rd2-b:#4A1515;
+  --am:#FFB347;--am-bg:#1A0E00;--am-b:#3D2800;
+  --pu:#A78BFA;--pu-bg:#0F0A1A;--pu-b:#2A1A4A;
+  --gn:#00E5A0;--gn-bg:#00140B;--gn-b:#003D28;
+  --cy:#00D4FF;--cy-bg:#001E2B;--cy-dim:#005A80;
+  --t1:#F0F6FF;--t2:#8BBFE0;--t3:#4E6B82;
+  --mu:#6E8398;--mu-bg:#0B141E;--mu-b:#22364B;
+  --dsy:#7A8EA8;--dsy-bg:#0C1520;--dsy-b:#1A2E44;
+  --di:#5E8A7A;--di-bg:#0A1814;--di-b:#163428;
+  --dsc:#A07850;--dsc-bg:#180E04;--dsc-b:#3A2010;
+  --dn:#5A7E9E;--dn-bg:#0A1420;--dn-b:#163040;
+  --dself:#00B8D4;--dself-bg:#001A1E;--dself-b:#003840;
+  --hover-line:rgba(255,255,255,.75);
+  --rd-fill:var(--rd);--rd2-fill:var(--rd2);--am-fill:var(--am);--pu-fill:var(--pu);
+  --fill-alpha-cap:1;
+  --heat-imminent:255,82,82;--heat-critical:224,112,112;--heat-warning:255,179,71;
+  --heat-note:167,139,250;--heat-muted:110,131,152;
+  --imm-bar-bg:#120808;--imm-bar-fg:#FF5252;
+  --pill-bg:#050A12;
+}
+/* height:100vh + overflow:hidden (2026-09-30 fix), not min-height:100vh -- matches the
+   supplied mockup's own html,body{height:100vh;overflow:hidden} exactly. A min-height is only
+   a FLOOR: it never stops the page from growing taller than the viewport when content wants
+   more room, which is what was happening -- the whole page kept growing instead of individual
+   panels scrolling. With a hard height cap here, every flex:1/min-height:0 descendant below is
+   forced to fit the actual viewport, so overflow has nowhere to go but each panel's own
+   .tw{overflow-y:auto} -- one page, scrollable panels, same as the reference. */
+.adk *{box-sizing:border-box}
+.adk .page{flex:1;min-height:0;display:flex;flex-direction:column;padding:var(--g);gap:var(--g);overflow:hidden}
+.adk .subtitle{font-size:11px;color:var(--t3);margin:0;flex-shrink:0}
+.adk .subtitle-row{display:flex;align-items:center;gap:12px;flex-shrink:0}
+/* "Mute recurring" button (2026-10-01, on request: a dashboard button "that triggers the
+   mechanism we just defined" -- see alert_catalog.run_recurring_auto_mute's own docstring). */
+.adk .mute-recurring-row{margin-left:auto;display:flex;align-items:center;gap:8px}
+.adk .mute-recurring-msg{font-size:10.5px;color:var(--t3)}
+.adk .subtitle a{color:var(--t2)}
+.adk .subtitle a:hover{color:var(--t1)}
+.adk .stats{display:grid;grid-template-columns:repeat(7,1fr);gap:var(--g);flex-shrink:0}
+.adk .sc{background:var(--s1);border:1px solid var(--b);border-radius:var(--r);padding:8px 12px}
+.adk .sl2{font-size:9px;color:var(--t3);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:3px}
+.adk .sv{font-size:18px;font-weight:500}
+.adk .ss{font-size:10px;color:var(--t3);margin-top:2px}
+.adk .body{flex:1;min-height:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));gap:var(--g)}
+.adk .stack{display:flex;flex-direction:column;gap:var(--g);min-height:0;min-width:0}
+.adk .stack > .cd{flex:1 1 0}
+.adk .stack > .cd:first-child{flex-grow:1.2}
+.adk .cd{background:var(--s1);border:1px solid var(--b);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column;min-height:0;min-width:0}
+.adk .ch{padding:7px 12px;border-bottom:1px solid var(--b);display:flex;align-items:center;gap:8px;flex-shrink:0;min-width:0}
+.adk .stack .ch{padding:5px 10px}
+.adk .ct{font-size:11px;font-weight:500;white-space:nowrap}
+.adk .cs{font-size:9px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.adk .badge{margin-left:auto;flex-shrink:0;font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px}
+.adk .cf{padding:5px 12px;border-top:1px solid var(--b);font-size:9px;color:var(--t3);flex-shrink:0}
+.adk .tw{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto}
+/* Themed scrollbar for every scrollable spot on this page (2026-10-06, "edit scrolbars to fit
+   the design more") -- var(--s2)/var(--b2)/var(--cy) are this page's own existing theme-role
+   vars (surface tier, secondary border, accent), already re-tuned per light/dark at the top of
+   this file, so one rule covers both without a separate copy -- same reasoning the .exec2
+   dashboards' own scrollbar fix just used, applied to THIS page's own variable names instead.
+   .mx-wrap/.mx-mbody are the Alert Matrix popup's own two scroll spots; .tw is every stack
+   panel's row table. */
+.adk .tw, .adk .mx-wrap, .adk .mx-mbody{scrollbar-width:thin;scrollbar-color:var(--b2) var(--s2)}
+.adk .tw::-webkit-scrollbar, .adk .mx-wrap::-webkit-scrollbar, .adk .mx-mbody::-webkit-scrollbar{width:7px}
+.adk .tw::-webkit-scrollbar-track, .adk .mx-wrap::-webkit-scrollbar-track, .adk .mx-mbody::-webkit-scrollbar-track{background:var(--s2);border-radius:4px}
+.adk .tw::-webkit-scrollbar-thumb, .adk .mx-wrap::-webkit-scrollbar-thumb, .adk .mx-mbody::-webkit-scrollbar-thumb{background:var(--b2);border-radius:4px}
+.adk .tw::-webkit-scrollbar-thumb:hover, .adk .mx-wrap::-webkit-scrollbar-thumb:hover, .adk .mx-mbody::-webkit-scrollbar-thumb:hover{background:var(--cy)}
+/* NOT flex:1/height:100% (2026-09-30 fix) -- that forced every <table> to fill its whole
+   column height, and the browser's default table layout then spreads that leftover height
+   EVENLY across every <tr>, however many there are. Fine for the mockup's fixed ~5 example
+   rows; with real data (a Warning panel alone can carry 90+ rows) it blew each row up to
+   ~4x its natural height, producing exactly the "unnecessary empty space, hard to read"
+   effect the mockup itself never has (it never had more rows than fit). Rows now keep their
+   natural compact height; a panel with FEW rows gets one trailing blank gap below the table
+   instead of the gap being smeared across every row, and a panel with MANY rows scrolls
+   (.tw's own overflow-y:auto) at natural, legible row height instead of stretching. */
+.adk .tw > table{width:100%}
+.adk .tbl2{width:100%;border-collapse:collapse}
+.adk .tbl2 th{padding:5px 10px;font-size:9px;font-weight:600;letter-spacing:.06em;color:var(--t3);text-transform:uppercase;text-align:left;border-bottom:1px solid var(--b);white-space:nowrap;height:1px}
+.adk .tbl2 td{padding:4px 10px;font-size:11px;color:var(--t2);border-bottom:1px solid var(--b);vertical-align:middle;white-space:nowrap}
+.adk .tbl2 tr:last-child td{border-bottom:none}
+.adk .tbl2 tbody tr:hover td{background:var(--s2)}
+.adk .tbl2 td:first-child{width:100%;max-width:0;overflow:hidden;text-overflow:ellipsis}
+.adk .nm{color:var(--t1);font-weight:500;font-size:11px}
+.adk .fv{color:var(--t1);font-size:11px;font-weight:500}
+.adk .st-f{display:flex;align-items:center;gap:4px;color:var(--rd);font-size:10px}
+.adk .st-ok{font-size:10px;color:var(--gn)}
+.adk .st-mu{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--mu)}
+.adk .muted td:first-child{width:36%}
+.adk .muted td:first-child .nm{text-decoration:line-through;color:var(--t2);font-weight:400}
+.adk .muted td:last-child{width:44%;max-width:0;overflow:hidden;text-overflow:ellipsis;font-size:10px;color:var(--t3)}
+.adk .pl{display:inline-flex;align-items:center;padding:2px 6px;border-radius:20px;font-size:9px;font-weight:600;white-space:nowrap}
+.adk .pl-rd{background:var(--rd-bg);color:var(--rd);border:1px solid var(--rd-b)}
+.adk .pl-rd2{background:var(--rd2-bg);color:var(--rd2);border:1px solid var(--rd2-b)}
+.adk .pl-am{background:var(--am-bg);color:var(--am);border:1px solid var(--am-b)}
+.adk .pl-pu{background:var(--pu-bg);color:var(--pu);border:1px solid var(--pu-b)}
+.adk .pl-dsy{background:var(--dsy-bg);color:var(--dsy);border:1px solid var(--dsy-b)}
+.adk .pl-di{background:var(--di-bg);color:var(--di);border:1px solid var(--di-b)}
+.adk .pl-dsc{background:var(--dsc-bg);color:var(--dsc);border:1px solid var(--dsc-b)}
+.adk .pl-dn{background:var(--dn-bg);color:var(--dn);border:1px solid var(--dn-b)}
+.adk .pl-dself{background:var(--dself-bg);color:var(--dself);border:1px solid var(--dself-b)}
+.adk .pulse{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--rd);animation:adkp 1.4s ease-in-out infinite}
+@keyframes adkp{0%,100%{opacity:1}50%{opacity:.3}}
+.adk .trend-u{font-size:9px;color:var(--rd)}
+.adk .trend-d{font-size:9px;color:var(--gn)}
+.adk .trend-f{font-size:9px;color:var(--t3)}
+.adk .lg{display:flex;align-items:center;gap:8px;margin-left:auto;flex-shrink:0}
+.adk .li{display:flex;align-items:center;gap:3px;font-size:8px;color:var(--t3)}
+.adk .li i{width:7px;height:7px;border-radius:2px;display:inline-block}
+.adk .grps{flex:1;display:flex;flex-direction:column;min-height:0;padding:2px 10px}
+.adk .grp-row{flex:1;display:flex;align-items:center;gap:8px;min-height:0}
+.adk .grp-row .pl{width:78px;justify-content:center;flex-shrink:0;padding:0 6px;line-height:12px}
+.adk .grp-row b{width:26px;text-align:right;font-size:10px;font-weight:500;color:var(--t2);flex-shrink:0}
+.adk .seg{flex:1;display:flex;gap:2px;height:min(21px,70%);min-height:12px;min-width:0}
+.adk .seg > div{display:flex;align-items:center;justify-content:center;border-radius:2px;min-width:0;overflow:hidden;font-size:13.2px;font-weight:700;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5);line-height:1;transition:filter .1s ease,transform .1s ease}
+/* Hover feedback (2026-10-01, on request: "make alert domains and severity trend graphs
+   interactive a bit") -- brighten + lift slightly on hover. cursor stays default, not pointer
+   -- these aren't clickable, just hoverable for the exact value, so the cursor shouldn't
+   promise an action that doesn't exist. */
+.adk .seg > div:hover{filter:brightness(1.25);transform:scaleY(1.15);z-index:1}
+.adk [data-tip]:focus-visible{outline:2px solid var(--t2);outline-offset:1px}
+/* Shared tooltip (2026-10-01 follow-up: "it needs to say something... right now there is
+   nothing"). A pure-CSS content:attr(data-tip) ::after attempt was tried first and dropped --
+   position:absolute positioned it relative to the segment's own small box, and getting that to
+   reliably clear .cd's own overflow:hidden for a row sitting at a panel's top edge (and stay
+   correctly stacked above LATER sibling rows) turned into exactly the kind of containing-
+   block/z-index edge case this fix needed to not have. One shared #adkTip instead, JS-
+   positioned via getBoundingClientRect() same as every popup on this page already is --
+   position:fixed escapes any ancestor's overflow/stacking context entirely, the same reason
+   .mx-scrim already works reliably regardless of which panel opened it. */
+.adk-tip{position:fixed;background:var(--s1);color:var(--t1);font-size:10px;font-weight:600;
+  white-space:nowrap;padding:4px 9px;border-radius:6px;border:1px solid var(--b2);
+  box-shadow:0 6px 16px -4px rgba(0,0,0,.6);z-index:150;pointer-events:none;
+  opacity:0;transition:opacity .08s ease}
+.adk-tip.show{opacity:1}
+.adk .c-rd{background:var(--rd-fill)}.adk .c-rd2{background:var(--rd2-fill)}.adk .c-am{background:var(--am-fill)}.adk .c-pu{background:var(--pu-fill)}
+.adk .trend{flex:1;min-height:0;display:flex;padding:5px 10px 3px 4px}
+.adk .yax{display:flex;flex-direction:column;justify-content:space-between;padding-bottom:12px;width:24px;text-align:right;font-size:8px;color:var(--t3)}
+.adk .yax span{line-height:0}
+.adk .plot{flex:1;display:flex;flex-direction:column;margin-left:6px;min-width:0}
+.adk .bars{flex:1;display:flex;gap:6px;min-height:0;background:linear-gradient(var(--b) 1px,transparent 1px) 0 0/100% 25%;border-bottom:1px solid var(--b)}
+.adk .day{flex:1;display:flex;align-items:flex-end;gap:1px}
+.adk .day > div:hover{filter:brightness(1.3)}
+/* min-height:2px (2026-10-01 fix) -- a day with 0 findings for a tier renders at inline
+   height:0%, which has literally no hoverable area at all; without this, that bar's own
+   tooltip (correctly showing "0") was simply unreachable by a mouse. */
+.adk .day > div{flex:1;border-radius:1px 1px 0 0;opacity:.85;min-height:2px}
+.adk .days{display:flex;gap:6px;height:12px;align-items:flex-end}
+.adk .days span{flex:1;text-align:center;font-size:8px;color:var(--t3)}
+
+/* ---------- Alert Matrix (2026-10-01) -- rows=alert type, columns=domain. Palette reuses
+   .adk's own CSS vars throughout (NOT the mockup's separate --heat/--up/--down/--net/--sys
+   system) so these three panels stay visually consistent with the rest of this already-built
+   page -- --heat/--accent-mx are the only two set per-instance (inline, per tier). ---------- */
+.adk .mx-toolbar{display:flex;align-items:center;gap:10px;padding:4px 12px 2px;font-size:10px;color:var(--t3);flex-shrink:0}
+.adk .mx-seg{display:inline-flex;background:var(--s2);border:1px solid var(--b);border-radius:7px;padding:2px}
+.adk .mx-seg button{background:transparent;border:0;color:var(--t3);font:inherit;font-size:10px;font-weight:600;border-radius:5px;padding:4px 9px;cursor:pointer}
+.adk .mx-seg button[aria-pressed="true"]{color:var(--t1);background:var(--s3)}
+.adk .mx-seg button:focus-visible{outline:2px solid var(--accent-mx,var(--rd));outline-offset:1px}
+.adk .mx-legend{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:9px}
+.adk .mx-ramp{width:60px;height:5px;border-radius:3px;background:linear-gradient(90deg,rgba(var(--heat),.1),rgba(var(--heat),.9))}
+.adk .mx-wrap{flex:1;min-height:0;overflow:auto;padding:6px 10px}
+.adk .mx-table{border-collapse:separate;border-spacing:4px;width:100%;min-width:480px;table-layout:fixed}
+.adk .mx-table col.c-row{width:120px} .adk .mx-table col.c-tot{width:46px}
+.adk .mx-table thead th{font-size:9px;font-weight:600;color:var(--t2);text-align:center;padding:1px 2px 4px}
+.adk .mx-table thead th .dot{display:inline-block;width:6px;height:6px;border-radius:2px;margin-right:4px;background:var(--c)}
+.adk .mx-table thead th.tot{color:var(--t3);font-weight:500}
+.adk .mx-table th.row{text-align:left;font-size:10px;font-weight:600;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:2px}
+.adk .mx-table td.cell,.adk .mx-table td.empty{height:40px;border-radius:5px;text-align:center;vertical-align:middle;white-space:nowrap}
+.adk .mx-table td.cell{position:relative;cursor:pointer;
+  background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,0) 60%),rgba(var(--heat),min(var(--a,.08),var(--fill-alpha-cap,1)));
+  border:1px solid rgba(var(--heat),calc(min(var(--a,.08),var(--fill-alpha-cap,1)) + .1));
+  transition:transform .12s ease,box-shadow .12s ease,border-color .12s}
+.adk .mx-table td.cell:hover,.adk .mx-table td.cell:focus-visible{outline:none;transform:translateY(-1px);border-color:var(--hover-line);box-shadow:0 6px 14px -6px rgba(0,0,0,.7)}
+.adk .mx-table td.cell .n{font-size:15px;font-weight:700;line-height:1;letter-spacing:-.2px;color:var(--t1);text-shadow:0 1px 2px rgba(0,0,0,.45)}
+.adk .mx-table td.cell .t{display:inline-block;margin-top:3px;font-size:8.5px;font-weight:650;padding:1px 5px;border-radius:999px;background:var(--pill-bg)}
+.adk .mx-table td.cell.hot .t{background:var(--pill-bg)}
+/* NOT a dark-only up/down/flat text colour override here (2026-10-01 fix) -- the mockup's
+   original #8d0f1c/#075235/#4a3510 dark-on-light trio assumed the trend pill sat directly on
+   the bright hot tile with no backing of its own. Once the pill got its own solid background
+   (--pill-bg, see .t's own rule above -- opaque and theme-tuned, not the translucent
+   rgba(5,10,18,.62) it used to be; that fix is a SEPARATE 2026-10-01 round, see --pill-bg's
+   own comment up in .adk's var block, for "that gray pill color does not translate to the
+   white theme"), dark-on-dark text became the risk instead. Every trend badge uses the same
+   --rd/--gn/--t3 .up/.down/.flat colours below in both themes -- they already pair correctly
+   with --pill-bg since both flip together per theme. */
+.adk .mx-table td.cell.ok{background:rgba(52,211,153,.06);border:1px dashed var(--gn-b)}
+.adk .mx-table td.cell.ok .n{color:var(--gn)}
+/* Muted (2026-10-01) -- same heat-scaled shading formula as .firing (JS computes --a the
+   identical way), just over --heat set to a grey triplet (MUTED_HEAT) instead of a tier's own
+   red/amber/purple, and deliberately NO .firing/mxshock pulse -- muting is the one state on
+   this whole page that must never visually escalate, however much volume is behind it. */
+.adk .mx-table td.cell.muted{
+  background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,0) 60%),rgba(var(--heat),var(--a,.1));
+  border:1px dashed rgba(var(--heat),.55)}
+/* NOT color:var(--mu) here (2026-10-01 fix) -- that's a grey-blue sitting on this tile's own
+   grey-shaded background, the exact low-contrast mistake the "make all tile numbers white"
+   fix already corrected for .hot. Inherits .cell .n's plain white (var(--t1)) instead, same
+   as every other tile regardless of state. */
+.adk .mx-table td.empty{color:var(--t3);font-size:10px;border:1px dashed var(--b);background:repeating-linear-gradient(135deg,transparent 0 6px,rgba(255,255,255,.015) 6px 12px)}
+.adk .mx-table .up{color:var(--rd)} .adk .mx-table .down{color:var(--gn)} .adk .mx-table .flat{color:var(--t3)}
+.adk .mx-table td.cell.firing{animation:mxshock 2s cubic-bezier(.2,.6,.4,1) infinite}
+.adk .mx-table td.cell.firing.rising{animation-duration:1.1s}
+@keyframes mxshock{0%{box-shadow:0 0 0 0 rgba(var(--heat),.55)}100%{box-shadow:0 0 0 6px rgba(var(--heat),0)}}
+.adk .mx-table td.tot{text-align:center;font-size:11px;font-weight:650;color:var(--t2);position:relative}
+.adk .mx-table td.tot .bar{display:block;height:2px;border-radius:2px;margin:4px auto 0;background:rgba(var(--heat),.7)}
+.adk .mx-table tfoot td{text-align:center;font-size:10px;font-weight:650;color:var(--t3);padding-top:3px;border-top:1px solid var(--b)}
+.adk .mx-table tfoot td.grand{color:var(--t1)}
+/* Folded (all-clear) rows (2026-10-01, on request: "fold metrix rows with all no incidences
+   accross all domans") -- real <tr>s, just hidden by default so a long, mostly-quiet matrix
+   doesn't push genuinely firing rows below the fold; toggled open via .mx-fold-btn. */
+.adk .mx-table tr.mx-foldrow{display:none}
+.adk .mx-table.show-folded tr.mx-foldrow{display:table-row}
+.adk .mx-foldtoggle td{padding:3px 2px;border:none}
+.adk .mx-fold-btn{width:100%;font:inherit;font-size:10.5px;font-weight:600;color:var(--t3);background:var(--s2);border:1px dashed var(--b);border-radius:6px;padding:5px 8px;cursor:pointer;text-align:center}
+.adk .mx-fold-btn:hover,.adk .mx-fold-btn:focus-visible{color:var(--t1);border-color:var(--b2);outline:none}
+.adk .mx-note{padding:2px 12px 6px;font-size:9px;color:var(--t3);flex-shrink:0}
+
+/* ---------- shared popup -- one instance, reused by all three matrix panels ---------- */
+.adk .mx-scrim{position:fixed;inset:0;background:rgba(3,8,15,.7);backdrop-filter:blur(3px);display:none;align-items:flex-start;justify-content:center;padding:7vh 16px;z-index:200}
+.adk .mx-scrim.open{display:flex}
+/* Third screen stacks ABOVE the affected-items popup, not instead of it (2026-10-01). */
+.adk .cmt-scrim{z-index:210}
+.adk .cmt-modal{max-width:520px}
+.adk .mx-modal{width:100%;max-width:640px;max-height:84vh;display:flex;flex-direction:column;overflow:hidden;background:var(--s1);border:1px solid var(--b2);border-radius:12px;box-shadow:0 30px 80px -10px rgba(0,0,0,.8);animation:mxpop .16s ease-out;font-size:12px}
+@keyframes mxpop{from{transform:translateY(10px) scale(.985);opacity:0}to{transform:none;opacity:1}}
+.adk .mx-mhead{position:relative;display:flex;align-items:flex-start;gap:12px;padding:16px 18px 12px;background:linear-gradient(90deg,rgba(var(--heat-mx,255,82,82),.14),rgba(0,0,0,0) 70%)}
+.adk .mx-mhead::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent-mx,var(--rd))}
+.adk .mx-mhead.is-ok{background:linear-gradient(90deg,rgba(52,211,153,.1),transparent 70%)}
+.adk .mx-mhead.is-ok::before{background:var(--gn)}
+.adk .mx-mhead.is-muted{background:linear-gradient(90deg,rgba(110,131,152,.12),transparent 70%)}
+.adk .mx-mhead.is-muted::before{background:var(--mu)}
+.adk .mx-mtitle{flex:1;min-width:0}
+.adk .mx-mtitle h3{margin:0;font-size:16px;font-weight:650;color:var(--t1)}
+.adk .mx-ctx{margin-top:6px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:11px;color:var(--t3)}
+.adk .mx-pill{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid var(--b2);color:var(--t2);background:var(--s2)}
+.adk .mx-pill .dot{width:6px;height:6px;border-radius:2px;background:var(--c)}
+.adk .mx-pill.firing{color:var(--rd);border-color:var(--rd-b)}
+.adk .mx-pill.ok{color:var(--gn);border-color:var(--gn-b)}
+.adk .mx-pill.unconfigured{color:var(--gn);border-color:var(--gn-b)}
+.adk .mx-pill.muted{color:var(--mu);border-color:var(--mu-b)}
+.adk .mx-x{flex:none;background:var(--s2);border:1px solid var(--b);color:var(--t3);width:28px;height:28px;border-radius:7px;font-size:16px;line-height:1;cursor:pointer}
+.adk .mx-x:hover,.adk .mx-x:focus-visible{color:var(--t1);border-color:var(--b2);outline:none}
+.adk .mx-mstats{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;padding:10px 18px}
+.adk .mx-stat{background:var(--s2);border:1px solid var(--b);border-radius:9px;padding:8px 10px}
+.adk .mx-stat b{display:block;font-size:17px;font-weight:700;line-height:1.1;color:var(--t1)}
+.adk .mx-stat span{font-size:10px;color:var(--t3)}
+.adk .mx-mfilter{padding:2px 18px 6px;position:relative}
+.adk .mx-mfilter svg{position:absolute;left:30px;top:50%;transform:translateY(-55%);width:13px;height:13px;stroke:var(--t3)}
+.adk .mx-mfilter input{width:100%;background:var(--s2);border:1px solid var(--b);color:var(--t1);border-radius:7px;padding:8px 10px 8px 32px;font:inherit;font-size:12px}
+.adk .mx-mfilter input:focus{outline:none;border-color:var(--b2);box-shadow:0 0 0 3px rgba(59,85,118,.35)}
+.adk .mx-mbody{overflow-y:auto;padding:4px 18px 14px}
+.adk .mx-sys{margin-top:10px}
+.adk .mx-sys-h{display:flex;align-items:center;gap:8px;font-size:11px;font-weight:650;color:var(--t2);padding:4px 2px 5px}
+.adk .mx-sys-h .cnt{margin-left:auto;font-size:10px;color:var(--t3);font-weight:500}
+.adk .mx-item{display:grid;grid-template-columns:1fr auto;gap:3px 12px;align-items:center;padding:9px 11px 8px;margin-bottom:5px;border-radius:8px;background:var(--s2);border:1px solid var(--b);border-left:3px solid var(--sev,var(--accent-mx,var(--rd)))}
+/* Clickable only inside the affected-items popup (2026-10-01, on request: "the detailed
+   alert on the second screen must also be clickable") -- the comment list in the third
+   screen reuses .mx-item's own layout but is never itself a further drill-down target. */
+.adk .mx-item.clickable{cursor:pointer}
+.adk .mx-item.clickable:hover,.adk .mx-item.clickable:focus-visible{border-color:var(--b2);box-shadow:0 4px 10px -4px rgba(0,0,0,.5);outline:none}
+.adk .mx-path{font-size:12px;color:var(--t2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.adk .mx-path .sep{color:var(--t3);margin:0 5px}
+.adk .mx-path .leaf{color:var(--t1);font-weight:650}
+.adk .mx-host{font-size:10.5px;color:var(--t3)}
+.adk .mx-host code{font-family:inherit;color:var(--t2)}
+.adk .mx-val{grid-row:1/3;grid-column:2;text-align:right}
+.adk .mx-val .v{font-size:14px;font-weight:700;color:var(--sev,var(--t1))}
+.adk .mx-val .s{font-size:10px;color:var(--t3)}
+.adk .mx-meter{grid-column:1/3;height:4px;background:var(--b);border-radius:2px;margin-top:5px;overflow:hidden}
+.adk .mx-meter i{display:block;height:100%;border-radius:2px;background:var(--sev,var(--accent-mx,var(--rd)))}
+/* Mute reason (2026-10-01, on request: "have the pop up screen show mute reason") -- only
+   present on items from muted_matrix() (see _affected_item's own "reason" comment); ordinary
+   severity_matrix() items never carry this field, so the JS only emits the line when present. */
+.adk .mx-reason{grid-column:1/3;font-size:10.5px;color:var(--mu);margin-top:4px;font-style:italic;white-space:normal}
+.adk .mx-reason b{font-style:normal;font-weight:650}
+.adk .mx-unmute-btn{font-style:normal;font-size:10px;font-weight:600;color:var(--mu);background:var(--mu-bg);border:1px solid var(--mu-b);border-radius:999px;padding:2px 9px;margin-left:6px;cursor:pointer}
+.adk .mx-unmute-btn:hover{filter:brightness(1.08)}
+.adk .mx-unmute-btn:disabled{opacity:.6;cursor:default}
+.adk .mx-unmute-note{font-style:normal;font-size:10px;color:var(--rd);margin-top:4px}
+.adk .mx-unconfigured-note{grid-column:1/3;font-size:10.5px;color:var(--gn);margin-top:4px;font-style:italic}
+.adk .mx-drill-hint{grid-column:1/3;display:flex;align-items:center;gap:3px;font-size:10px;color:var(--t3);margin-top:5px;padding-top:5px;border-top:1px dashed var(--b)}
+.adk .mx-item.clickable:hover .mx-drill-hint,.adk .mx-item.clickable:focus-visible .mx-drill-hint{color:var(--t1)}
+.adk .mx-drill-hint .car{font-size:12px;line-height:1}
+.adk .mx-none{padding:24px 0;text-align:center;color:var(--t3);font-size:12px}
+.adk .cmt-item{padding:10px 11px;margin-bottom:8px;border-radius:8px;background:var(--s2);border:1px solid var(--b)}
+.adk .cmt-item .cmt-meta{display:flex;gap:8px;align-items:baseline;font-size:10.5px;color:var(--t3);margin-bottom:5px}
+.adk .cmt-item .cmt-meta b{color:var(--t2);font-weight:650}
+.adk .cmt-item .cmt-text{font-size:12px;color:var(--t1);white-space:pre-wrap;line-height:1.45}
+.adk .cmt-actions{margin-top:8px}
+/* Mute mini-form (2026-10-01, on request: "mute alert and use one of their comments as mute
+   reason") -- appended into the clicked comment's own card, not a separate popup layer, since
+   it is quoting/acting on THAT card's own text. */
+.adk .cmt-mute-form{margin-top:9px;padding-top:9px;border-top:1px dashed var(--b)}
+.adk .cmt-mute-row{display:block;font-size:10.5px;color:var(--t3);margin-bottom:8px}
+.adk .cmt-mute-row b{color:var(--t1)}
+.adk .cmt-mute-row textarea,.adk .cmt-mute-row select,.adk .cmt-mute-row input{display:block;width:100%;margin-top:4px;background:var(--s1);border:1px solid var(--b);color:var(--t1);border-radius:6px;padding:6px 8px;font:inherit;font-size:11.5px;box-sizing:border-box}
+.adk .cmt-mute-row textarea{resize:vertical}
+.adk .cmt-mute-msg{font-size:10.5px;min-height:14px;margin-bottom:6px;color:var(--t3)}
+.adk .cmt-mute-actions{display:flex;gap:7px}
+.adk .cmt-mute-done{margin-top:9px;padding:8px 10px;border-radius:8px;background:var(--gn-bg);color:var(--gn);border:1px solid var(--gn-b);font-size:11.5px;font-weight:600}
+/* Access-denied panel (2026-10-02, on request: "a cleanly designed error page showning
+   access control restrictions should pop up when you try to mute an alert that does not
+   belong to your group") -- swapped in for the mute mini-form itself on a 403
+   access_denied response, same "replace the form" pattern .cmt-mute-done already uses for
+   the success case, just the am/warning palette instead of green. */
+.adk .cmt-access-denied{margin-top:9px;padding:10px 12px;border-radius:8px;background:var(--am-bg);border:1px solid var(--am-b)}
+.adk .cmt-access-denied .cad-title{color:var(--am);font-weight:700;font-size:11.5px;margin-bottom:4px}
+.adk .cmt-access-denied .cad-body{color:var(--t2);font-size:11px;line-height:1.5}
+.adk .cmt-access-denied .cad-body b{color:var(--t1)}
+.adk .cmt-mute-blocked{margin-top:9px;padding:10px 12px;border-radius:8px;background:var(--am-bg);border:1px solid var(--am-b);color:var(--t2);font-size:11px;line-height:1.5}
+.adk .mx-mfoot{display:flex;align-items:center;gap:7px;padding:10px 18px;border-top:1px solid var(--b);background:var(--s2)}
+.adk .mx-bulk{display:flex;align-items:center;gap:12px}
+.adk .mx-selall{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--t2);cursor:pointer;user-select:none}
+.adk .mx-bulk-form{padding:12px 18px;border-top:1px solid var(--b);background:var(--s2)}
+.adk .mx-sel-wrap{display:inline-flex;align-items:center;gap:4px;cursor:pointer;margin-right:10px;user-select:none}
+.adk .mx-sel-wrap input{cursor:pointer}
+.adk .mx-btn{font:inherit;font-size:11px;font-weight:600;border-radius:7px;padding:6px 12px;cursor:pointer;background:transparent;border:1px solid var(--b2);color:var(--t2)}
+.adk .mx-btn:hover{color:var(--t1);border-color:var(--b2)}
+.adk .mx-btn.primary{background:#1d4370;border-color:#2c5e98;color:#fff}
+.adk .mx-btn.primary:hover{background:#235089}
+.adk .mx-btn:focus-visible{outline:2px solid var(--accent-mx,var(--rd));outline-offset:1px}
+@media (max-width:560px){ .adk .mx-mstats{grid-template-columns:repeat(2,1fr)} }
+@media (prefers-reduced-motion:reduce){
+  .adk .mx-table td.cell.firing,.adk .badge i,.adk .pulse,.adk .mx-modal{animation:none!important}
+  .adk .mx-table td.cell{transition:none!important}
+}
+
+@media (max-width:1280px){
+  .adk .tbl2 th,.adk .tbl2 td{padding-left:6px;padding-right:6px}
+  .adk .grp-row .pl{width:auto}
+  .adk .stack .cs{display:none}
+  .adk .stats{grid-template-columns:repeat(4,1fr)}
+}
+</style>
+
+<div class="adk" id="adkRoot">
+<div class="page">
+
+  {% comment %}
+    home_url (2026-10-01, replacing a hardcoded management_dashboard_focused link) -- this page
+    is now reachable by five different roles, each with its own landing page (roles.ROLE_HOME);
+    a Management-only destination would bounce every one of them. home_url already resolves the
+    correct one per viewer (see context.role_flags/_home_url), the same value the brand pill's
+    own home link uses.
+  {% endcomment %}
+  <div class="subtitle-row">
+    <p class="subtitle"><a href="{{ home_url }}">‹ Back</a> · As of {{ generated_at|date:"d M Y, H:i" }}</p>
+    {% if can_mute %}
+    {% comment %}
+      "Mute recurring" (2026-10-01, on request: a button "that triggers the mechanism we just
+      defined" -- the recurring-comment auto-mute built the same day). Same is_role_admin gate
+      as every other silence-creating action on this page (the comment popup's own quick-mute,
+      config_alerts' own silence form) -- hidden entirely for a viewer who could never use it,
+      not shown disabled.
+    {% endcomment %}
+    <div class="mute-recurring-row">
+      <span class="mute-recurring-msg" id="muteRecurringMsg"></span>
+      <button type="button" class="mx-btn" id="muteRecurringBtn" data-url="{{ mute_recurring_url }}">Mute recurring</button>
+    </div>
+    {% comment %}
+      Confirmation dialog (2026-10-02, on request: "the mute recurring button should also
+      open a confirmation dialog where it shows the results of its assessments which alerts
+      qualify for mute and a confirmation button") -- preview first (no AlertSilence written
+      yet), admin reviews the real list, confirms or cancels. Reuses the existing
+      .mx-scrim/.mx-modal shell the comment/affected-items popups already use.
+    {% endcomment %}
+    <div class="mx-scrim" id="recurScrim">
+      <div class="mx-modal" style="max-width:600px">
+        <div class="mx-mhead">
+          <div class="mx-mtitle"><h3>Mute recurring issues</h3><div class="mx-ctx" id="recurCtx"></div></div>
+          <button class="mx-x" id="recurClose" type="button" aria-label="Close">&times;</button>
+        </div>
+        <div class="mx-mbody" id="recurBody"></div>
+        <div class="mx-mfoot">
+          <button class="mx-btn" id="recurCancel" type="button">Cancel</button>
+          <button class="mx-btn primary" id="recurConfirm" type="button">Confirm mute</button>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="stats">
+    <div class="sc"><div class="sl2">Total rules</div><div class="sv">{{ state.total_rules }}</div><div class="ss">across 3 domains · Security n/a</div></div>
+    <div class="sc"><div class="sl2">Currently firing</div><div class="sv" style="color:var(--rd);display:flex;align-items:center;gap:8px">{{ state.firing.total }} {% if state.firing.total %}<span class="pulse"></span>{% endif %}</div><div class="ss">{{ state.firing.imminent }} imminent · {{ state.firing.critical }} critical · {{ state.firing.warning }} warning</div></div>
+    <div class="sc"><div class="sl2">Muted</div><div class="sv" style="color:var(--t3)">{{ muted_suppressed_total }}</div><div class="ss">suppressed · {{ state.muted }} active rule{{ state.muted|pluralize }}</div></div>
+    <div class="sc"><div class="sl2">Total firings</div><div class="sv">{{ state.last_30d_total }}</div><div class="ss">last 30 days · avg {{ state.last_30d_avg_per_day }}/day</div></div>
+    <div class="sc"><div class="sl2">Notifications today</div><div class="sv">{{ notif.total }}</div><div class="ss">{{ notif.fired }} fired · {{ notif.resolved }} resolved</div></div>
+    <div class="sc"><div class="sl2">Avg time to resolve</div><div class="sv">{% if resolve_hours != None %}{{ resolve_hours }}h{% else %}—{% endif %}</div><div class="ss">last 30 days</div></div>
+    <div class="sc"><div class="sl2">Default alert window</div><div class="sv">{{ default_window.default_alert_window_start|time:"H:i" }}–{{ default_window.default_alert_window_end|time:"H:i" }}</div><div class="ss">applies to any group with no schedule of its own · per-group overrides apply</div></div>
+  </div>
+
+  <div class="body">
+
+    <div class="stack">
+      <div class="cd">
+        <div class="ch">
+          <span class="ct">Alert domains</span><span class="cs">severity · 30d</span>
+          <div class="lg">
+            <div class="li"><i style="background:var(--rd)"></i>Imm</div>
+            <div class="li"><i style="background:var(--rd2)"></i>Crit</div>
+            <div class="li"><i style="background:var(--am)"></i>Warn</div>
+            <div class="li"><i style="background:var(--pu)"></i>Note</div>
+          </div>
+        </div>
+        <div class="grps">
+          {% for d in domain_rows %}
+          <div class="grp-row">
+            <span class="pl pl-{{ d.css }}">{{ d.name }}</span>
+            {% if d.segments %}
+            <div class="seg">
+              {% for seg in d.segments %}<div class="c-{{ seg.css }}" style="flex:{{ seg.flex }}" title="{{ seg.title }}" data-tip="{{ seg.title }}" aria-label="{{ seg.title }}" tabindex="0">{% if seg.count %}{{ seg.count }}{% endif %}</div>{% endfor %}
+            </div>
+            <b>{{ d.total }}</b>
+            {% else %}
+            <div class="seg" style="opacity:.35"><div style="flex:1;background:var(--s3)"></div></div>
+            <b style="color:var(--t3)">n/a</b>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="cd">
+        <div class="ch">
+          <span class="ct">Severity trends</span><span class="cs">last 7 days</span>
+          <div class="lg">
+            <div class="li"><i style="background:var(--rd)"></i>Imm</div>
+            <div class="li"><i style="background:var(--rd2)"></i>Crit</div>
+            <div class="li"><i style="background:var(--am)"></i>Warn</div>
+            <div class="li"><i style="background:var(--pu)"></i>Note</div>
+          </div>
+        </div>
+        <div class="trend">
+          <div class="yax">{% for y in trend_yaxis %}<span>{{ y }}</span>{% endfor %}</div>
+          <div class="plot">
+            <div class="bars">
+              {% for day in trend_days %}
+              <div class="day">
+                {% for b in day.bars %}<div style="height:{{ b.pct }}%;background:var(--{{ b.css }}-fill)" title="{{ b.title }}" data-tip="{{ b.title }}" aria-label="{{ b.title }}" tabindex="0"></div>{% endfor %}
+              </div>
+              {% endfor %}
+            </div>
+            <div class="days">{% for day in trend_days %}<span>{{ day.label }}</span>{% endfor %}</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    {% for panel in tier_panels %}
+    <div class="cd" style="border-top:2px solid {{ panel.style.fg }};--heat:{{ panel.style.heat }};--accent-mx:{{ panel.style.fg }};--heat-mx:{{ panel.style.heat }}">
+      <div class="ch" style="background:{{ panel.style.header_bg }}">
+        {% if panel.tier == 'imminent' %}<span style="display:flex;align-items:center;gap:6px;flex-shrink:0"><span class="pulse"></span><span class="ct" style="color:{{ panel.style.header_fg }}">Imminent alerts</span></span>{% else %}<span class="ct" style="color:{{ panel.style.header_fg }}">{{ panel.label }}</span>{% endif %}
+        <span class="cs">{{ panel.style.subtitle }} · all domains</span>
+        {% if panel.tier == 'imminent' %}
+        <span style="margin-left:auto;flex-shrink:0;font-size:10px;font-weight:600;color:{{ panel.style.header_fg }}">{{ panel.firing_count }} firing</span>
+        {% else %}
+        <span class="badge" style="color:{{ panel.style.fg }};background:{{ panel.style.bg }};border:1px solid {{ panel.style.border }}">{{ panel.firing_count }} firing</span>
+        {% endif %}
+      </div>
+      <div class="mx-toolbar">
+        <div class="mx-seg" role="group" aria-label="Colour tiles by">
+          <button type="button" aria-pressed="true" data-mode="firings">Firings</button>
+          <button type="button" aria-pressed="false" data-mode="trend">Trend</button>
+        </div>
+        <span class="mx-legend">fewer <span class="mx-ramp"></span> more</span>
+      </div>
+      <div class="mx-wrap"><table class="mx-table" data-tier="{{ panel.tier }}" data-src="{{ panel.matrix_id }}" aria-label="{{ panel.label }} alerts by type and domain"></table></div>
+      <div class="mx-note">Change shown against the previous alert window ({{ prev_window_start|date:"d M, H:i" }} → {{ generated_at|date:"d M, H:i" }}), excludes currently-muted findings. Select a tile to see affected systems.</div>
+      {{ panel.matrix|json_script:panel.matrix_id }}
+      <div class="cf">&nbsp;</div>
+    </div>
+    {% endfor %}
+
+    <div class="cd" style="border-top:2px solid var(--mu);--heat:var(--heat-muted);--accent-mx:var(--mu);--heat-mx:var(--heat-muted)">
+      <div class="ch" style="background:var(--mu-bg)">
+        <span style="display:flex;align-items:center;gap:6px;flex-shrink:0;color:var(--mu)"><span class="ct">Muted alerts</span></span>
+        <span class="cs">silenced · not evaluated · all domains</span>
+        <span class="badge" style="color:var(--mu);background:var(--mu-bg);border:1px solid var(--mu-b)">{{ muted|length }} silenced</span>
+      </div>
+      {% if muted %}
+      {% comment %}
+        Gated on `muted` (real AlertSilence rows), not muted_matrix.data -- a silence can exist
+        with zero matching occurrences in muted_matrix's own 30-day window (rare, but a real
+        case: a silence created ahead of its first incident, or one quiet for a month), and
+        the "N silenced" badge above must stay honest with the Currently Silenced list even
+        then. The matrix JS renders an empty-but-present grid in that edge case rather than
+        this template trying to predict it.
+      {% endcomment %}
+      <div class="mx-toolbar">
+        <div class="mx-seg" role="group" aria-label="Colour tiles by">
+          <button type="button" aria-pressed="true" data-mode="firings">Firings</button>
+          <button type="button" aria-pressed="false" data-mode="trend">Trend</button>
+        </div>
+        <span class="mx-legend">fewer <span class="mx-ramp"></span> more</span>
+      </div>
+      <div class="mx-wrap"><table class="mx-table" data-tier="muted" data-src="mxData_muted" aria-label="Muted alerts by type and domain"></table></div>
+      <div class="mx-note">Count = occurrences currently suppressed by an active silence, not a count of silences. Select a tile to see affected systems and why each was muted.</div>
+      {{ muted_matrix|json_script:"mxData_muted" }}
+      {% else %}
+      <div class="tw">
+        <table class="tbl2 muted">
+          <thead><tr><th>Alert</th><th>Domain</th><th>State</th><th>Reason</th></tr></thead>
+          <tbody>
+            <tr><td colspan="4" style="color:var(--t3)">Nothing currently silenced.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+      <div class="cf">{{ muted|length }} muted · excluded from firing counts</div>
+    </div>
+
+  </div>
+
+  {% comment %}
+    Shared hover tooltip (2026-10-01) -- one element for every [data-tip] on the page (Alert
+    Domains segments, Severity Trends bars). See its own CSS comment for why this is JS-
+    positioned rather than a pure-CSS ::after.
+  {% endcomment %}
+  <div class="adk-tip" id="adkTip" role="tooltip"></div>
+
+  {% comment %}
+    Shared Alert Matrix popup (2026-10-01) -- ONE instance for all three matrix panels (spec:
+    "The popup markup should exist once and be shared"). Which tier's colours it wears is set
+    live by JS when a tile is clicked (reads --heat/--accent-mx off that tile's own panel).
+  {% endcomment %}
+  <div class="mx-scrim" id="mxScrim" data-mute-bulk-url="{{ mute_bulk_url }}">
+    <div class="mx-modal" role="dialog" aria-modal="true" aria-labelledby="mxTitle" id="mxModal">
+      <div class="mx-mhead" id="mxHead">
+        <div class="mx-mtitle">
+          <h3 id="mxTitle"></h3>
+          <div class="mx-ctx" id="mxCtx"></div>
+        </div>
+        <button class="mx-x" id="mxClose" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div class="mx-mstats" id="mxStats"></div>
+      <div class="mx-mfilter">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+        <input id="mxFilter" type="search" placeholder="Filter by system, component or host" aria-label="Filter affected items">
+      </div>
+      <div class="mx-mbody" id="mxBody"></div>
+      {% comment %}
+        Bulk mute (2026-10-02, on request: "way too many to mute one by one allow a select
+        then mute option" -- the per-item comment-popup flow asks for a reason/group/expiry on
+        every single finding, workable for one or two, not the 10 Degraded/Network findings
+        that prompted this). Reuses the SAME .cmt-mute-row/.cmt-mute-msg/.cmt-mute-actions
+        styling the single-item mute mini-form already uses -- one shared reason/expiry across
+        every checked item, group resolved per item server-side. Hidden entirely until a
+        checkbox is actually ticked; JS also hides the whole #mxBulk row when the current
+        panel has no checkable items (e.g. the Muted panel, where nothing here needs muting).
+      {% endcomment %}
+      <div class="mx-bulk-form" id="mxBulkForm" style="display:none">
+        <label class="cmt-mute-row">Reason<textarea id="mxBulkReason" rows="2"></textarea></label>
+        <label class="cmt-mute-row">Expires in (days)<input type="number" id="mxBulkDays" value="60" min="1" style="width:70px"></label>
+        <div class="cmt-mute-msg" id="mxBulkMsg"></div>
+        <div class="cmt-mute-actions">
+          <button class="mx-btn primary" id="mxBulkConfirm" type="button">Confirm mute</button>
+          <button class="mx-btn" id="mxBulkCancel" type="button">Cancel</button>
+        </div>
+      </div>
+      <div class="mx-mfoot">
+        <div class="mx-bulk" id="mxBulk" style="display:none">
+          <label class="mx-selall"><input type="checkbox" id="mxSelAll"> Select all</label>
+          <button class="mx-btn primary" id="mxMuteSelected" type="button" disabled>Mute selected (<span id="mxSelCount">0</span>)</button>
+        </div>
+        <span style="flex:1 1 auto"></span>
+        <button class="mx-btn" id="mxExport" type="button">Export list</button>
+        {% if alert_groups_url %}
+        <button class="mx-btn primary" id="mxAlertGroups" type="button" data-href="{{ alert_groups_url }}">Open Alert Groups</button>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {% comment %}
+    Third screen (2026-10-01, on request: "the detailed alert on the second screen must also
+    be clickable opening another popup that shows the last 10 comments") -- a clicked mx-item
+    drills one layer deeper into the SAME finding, so this is a SEPARATE scrim/modal stacked
+    ABOVE mx-scrim (higher z-index, see .cmt-scrim's own CSS) rather than replacing its
+    content -- closing the comment popup should land the admin back on the affected-items
+    list they were just looking at, not re-trigger the tile click.
+  {% endcomment %}
+  <div class="mx-scrim cmt-scrim" id="cmtScrim" data-url="{{ comment_history_url }}" data-mute-url="{{ mute_url }}" data-unmute-url="{{ unmute_url }}" data-can-mute="{% if can_mute %}1{% endif %}">
+    <div class="mx-modal cmt-modal" role="dialog" aria-modal="true" aria-labelledby="cmtTitle" id="cmtModal" style="--accent-mx:var(--t2);--heat-mx:var(--heat-muted)">
+      <div class="mx-mhead">
+        <div class="mx-mtitle">
+          <h3 id="cmtTitle">Admin comments</h3>
+          <div class="mx-ctx" id="cmtCtx"></div>
+        </div>
+        <button class="mx-x" id="cmtClose" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div class="mx-mbody" id="cmtBody"></div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  // .adk is CSS-locked to height:100vh (matching the mockup's own html,body{height:100vh;
+  // overflow:hidden} -- one screen, panels scroll internally, never the page). But this page
+  // renders BELOW base.html's own sticky .topbar, which eats some of that 100vh in real flow,
+  // so a flat 100vh alone still overflows the true viewport by the topbar's own height. Measured
+  // live rather than hardcoded (2026-09-30) -- a hardcoded px guess would silently drift the
+  // moment the topbar's own padding/logo size changes, the exact mistake .backnav's gutter
+  // formula already made (see base.html's own comment on why that pill got suppressed here).
+  var root = document.getElementById("adkRoot");
+  var topbar = document.querySelector(".topbar");
+  if (!root) { return; }
+  function sizeToViewport() {
+    var topbarH = topbar ? topbar.getBoundingClientRect().height : 0;
+    root.style.height = "calc(100vh - " + topbarH + "px)";
+  }
+  sizeToViewport();
+  window.addEventListener("resize", sizeToViewport);
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  // "Mute recurring" (2026-10-01, confirmation dialog added 2026-10-02) -- self-contained,
+  // not dependent on the big matrix IIFE further down, since this button needs to work even
+  // before/regardless of that script's own setup. Two real requests: a preview (no
+  // AlertSilence written) the admin reviews, then a confirm that re-runs the SAME evaluation
+  // for real -- never just replays the preview's own list, so what gets muted always reflects
+  // the criteria at the moment of confirming, not a potentially-stale snapshot. Reloads the
+  // page on success so every panel (matrix cells, Muted panel, stat tiles) picks up the real,
+  // server-computed new state rather than hand-patching the DOM.
+  var btn = document.getElementById("muteRecurringBtn");
+  var msg = document.getElementById("muteRecurringMsg");
+  var scrim = document.getElementById("recurScrim");
+  var body = document.getElementById("recurBody");
+  var ctx = document.getElementById("recurCtx");
+  var closeBtn = document.getElementById("recurClose");
+  var cancelBtn = document.getElementById("recurCancel");
+  var confirmBtn = document.getElementById("recurConfirm");
+  if (!btn) { return; }
+
+  function getCookie(name) {
+    var m = document.cookie.match(new RegExp("(^|; )" + name + "=([^;]*)"));
+    return m ? decodeURIComponent(m[2]) : null;
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function post(confirm) {
+    var body = new URLSearchParams();
+    if (confirm) { body.set("confirm", "1"); }
+    return fetch(btn.dataset.url, {
+      method: "POST",
+      headers: { "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": getCookie("csrftoken") || "" },
+      credentials: "same-origin",
+      body: body,
+    }).then(function (r) { return r.json(); });
+  }
+  function closeScrim() {
+    scrim.classList.remove("open");
+    btn.disabled = false;
+  }
+
+  btn.addEventListener("click", function () {
+    btn.disabled = true;
+    msg.textContent = "Checking for recurring issues…";
+    post(false)
+      .then(function (data) {
+        if (!data.ok) { throw new Error(data.error || "error"); }
+        msg.textContent = "";
+        var candidates = data.candidates || [];
+        if (!candidates.length) {
+          msg.textContent = "No recurring issues found (checked " + data.checked + ").";
+          btn.disabled = false;
+          return;
+        }
+        ctx.textContent = candidates.length + " issue" + (candidates.length === 1 ? "" : "s") + " qualify — checked " + data.checked + " open finding" + (data.checked === 1 ? "" : "s") + ".";
+        body.innerHTML = candidates.map(function (c) {
+          return '<div class="cmt-item"><div class="cmt-meta"><b>' + escapeHtml(c.system) + '</b><span>' + escapeHtml(c.label) + ' — ' + escapeHtml(c.group_name) + '</span></div>'
+            + '<div class="cmt-text">' + escapeHtml(c.reason) + '</div></div>';
+        }).join("");
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = "Confirm mute";
+        scrim.classList.add("open");
+        closeBtn.focus();
+      })
+      .catch(function (err) {
+        btn.disabled = false;
+        msg.textContent = "Couldn’t run the check (" + err.message + ").";
+      });
+  });
+
+  confirmBtn.addEventListener("click", function () {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = "Muting…";
+    post(true)
+      .then(function (data) {
+        if (!data.ok) { throw new Error(data.error || "error"); }
+        closeScrim();
+        var n = data.muted.length;
+        msg.textContent = n
+          ? "Muted " + n + " recurring issue" + (n === 1 ? "" : "s") + " — reloading…"
+          : "Nothing left to mute (already handled) — reloading…";
+        setTimeout(function () { location.reload(); }, 1200);
+      })
+      .catch(function (err) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = "Confirm mute";
+        msg.textContent = "Couldn’t mute (" + err.message + ").";
+      });
+  });
+
+  [closeBtn, cancelBtn].forEach(function (b) {
+    b.addEventListener("click", function () {
+      closeScrim();
+      msg.textContent = "";
+    });
+  });
+  scrim.addEventListener("click", function (e) { if (e.target === scrim) { closeScrim(); msg.textContent = ""; } });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && scrim.classList.contains("open")) { closeScrim(); msg.textContent = ""; }
+  });
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  // Shared hover tooltip for Alert Domains / Severity Trends (2026-10-01) -- see .adk-tip's
+  // own CSS comment for why this is JS-positioned (getBoundingClientRect + position:fixed)
+  // rather than a pure-CSS ::after: it needs to clear ANY ancestor's overflow:hidden and paint
+  // above EVERY sibling regardless of which row/day it belongs to, and position:fixed is the
+  // one positioning mode that is immune to both by construction.
+  var tip = document.getElementById("adkTip");
+  var targets = document.querySelectorAll("[data-tip]");
+  if (!tip || !targets.length) { return; }
+
+  function place(el) {
+    var text = el.getAttribute("data-tip");
+    if (!text) { return; }
+    tip.textContent = text;
+    tip.classList.add("show");   // show first so offsetWidth/Height below reflect real content
+    var r = el.getBoundingClientRect();
+    var tw = tip.offsetWidth, th = tip.offsetHeight;
+    var top = r.top - th - 7;             // default: above the element
+    if (top < 4) { top = r.bottom + 7; }  // not enough room above (e.g. the first row of a
+                                           // panel right at its own top edge) -- flip below
+    var left = r.left + r.width / 2 - tw / 2;
+    left = Math.max(4, Math.min(left, window.innerWidth - tw - 4));  // keep on-screen sideways
+    tip.style.top = top + "px";
+    tip.style.left = left + "px";
+  }
+
+  function hide() { tip.classList.remove("show"); }
+
+  targets.forEach(function (el) {
+    el.addEventListener("mouseenter", function () { place(el); });
+    el.addEventListener("mouseleave", hide);
+    el.addEventListener("focus", function () { place(el); });
+    el.addEventListener("blur", hide);
+  });
+  window.addEventListener("scroll", hide, true);
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  // Alert Matrix (2026-10-01) -- ONE reusable component, one instance per .mx-table[data-tier]
+  // (spec: "Pass the tier as a parameter... Load the CSS and JS once even when all three
+  // panels are on the page. The popup markup should exist once and be shared."). Ported from
+  // reference/alert-matrix-mockup.html's own render()/openModal()/drawList() logic, ported
+  // almost verbatim -- the real changes are: data comes from a server-rendered JSON payload
+  // per instance instead of one hardcoded array, multiple instances coexist, and a new
+  // "empty" cell state (Security -- see alert_catalog.py's own comment on why that domain
+  // gets a genuinely empty tile instead of a fabricated "0, OK" one) that the original
+  // single-panel demo never needed.
+  var tables = document.querySelectorAll(".mx-table[data-src]");
+  if (!tables.length) { return; }
+
+  var MATRIX_DOMAINS = ["Network", "Systems", "Infrastructure", "Self", "Security"];
+  // Mute reasons are admin-typed free text (AlertSilence.reason) going into innerHTML below --
+  // escaped before interpolation so a reason containing "<"/"&"/etc. renders as literal text
+  // instead of being parsed as markup.
+  var escapeHtml = function (s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  };
+  var trendTxt = function (n, p) { var d = n - p; return d > 0 ? "▲ +" + d : d < 0 ? "▼ " + d : "0"; };
+  var trendCls = function (n, p) { var d = n - p; return d > 0 ? "up" : d < 0 ? "down" : "flat"; };
+  var pctTxt = function (n, p) { return p === 0 ? "new this period" : (n - p > 0 ? "+" : "") + Math.round((n - p) / p * 100) + "%"; };
+
+  var panels = [];   // every instantiated matrix, for the shared popup to look its owner up
+
+  function buildPanel(table) {
+    var src = document.getElementById(table.dataset.src);
+    var raw = { data: [], affected: {} };
+    try { raw = JSON.parse(src.textContent); } catch (e) { /* leave raw empty, render() still produces a valid (empty) table */ }
+
+    var card = table.closest(".cd");
+    var toolbar = card ? card.querySelector(".mx-toolbar") : null;
+    var panel = { table: table, card: card, data: raw.data, affected: raw.affected, mode: "firings", map: {} };
+    panel.data.forEach(function (r) { panel.map[r[0] + "|" + r[1]] = r; });
+
+    // alert rows, in the order the server emitted them (already tier-scoped, never a
+    // hand-maintained list -- see severity_matrix()'s own docstring)
+    var alerts = [];
+    panel.data.forEach(function (r) { if (alerts.indexOf(r[0]) === -1) { alerts.push(r[0]); } });
+    panel.alerts = alerts;
+
+    panel.render = function () { renderPanel(panel); };
+
+    if (toolbar) {
+      toolbar.querySelectorAll(".mx-seg button").forEach(function (b) {
+        b.addEventListener("click", function () {
+          panel.mode = b.dataset.mode;
+          toolbar.querySelectorAll(".mx-seg button").forEach(function (x) { x.setAttribute("aria-pressed", x === b); });
+          panel.render();
+        });
+      });
+    }
+
+    panels.push(panel);
+    panel.render();
+  }
+
+  function renderPanel(panel) {
+    var alerts = panel.alerts, map = panel.map, mode = panel.mode;
+    // "muted" alongside "firing" (2026-10-01) -- the Muted panel's cells are never "firing",
+    // so without this the heat scale's own max would always fall back to 1 there and every
+    // muted tile would render at the same (near-max) shade regardless of real count.
+    var shadedCounts = panel.data.filter(function (r) { return r[2] === "firing" || r[2] === "muted"; }).map(function (r) { return r[3]; });
+    var max = Math.max(1, shadedCounts.length ? Math.max.apply(null, shadedCounts) : 1);
+    var rises = panel.data.map(function (r) { return r[3] - r[4]; }).filter(function (d) { return d > 0; });
+    var maxRise = Math.max(1, rises.length ? Math.max.apply(null, rises) : 1);
+
+    var colTot = MATRIX_DOMAINS.map(function () { return 0; });
+    var rowTots = [];
+    var rowsHtml = [];
+
+    alerts.forEach(function (a) {
+      var rowTot = 0, cells = "";
+      MATRIX_DOMAINS.forEach(function (d, i) {
+        var r = map[a + "|" + d];
+        if (!r) { cells += '<td class="empty" tabindex="-1" aria-hidden="true"></td>'; return; }
+        var state = r[2], n = r[3], p = r[4], dl = n - p;
+        var key = a + "|" + d;
+        if (state === "empty") {
+          cells += '<td class="empty" tabindex="-1" aria-hidden="true" title="Not monitored"></td>';
+          return;
+        }
+        rowTot += n; colTot[i] += n;
+        var trend = '<div class="t ' + trendCls(n, p) + '" title="' + pctTxt(n, p) + ' vs previous alert window">' + trendTxt(n, p) + '</div>';
+        if (state === "ok") {
+          cells += '<td class="cell ok" tabindex="0" data-k="' + key + '" title="OK, resolved"><div class="n">' + n + '</div>' + trend + '</td>';
+          return;
+        }
+        // Unconfigured (2026-10-02, "a way to show alerts that are configured vs those that
+        // are not configured....same exact color as the green zero tile and not give it a
+        // puls[e] animation") -- same calm .cell.ok styling and no shock-ring animation
+        // (that's only ever applied to .cell.firing), since nothing here is actually paging
+        // anyone; still shows its real count n, unlike "ok" which is always 0.
+        if (state === "unconfigured") {
+          cells += '<td class="cell ok unconfigured" tabindex="0" data-k="' + key + '" title="Not configured — no Alert Group covers this"><div class="n">' + n + '</div>' + trend + '</td>';
+          return;
+        }
+        var al = mode === "firings" ? .10 + .78 * Math.sqrt(n / max) : (dl > 0 ? .35 + .5 * dl / maxRise : .08);
+        if (state === "muted") {
+          cells += '<td class="cell muted" style="--a:' + al.toFixed(2) + '" tabindex="0" data-k="' + key + '" title="Muted"><div class="n">' + n + '</div>' + trend + '</td>';
+          return;
+        }
+        cells += '<td class="cell firing' + (dl > 0 ? " rising" : "") + (al > .55 ? " hot" : "") +
+          '" style="--a:' + al.toFixed(2) + '" tabindex="0" data-k="' + key + '" title="Firing' + (dl > 0 ? ", rising" : "") + '"><div class="n">' + n + '</div>' + trend + '</td>';
+      });
+      rowTots.push(rowTot);
+      rowsHtml.push('<tr><th class="row" scope="row">' + a + '</th>' + cells + '<td class="tot">' + rowTot + '<span class="bar" style="width:__W' + (rowTots.length - 1) + '__"></span></td></tr>');
+    });
+    var maxRow = Math.max.apply(null, rowTots.concat([1]));
+    rowsHtml = rowsHtml.map(function (html, i) {
+      return html.replace("__W" + i + "__", Math.round(8 + 32 * rowTots[i] / maxRow) + "px");
+    });
+
+    // Fold rows with nothing firing in ANY domain (2026-10-01, on request: "fold metrix rows
+    // with all no incidences accross all domans no need to take up space we can just know
+    // that there are there and that nothing is alerting") -- still real <tr> rows in the DOM
+    // (so a muted/"OK, resolved" cell inside one is still inspectable once expanded, same as
+    // any other cell), just collapsed behind one summary row by default so a long, mostly-
+    // quiet matrix doesn't push the genuinely firing rows below the fold.
+    var activeRows = [], foldedRows = [];
+    rowsHtml.forEach(function (html, i) { (rowTots[i] > 0 ? activeRows : foldedRows).push(html); });
+    var body = activeRows.join("");
+    if (foldedRows.length) {
+      var cols = MATRIX_DOMAINS.length + 2;
+      body += '<tr class="mx-foldtoggle"><td colspan="' + cols + '">' +
+        '<button type="button" class="mx-fold-btn" aria-expanded="false">' +
+        foldedRows.length + (foldedRows.length === 1 ? " category" : " categories") +
+        ' with nothing firing in any domain — show</button></td></tr>' +
+        foldedRows.map(function (html) { return html.replace("<tr>", '<tr class="mx-foldrow">'); }).join("");
+    }
+
+    var domDot = { Network: "var(--dn)", Systems: "var(--dsy)", Infrastructure: "var(--di)", Self: "var(--dself)", Security: "var(--dsc)" };
+    panel.table.innerHTML =
+      '<colgroup><col class="c-row">' + MATRIX_DOMAINS.map(function () { return "<col>"; }).join("") + '<col class="c-tot"></colgroup>' +
+      '<thead><tr><th></th>' + MATRIX_DOMAINS.map(function (d) { return '<th><span class="dot" style="--c:' + domDot[d] + '"></span>' + d + '</th>'; }).join("") + '<th class="tot">Total</th></tr></thead>' +
+      '<tbody>' + body + '</tbody>' +
+      '<tfoot><tr><td></td>' + colTot.map(function (c) { return "<td>" + c + "</td>"; }).join("") + '<td class="grand">' + colTot.reduce(function (x, y) { return x + y; }, 0) + '</td></tr></tfoot>';
+
+    panel.table.querySelectorAll("td.cell").forEach(function (c) {
+      c.addEventListener("click", function () { openModal(panel, c); });
+      c.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openModal(panel, c); } });
+    });
+
+    var foldBtn = panel.table.querySelector(".mx-fold-btn");
+    if (foldBtn) {
+      foldBtn.addEventListener("click", function () {
+        var show = panel.table.classList.toggle("show-folded");
+        foldBtn.setAttribute("aria-expanded", show);
+        foldBtn.textContent = foldedRows.length + (foldedRows.length === 1 ? " category" : " categories")
+          + " with nothing firing in any domain — " + (show ? "hide" : "show");
+      });
+    }
+  }
+
+  tables.forEach(buildPanel);
+
+  // ---------- shared popup ----------
+  var scrim = document.getElementById("mxScrim");
+  var modal = document.getElementById("mxModal");
+  var head = document.getElementById("mxHead");
+  if (!scrim || !modal || !head) { return; }
+  var lastFocus = null, current = [];
+  // Bulk mute (2026-10-02, "way too many to mute one by one allow a select then mute
+  // option") -- selectedKeys persists ACROSS a filter re-render (drawList() rebuilds
+  // #mxBody's innerHTML on every keystroke; losing a check on every filter edit would make
+  // this unusable for exactly the long lists it exists for). selMap carries the
+  // system/category/flag_key/label each key needs for the actual mute POST, rebuilt
+  // alongside the checkboxes every render since `current` itself can change between opens.
+  var selectedKeys = new Set();
+  var selMap = {};
+  var muteBulkUrl = scrim.dataset.muteBulkUrl;
+
+  // ---------- third screen: comment history (2026-10-01) ----------
+  var cmtScrim = document.getElementById("cmtScrim");
+  var cmtBody = document.getElementById("cmtBody");
+  var cmtClose = document.getElementById("cmtClose");
+  var cmtLastFocus = null;
+  var commentHistoryUrl = cmtScrim ? cmtScrim.dataset.url : "";
+  var muteUrl = cmtScrim ? cmtScrim.dataset.muteUrl : "";
+  // Page-level "could this viewer ever unmute anything" gate (same can_mute flag the "Mute
+  // recurring" row already uses) -- real per-group enforcement still happens server-side in
+  // alert_unmute regardless; this only decides whether the button is worth showing at all.
+  var unmuteUrl = cmtScrim ? cmtScrim.dataset.unmuteUrl : "";
+  var canMute = !!(cmtScrim && cmtScrim.dataset.canMute);
+  // Current popup's own identity + candidate groups, set fresh by every openCommentModal()
+  // call -- the mute mini-form (delegated on cmtBody, built on demand) reads this rather than
+  // re-parsing the DOM for system/category/flag_key every time a card's button is clicked.
+  var cmtState = { system: "", category: "", flagKey: "", groups: [], canMute: false, comments: [] };
+
+  function getCookie(name) {
+    var m = document.cookie.match(new RegExp("(^|; )" + name + "=([^;]*)"));
+    return m ? decodeURIComponent(m[2]) : null;
+  }
+
+  function closeCmtModal() {
+    if (cmtScrim) { cmtScrim.classList.remove("open"); }
+    if (cmtLastFocus) { cmtLastFocus.focus(); }
+  }
+
+  function renderComments() {
+    if (!cmtState.comments.length) {
+      // "if that same issue has not yet been addessed just write this when someone tries to
+      // click it" (2026-10-01) -- the one explicit case this screen must cover. Extended
+      // 2026-10-02 (reported: "tried muting the degraded alerts in critical matrix no unmute
+      // button exists" -- traced to can_mute: true with zero comments to attach as a reason,
+      // so the ONLY mute entry point -- "Mute with this reason" under a comment -- never had
+      // anywhere to render; nothing was ever actually muted). A finding the admin is allowed
+      // to mute still gets a real way to do it even with no comment history yet, same mini-
+      // form, just starting from a blank reason instead of a pre-filled one.
+      var muteBtnNoComment = cmtState.canMute
+        ? '<div class="cmt-item"><div class="cmt-actions"><button type="button" class="mx-btn cmt-mute-btn" data-idx="-1">Mute this</button></div></div>'
+        : "";
+      var blockedNoComment = (!cmtState.canMute && cmtState.muteUnavailableReason)
+        ? '<div class="cmt-mute-blocked">' + escapeHtml(cmtState.muteUnavailableReason) + '</div>'
+        : "";
+      cmtBody.innerHTML = '<div class="mx-none">This issue has not been addressed by an admin yet.</div>'
+        + muteBtnNoComment + blockedNoComment;
+      return;
+    }
+    var items = cmtState.comments.map(function (c, idx) {
+      var when = new Date(c.created_at);
+      var whenTxt = isNaN(when.getTime()) ? c.created_at : when.toLocaleString();
+      var who = c.author ? escapeHtml(c.author) : "Unknown";
+      var muteBtn = cmtState.canMute
+        ? '<div class="cmt-actions"><button type="button" class="mx-btn cmt-mute-btn" data-idx="' + idx + '">Mute with this reason</button></div>'
+        : "";
+      return '<div class="cmt-item"><div class="cmt-meta"><b>' + who + '</b><span>' + whenTxt + '</span></div>' +
+        '<div class="cmt-text">' + escapeHtml(c.comment) + '</div>' + muteBtn + '</div>';
+    }).join("");
+    // Say WHY, not just silently drop the button (2026-10-02, reported: "still no clealy
+    // labelled mute button" -- traced to Network/Infrastructure Team's own pause leaving
+    // can_mute false with no explanation at all; see alert_comment_history's own comment).
+    var blockedNote = (!cmtState.canMute && cmtState.muteUnavailableReason)
+      ? '<div class="cmt-mute-blocked">' + escapeHtml(cmtState.muteUnavailableReason) + '</div>'
+      : "";
+    cmtBody.innerHTML = items + blockedNote;
+  }
+
+  function openCommentModal(trigger) {
+    if (!cmtScrim || !commentHistoryUrl) { return; }
+    cmtLastFocus = trigger;
+    var host = trigger.dataset.host, fk = trigger.dataset.fk, cat = trigger.dataset.cat || "", label = trigger.dataset.label;
+    cmtState = { system: host, category: cat, flagKey: fk, groups: [], canMute: false, comments: [], muteUnavailableReason: null };
+    document.getElementById("cmtCtx").innerHTML =
+      '<span class="mx-pill">' + escapeHtml(label || host) + '</span>';
+    cmtBody.innerHTML = '<div class="mx-none">Loading…</div>';
+    cmtScrim.classList.add("open");
+    cmtClose.focus();
+    var url = commentHistoryUrl + "?system=" + encodeURIComponent(host) + "&flag_key=" + encodeURIComponent(fk)
+      + "&category=" + encodeURIComponent(cat);
+    fetch(url, { credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok) { throw new Error(data.error || "error"); }
+        cmtState.comments = data.comments || [];
+        cmtState.canMute = !!data.can_mute;
+        cmtState.groups = data.groups || [];
+        cmtState.muteUnavailableReason = data.mute_unavailable_reason || null;
+        renderComments();
+      })
+      .catch(function () {
+        cmtBody.innerHTML = '<div class="mx-none">Couldn’t load comments right now. Try again.</div>';
+      });
+  }
+
+  // Mute mini-form (2026-10-01, on request: "for those issues where admins affirm normal
+  // behaviour mute alert and use one of their comments as mute reason") -- delegated on
+  // cmtBody since renderComments() rebuilds its contents on every popup open.
+  if (cmtBody) {
+    cmtBody.addEventListener("click", function (e) {
+      var muteBtn = e.target.closest && e.target.closest(".cmt-mute-btn");
+      if (muteBtn) {
+        var idx = parseInt(muteBtn.dataset.idx, 10);
+        // idx -1 = the no-comment-yet case above -- same mini-form, blank reason instead of
+        // a comment's own text, since there's no comment to pre-fill it with.
+        var comment = idx >= 0 ? cmtState.comments[idx] : { comment: "" };
+        var card = muteBtn.closest(".cmt-item");
+        if (!comment || !card) { return; }
+        var groups = cmtState.groups;
+        var groupField = groups.length === 1
+          ? '<input type="hidden" class="cmt-mute-group" value="' + groups[0].id + '">'
+            + '<div class="cmt-mute-row">Will roll into <b>' + escapeHtml(groups[0].name) + '</b>’s daily digest.</div>'
+          : groups.length > 1
+            ? '<label class="cmt-mute-row">Group<select class="cmt-mute-group">'
+              + groups.map(function (g) { return '<option value="' + g.id + '">' + escapeHtml(g.name) + '</option>'; }).join("")
+              + '</select></label>'
+            : '<div class="cmt-mute-row" style="color:var(--rd)">No monitoring alert group covers this system/category — create or edit one in Alert Groups first.</div>';
+        card.insertAdjacentHTML("beforeend",
+          '<div class="cmt-mute-form">'
+          + '<label class="cmt-mute-row">Reason<textarea class="cmt-mute-reason" rows="3">' + escapeHtml(comment.comment) + '</textarea></label>'
+          + groupField
+          + '<label class="cmt-mute-row">Expires in (days)<input type="number" class="cmt-mute-days" value="60" min="1" style="width:70px"></label>'
+          + '<div class="cmt-mute-msg"></div>'
+          + '<div class="cmt-mute-actions">'
+          + (groups.length ? '<button type="button" class="mx-btn primary cmt-mute-confirm">Confirm mute</button>' : "")
+          + '<button type="button" class="mx-btn cmt-mute-cancel">Cancel</button></div></div>');
+        muteBtn.parentElement.style.display = "none";
+        return;
+      }
+
+      var cancelBtn = e.target.closest && e.target.closest(".cmt-mute-cancel");
+      if (cancelBtn) {
+        var item = cancelBtn.closest(".cmt-item");
+        var form = cancelBtn.closest(".cmt-mute-form");
+        if (form) { form.remove(); }
+        var actions = item && item.querySelector(".cmt-actions");
+        if (actions) { actions.style.display = ""; }
+        return;
+      }
+
+      var confirmBtn = e.target.closest && e.target.closest(".cmt-mute-confirm");
+      if (confirmBtn) {
+        var mform = confirmBtn.closest(".cmt-mute-form");
+        var reasonEl = mform.querySelector(".cmt-mute-reason");
+        var groupEl = mform.querySelector(".cmt-mute-group");
+        var daysEl = mform.querySelector(".cmt-mute-days");
+        var msgEl = mform.querySelector(".cmt-mute-msg");
+        var reasonTxt = (reasonEl.value || "").trim();
+        var groupVal = groupEl ? groupEl.value : "";
+        if (!reasonTxt || !groupVal) {
+          msgEl.style.color = "var(--rd)";
+          msgEl.textContent = "A reason and a group are required.";
+          return;
+        }
+        confirmBtn.disabled = true;
+        msgEl.style.color = "var(--t3)";
+        msgEl.textContent = "Muting…";
+        fetch(muteUrl, {
+          method: "POST",
+          headers: { "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": getCookie("csrftoken") || "" },
+          credentials: "same-origin",
+          body: new URLSearchParams({
+            system: cmtState.system, category: cmtState.category, flag_key: cmtState.flagKey,
+            reason: reasonTxt, group: groupVal, expires_days: (daysEl && daysEl.value) || "60",
+          }),
+        }).then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (!data.ok) {
+              if (data.access_denied) {
+                // "a cleanly designed error page showning access control restrictions
+                // should pop up when you try to mute an alert that does not belong to your
+                // group" (2026-10-02) -- swap the whole form out, same as the success case,
+                // rather than just an inline message: this is a real rejection, not a
+                // fixable validation error the admin should retry inline.
+                mform.outerHTML = '<div class="cmt-access-denied">'
+                  + '<div class="cad-title">Not your Alert Group</div>'
+                  + '<div class="cad-body">' + escapeHtml(data.error) + '</div></div>';
+                return;
+              }
+              confirmBtn.disabled = false;
+              msgEl.style.color = "var(--rd)";
+              msgEl.textContent = data.error || "Could not mute this issue.";
+              return;
+            }
+            mform.outerHTML = '<div class="cmt-mute-done">' + escapeHtml(data.message) + '</div>';
+          })
+          .catch(function () {
+            confirmBtn.disabled = false;
+            msgEl.style.color = "var(--rd)";
+            msgEl.textContent = "Network error — try again.";
+          });
+      }
+    });
+  }
+
+  if (cmtClose) { cmtClose.onclick = closeCmtModal; }
+  if (cmtScrim) {
+    cmtScrim.addEventListener("click", function (e) { if (e.target === cmtScrim) { closeCmtModal(); } });
+  }
+
+  function openModal(panel, cell) {
+    lastFocus = cell;
+    var r = panel.map[cell.dataset.k];
+    var a = r[0], d = r[1], state = r[2], n = r[3], p = r[4];
+    current = panel.affected[cell.dataset.k] || [];
+
+    if (panel.card) {
+      var cs = getComputedStyle(panel.card);
+      modal.style.setProperty("--accent-mx", cs.getPropertyValue("--accent-mx") || cs.getPropertyValue("--rd"));
+      modal.style.setProperty("--heat-mx", cs.getPropertyValue("--heat-mx") || "255,82,82");
+    }
+    head.classList.toggle("is-ok", state === "ok" || state === "unconfigured");
+    head.classList.toggle("is-muted", state === "muted");
+    document.getElementById("mxTitle").textContent = a;
+    var domDot = { Network: "var(--dn)", Systems: "var(--dsy)", Infrastructure: "var(--di)", Self: "var(--dself)", Security: "var(--dsc)" };
+    var stateLabel = state === "ok" ? "OK" : state === "muted" ? "Muted" : state === "unconfigured" ? "Not configured" : "Firing";
+    document.getElementById("mxCtx").innerHTML =
+      '<span class="mx-pill"><span class="dot" style="--c:' + domDot[d] + '"></span>' + d + '</span>' +
+      '<span class="mx-pill ' + state + '">' + stateLabel + '</span>' +
+      '<span><span class="' + trendCls(n, p) + '">' + trendTxt(n, p) + '</span> vs previous alert window (' + p + ' → ' + n + ', ' + pctTxt(n, p) + ')</span>';
+    var systems = new Set(current.map(function (i) { return i.path[0]; })).size;
+    var hosts = new Set(current.map(function (i) { return i.host; })).size;
+    var lastLabel = state === "muted" ? "suppressed" : state === "unconfigured" ? "unconfigured" : "firings";
+    document.getElementById("mxStats").innerHTML = [[systems, "systems"], [hosts, "hosts"], [current.length, "components"], [n, lastLabel]]
+      .map(function (pair) { return '<div class="mx-stat"><b>' + pair[0] + '</b><span>' + pair[1] + '</span></div>'; }).join("");
+    document.getElementById("mxFilter").value = "";
+    // Fresh selection every time a different cell is opened -- a check made for one cell's
+    // own items carrying over into an unrelated one would silently mute something the admin
+    // never looked at.
+    selectedKeys.clear();
+    selMap = {};
+    var bulkWrap = document.getElementById("mxBulk");
+    var bulkForm = document.getElementById("mxBulkForm");
+    if (bulkForm) { bulkForm.style.display = "none"; }
+    if (bulkWrap) {
+      bulkWrap.style.display = (canMute && current.some(function (i) { return i.fk && !i.reason; })) ? "" : "none";
+    }
+    drawList("");
+    updateBulkUI();
+    scrim.classList.add("open");
+    document.getElementById("mxClose").focus();
+  }
+
+  function updateBulkUI() {
+    var muteBtn = document.getElementById("mxMuteSelected");
+    var countEl = document.getElementById("mxSelCount");
+    var selAll = document.getElementById("mxSelAll");
+    if (!muteBtn || !countEl) { return; }
+    countEl.textContent = selectedKeys.size;
+    muteBtn.disabled = selectedKeys.size === 0;
+    if (selAll) {
+      var visible = Array.prototype.slice.call(document.querySelectorAll(".mx-sel-cb"));
+      var checkedVisible = visible.filter(function (cb) { return cb.checked; });
+      selAll.checked = visible.length > 0 && checkedVisible.length === visible.length;
+      selAll.indeterminate = checkedVisible.length > 0 && checkedVisible.length < visible.length;
+    }
+  }
+
+  function drawList(q) {
+    q = q.trim().toLowerCase();
+    var items = current.filter(function (i) { return !q || (i.path.join(" ") + " " + i.host).toLowerCase().indexOf(q) !== -1; });
+    var body = document.getElementById("mxBody");
+    if (!items.length) {
+      body.innerHTML = '<div class="mx-none">' + (current.length ? "No matches for this filter." : "All clear. No affected systems in this period.") + '</div>';
+      updateBulkUI();
+      return;
+    }
+    var groups = {}, order = [];
+    items.slice().sort(function (x, y) { return y.pct - x.pct; }).forEach(function (i) {
+      var sys = i.path[0];
+      if (!groups[sys]) { groups[sys] = []; order.push(sys); }
+      groups[sys].push(i);
+    });
+    body.innerHTML = order.map(function (sys) {
+      var list = groups[sys];
+      return '<div class="mx-sys"><div class="mx-sys-h">' + sys + '<span class="cnt">' + list.length + ' affected</span></div>' +
+        list.map(function (i) {
+          var pathHtml = i.path.map(function (p, ix) { return ix === i.path.length - 1 ? '<span class="leaf">' + p + '</span>' : p; }).join('<span class="sep">›</span>');
+          // Unmute (2026-10-02, on request: "what about the ability to mute and unmute from
+          // alert dashboard we described" -- this panel could already show WHY something was
+          // muted, but never let an admin undo it). Only on items that carry a reason (muted
+          // ones), only when this viewer could ever unmute anything at all -- real per-group
+          // enforcement still happens server-side regardless. A dedicated button rather than
+          // reusing the row's own click-through, since that opens the comment-history popup,
+          // a different action entirely (its own click handler below stops this one bubbling
+          // into that).
+          var unmuteBtn = (i.reason && canMute)
+            ? ' <button type="button" class="mx-unmute-btn" data-host="' + escapeHtml(i.host) + '" data-cat="' + escapeHtml(i.cat || "") + '" data-fk="' + escapeHtml(i.fk || "") + '">Unmute</button>'
+            : "";
+          var reasonHtml = i.reason ? '<div class="mx-reason"><b>Muted:</b> ' + escapeHtml(i.reason) + unmuteBtn + '</div>' : "";
+          // Clickable (2026-10-01, on request: "the detailed alert on the second screen must
+          // also be clickable opening another popup that shows the last 10 comments") -- only
+          // when the item carries a flag_key (every real severity_matrix()/muted_matrix() item
+          // does; see _affected_item's own "fk" comment) to drill into its comment history.
+          var fkAttr = i.fk ? ' data-fk="' + escapeHtml(i.fk) + '" data-cat="' + escapeHtml(i.cat || "") + '" data-host="' + escapeHtml(i.host) + '" data-label="' + escapeHtml(i.path.join(" › ")) + '" role="button" tabindex="0"' : "";
+          // Visible entry point for the comment-history drill-down, not just a bare cursor
+          // change (2026-10-02, reported: "i dont see the mute button when i click on the
+          // firing alert tab" -- the mute action was always ONE level deeper than this popup,
+          // behind clicking the row itself, with nothing but a hover style hinting that was
+          // possible; Export list/Open Alert Groups were the only visible buttons). Only for
+          // items with a flag_key -- the same condition that makes the row clickable at all.
+          // Bulk-select checkbox (2026-10-02, "way too many to mute one by one allow a select
+          // then mute option") -- only on items that are both mutable (i.fk) and NOT already
+          // muted (!i.reason, which already has its own Unmute button -- selecting it to mute
+          // again makes no sense). selMap is rebuilt every render (not just once) since
+          // `current` itself changes between popup opens; selectedKeys itself is never reset
+          // here, so a check made before a filter edit survives the re-render below.
+          var selKey = i.host + "||" + (i.cat || "") + "||" + (i.fk || "");
+          var checkboxHtml = "";
+          if (i.fk && canMute && !i.reason && i.configured !== false) {
+            selMap[selKey] = { system: i.host, category: i.cat || "", flag_key: i.fk, label: i.path.join(" › ") };
+            var isChecked = selectedKeys.has(selKey) ? " checked" : "";
+            checkboxHtml = '<label class="mx-sel-wrap"><input type="checkbox" class="mx-sel-cb" data-key="' + escapeHtml(selKey) + '"' + isChecked + '> Select</label>';
+          }
+          var drillHint = i.fk
+            ? '<div class="mx-drill-hint">' + checkboxHtml + '<span>' + (i.reason ? "View comment history" : "View comments & mute with one →") + '<span class="car">›</span></span></div>'
+            : "";
+          // Flag individual uncovered items even inside an otherwise-real FIRING cell
+          // (2026-10-02, "a way to show alerts that are configured vs those that are not
+          // configured") -- a mixed cell (e.g. RAM usage: CRB configured, GMS not) keeps its
+          // real "firing"/pulsing state since part of it IS actively notifying someone, but
+          // this specific row still needs to say nobody's covering IT -- green, not alarming,
+          // same spirit as severity_matrix()'s own cell-level "unconfigured" state.
+          var unconfiguredNote = i.configured === false
+            ? '<div class="mx-unconfigured-note">Not configured — no Alert Group covers this.</div>'
+            : "";
+          return '<div class="mx-item' + (i.fk ? " clickable" : "") + '"' + fkAttr + ' style="' + (i.sev ? "--sev:" + i.sev : "") + '">' +
+            '<div class="mx-path" title="' + i.path.join(" › ") + '">' + pathHtml + '</div>' +
+            '<div class="mx-host"><code>' + i.host + '</code>, since ' + i.since + '</div>' +
+            '<div class="mx-val"><div class="v">' + i.v + '</div><div class="s">' + i.s + '</div></div>' +
+            '<div class="mx-meter"><i style="width:' + i.pct + '%"></i></div>' + reasonHtml + unconfiguredNote + drillHint + '</div>';
+        }).join("") + '</div>';
+    }).join("");
+    updateBulkUI();
+  }
+
+  function closeModal() { scrim.classList.remove("open"); if (lastFocus) { lastFocus.focus(); } }
+  document.getElementById("mxClose").onclick = closeModal;
+  scrim.addEventListener("click", function (e) { if (e.target === scrim) { closeModal(); } });
+  document.addEventListener("keydown", function (e) {
+    // Comment popup is the TOPMOST layer when open (2026-10-01) -- Escape/Tab apply to it
+    // first and never fall through to the affected-items popup underneath.
+    if (cmtScrim && cmtScrim.classList.contains("open")) {
+      if (e.key === "Escape") { closeCmtModal(); }
+      if (e.key === "Tab") {
+        var cf = Array.prototype.slice.call(cmtScrim.querySelectorAll("button,input"));
+        var cfirst = cf[0], clast = cf[cf.length - 1];
+        if (e.shiftKey && document.activeElement === cfirst) { e.preventDefault(); clast.focus(); }
+        else if (!e.shiftKey && document.activeElement === clast) { e.preventDefault(); cfirst.focus(); }
+      }
+      return;
+    }
+    if (!scrim.classList.contains("open")) { return; }
+    if (e.key === "Escape") { closeModal(); }
+    if (e.key === "Tab") {
+      var f = Array.prototype.slice.call(scrim.querySelectorAll("button,input"));
+      var first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+  document.getElementById("mxFilter").addEventListener("input", function (e) { drawList(e.target.value); });
+
+  // Bulk mute controls (2026-10-02, "way too many to mute one by one allow a select then
+  // mute option"). "Select all" is scoped to the CURRENTLY VISIBLE (filtered) checkboxes only
+  // -- same "export THIS list" scoping #mxExport already uses -- toggling every one of them
+  // and syncing selectedKeys to match.
+  var selAllCb = document.getElementById("mxSelAll");
+  if (selAllCb) {
+    selAllCb.addEventListener("change", function () {
+      var boxes = Array.prototype.slice.call(document.querySelectorAll(".mx-sel-cb"));
+      boxes.forEach(function (cb) {
+        cb.checked = selAllCb.checked;
+        if (cb.checked) { selectedKeys.add(cb.dataset.key); } else { selectedKeys.delete(cb.dataset.key); }
+      });
+      updateBulkUI();
+    });
+  }
+  var muteSelectedBtn = document.getElementById("mxMuteSelected");
+  var bulkForm = document.getElementById("mxBulkForm");
+  var bulkReason = document.getElementById("mxBulkReason");
+  var bulkDays = document.getElementById("mxBulkDays");
+  var bulkMsg = document.getElementById("mxBulkMsg");
+  var bulkConfirmBtn = document.getElementById("mxBulkConfirm");
+  var bulkCancelBtn = document.getElementById("mxBulkCancel");
+  if (muteSelectedBtn && bulkForm) {
+    muteSelectedBtn.addEventListener("click", function () {
+      bulkForm.style.display = "";
+      bulkMsg.textContent = "";
+      bulkReason.focus();
+    });
+  }
+  if (bulkCancelBtn) {
+    bulkCancelBtn.addEventListener("click", function () {
+      bulkForm.style.display = "none";
+      bulkMsg.textContent = "";
+    });
+  }
+  if (bulkConfirmBtn) {
+    bulkConfirmBtn.addEventListener("click", function () {
+      var reasonTxt = (bulkReason.value || "").trim();
+      if (!reasonTxt) {
+        bulkMsg.style.color = "var(--rd)";
+        bulkMsg.textContent = "A reason is required.";
+        return;
+      }
+      var items = Array.from(selectedKeys).map(function (k) { return selMap[k]; }).filter(Boolean);
+      if (!items.length) {
+        bulkMsg.style.color = "var(--rd)";
+        bulkMsg.textContent = "Nothing selected.";
+        return;
+      }
+      bulkConfirmBtn.disabled = true;
+      bulkMsg.style.color = "var(--t3)";
+      bulkMsg.textContent = "Muting " + items.length + " finding" + (items.length === 1 ? "" : "s") + "…";
+      fetch(muteBulkUrl, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": getCookie("csrftoken") || "" },
+        credentials: "same-origin",
+        body: new URLSearchParams({
+          reason: reasonTxt, expires_days: bulkDays.value || "60", items: JSON.stringify(items),
+        }),
+      }).then(function (r) { return r.json(); })
+        .then(function (data) {
+          bulkConfirmBtn.disabled = false;
+          if (!data.ok) {
+            bulkMsg.style.color = "var(--rd)";
+            bulkMsg.textContent = data.error || "Could not mute.";
+            return;
+          }
+          var n = data.muted.length, s = data.skipped.length;
+          var msg = "Muted " + n + " finding" + (n === 1 ? "" : "s") + ".";
+          if (s) {
+            msg += " Skipped " + s + ": " + data.skipped.map(function (x) { return x.label + " (" + x.reason + ")"; }).join("; ") + ".";
+          }
+          bulkMsg.style.color = n ? "var(--gn)" : "var(--rd)";
+          bulkMsg.textContent = msg + (n ? " Reloading…" : "");
+          if (n) { setTimeout(function () { location.reload(); }, 1600); }
+        })
+        .catch(function () {
+          bulkConfirmBtn.disabled = false;
+          bulkMsg.style.color = "var(--rd)";
+          bulkMsg.textContent = "Network error — try again.";
+        });
+    });
+  }
+
+  // Clickable affected items -- opens the third screen (2026-10-01, see openCommentModal's
+  // own comment). Delegated on mxBody since drawList() rebuilds its contents on every filter.
+  document.getElementById("mxBody").addEventListener("click", function (e) {
+    var selCb = e.target.closest && e.target.closest(".mx-sel-cb");
+    if (selCb) {
+      // Native checkbox toggling already happened before this handler runs -- just stop it
+      // bubbling into the row's own click-through (which would otherwise also open the
+      // comment-history popup on the same click) and sync the selection state.
+      e.stopPropagation();
+      var key = selCb.dataset.key;
+      if (selCb.checked) { selectedKeys.add(key); } else { selectedKeys.delete(key); }
+      updateBulkUI();
+      return;
+    }
+    var unmuteBtn = e.target.closest && e.target.closest(".mx-unmute-btn");
+    if (unmuteBtn) {
+      e.stopPropagation();
+      unmuteBtn.disabled = true;
+      var origText = unmuteBtn.textContent;
+      unmuteBtn.textContent = "Unmuting…";
+      fetch(unmuteUrl, {
+        method: "POST",
+        headers: { "X-Requested-With": "XMLHttpRequest", "X-CSRFToken": getCookie("csrftoken") || "" },
+        credentials: "same-origin",
+        body: new URLSearchParams({
+          system: unmuteBtn.dataset.host, category: unmuteBtn.dataset.cat, flag_key: unmuteBtn.dataset.fk,
+        }),
+      }).then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.ok) {
+            unmuteBtn.disabled = false;
+            unmuteBtn.textContent = origText;
+            // Same "cleanly designed error" treatment access_denied already gets elsewhere on
+            // this page -- a real rejection (not your group, or the state moved since the
+            // popup loaded), shown next to the button rather than failing silently.
+            var reasonEl = unmuteBtn.closest(".mx-reason");
+            var note = document.createElement("div");
+            note.className = "mx-unmute-note";
+            note.textContent = data.error || "Could not unmute this.";
+            if (reasonEl) { reasonEl.appendChild(note); }
+            return;
+          }
+          unmuteBtn.textContent = "Unmuted — reloading…";
+          location.reload();
+        })
+        .catch(function () {
+          unmuteBtn.disabled = false;
+          unmuteBtn.textContent = origText;
+        });
+      return;
+    }
+    var item = e.target.closest && e.target.closest(".mx-item.clickable");
+    if (item) { openCommentModal(item); }
+  });
+  document.getElementById("mxBody").addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") { return; }
+    // Never hijack Space on the checkbox itself -- preventDefault below would block its own
+    // native toggle, and this row-activation shortcut isn't what focusing a checkbox means.
+    if (e.target.closest && e.target.closest(".mx-sel-cb")) { return; }
+    var item = e.target.closest && e.target.closest(".mx-item.clickable");
+    if (item) { e.preventDefault(); openCommentModal(item); }
+  });
+
+  // Export the CURRENTLY FILTERED list, not the unfiltered one -- "export this list" should
+  // mean whatever the admin is actually looking at right now.
+  var exportBtn = document.getElementById("mxExport");
+  if (exportBtn) {
+    exportBtn.addEventListener("click", function () {
+      var q = (document.getElementById("mxFilter").value || "").trim().toLowerCase();
+      var items = current.filter(function (i) { return !q || (i.path.join(" ") + " " + i.host).toLowerCase().indexOf(q) !== -1; });
+      var rows = [["System", "Component", "Resource", "Host", "Value", "Context", "Since"]];
+      items.forEach(function (i) {
+        rows.push([i.path[0] || "", i.path[1] || "", i.path[2] || "", i.host || "", i.v || "", i.s || "", i.since || ""]);
+      });
+      var csv = rows.map(function (row) {
+        return row.map(function (cell) { return '"' + String(cell).replace(/"/g, '""') + '"'; }).join(",");
+      }).join("\r\n");
+      var blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = (document.getElementById("mxTitle").textContent || "alert-matrix") + ".csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // Same-tab navigation, not a new tab (2026-10-01) -- "Open Alert Groups" goes to a screen
+  // inside this same app (config_alerts or my_alert_groups, whichever this viewer can reach --
+  // see views._alert_dashboard_context's own precedence), unlike the external Grafana link
+  // this button replaced.
+  var alertGroupsBtn = document.getElementById("mxAlertGroups");
+  if (alertGroupsBtn) {
+    alertGroupsBtn.addEventListener("click", function () {
+      var href = alertGroupsBtn.dataset.href;
+      if (href) { window.location.href = href; }
+    });
+  }
+})();
+</script>
+{% endblock %}

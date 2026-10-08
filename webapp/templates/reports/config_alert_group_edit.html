@@ -16,7 +16,16 @@
     <a class="btn ghost" href="{% url 'config_alerts' %}">All groups</a>
   </div>
 
-  {% if health and not health.is_live %}
+  {% if health and health.is_unconfirmed %}
+  <div class="card" style="border-color:var(--amber);margin-bottom:16px">
+    <div class="body" style="padding:14px 18px">
+      <p style="margin:0 0 6px;font-weight:700;color:var(--amber)">● Unconfirmed — this is what the amber chip on Alerting meant</p>
+      <ul style="margin:0;padding-left:18px;color:var(--ink)">
+        {% for p in health.problems %}<li>{{ p }}</li>{% endfor %}
+      </ul>
+    </div>
+  </div>
+  {% elif health and not health.is_live %}
   <div class="card" style="border-color:var(--red);margin-bottom:16px">
     <div class="body" style="padding:14px 18px">
       <p style="margin:0 0 6px;font-weight:700;color:var(--red)">● Not live — this is what the red chip on Alerting meant</p>

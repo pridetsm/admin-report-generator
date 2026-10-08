@@ -209,6 +209,38 @@ a:hover { text-decoration: underline; }
   .backnav-text { display: none; }
 }
 
+/* ---- dashboard chrome hide/show toggle (2026-10-06, on request: "add back the app bar on
+   top but add a special button for all dashboad screens to hide it and to bring it back... a
+   button works better because it covers touch navigation as well") ---- the <html> class is
+   set in base.html's own early <head> script (same pre-paint-flash-avoidance trick the
+   data-theme attribute right above it already uses), toggled by #dashChromeToggle further
+   down the page -- see that button's own comment for why it lives outside {% block chrome %}
+   entirely. Targets every piece of the chrome base.html's own "{% block chrome %}" comment
+   names as one unit (header, drawer, its backdrop, the floating back button) so hiding it
+   hides the whole bar, not just a piece of it. */
+html.dash-chrome-hidden .topbar,
+html.dash-chrome-hidden .drawer,
+html.dash-chrome-hidden .drawer-backdrop,
+html.dash-chrome-hidden .backnav { display: none !important; }
+
+.dash-chrome-toggle {
+  position: fixed; bottom: 18px; right: 18px; z-index: 50;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 10px 16px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink); box-shadow: var(--shadow);
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.dash-chrome-toggle:hover { border-color: var(--accent); }
+.dash-chrome-toggle .dct-arrow { font-size: 13px; line-height: 1; }
+/* Icon-only below 640px, not a smaller version of the same label+icon pill -- the label's
+   own text ("Hide nav"/"Show nav") is the least important part of this control for a thumb
+   reaching for it on a phone, and dropping it leaves more room for a touch target that's
+   still comfortably tappable instead of shrinking everything to fit. */
+@media (max-width: 640px) {
+  .dash-chrome-toggle { padding: 12px; }
+  .dash-chrome-toggle .dct-label { display: none; }
+}
+
 /* ---- past-report detail: plain tables ---- */
 .section-label.sub { margin-top: 22px; font-size: 11px; color: var(--muted); }
 .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; word-break: break-all; }
@@ -294,6 +326,17 @@ a:hover { text-decoration: underline; }
 .chip.amber  { color: var(--amber);  background: var(--amber-bg); }
 .chip.green  { color: var(--green);  background: var(--green-bg); }
 .chip.accent { color: var(--accent); background: var(--accent-bg); }
+/* "note" band (2026-09-29, on request: "why call it service now.....what is is is a
+   note.....so you need to design a notebanner that follows the designs for all
+   banners....just different coloring") -- a FlagVM.band of "note" (e.g. a cluster node's
+   network discard count -- see network.py's own comment on why a discard is background
+   context, not a fault) had no rule here at all, so it fell through unstyled. Reuses the
+   SAME --accent/--accent-bg this screen already has (not a new hue) -- matches
+   send_report/infrastructure_report.py's own CHIP_NOTE_BG/CHIP_NOTE_TXT, which made the
+   identical choice for the xlsx's own "NODE NETWORK DISCARDS" banner: not green (would
+   misread as "all clear"), not amber/red (it isn't a finding) -- background context worth
+   knowing, in the app's own existing informational colour. */
+.chip.note   { color: var(--accent); background: var(--accent-bg); }
 
 /* ---- Alert group "Live status" chips: a glowing halo, not just a coloured chip, so a fully
    configured group reads as visibly ALIVE rather than merely labelled (2026-09-04, on
@@ -314,6 +357,14 @@ a:hover { text-decoration: underline; }
   color: var(--red); border-color: var(--red);
   box-shadow: 0 0 0 1px var(--red), 0 0 12px 2px rgba(224, 90, 90, .55);
 }
+/* Configured correctly but never CONFIRMED to have actually sent (2026-10-01, on request:
+   "they should not be green unless already sending" -- found via Network Team/Infrastructure
+   Team: config-valid and successfully-notifying are different claims, see
+   _alert_group_health's own docstring). Amber, not green -- "should work" is not "has worked". */
+.live-chip.is-unconfirmed {
+  color: var(--amber); border-color: var(--amber);
+  box-shadow: 0 0 0 1px var(--amber), 0 0 12px 2px rgba(232, 176, 75, .5);
+}
 
 /* ---- flagged rows ---- */
 .flag {
@@ -325,6 +376,7 @@ a:hover { text-decoration: underline; }
 .flag .txt .name { font-weight: 550; }
 .flag .bar { width: 3px; align-self: stretch; border-radius: 3px; }
 .flag .bar.red { background: var(--red); } .flag .bar.amber { background: var(--amber); }
+.flag .bar.note { background: var(--accent); }
 
 /* segmented Yes/No — neutral until chosen, then a calm tint (not a loud fill) */
 .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }

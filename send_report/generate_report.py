@@ -60,6 +60,30 @@ from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 
 
+# Disk usage at/above this crosses from "Disk usage" (Critical) into "Very high disk usage"
+# (Imminent) -- a SEPARATE category, not the same one turning a darker shade of red (2026-10-01,
+# on request: "for disk usage there is one that is imminent and a version of it that is
+# critical... make these two alert types disk usage and Very high disk usage"). Deliberately a
+# bare module constant, NOT a Config field like chip_amber/chip_red -- matches the one real
+# precedent for this exact split already in this codebase, network.py's own flash_storage_low/
+# flash_storage_critical (switch flash/NVRAM), which has always used a hardcoded 85/95 split,
+# never an admin-editable one. Shared by this module's own disk check below AND network.py's
+# three node/device-disk checks (imported as gr.DISK_IMMINENT_PCT) so all four never drift.
+DISK_IMMINENT_PCT = 95
+
+# Same split, same reasoning, CPU instead of disk (2026-10-01, on request: "cpu usage is also
+# between 2 severities" -> split, with 95% chosen deliberately: CPU here is already a 5-minute
+# AVERAGE (not an instant spike), so a sustained 95%+ average is a real signal, not noise, even
+# though CPU naturally spikes more often than disk fills up. A SEPARATE constant from
+# DISK_IMMINENT_PCT on purpose -- they coincide at 95 today but measure unrelated things and
+# may need to diverge later; never assume they move together.
+CPU_IMMINENT_PCT = 95
+
+# Same split again, RAM instead of CPU (2026-10-01, on request: "rename ram usage across
+# severities"). Also a separate constant from the other two for the same reason.
+RAM_IMMINENT_PCT = 95
+
+
 # ============================================================================ #
 #  CONFIGURATION
 # ============================================================================ #
@@ -450,6 +474,47 @@ SERVICE_CHECKS: Dict[str, List[Service]] = {
              Service("IIS (W3SVC)", win_service("W3SVC", "10.0.206.12:9182"))],
     "ebis": [Service("IIS (W3SVC)", win_service("W3SVC", "10.0.207.20:9182")),
              Service("MSSQLSERVER", win_service("MSSQLSERVER", "10.0.207.21:9182"))],
+    # GTMS (Gold Bars Management System), hre-goldbars-01 (2026-09-29, on request: "added a
+    # new mono host system goldbars has sqlserver installed and other essential services").
+    # Checked live before wiring this up: NO MSSQLSERVER service exists on this host at all
+    # (not even present-and-stopped) -- its real DB engine is PostgreSQL
+    # (postgresql-x64-18, confirmed running), not SQL Server as first described; confirmed
+    # with the requester which services to track (PostgreSQL + IIS -- the app's own
+    # GoldBarsService and KeycloakService were both seen stopped but deliberately left
+    # unchecked, not asked for). No "offered" web-link Service needed here -- the weblink
+    # (https://gtms.rbz.co.zw:8443/, in blackbox_http) auto-attributes to this system since
+    # "gtms" is already a substring of its own URL (see LINK_CHECKS' own comment).
+    "gtms": [Service("PostgreSQL", win_service("postgresql-x64-18", "10.0.207.6:9182")),
+             Service("IIS (W3SVC)", win_service("W3SVC", "10.0.207.6:9182"))],
+    # ManageEngine ServiceDesk Plus, hre-svcdapp-01 (2026-09-29, on request: "added another
+    # monohost system ip 10.0.207.40 ITSM tool"). Probed live before wiring this up: the
+    # "servicedesk" service (ServiceDesk Plus itself) is running, alongside several
+    # ManageEngine UEMS (Unified Endpoint Management -- a different product family, patch/
+    # endpoint security, bundled on the same box) services. Requester confirmed treating all
+    # of it as ONE system ("track them... it rides off of manage engine"), not splitting
+    # ServiceDesk Plus from UEMS. Web UI confirmed live via its own login page title on both
+    # :443 and :8080; no DNS hostname found for this host, so the weblink (added to
+    # blackbox_http) probes the bare IP -- see LINK_CHECKS' own override entry below, since
+    # "manageengineservicedeskplus" (this system's normalised name) is not a substring of a
+    # bare-IP URL the way a real hostname would be.
+    "manageengineservicedeskplus": [
+        Service("ServiceDesk Plus", win_service("servicedesk", "10.0.207.40:9182")),
+        Service("UEMS Agent", win_service("ManageEngine UEMS - Agent", "10.0.207.40:9182")),
+        Service("UEMS Notification Server",
+                win_service("ManageEngine UEMS - Notification Server", "10.0.207.40:9182")),
+        Service("Unified Endpoint Security",
+                win_service("ManageEngine Unified Endpoint Security - Agent", "10.0.207.40:9182")),
+        Service("OS Deployer PXE Server",
+                win_service("ManageEngine OS Deployer PXE Server", "10.0.207.40:9182")),
+    ],
+    # Voice Recorder, hre-voice-01 (2026-09-29, on request: "added another monohost system
+    # called Voice Recorder IP 10.100.249.225"). Probed live before wiring this up: no
+    # service on the host is distinctly named for a recording app -- only postgresql-x64-17
+    # (running) stood out; confirmed with the requester to track just that for now. The
+    # host's only web content (IIS default site, port 80) is titled "RBZ GOLD BARS" -- stale/
+    # unrelated leftover content, not this system's own UI -- so no weblink is configured
+    # (confirmed with the requester to skip it rather than probe something misleading).
+    "voicerecorder": [Service("PostgreSQL", win_service("postgresql-x64-17", "10.100.249.225:9182"))],
     "refinitivreuters": [
         Service("Post Trade 1.9 Conversation Printer RESZ",
                 win_service("PT_1.9_CONVPRT_RESZ", "10.100.245.216:9182")),
@@ -1005,6 +1070,7 @@ LINK_CHECKS: Dict[str, List[str]] = {
     "bdtrs":      ["bdctrs.rbz.co.zw", "bdctrs"],       # domain is 'bdctrs' (extra c) -> won't name-match
     "gcms":       ["vault.rbz.co.zw", "vault"],         # GCMS web app lives at vault.rbz.co.zw (no 'gcms' in URL)
     "frs":        ["frs.rbz.co.zw", "10.100.245.150"],  # FRS web app at https://frs.rbz.co.zw (trusted Sectigo cert). Probe by HOSTNAME, not the bare IP: the cert's SAN is frs.rbz.co.zw with no IP SAN, so probing 10.100.245.150 fails TLS verification. IP kept here only to still attribute any stale IP-based series.
+    "manageengineservicedeskplus": ["10.0.207.40"],     # ManageEngine ServiceDesk Plus -- no DNS hostname found for hre-svcdapp-01, probed by bare IP, which is never a substring of "manageengineservicedeskplus".
 }
 
 
@@ -2060,9 +2126,21 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
     for c in sysm.components:
         for mount, dd in sorted(store.disk.get(c.instance, {}).items(), key=lambda kv: -kv[1].get("used", 0)):
             u = dd.get("used", 0)
-            band = "red" if u >= cfg.chip_red else ("amber" if u >= cfg.chip_amber else None)
-            if band:
-                flags.append(Flag(f"disk:{c.label}:{mount}", f"{c.label} · {mount} {u:.0f}%", band, "disk"))
+            # THREE tiers now, three DIFFERENT category names, not one name spanning two
+            # severities (2026-10-01, on request: "after you split them do not name them the
+            # exact same thing across severities"): amber="disk"/Warning,
+            # red<DISK_IMMINENT_PCT="high_disk"/Critical, red>=DISK_IMMINENT_PCT=
+            # "very_high_disk"/Imminent. The flag_key prefix changes WITH the category at
+            # every boundary, so crossing a line always reads as a new incident (closes the
+            # old finding, opens a new one), never the same key quietly turning a darker red.
+            if u >= DISK_IMMINENT_PCT:
+                flags.append(Flag(f"very_high_disk:{c.label}:{mount}",
+                                  f"{c.label} · {mount} {u:.0f}%", "red", "very_high_disk"))
+            elif u >= cfg.chip_red:
+                flags.append(Flag(f"high_disk:{c.label}:{mount}",
+                                  f"{c.label} · {mount} {u:.0f}%", "red", "high_disk"))
+            elif u >= cfg.chip_amber:
+                flags.append(Flag(f"disk:{c.label}:{mount}", f"{c.label} · {mount} {u:.0f}%", "amber", "disk"))
     # unreachable host / high RAM (one pass per component, mirroring the Memory panel)
     for c in sysm.components:
         if is_unreachable(store, c.instance):
@@ -2071,18 +2149,26 @@ def flagged_for_system(store: "Store", sysm: "System", cfg: "Config") -> List[Fl
             v = store.ram.get(c.instance)
             amber, red = ram_thresholds(c.instance, cfg.chip_amber, cfg.chip_red)
             if v is not None and v >= amber:
-                band = "red" if v >= red else "amber"
                 note = ram_threshold_comment(c.instance, v)
                 text = f"{c.label} · RAM {v:.0f}%" + (f" — {note}" if note else "")
-                flags.append(Flag(f"ram:{c.label}", text, band, "ram"))
-    # high CPU
+                # Same three-tier/three-name split as disk above.
+                if v >= RAM_IMMINENT_PCT:
+                    flags.append(Flag(f"very_high_ram:{c.label}", text, "red", "very_high_ram"))
+                elif v >= red:
+                    flags.append(Flag(f"high_ram:{c.label}", text, "red", "high_ram"))
+                else:
+                    flags.append(Flag(f"ram:{c.label}", text, "amber", "ram"))
+    # high CPU -- same three-tier/three-name split as disk above.
     for c in sysm.components:
         cu = store.cpu.get(c.instance)
         if cu is None:
             continue
-        band = "red" if cu >= cfg.chip_red else ("amber" if cu >= cfg.chip_amber else None)
-        if band:
-            flags.append(Flag(f"cpu:{c.label}", f"{c.label} · CPU {cu:.0f}%", band, "cpu"))
+        if cu >= CPU_IMMINENT_PCT:
+            flags.append(Flag(f"very_high_cpu:{c.label}", f"{c.label} · CPU {cu:.0f}%", "red", "very_high_cpu"))
+        elif cu >= cfg.chip_red:
+            flags.append(Flag(f"high_cpu:{c.label}", f"{c.label} · CPU {cu:.0f}%", "red", "high_cpu"))
+        elif cu >= cfg.chip_amber:
+            flags.append(Flag(f"cpu:{c.label}", f"{c.label} · CPU {cu:.0f}%", "amber", "cpu"))
     # services down
     for name, up, _kind, group in store.services.get(sysm.name, []):
         if not up:

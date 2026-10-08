@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Backup History Report · RBZ Monitoring Console{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:760px">
+
+  <div class="rs-head">
+    <h1>Backup History Report</h1>
+    <p>For a chosen date range: whether each system's backup was reachable and current each
+       day, the real backup filename and timestamp where it's been recorded, and which report
+       that day traces back to.</p>
+  </div>
+
+  <div class="card"><div class="body" style="padding:18px">
+    <p style="margin:0 0 16px;color:var(--muted);font-size:13.5px">
+      Covers every system the backup checker has ever reported on within the chosen range —
+      there is no system picker. Backup filenames/timestamps are only recorded from the day
+      this report shipped onward; earlier dates still show whether a backup was reachable and
+      current, just not the file itself.
+      {% if min_date %}
+        No data is archived before {{ min_date|date:"d M Y" }} — the picker below won't let
+        you scroll back further than that.
+      {% endif %}
+    </p>
+
+    {% if no_data_yet %}
+    <p class="muted" style="margin:0 0 16px">
+      No backup data has been archived yet — there is nothing to report on.
+    </p>
+    {% else %}
+    <form method="post" class="xlsx-download-form">{% csrf_token %}
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:18px">
+        <label class="field">
+          <span>From</span>
+          <input type="date" name="from" value="{{ default_from|date:'Y-m-d' }}"
+                 {% if min_date %}min="{{ min_date|date:'Y-m-d' }}"{% endif %}
+                 max="{{ max_date|date:'Y-m-d' }}" required>
+        </label>
+        <label class="field">
+          <span>To</span>
+          <input type="date" name="to" value="{{ default_to|date:'Y-m-d' }}"
+                 {% if min_date %}min="{{ min_date|date:'Y-m-d' }}"{% endif %}
+                 max="{{ max_date|date:'Y-m-d' }}" required>
+        </label>
+      </div>
+
+      <label class="field" style="margin-bottom:18px">
+        <span>Theme</span>
+        <div class="segtheme">
+          <input type="radio" id="bhThemeDark" name="theme" value="dark"
+                 {% if default_theme != "light" %}checked{% endif %}>
+          <label for="bhThemeDark">Dark</label>
+          <input type="radio" id="bhThemeLight" name="theme" value="light"
+                 {% if default_theme == "light" %}checked{% endif %}>
+          <label for="bhThemeLight">Light</label>
+        </div>
+      </label>
+
+      <button class="btn primary" type="submit">
+        ⬇ Generate &amp; download
+      </button>
+    </form>
+    {% endif %}
+  </div></div>
+</div>
+{% endblock %}

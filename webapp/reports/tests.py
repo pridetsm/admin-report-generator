@@ -2271,6 +2271,190 @@ class DashboardsAreSeparate(TestCase):
                                   "Active Directory Report"])
 
 
+class IncidentCalendarPanel(TestCase):
+    """03 Incident Calendar (2026-10-07, incident-calendar.zip package) -- reuses
+    IssueOccurrence as the real incident source (see build_incident_calendar_context's own
+    docstring for why no new Incident model exists), and the Needs Attention Now 2-hour
+    freshness rule for "Missing backups" (on request: "keep both occurances, just stop firing
+    in needs attention now after 2 hours")."""
+
+    def setUp(self):
+        from .models import IssueOccurrence, LiveEstateOverview
+
+        U = get_user_model()
+        self.admin = U.objects.create_user("inccal", password="pw12345!", is_superuser=True)
+        self.now = timezone.now()
+        self.today = timezone.localtime(self.now).date()
+
+        LiveEstateOverview.objects.update_or_create(
+            kind="system_admin",
+            defaults={
+                "captured_at": self.now,
+                "overview": {
+                    "glance": [], "watch": [],
+                    "immediate": [{"label": "Missing backups", "value": "2 | 10",
+                                   "sub": "missing | tracked", "state": "bad"}],
+                },
+                "systems": [{"name": "RTGS", "hosts": 1, "flags": [
+                    {"key": "backup:Database", "text": "Database — NO BACKUP",
+                     "band": "red", "category": "backup"},
+                    {"key": "backup:App", "text": "App — NO BACKUP",
+                     "band": "red", "category": "backup"},
+                ]}],
+            })
+
+        # Fresh (30 min old) -- still inside the 2-hour window, so still a NEW finding.
+        IssueOccurrence.objects.create(
+            system="RTGS", flag_key="backup:Database", category="backup", band="red",
+            text="Database — NO BACKUP", domain="Systems",
+            started_at=self.now - datetime.timedelta(minutes=30), last_seen_at=self.now)
+        # Stale (5 hours old) -- past the 2-hour window, a known/tracked finding now.
+        IssueOccurrence.objects.create(
+            system="RTGS", flag_key="backup:App", category="backup", band="red",
+            text="App — NO BACKUP", domain="Systems",
+            started_at=self.now - datetime.timedelta(hours=5), last_seen_at=self.now)
+
+        self.client.force_login(self.admin)
+
+    # -- 1. Context builder --------------------------------------------------------------
+
+    def test_context_shape_and_month_keys(self):
+        from .views import build_incident_calendar_context
+
+        ctx = build_incident_calendar_context(self.today)
+        self.assertEqual(ctx["domains"], ["Systems", "Network", "Infrastructure", "Security"])
+        self.assertEqual(ctx["types"], ["Missing backups"])
+        cur_key = f"{self.today.year:04d}-{self.today.month:02d}"
+        self.assertIn(cur_key, ctx["months"])
+        self.assertEqual(ctx["months"][cur_key]["today"], self.today.day)
+        self.assertIn("Security", ctx["months"][cur_key]["nodata"])
+
+    def test_previous_month_today_is_past_the_month_length(self):
+        from .views import build_incident_calendar_context
+        import calendar as _calendar
+
+        ctx = build_incident_calendar_context(self.today)
+        prev = self.today.replace(day=1) - datetime.timedelta(days=1)
+        prev_key = f"{prev.year:04d}-{prev.month:02d}"
+        days_in_prev = _calendar.monthrange(prev.year, prev.month)[1]
+        self.assertGreaterEqual(ctx["months"][prev_key]["today"], days_in_prev)
+
+    def test_incident_merges_both_occurrences_for_the_day(self):
+        """Both open RTGS occurrences (Database + App) started today -> ONE incident entry,
+        devices merged, resolved False since at least one is still open."""
+        from .views import build_incident_calendar_context
+
+        ctx = build_incident_calendar_context(self.today)
+        cur_key = f"{self.today.year:04d}-{self.today.month:02d}"
+        todays = [i for i in ctx["months"][cur_key]["incidents"] if i["day"] == self.today.day]
+        self.assertEqual(len(todays), 1)
+        inc = todays[0]
+        self.assertEqual(inc["domain"], "Systems")
+        self.assertFalse(inc["resolved"])
+        self.assertEqual(set(inc["devices"]), {"RTGS — Database", "RTGS — App"})
+        self.assertEqual(inc["note"], "Awaiting resolution.")
+
+    def test_resolved_incident_note_and_flag(self):
+        from .models import IssueOccurrence
+        from .views import build_incident_calendar_context
+
+        IssueOccurrence.objects.filter(system="RTGS").update(
+            resolved_at=self.now, last_seen_at=self.now)
+        ctx = build_incident_calendar_context(self.today)
+        cur_key = f"{self.today.year:04d}-{self.today.month:02d}"
+        inc = next(i for i in ctx["months"][cur_key]["incidents"] if i["day"] == self.today.day)
+        self.assertTrue(inc["resolved"])
+        self.assertIn("cleared automatically", inc["note"])
+
+    # -- 2. Needs Attention exclusion (2-hour freshness) ----------------------------------
+
+    def test_stale_backup_miss_excluded_from_needs_attention_fresh_count(self):
+        """Database (30 min old) counts; App (5h old) does not -- tile reads "1 | 10", not
+        "2 | 10", and stays red/bad since at least one fresh finding remains.
+
+        Calls _management_dashboard_context directly (RequestFactory, not self.client.get)
+        rather than reading response.context -- on this box's Django 5.1.15 / Python 3.14.3
+        combo, the test client's template-rendered signal handler (store_rendered_templates ->
+        RenderContext.__copy__ -> BaseContext.__copy__) raises
+        "'super' object has no attribute 'dicts'" on ANY rendered template, a pre-existing
+        environment incompatibility unrelated to this feature (confirmed by triggering it on
+        an unmodified, already-shipped page). Calling the context builder directly exercises
+        the exact same real code the view calls, without going through that broken signal."""
+        from django.test import RequestFactory
+
+        from .views import _management_dashboard_context
+
+        request = RequestFactory().get(reverse("management_dashboard_pretty"))
+        request.user = self.admin
+        ctx = _management_dashboard_context(request)
+        row = next(e for e in ctx["exceptions"] if e["label"] == "Missing backups")
+        self.assertEqual(row["value"], "1 | 10")
+        self.assertEqual(row["band"], "bad")
+
+    def test_all_stale_backup_misses_clears_the_row_to_ok(self):
+        from django.test import RequestFactory
+
+        from .models import IssueOccurrence
+        from .views import _management_dashboard_context
+
+        IssueOccurrence.objects.filter(flag_key="backup:Database").update(
+            started_at=self.now - datetime.timedelta(hours=3))
+        request = RequestFactory().get(reverse("management_dashboard_pretty"))
+        request.user = self.admin
+        ctx = _management_dashboard_context(request)
+        row = next(e for e in ctx["exceptions"] if e["label"] == "Missing backups")
+        self.assertEqual(row["value"], "0 | 10")
+        self.assertEqual(row["band"], "ok")
+
+    def test_other_standing_labels_unaffected(self):
+        """The freshness override only ever touches "Missing backups" -- every other row's
+        value/band must pass through _fresh_backup_miss_override unchanged."""
+        from django.test import RequestFactory
+
+        from .models import LiveEstateOverview
+        from .views import _management_dashboard_context
+
+        row = LiveEstateOverview.objects.get(kind="system_admin")
+        row.overview["immediate"].append(
+            {"label": "Services down", "value": "3 | 20", "state": "bad"})
+        row.save(update_fields=["overview"])
+        request = RequestFactory().get(reverse("management_dashboard_pretty"))
+        request.user = self.admin
+        ctx = _management_dashboard_context(request)
+        services_row = next(e for e in ctx["exceptions"] if e["label"] == "Services down")
+        self.assertEqual(services_row["value"], "3 | 20")
+        self.assertEqual(services_row["band"], "bad")
+
+    # -- 3. Template render -----------------------------------------------------------------
+
+    def test_dashboard_renders_the_calendar_panel(self):
+        body = self.client.get(reverse("management_dashboard_pretty")).content.decode()
+        self.assertIn('<span class="n">03</span> Incident Calendar', body)
+        self.assertIn('<span class="n">04</span> SWIFT Transaction History', body)
+        self.assertIn('class="mid-row2"', body)
+        self.assertIn('id="incident-data"', body)
+        self.assertIn('id="na-ov-inc"', body)
+        self.assertNotIn('class="col-c2"', body)
+
+    def test_banner_tiles_are_the_spec_s_three_not_the_old_five(self):
+        """Scoped to the Incident Calendar panel's own STATIC markup specifically -- the rest
+        of the page (01 Needs Attention Now included) legitimately has its own, unrelated
+        "Unresolved" text elsewhere, and the calendar's OWN "Unresolved"/"Devices" day-popup
+        tiles only ever exist as JS-generated innerHTML at runtime, never in the server-
+        rendered source -- a page-wide search would false-positive on either."""
+        body = self.client.get(reverse("management_dashboard_pretty")).content.decode()
+        start = body.find('id="incBanner"')
+        end = body.find('id="incMatrix"')
+        self.assertGreater(start, 0)
+        self.assertGreater(end, start)
+        banner_html = body[start:end]
+        self.assertIn(">Incidents</div>", banner_html)
+        self.assertIn(">Incident types</div>", banner_html)
+        self.assertIn(">Affected domains</div>", banner_html)
+        self.assertNotIn("Unresolved", banner_html)
+        self.assertNotIn("Affected devices", banner_html)
+
+
 # The old NetworkDevicePicker/NetworkDeviceIsNotASystem classes (network_dashboard) were
 # removed 2026-09-22 along with the view itself -- superseded by AccessSwitchesDevicePicker/
 # AccessSwitchesDevicesAreNotBusinessSystems below.

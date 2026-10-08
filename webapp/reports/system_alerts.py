@@ -176,7 +176,12 @@ def run_system_alert_cycle(*, dry_run: bool = False) -> SystemAlertRunResult:
 
     checks = list(FreshnessCheck.objects.filter(active=True))
     result.checks_evaluated = len(checks)
-    if not groups or not checks:
+    # Checks, not checks-AND-groups (2026-10-01, on request: "add staleness and other system
+    # alerts to the alert dashboard") -- staleness state must keep getting evaluated and
+    # recorded even if every Staleness AlertGroup happens to be paused/deleted, same as
+    # IssueOccurrence keeps recording Monitoring findings independent of AlertGroup coverage.
+    # The group loop below still naturally sends nothing when `groups` is empty.
+    if not checks:
         return result
 
     prom = _prom_client()
@@ -190,6 +195,32 @@ def run_system_alert_cycle(*, dry_run: bool = False) -> SystemAlertRunResult:
         mtime = mtimes.get(c.pk)
         age = (now.timestamp() - mtime) if mtime is not None else None
         stale = age is None or age > c.max_age_seconds
+        # Feed the SAME IssueOccurrence/Alert Matrix the other two notification types already
+        # use (2026-10-01, on request: "just add a staleness issue category increase domain to
+        # include another domain... call it Self... use existing design") -- a new "staleness"
+        # category under a new "Self" domain (this app watching its OWN monitoring pipeline,
+        # not a business system), comprehensive and group-independent exactly like the Systems/
+        # kind loops in alerting.py already are. ONE pseudo-"system" per CHECK, not per real
+        # business system ("{c.system} · {c.name}", matching the digest e-mail's own label
+        # below) -- record_occurrences resolves whatever isn't in THIS call's flags list for
+        # the given system name, so two checks sharing a real system (T24 has four) would
+        # wrongly resolve each other's finding if they shared one record_occurrences call; a
+        # checker-unique pseudo-system avoids that collision entirely, and reads naturally in
+        # the matrix popup ("CEBAS · Database Backup Checker" affected, not just "CEBAS").
+        if not dry_run:
+            from . import alerting as _alerting
+            from .services import FlagVM
+
+            pseudo_system = f"{c.system} · {c.name}"
+            if stale:
+                max_age_str = _duration_str(c.max_age_seconds)
+                detail = (f"Not updated in {_duration_str(age)} (expected within {max_age_str})"
+                         if age is not None else
+                         f"No data at all from this checker (expected within {max_age_str})")
+                stale_flags = [FlagVM("stale", detail, "red", "staleness")]
+            else:
+                stale_flags = []
+            _alerting.record_occurrences(pseudo_system, stale_flags, now, domain="Self")
         for g in groups:
             if c.system not in (g.systems or []):
                 continue

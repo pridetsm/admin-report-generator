@@ -22,6 +22,16 @@ PROMTOOL_PATH = PROMETHEUS_DIR / "promtool.exe"
 CANDIDATE_PATH = PROMETHEUS_DIR / "_candidate_prometheus.yml"
 SERVICE_NAME = "Prometheus"
 
+# The retention flags this app manages live in NSSM's own AppParameters, NOT prometheus.yml --
+# they're process-start CLI flags Prometheus only reads at launch, so changing them always
+# needs the same restart as everything else here, never a live reload. Confirmed 2026-09-30:
+# NSSM's `Application` for the Prometheus service is prometheus.exe directly (not a wrapping
+# .bat), so `nssm set Prometheus AppParameters "..."` is the correct write target -- verify
+# this again with `nssm.exe get Prometheus Application` before reusing this code against a
+# different host/deployment where that might not hold.
+NSSM_PATH = Path(r"C:\nssm\nssm.exe")
+DATA_DIR = PROMETHEUS_DIR / "data"
+
 # The three files prometheus.yml's `rule_files:` list references — confirmed via
 # `promtool check config` ("3 rule files found"). Each gets its own DB-versioned sub-page,
 # reached from the main Prometheus config screen (see prometheus_rule_file in views.py).
@@ -140,6 +150,105 @@ def write_and_restart(content: str, *, allow_job_removal: bool = False) -> Tuple
     if not ok:
         return False, f"prometheus.yml was rewritten, but {detail}"
     return True, f"promtool validated the config, prometheus.yml was rewritten, and {detail}"
+
+
+def get_app_parameters() -> str:
+    """The live NSSM AppParameters string, exactly as configured -- e.g.
+    '--config.file=C:\\metrics\\prometheus\\prometheus.yml --web.config.file=...'.
+
+    nssm.exe's stdout on this install is genuine UTF-16LE (confirmed live, 2026-09-30: raw
+    bytes are '-\\x00-\\x00c\\x00...', one null byte after every ASCII character) -- capturing
+    with subprocess's own text=True mis-decodes it via the console's default codepage, which
+    does NOT fix this (every other byte still renders as a stray space/control char; a
+    whitespace-collapse pass over THAT output is cosmetic and changes nothing, confirmed by
+    testing it directly). Capturing raw bytes and decoding as utf-16-le explicitly is the
+    actual fix."""
+    result = subprocess.run(
+        [str(NSSM_PATH), "get", SERVICE_NAME, "AppParameters"],
+        capture_output=True, timeout=15)
+    return result.stdout.decode("utf-16-le", errors="ignore").strip()
+
+
+def build_app_parameters(params: str, *, retention_days: int | None,
+                         admin_api_enabled: bool = False) -> str:
+    """Strip any existing --storage.tsdb.retention.*/--web.enable-admin-api tokens from the
+    live AppParameters string and rebuild with the new values, preserving every other flag.
+    retention_days=None omits the flag entirely, so Prometheus falls back to its own 15-day
+    default -- --storage.tsdb.retention.size is NEVER set here at all (not just conditionally
+    omitted): explicit decision, the time window alone is trusted to bound size (see
+    PROMETHEUS-RETENTION-PLAN.md's own risk note on this).
+
+    Plain whitespace split, deliberately NOT shlex.split(): confirmed live, 2026-09-30 --
+    shlex's default POSIX mode treats backslash as an escape character, silently corrupting
+    every Windows path here (C:\\metrics\\prometheus\\prometheus.yml -> C:metricsprometheus
+    prometheus.yml). None of these flag values contain spaces, so a plain split needs no
+    quoting-awareness at all -- shlex was solving a problem this string doesn't have while
+    creating a real one."""
+    tokens = [t for t in params.split()
+             if not t.startswith("--storage.tsdb.retention.")
+             and t != "--web.enable-admin-api"]
+    if retention_days is not None:
+        tokens.append(f"--storage.tsdb.retention.time={retention_days}d")
+    if admin_api_enabled:
+        tokens.append("--web.enable-admin-api")
+    return " ".join(tokens)
+
+
+def write_retention_and_restart(retention_days: int) -> Tuple[bool, str]:
+    """Apply a new live_window_days to the live service: build the new AppParameters, `nssm
+    set`, restart, and re-check service_status() explicitly rather than trusting the restart
+    call's own exit code -- this restart is more consequential than a config-file reload (it
+    changes what Prometheus itself keeps, not just what it scrapes), so the caller (and the
+    PrometheusRetentionRevision row it creates on success) deserves to know Running/Stopped for
+    certain, not just "the restart command returned 0"."""
+    try:
+        current = get_app_parameters()
+    except Exception as exc:
+        return False, f"Could not read the current service parameters: {exc}"
+
+    new_params = build_app_parameters(current, retention_days=retention_days)
+    try:
+        result = subprocess.run(
+            [str(NSSM_PATH), "set", SERVICE_NAME, "AppParameters", new_params],
+            capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return False, "nssm set timed out after 15s -- nothing was changed on the service."
+    if result.returncode != 0:
+        # Same UTF-16LE decoding as get_app_parameters() -- see that function's own comment.
+        err = (result.stderr or result.stdout).decode("utf-16-le", errors="ignore").strip()
+        return False, f"nssm set failed: {err}"
+
+    ok, detail = _restart_service()
+    status = service_status()
+    if not ok:
+        return False, f"AppParameters updated, but {detail} (service is now: {status})"
+    return True, f"Retention set to {retention_days}d and {SERVICE_NAME} restarted (status: {status})."
+
+
+def disk_usage_snapshot() -> dict:
+    """{'data_dir_bytes', 'c_drive_free_bytes', 'c_drive_total_bytes', 'computed_at'} --
+    computed on demand (the config screen's own "Refresh disk usage" button), not on every
+    page load: walking the block-directory tree is cheap at the tens-of-blocks scale this data
+    dir holds, but not something to redo on every GET."""
+    import shutil
+
+    import django.utils.timezone as dj_timezone
+
+    data_bytes = 0
+    if DATA_DIR.exists():
+        for p in DATA_DIR.rglob("*"):
+            if p.is_file():
+                try:
+                    data_bytes += p.stat().st_size
+                except OSError:
+                    continue
+    usage = shutil.disk_usage(str(PROMETHEUS_DIR.anchor))
+    return {
+        "data_dir_bytes": data_bytes,
+        "c_drive_free_bytes": usage.free,
+        "c_drive_total_bytes": usage.total,
+        "computed_at": dj_timezone.now(),
+    }
 
 
 def rule_file_path(filename: str) -> Path:

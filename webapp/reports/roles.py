@@ -68,10 +68,20 @@ ROLE_PAGES = {
     # Common is also the honest description: the view is purely snapshot-driven, and a
     # snapshot can only exist because a role-gated screen captured it. Nothing is widened by
     # letting the download itself belong to everyone.
+    # "management_dashboard_alerts" (2026-10-01, moved off Management -- "remove the dashboard
+    # from the management role and add it to all other roles") is listed on this role and the
+    # four below it (Network/Infrastructure/Security Admin, Administrator) -- the five estate/
+    # admin roles the alert data is actually about -- but deliberately NOT Gov Systems Admin
+    # (owns nothing, see that role's own comment below) or Sub Admin (not a role you switch
+    # into, see SUB_ADMIN_ROLE's own comment), and no longer Management at all (dropped, not
+    # kept read-only). roles.can_view_alert_dashboard is the real gate (the view's own check,
+    # same "menu narrows, per-view check is the boundary" relationship every other entry here
+    # has) -- this set only drives the drawer link / role-screen count / wrong-role bounce.
     SYSTEM_ADMIN_ROLE:   {"reports", "report_form", "report", "history", "submission_detail",
                           "connect", "folder_watch", "folder_watch_temenos", "folder_watch_data",
                           "automated_reports", "automated_report_type", "automated_report_detail",
-                          "automated_report_toggle_distribution", "automated_report_download"},
+                          "automated_report_toggle_distribution", "automated_report_download",
+                          "backup_history_report", "management_dashboard_alerts"},
     # ...and the network people get the matching pair: a device picker and the report it
     # opens, so neither role has to walk past the other's screens to reach its own.
     # `network_sod_generate` sits alongside its screen for the same reason `generate` is
@@ -95,7 +105,9 @@ ROLE_PAGES = {
                           "core_switches_form", "core_switches_report",
                           "routers_form", "routers_report",
                           "wireless_controller_form", "wireless_controller_report",
-                          "access_switches_form", "access_switches_report"},
+                          "access_switches_form", "access_switches_report",
+                          "firewalls_form", "firewalls_report",
+                          "management_dashboard_alerts"},
     # Infrastructure Admin owns the underlying hardware (hyper-converged clusters, standalone
     # DB hosts) — a third estate alongside business systems and network gear. Its own picker,
     # but its "report" reuses the shared `generate` screen directly (see views.infra_report),
@@ -119,14 +131,16 @@ ROLE_PAGES = {
                           "core_switches_form", "core_switches_report",
                           "routers_form", "routers_report",
                           "wireless_controller_form", "wireless_controller_report",
-                          "access_switches_form", "access_switches_report"},
+                          "access_switches_form", "access_switches_report",
+                          "firewalls_form", "firewalls_report",
+                          "management_dashboard_alerts"},
     ADMIN_ROLE:          {"roles_console", "system_settings", "grafana_config",
                           "prometheus_config", "prometheus_rule_file",
                           "configuration", "config_yaml", "config_role_scopes",
                           "config_prometheus", "config_topology", "config_snmp",
                           "config_backup_policy",
                           "config_scripts", "config_script_edit",
-                          "config_script_preview"},
+                          "config_script_preview", "management_dashboard_alerts"},
     # Security Admin runs the SAME System Health report as System Admin — same picker, same
     # screens — plus its own OS Inventory. Sharing report_form/report between two roles is why
     # PAGE_OWNER became a set: as a single owner, whichever role lost the tie was bounced off
@@ -134,7 +148,8 @@ ROLE_PAGES = {
     SECURITY_ADMIN_ROLE: {"reports", "report_form", "report", "os_inventory",
                           "history", "submission_detail", "connect",
                           "automated_reports", "automated_report_type", "automated_report_detail",
-                          "automated_report_toggle_distribution", "automated_report_download"},
+                          "automated_report_toggle_distribution", "automated_report_download",
+                          "management_dashboard_alerts"},
     # One role still has no estate. Deliberately empty rather than borrowing another role's
     # dashboard: a role with nothing in it should look like one.
     "Gov Systems Admin": set(),
@@ -143,12 +158,23 @@ ROLE_PAGES = {
     # the landing page... called Executive - Focused"; 2026-09-19, on request: "save the
     # current variation of the focused dashboard as -analytical instead of -focused" -- Focused
     # was redesigned into a plain 2x2 domain grid and its former content preserved as its own
-    # page, Analytical). Still no Reports/History access: this role's whole job is these three
-    # glance-able pages, not generating or reviewing individual reports the way every estate
-    # role above does. See views._management_dashboard_context for the one context builder all
-    # three pages share, and management_dashboard_full.html / management_dashboard_focused.html
-    # / management_dashboard_analytical.html for how their own content actually differs.
-    MANAGEMENT_ROLE: {"management_dashboard_full", "management_dashboard_focused",
+    # page, Analytical; 2026-10-05, on request: "save the current dashboard as -focus....then
+    # this new one call it -pretty and make it the landing page" -- same move again, Pretty's
+    # cosmetic Needs Attention Now matrix redesign took over the landing slot, Focus is what
+    # "Focused" rendered the moment before that; 2026-10-07, on request: "rename this one to
+    # Pretty Analytical then duplicate it and remove the domain for which we have nothing
+    # monitored i.e security domain...this duplicate make it landing page" -- Pretty's own
+    # prior content, Security domain included, preserved verbatim as a 5th page, Pretty
+    # Analytical; Pretty itself keeps the landing slot and its original name/URL, now rendering
+    # the Security-free variant). Still no Reports/History access: this role's whole job is
+    # these five glance-able pages, not generating or reviewing individual reports the way
+    # every estate role above does. See views._focus_style_context/
+    # _management_dashboard_context for the context builders these five pages share, and
+    # management_dashboard_full.html / management_dashboard_focus.html /
+    # management_dashboard_pretty.html / management_dashboard_pretty_analytical.html /
+    # management_dashboard_analytical.html for how their own content actually differs.
+    MANAGEMENT_ROLE: {"management_dashboard_full", "management_dashboard_focus",
+                      "management_dashboard_pretty", "management_dashboard_pretty_analytical",
                       "management_dashboard_analytical"},
 }
 
@@ -172,9 +198,10 @@ ROLE_HOME = {
     # on another role's dashboard.
     "Gov Systems Admin": "role_empty",
     # Its own dashboard IS its landing page -- there is nothing else to choose between first.
-    # Lands on the Focused view specifically (2026-09-16): Full is reachable from the drawer
-    # for when more detail is wanted, but the day-to-day glance is the trimmed-down page.
-    MANAGEMENT_ROLE: "management_dashboard_focused",
+    # Lands on Pretty specifically (2026-09-16, originally Focused; 2026-10-05, Pretty took
+    # over the landing slot -- see MANAGEMENT_ROLE's own comment above): Full is reachable from
+    # the drawer for when more detail is wanted, but the day-to-day glance is this page.
+    MANAGEMENT_ROLE: "management_dashboard_pretty",
 }
 
 # url_name -> the roles that own it, for the "you are in the wrong role for that page" hint.
@@ -429,6 +456,21 @@ def is_management(user) -> bool:
                 and (user.is_superuser or user.groups.filter(name=MANAGEMENT_ROLE).exists()))
 
 
+def can_view_alert_dashboard(user) -> bool:
+    """Who may see Executive - Alerts (2026-10-01, moved off Management entirely -- "remove
+    the dashboard from the management role and add it to all other roles"): the five estate/
+    admin roles whose own work the alert data is actually about -- System/Network/
+    Infrastructure/Security Admin, and Administrator. Deliberately NOT Gov Systems Admin (owns
+    nothing, see ROLE_PAGES' own comment on that role) or Sub Admin (not a role you switch
+    into, see SUB_ADMIN_ROLE's own comment), and no longer Management (dropped on request, not
+    kept as read-only). A superuser passes, holding every role by definition."""
+    return bool(user and user.is_authenticated
+                and (user.is_superuser
+                     or user.groups.filter(name__in=[
+                         SYSTEM_ADMIN_ROLE, NETWORK_ADMIN_ROLE, INFRA_ADMIN_ROLE,
+                         SECURITY_ADMIN_ROLE, ADMIN_ROLE]).exists()))
+
+
 def is_infra_admin(user) -> bool:
     """Who may see the Infrastructure Admin picker/report — the hardware estate (HCI
     clusters, standalone DB hosts) that generate_report.load_topology's scope="infra" reads.
@@ -529,6 +571,17 @@ REPORTS = [
         "certificates, with your comments against each finding.",
         "report_form", {SYSTEM_ADMIN_ROLE, SECURITY_ADMIN_ROLE},
         "img/reports/system-health.png"),
+    # Sits right next to System Health Report on request (2026-10-06, "add a report ... right
+    # next to systems admin report"). Reuses System Health's own icon (no bespoke art exists
+    # for this one yet) -- same estate, same role, immediately adjacent in this list so the
+    # two tiles render next to each other (tile order follows list order, views.reports).
+    ReportOption(
+        "backup_history", "Backup History Report",
+        "A date range in, a day-by-day audit out: was each system's backup reachable and "
+        "current, the real filename and timestamp where recorded, and which report — "
+        "admin-signed where one exists — that day traces back to.",
+        "backup_history_report", {SYSTEM_ADMIN_ROLE},
+        "img/reports/system-health.png"),
     # The "Networks Report" category, under the full 39-device SNMPv3 estate (core switch
     # included -- see network.DEVICES' own comment on the 38-device block). Used to be one
     # combined "Switches & Routers Report" tile; split into four narrower ones (2026-09-23,
@@ -562,6 +615,20 @@ REPORTS = [
         "PSU/fan, uptime, interface bandwidth and errors, access-point/uplink ports, "
         "OSPF adjacency, and storage, device by device.",
         "access_switches_form", {NETWORK_ADMIN_ROLE, INFRA_ADMIN_ROLE},
+        "img/reports/network.png", category="Networks Report"),
+    # A fifth Networks Report member (2026-09-29, on request: "add these firewalls to a new
+    # firewall report which is part of the network reports group"). None of its four devices
+    # answer SNMP yet, on request added anyway ("firewalls not yet on snmp but just add them
+    # for now") -- kept from ever showing as a false "unreachable" on the alert poller or the
+    # Executive Dashboard's Network tile by DEVICES' own "kind": "Firewall" (see
+    # network.firewall_device_keys' own comment); this report's own picker still shows them,
+    # honestly, as unreachable until SNMP is fixed on them.
+    ReportOption(
+        "firewalls", "Firewall Report",
+        "Per-device health for the firewall estate — interface bandwidth and errors, "
+        "device by device. Not yet on SNMP; devices here may show as unreachable until "
+        "that is fixed.",
+        "firewalls_form", {NETWORK_ADMIN_ROLE, INFRA_ADMIN_ROLE},
         "img/reports/network.png", category="Networks Report"),
     # The morning checklist, a different thing from the live Network Report above: that one
     # is captured from Prometheus, this one is worked through by hand across the SolarWinds,

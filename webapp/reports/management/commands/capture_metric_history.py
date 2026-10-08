@@ -4,15 +4,14 @@ from reports import metric_history
 
 
 class Command(BaseCommand):
-    help = ("One fresh RAM/CPU/Disk/SWIFT/COB reading per series, across the whole business "
-           "topology, written to MetricSample -- scheduled hourly, see deploy/gms/"
-           "folder_exporter.yml (job metric_history_capture).")
+    help = ("One fresh reading per metric_registry.REGISTRY entry, across the whole estate, "
+           "written to MetricSample (prometheus_snapshot_db) -- scheduled hourly, see "
+           "deploy/gms/folder_exporter.yml (job metric_history_capture).")
 
     def handle(self, *args, **options):
         result = metric_history.capture_now()
         if result["error"]:
             self.stderr.write(self.style.ERROR(f"Prometheus unreachable: {result['error']}"))
             return
-        self.stdout.write(self.style.SUCCESS(
-            f"ram={result['ram']} cpu={result['cpu']} disk={result['disk']} "
-            f"swift={result['swift']} cob={result['cob']}"))
+        counts = " ".join(f"{k}={v}" for k, v in result.items() if k != "error")
+        self.stdout.write(self.style.SUCCESS(counts))

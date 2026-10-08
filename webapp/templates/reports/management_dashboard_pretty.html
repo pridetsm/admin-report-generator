@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% load static %}
-{% block title %}Executive Dashboard — Focused{% endblock %}
+{% block title %}Executive Dashboard{% endblock %}
 
 {% comment %}
   Exception-based Executive Dashboard (2026-09-14, on request: "go into the executive
@@ -17,7 +17,29 @@
   Two domains have no real data source at all (Security -- no monitoring source yet;
   Government Systems -- excluded entirely) and are shown as such, per design_prompt.md's own
   explicit instruction, not silently omitted or given a fabricated "clean" reading.
+
+  Needs Attention Now redesigned 2026-10-05 (on request: "added a new zip to apply cosmatic
+  changes to the managerial dashboard needs attention now panel....save the current dashboard
+  as -focus....then this new one call it -pretty and make it the landing page") --
+  needs-attention-package.zip's own domain x issue-type matrix, animated state-driven banner
+  and clickable popups, built directly from that package's own reference HTML (see
+  views._needs_attention_matrix's own docstring for exactly how the matrix data maps onto
+  ctx["exceptions"]). This page became the new Management landing page in the same request;
+  Executive - Focus (management_dashboard_focus.html) is what THIS section used to look like,
+  preserved verbatim. Domain Health and Live Activity below are completely UNCHANGED from
+  Focus -- the redesign request was scoped to Needs Attention Now specifically.
+
+  Chrome (topbar/drawer/backnav/spinner) is back (2026-10-06, on request: "add back the app
+  bar on top but add a special button for all dashboad screens to hide it and to bring it
+  back... a button works better because it covers touch navigation as well") -- the 2026-10-05
+  "render without base.html's own chrome" override below is gone; this page now extends
+  base.html the same plain way Full/Analytical/Focus always have. The chrome isn't gone, it's
+  just hideABLE now, on every Executive dashboard page at once, via #dashChromeToggle and its
+  own CSS/JS -- all of that lives in base.html itself (see that file's own comments near
+  .dash-chrome-toggle and the <html class="dash-chrome-hidden"> it applies), not here, since
+  the toggle is shared chrome-control, not something specific to this one page.
 {% endcomment %}
+
 
 {% block body %}
 <style>
@@ -56,6 +78,15 @@
 }
 .exec2 * { box-sizing:border-box; }
 .exec2 { background:var(--ehpaper); color:var(--ehink); padding:0 0 40px; font-family:"Segoe UI",system-ui,sans-serif; font-size:15px; line-height:1.6; }
+/* This page renders without base.html's own chrome (topbar/drawer/backnav/spinner, see the
+   two empty block overrides near the top of this file) -- app.css still loads (every
+   page shares it) and its own body/layout rules assume that chrome is present, so without
+   this override app.css's own spacing for a chrome-less body can leak through and misalign
+   this page's own .wrap2 centering. Pinning body/.exec2 margins to zero here guarantees this
+   page's own max-width:min(96vw,1920px)/margin:0 auto on .wrap2 below is the only layout rule
+   in effect, regardless of what app.css assumes elsewhere. */
+body:has(.exec2) { margin:0; padding:0; background:var(--ehpaper); }
+.exec2 { margin:0; width:100%; }
 .exec2 .wrap2 { max-width:min(96vw, 1920px); margin:0 auto; }
 .exec2 h1,.exec2 h2,.exec2 h3,.exec2 h4 { font-family:Georgia,serif; color:var(--ehink); font-weight:400; }
 
@@ -63,7 +94,13 @@
 .exec2 .eyebrow2 { font-family:Consolas,monospace; font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--ehmuted); display:flex; align-items:center; gap:10px; margin-bottom:6px; }
 .exec2 .eyebrow2 .dot { width:5px; height:5px; border-radius:50%; background:var(--ehgold); }
 .exec2 h1.title2 { font-size:28px; margin:0 0 6px; }
-.exec2 .subtitle2 { color:var(--ehink-soft); font-size:14px; margin:0; }
+/* Title + eyebrow subtitle on one row (2026-10-05) -- see the masthead's own markup below:
+   the old standalone eyebrow ("RBZ Monitoring Console") and <p class="subtitle2"> lines are
+   gone, replaced by this one row pairing the real title with the timestamp/back-link in the
+   eyebrow's own small-caps style. */
+.exec2 .title-row2 { display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+.exec2 .title-row2 h1.title2 { margin:0; }
+.exec2 .title-row2 .eyebrow2 { margin:0; }
 /* The generic app-chrome "back to role select" crest (base.html's .brand-back) sits in the
    plain grey topbar above this page's own paper/gold masthead -- next to nothing else on this
    screen (the exec dashboards hide the usual nav), it read as a small icon floating loose
@@ -86,18 +123,66 @@
   border:1px solid var(--ehline); border-radius:6px; padding:3px 6px; cursor:pointer;
 }
 .exec2 .refresh2 select:focus-visible { outline:2px solid var(--ehgold); outline-offset:1px; }
+/* Fit to screen (2026-10-07, on request: "is it possible to make it so the screen ensures all
+   widget visibility regardless of initial screen size unless of course when user starts
+   zooming in" -- shipped opt-in first, since this is a shared console people already use daily
+   and a uniform shrink-to-fit makes text noticeably smaller on a small laptop window than
+   today's reflow (mid-row2 collapsing to one column, etc.); made the DEFAULT the same day on
+   direct follow-up request ("make the dashboard fit to screen by default") -- the toggle stays,
+   now as an opt-OUT, and an explicit off choice is still remembered. See the matching script
+   below .wrap2's own closing tag for the actual scale-to-fit logic; this only themes the
+   toggle, matching .refresh2's own look.) */
+.exec2 .fit2 { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--ehmuted); cursor:pointer; }
+.exec2 .fit2 input { accent-color:var(--ehgold); cursor:pointer; }
+/* Applied to <html> only while fit mode is actually on (2026-10-07) -- .wrap2 switches to
+   position:fixed + transform:scale() at that point (JS below), so the page's own normal
+   scroll/flow has to be suppressed or there'd be dead space left behind where .wrap2 used to
+   sit in flow, AND a second, real scrollbar underneath the fixed/scaled copy. */
+html.fit-active, html.fit-active body { overflow:hidden; height:100%; }
+/* Real bug, found live (2026-10-07, "working as management notification not disappearing"):
+   base.html's own flash-message banner (e.g. "Working as Management." right after picking the
+   role) renders as a plain static-flow element ABOVE .exec2 in the HTML -- harmless normally,
+   but once fit mode promotes .wrap2 to position:fixed spanning the full viewport with an
+   opaque background, that fixed box paints OVER the message instead of under it (confirmed
+   live: elementFromPoint at the message's own screen coordinates returned the dashboard's own
+   heading, not the message). Not a "fails to disappear" bug -- it's completely invisible from
+   the first frame fit mode applies, which reads the same to someone who never saw it land in
+   the first place. Floating it above everything, centred, fixes this without touching
+   app.css's own .messages styling for every other (non fit-mode) page in the app. */
+html.fit-active .messages { position:fixed; top:14px; left:50%; transform:translateX(-50%);
+  z-index:10000; width:min(90vw, 640px); margin:0; }
 
 .exec2 .banner2 { display:flex; align-items:center; gap:18px; padding:20px 24px; border-radius:10px; margin-bottom:20px; border:1px solid var(--ehline); box-shadow:var(--ehshadow); flex-wrap:wrap; }
 .exec2 .banner2 .content2 { flex:1 1 320px; min-width:0; }
 .exec2 .banner2 .stamp2 { flex:0 0 auto; }
 .exec2 .banner2 .dot-big { width:16px; height:16px; border-radius:50%; flex:0 0 auto; }
-.exec2 .banner2.bad, .exec2 .banner2.warn { border:none; }
-.exec2 .banner2.bad h2, .exec2 .banner2.warn h2,
-.exec2 .banner2.bad p, .exec2 .banner2.warn p { color:#fff; }
-.exec2 .banner2.bad p, .exec2 .banner2.warn p { opacity:0.88; }
-.exec2 .banner2.bad .stamp2, .exec2 .banner2.warn .stamp2 { color:rgba(255,255,255,0.75); }
-.exec2 .banner2.bad .dot-big, .exec2 .banner2.warn .dot-big { background:#fff; box-shadow:0 0 0 5px rgba(255,255,255,0.28); animation:eh-pulse-dot 1.6s ease-in-out infinite; }
+/* .ok folded into these same bad/warn text/dot rules (2026-10-03) -- once the banner's own
+   background became a continuous colour-mix blend rather than a fixed per-state colour (see
+   views.py's own "Needs Attention Now banner colour blend" comment), the fully-healthy state
+   renders at FULL --ehgreen strength, the same bold saturation bad/warn's own gradients
+   already use -- not the old pale --ehgreen-soft card look .banner2.ok's own rules below were
+   written for. Confirmed by rendering the all-clean state directly: the old dark-ink text
+   (--ehink) was barely legible against that bold green, and the --grad-green dot nearly
+   vanished into it ("set all green occurance to the highest green we would get on the needs
+   attention banner if everything was okay in its panel" -- this is that exact scenario). White
+   text/dot, matching bad/warn exactly, is the correct reading now that all three states share
+   one bold-background treatment. */
+.exec2 .banner2.bad, .exec2 .banner2.warn, .exec2 .banner2.ok { border:none; }
+.exec2 .banner2.bad h2, .exec2 .banner2.warn h2, .exec2 .banner2.ok h2,
+.exec2 .banner2.bad p, .exec2 .banner2.warn p, .exec2 .banner2.ok p { color:#fff; }
+.exec2 .banner2.bad p, .exec2 .banner2.warn p, .exec2 .banner2.ok p { opacity:0.88; }
+.exec2 .banner2.bad .stamp2, .exec2 .banner2.warn .stamp2, .exec2 .banner2.ok .stamp2 { color:rgba(255,255,255,0.75); }
+.exec2 .banner2.bad .dot-big, .exec2 .banner2.warn .dot-big, .exec2 .banner2.ok .dot-big { background:#fff; box-shadow:0 0 0 5px rgba(255,255,255,0.28); }
+/* Only bad/warn pulse the dot -- a fully clean reading has nothing to draw the eye to, so its
+   dot stays a plain static white circle rather than animating like something needs attention. */
+.exec2 .banner2.bad .dot-big, .exec2 .banner2.warn .dot-big { animation:eh-pulse-dot 1.6s ease-in-out infinite; }
 @keyframes eh-pulse-dot { 0%,100% { box-shadow:0 0 0 5px rgba(255,255,255,0.28); } 50% { box-shadow:0 0 0 9px rgba(255,255,255,0.12); } }
+/* `background` here is a fallback only -- the real colour comes from the inline --banner-blend/
+   background the view sets per-request (2026-10-03, see that context builder's own "Needs
+   Attention Now banner colour blend" comment), which always wins since inline styles beat an
+   external/internal stylesheet rule of equal specificity. Kept, not deleted, so the banner
+   still reads sensibly on the rare path that ever renders this markup without that inline
+   style attached. */
 .exec2 .banner2.bad { background:linear-gradient(135deg, color-mix(in srgb, var(--tier-critical) 80%, black 20%), color-mix(in srgb, var(--tier-critical) 55%, black 45%)); animation:eh-pulse-glow 2.1s ease-in-out infinite; }
 .exec2 .banner2.bad .dot-big { animation:eh-pulse-dot-big 2.1s ease-in-out infinite; }
 /* Smooth two-point pulse (2026-09-14, on request: "smoothen the alert banner animation use
@@ -106,9 +191,14 @@
    multi-stage jumps), just box-shadow instead of drop-shadow since this banner already used
    box-shadow for its glow. Replaces the earlier multi-keyframe "heartbeat" (lub-dub-rest)
    design, which read as jittery rather than the smooth glow that design was going for. */
+/* Glows the SAME blended colour the banner's own background now uses (2026-10-03), not a
+   fixed --ehred -- a banner that's mostly green with one real finding should pulse that same
+   muted tone, not a pure-red glow that visually contradicts an otherwise green surface.
+   var(--banner-blend, var(--ehred)) falls back to the old fixed red if that custom property
+   is ever unset, same defensive reasoning as .banner2.bad's own background fallback above. */
 @keyframes eh-pulse-glow {
-  0%,100% { box-shadow:0 0 3px 0 color-mix(in srgb, var(--ehred) 50%, transparent), var(--ehshadow); }
-  50%     { box-shadow:0 0 26px 6px color-mix(in srgb, var(--ehred) 70%, transparent), var(--ehshadow); }
+  0%,100% { box-shadow:0 0 3px 0 color-mix(in srgb, var(--banner-blend, var(--ehred)) 50%, transparent), var(--ehshadow); }
+  50%     { box-shadow:0 0 26px 6px color-mix(in srgb, var(--banner-blend, var(--ehred)) 70%, transparent), var(--ehshadow); }
 }
 @keyframes eh-pulse-dot-big {
   0%,100% { box-shadow:0 0 0 5px rgba(255,255,255,0.22); transform:scale(1); }
@@ -147,9 +237,14 @@
 .range-scroll2 { flex:1 1 100px; max-width:200px; accent-color:var(--ehgold); height:13px; margin:0 2px; }
 .range-scroll2:disabled { opacity:.35; }
 .exec2 .banner2.warn { background:linear-gradient(135deg, color-mix(in srgb, var(--ehamber) 80%, black 20%), color-mix(in srgb, var(--ehamber) 55%, black 45%)); }
-.exec2 .banner2.ok { background:var(--ehgreen-soft); border:1px solid var(--ehline); }
-.exec2 .banner2.ok h2, .exec2 .banner2.ok p { color:var(--ehink); }
-.exec2 .banner2.ok .dot-big { background:var(--grad-green); }
+/* `background` here is a fallback only, same reasoning as .banner2.bad's own fallback further
+   up -- the real colour is the inline blend, which at a fully-clean 100% green resolves to
+   plain var(--ehgreen) (the "highest green" this banner can show). Text/dot colour are NOT
+   repeated here any more -- the shared .bad/.warn/.ok rules above already cover ok now that
+   all three states share one bold-background treatment; a second, lower-in-the-cascade rule
+   here would just silently win back over those and reintroduce the illegible dark-on-green
+   bug this same request fixed. */
+.exec2 .banner2.ok { background:var(--ehgreen-soft); }
 .exec2 .banner2 h2 { margin:0; font-size:21px; }
 .exec2 .banner2 p { margin:5px 0 0; font-size:13px; color:var(--ehink-soft); }
 .exec2 .banner2 .stamp2 { margin-left:auto; text-align:right; font-family:Consolas,monospace; font-size:11px; color:var(--ehmuted); white-space:nowrap; }
@@ -260,6 +355,38 @@
 @media (max-width:1000px) {
   .exec2 .top-row2 .col-a2, .exec2 .top-row2 .col-b2, .exec2 .top-row2 .col-c2 { flex:1 1 100%; }
 }
+/* Row 2: 03 Incident Calendar directly under 01 Needs Attention Now, 04 SWIFT Transaction
+   History under 02 Domain Health (2026-10-07, incident-calendar.zip package). Originally a
+   plain 50/50 CSS grid, deliberately kept separate from .top-row2's own hard-won flex-basis
+   tuning -- reverted on request ("make incident calendar the exact same width as needs
+   attention now"): a flat 50/50 split only coincidentally landed close to col-a2's own real
+   rendered width (col-a2 isn't 50% either -- it's whatever's left of top-row2 after col-b2's
+   fixed 52% box and the one real gap between them, since col-c2 was removed from this page
+   2026-10-07 and col-a2 is the row's only flex-grow item now). col-inc2/col-swift2 below are
+   now a VERBATIM copy of col-a2/col-b2's own rule (same basis, same grow/shrink, same
+   min-width, same breakpoints) rather than a parallel formula -- two rows built from the
+   identical column math, stacked, so 01/03 and 02/04 align into one true 2-column grid
+   instead of two independently-sized rows that merely happened to look similar. */
+.exec2 .mid-row2 { display:flex; flex-wrap:wrap; column-gap:28px; row-gap:34px; align-items:stretch; margin-bottom:34px; }
+/* col-inc2/col-swift2 themselves need display:flex;flex-direction:column too (2026-10-07, on
+   request: "make the swift transactions panel be the exact same height as incident calender
+   panel" -- mid-row2's own align-items:stretch was already stretching THESE two columns to
+   match each other, but each one's own single .sec2 child is a block box one level deeper, so
+   it just sat at its own natural content height inside the taller, now-empty column rather
+   than filling it -- confirmed live, un-scaled: Incident Calendar's .sec2 measured 376px,
+   SWIFT's 383px, inside two already-equal-height 383px columns. flex:1 1 auto on .sec2 below
+   (and already on .na-panel/.chart-card2 beneath IT) is what actually passes that stretched
+   height all the way down to the two panels themselves. */
+.exec2 .mid-row2 .col-inc2 { flex:1 1 calc((100% - 56px) * 0.34); min-width:336px; display:flex; flex-direction:column; }
+.exec2 .mid-row2 .col-swift2 { flex:0 0 calc((100% - 56px) * 0.52); min-width:384px; display:flex; flex-direction:column; }
+.exec2 .mid-row2 .sec2 { margin-bottom:0; border-top:none; padding-top:0; display:flex; flex-direction:column; flex:1 1 auto; }
+.exec2 .mid-row2 .sec2 > .na-panel, .exec2 .mid-row2 .sec2 > .chart-card2 { flex:1 1 auto; min-height:0; }
+@media (max-width:1500px) {
+  .exec2 .mid-row2 .col-inc2, .exec2 .mid-row2 .col-swift2 { flex:1 1 calc(50% - 14px); }
+}
+@media (max-width:1000px) {
+  .exec2 .mid-row2 .col-inc2, .exec2 .mid-row2 .col-swift2 { flex:1 1 100%; }
+}
 .exec2 .sec2 h2 { font-size:16px; margin:0 0 2px; display:flex; align-items:center; gap:10px; }
 .exec2 .sec2 h2 .n { font-family:Consolas,monospace; font-size:12px; color:var(--ehgold); }
 .exec2 .sec2 .note2 { font-size:12px; color:var(--ehmuted); font-style:italic; margin:0 0 14px; }
@@ -282,22 +409,51 @@
    exactly the same size, and overflow-y:auto lets a card with more findings than fits scroll
    internally instead of growing. 190px x2 + one 12px gap = 392px total -- see .fused-card2's
    own comment for why THAT number matters here too (Needs Attention Now is locked to match it). */
-.exec2 .health-card2 { background:var(--ehsurface); border:1px solid var(--ehline); border-top:3px solid var(--ehline); border-radius:8px; padding:14px 15px; box-shadow:var(--ehshadow); display:flex; flex-direction:column; cursor:pointer; text-decoration:none; height:190px; overflow-y:auto; }
-.exec2 .health-card2.ok { border-top-color:var(--ehgreen); }
-.exec2 .health-card2.warn { border-top-color:var(--ehamber); }
-.exec2 .health-card2.bad { border-top-color:var(--ehred); }
+.exec2 .health-card2 { background:var(--ehsurface); border:1px solid var(--ehline); border-radius:8px; padding:14px 15px; box-shadow:var(--ehshadow); display:flex; flex-direction:column; cursor:pointer; text-decoration:none; height:190px; overflow-y:auto; }
+/* Themed scrollbar for every overflow-y:auto spot still on this page's own light/gold --eh*
+   palette (2026-10-06, "edit scrolbars to fit the design more") -- var(--ehline)/var(--ehgold)
+   already flip between this page's light and dark THEME toggle on their own, so one rule
+   covers both without a separate dark-mode copy. .health-card2's own version of this gets
+   overridden further down by the permanent-dark block that section's own comment explains
+   (same reason its background/border get overridden there too); .fused-body2/.detail-list2
+   are the old section 02 card's own scroll spots, unused on THIS page since Needs Attention
+   Now moved to the na-panel/na-matrix-wrap design, but this is the exact same shared CSS
+   block management_dashboard_focus.html also carries, where both are still very much live --
+   kept identical here on purpose rather than letting the two files drift apart on it. */
+.exec2 .health-card2, .exec2 .fused-body2, .exec2 .detail-list2 { scrollbar-width:thin; scrollbar-color:var(--ehline) transparent; }
+.exec2 .health-card2::-webkit-scrollbar, .exec2 .fused-body2::-webkit-scrollbar, .exec2 .detail-list2::-webkit-scrollbar { width:6px; }
+.exec2 .health-card2::-webkit-scrollbar-track, .exec2 .fused-body2::-webkit-scrollbar-track, .exec2 .detail-list2::-webkit-scrollbar-track { background:transparent; }
+.exec2 .health-card2::-webkit-scrollbar-thumb, .exec2 .fused-body2::-webkit-scrollbar-thumb, .exec2 .detail-list2::-webkit-scrollbar-thumb { background:var(--ehline); border-radius:4px; }
+.exec2 .health-card2::-webkit-scrollbar-thumb:hover, .exec2 .fused-body2::-webkit-scrollbar-thumb:hover, .exec2 .detail-list2::-webkit-scrollbar-thumb:hover { background:var(--ehgold); }
+/* Gradient tint across the whole card, not a flat coloured top border (2026-10-06, on
+   request: "make the red line and green lines on domain panels just a gradient tint on the
+   panel... match the design of the first panel" -- section 01's own banner carries its status
+   as a diagonal linear-gradient wash, not a coloured edge; see views.py's own
+   banner_blend_style comment for that exact recipe. Lower percentages than the banner itself
+   (14%/5% vs the banner's effectively-saturated blend) since tinting a pale --ehsurface this
+   way reads far more vividly per percentage point than the same mix would on Pretty's own
+   dark cards, and these are small, text-dense, repeated 4-up cards, not one hero banner. */
+.exec2 .health-card2.ok { background:linear-gradient(135deg, color-mix(in srgb, var(--ehgreen) 14%, var(--ehsurface)), color-mix(in srgb, var(--ehgreen) 5%, var(--ehsurface))); border-color:color-mix(in srgb, var(--ehgreen) 30%, var(--ehline)); }
+.exec2 .health-card2.warn { background:linear-gradient(135deg, color-mix(in srgb, var(--ehamber) 14%, var(--ehsurface)), color-mix(in srgb, var(--ehamber) 5%, var(--ehsurface))); border-color:color-mix(in srgb, var(--ehamber) 30%, var(--ehline)); }
+.exec2 .health-card2.bad { background:linear-gradient(135deg, color-mix(in srgb, var(--ehred) 14%, var(--ehsurface)), color-mix(in srgb, var(--ehred) 5%, var(--ehsurface))); border-color:color-mix(in srgb, var(--ehred) 30%, var(--ehline)); }
 /* Security has no monitoring source at all yet (see no_data_domains) -- a neutral grey, not
    green/amber/red, is the only honest reading for "we don't measure this", so it gets its own
    band rather than being folded into "ok" (2026-09-19, settled after a couple of quick
    reversals: "you removed green coloring from security domain", then "i think i like no data
-   source better"). */
-.exec2 .health-card2.nodata { border-top-color:var(--ehline); }
+   source better"). Same gradient-tint treatment as the other three states, just with that
+   neutral colour instead of a status one. */
+.exec2 .health-card2.nodata { background:linear-gradient(135deg, color-mix(in srgb, var(--ehmuted) 10%, var(--ehsurface)), var(--ehsurface)); border-color:var(--ehline); }
 .exec2 .status-pill2.nodata { background:var(--ehline-soft); color:var(--ehmuted); }
 .exec2 .status-pill2.nodata::before { background:var(--ehmuted); }
 .exec2 .health-card2 .name2 { font-family:Georgia,serif; font-size:13.5px; margin-bottom:8px; line-height:1.3; color:var(--ehink); }
 .exec2 .status-pill2 { display:inline-flex; align-items:center; gap:5px; font-family:Consolas,monospace; font-size:9.5px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; padding:3px 8px; border-radius:20px; width:fit-content; }
 .exec2 .status-pill2::before { content:""; width:6px; height:6px; border-radius:50%; }
-.exec2 .status-pill2.ok { background:var(--ehgreen-soft); color:var(--ehgreen); } .exec2 .status-pill2.ok::before { background:var(--grad-green); }
+/* ::before dot is flat var(--ehgreen), not --grad-green (2026-10-03, on request, after the
+   Needs Attention Now fix: "no i mean on the whole page eg there are domains that are green
+   make them the right green" -- Domain Health's own "NORMAL" pill, e.g. Network/Infrastructure
+   when clean, was the one remaining spot on this page still using the blue-tinted gradient
+   instead of the plain green every other "ok" indicator here was already unified onto). */
+.exec2 .status-pill2.ok { background:var(--ehgreen-soft); color:var(--ehgreen); } .exec2 .status-pill2.ok::before { background:var(--ehgreen); }
 .exec2 .status-pill2.warn { background:var(--ehamber-soft); color:var(--ehamber); } .exec2 .status-pill2.warn::before { background:var(--grad-amber); }
 .exec2 .status-pill2.bad { background:var(--ehred-soft); color:var(--ehred); } .exec2 .status-pill2.bad::before { background:var(--grad-red); }
 .exec2 .health-card2 .detail2 { font-size:11px; color:var(--ehink-soft); margin-top:9px; line-height:1.5; }
@@ -315,6 +471,14 @@
 .exec2 .health-card2 .mini-bar2 .seg2 { height:100%; border-radius:6px; box-shadow:inset 0 1px 0 rgba(255,255,255,0.3), inset 0 -1px 1px rgba(0,0,0,0.18); }
 .exec2 .health-card2 .mini-bar2 .val2 { flex:0 0 auto; font-size:9.5px; color:var(--ehmuted); white-space:nowrap; }
 .exec2 .health-card2 .plain-flag2 { font-size:10.5px; color:var(--ehink-soft); margin-top:4px; }
+/* Clickable, same affordance pattern the matrix cells already use (2026-10-06, "make the
+   domain tiles... make their bar graphs clickable just like the tiles in needs attention now
+   so we see the actual error") -- a visible hover highlight, not just a cursor change, so it
+   reads as a real control rather than hoping the pointer icon alone gets noticed. Negative
+   margin + matching padding keeps the highlight's own box from shifting the bar/flag's text
+   or nudging neighbouring rows when it appears. */
+.exec2 .health-card2 .na-bar-click { cursor:pointer; border-radius:5px; margin-left:-4px; margin-right:-4px; padding-left:4px; padding-right:4px; transition:background-color .12s; }
+.exec2 .health-card2 .na-bar-click:hover { background-color:color-mix(in srgb, var(--ehink) 6%, transparent); }
 
 table.exceptions2 { width:100%; border-collapse:collapse; font-size:13px; }
 table.exceptions2 th { text-align:left; padding:8px 10px; font-family:Consolas,monospace; font-weight:600; color:var(--ehmuted); font-size:9.5px; letter-spacing:0.04em; text-transform:uppercase; border-bottom:1px solid var(--ehline); }
@@ -323,8 +487,15 @@ table.exceptions2 tr:last-child td { border-bottom:none; }
 .exec2 .sev2 { display:inline-block; width:8px; height:8px; border-radius:50%; }
 .exec2 .sev2.bad { background:var(--grad-red); } .exec2 .sev2.warn { background:var(--grad-amber); }
 /* "ok" -- unlike bad/warn, a real state a standing row (e.g. Unreachable components) can be
-   in on a healthy day, not just an unused variant (2026-09-18). */
-.exec2 .sev2.ok { background:var(--grad-green); }
+   in on a healthy day, not just an unused variant (2026-09-18). Flat var(--ehgreen), not the
+   blue-tinted --grad-green gradient every OTHER "ok" dot on this page still uses (2026-10-03,
+   on request: "set all green occurance to the highest green we would get on the needs
+   attention banner if everything was okay in its panel" -- that banner's own blend anchors on
+   plain --ehgreen, see views.py's own comment, so this row-level dot now reads as the exact
+   same green instead of a visibly different shade next to it; status-pill2.ok's own dot,
+   Domain Health's "NORMAL" pill, got the identical fix moments later once it turned out the
+   request meant the whole page, not just this one panel -- see that rule's own comment). */
+.exec2 .sev2.ok { background:var(--ehgreen); }
 .exec2 .exceptions2 .domain2 { font-family:Consolas,monospace; font-size:10px; color:var(--ehmuted); text-transform:uppercase; letter-spacing:0.03em; }
 .exec2 .exceptions2 .reading2 { font-family:Georgia,serif; font-size:15px; text-align:right; white-space:nowrap; }
 .exec2 .exceptions2 tr.bad .reading2 { color:var(--ehred); }
@@ -495,21 +666,287 @@ table.exceptions2 tr:last-child td { border-bottom:none; }
    03's own outer box, or anything in §02/§04/the row container. */
 .exec2 .empty-note2 { font-size:12.5px; color:var(--ehmuted); font-style:italic; margin:4px 0; }
 .exec2 footer.footer2 { margin-top:36px; padding-top:16px; border-top:1px solid var(--ehline); font-size:11.5px; color:var(--ehmuted); font-family:Consolas,monospace; }
+
+/* ============================================================================
+   Needs Attention Now -- matrix redesign (2026-10-05, needs-attention-package.zip)
+   Deliberately its own dark glassy "panel" look, NOT this page's paper/gold theme -- the
+   reference HTML is a self-contained dark panel by design (its own body background is
+   #060910), and the request was a COSMETIC change to this one panel specifically, not a
+   re-theme of the whole page. `.na-` prefixed throughout so nothing here can collide with
+   `.exec2`'s own class names. No external icon font (see views.py's own _MATRIX_ROW_LABELS
+   comment) -- row labels are plain uppercase text, matching the reference's own column-label
+   treatment exactly rather than adding a first external CDN dependency just for row icons.
+   ============================================================================ */
+/* Locked to the SAME 392px Domain Health's own grid works out to (2026-10-05, on request:
+   "size it down to fit the height of the two doman panel rows") -- the exact technique
+   .fused-card2/.fused-body2 (this page's own OLD section 02 card) already used for this same
+   side-by-side-column-height problem: a fixed outer height plus flex column layout, with only
+   the matrix table itself (.na-matrix-wrap) scrolling internally once it has more rows than
+   the locked height can show -- banner/footer stay full-size and fixed, never shrinking.
+   min-height:0 on the scrolling flex child is required, not decorative, same reason
+   .fused-body2's own comment gives: a flex child's default min-height:auto would otherwise
+   refuse to shrink below the table's own full content height.
+
+   Briefly 420px (2026-10-05, "the base of this panel should align with the base of the
+   network panel") to compensate for .na-header's own height once that header had taken over
+   this section's heading role and the outer <h2> below was removed as a duplicate -- back to
+   a bare 392px now that the very next request ("kindly remove this and let the banner snap
+   back to the top and restore the title that was outside the panel this inner title and all
+   clear not needed") restored that outer <h2> and deleted .na-header outright: col-a2 is
+   symmetric with col-b2 again (each section has exactly one real heading above its own fixed-
+   height box), so no compensation is needed any more.
+
+   No overflow:hidden (2026-10-06, on request: "glowing panel should be the top part of the
+   banner right now its in the banner right now just look at previous implementation before
+   cosmetic change" -- confirmed against management_dashboard_focus.html's own .fused-card2:
+   that card was NEVER given overflow:hidden either, specifically so .banner2's own pulse-glow
+   box-shadow could radiate outward past its edges -- see that file's own ".fused-banner2"
+   comment, "the rest of the glow is being blocked by the box's edges... tried first". This
+   page's na-panel had it, clipping .na-banner's own glow back down to whatever fits inside
+   its 14px margin instead of letting it bleed outward the way the original design always did.
+   Safe to drop: nothing inside na-panel has its own background flush against na-panel's own
+   edge (the banner sits 14px in, the matrix table's own cells sit 14px in via
+   .na-matrix-wrap's own padding), so there's no square corner this was ever clipping. */
+.na-panel{background:#0d1117;border-radius:14px;border:1px solid #1e2a3a;height:392px;display:flex;flex-direction:column}
+
+/* ONE shared glow/pulse/dot keyframe set driven by var(--na-blend), not three discrete
+   ok/amb/red variants (2026-10-06, on request: "this change was meant to be cosmetic only we
+   designed a robust color change algorithm that has since been set asside... yes i like the
+   new colors but we desined al algorithim to change colors as things happen" -- the matrix
+   redesign's own 3-state switch had replaced the continuous weighted blend outright, not just
+   restyled it). var(--na-blend) is set inline per-request by views.py's own
+   _weighted_color_blend (same algorithm management_dashboard_focus's own banner already uses,
+   just against this palette's literal hex anchors instead of the --eh* theme tokens) -- every
+   rule below reads that ONE custom property, so the whole banner shifts together continuously
+   as the real mix of clean/problem rows changes, exactly like the original algorithm intended.
+   Animation SPEED still comes from the discrete state-ok/amb/red classes (matrix["state"],
+   worst-of) -- a panel that's 97% green but has one red cell should still pulse at the urgent
+   "red" cadence even though its colour stays mostly green; speed is the one thing that's
+   allowed to stay a flat worst-of signal, same as the heading text below. */
+/* The two INSET shadows in na-glow below (not part of the animated glow itself -- identical,
+   non-interpolated at both the 0% and 50% stops, so they ride along statically while only the
+   outward glow actually animates) are the "glass look" top-edge shine (2026-10-06, on request:
+   "add back the shine edge to the top part of the panel the one fused with the banner"). This
+   has to live on .na-banner's own box-shadow, not .na-panel's -- now that the banner is fused
+   flush to the panel's top (margin:0, matching border-radius), the banner's own opaque
+   background paints every pixel of that top edge, so a highlight put on the panel underneath
+   would be completely hidden behind it. A thin bright line at the inner top edge plus a
+   faint 1px inner border is the standard CSS "glass bevel catching light" treatment -- inset
+   shadows are naturally clipped to the element's own border-radius, so it follows the banner's
+   rounded top corners with no extra markup. */
+@keyframes na-glow{0%,100%{box-shadow:0 0 8px color-mix(in srgb, var(--na-blend) 15%, transparent),0 0 20px color-mix(in srgb, var(--na-blend) 5%, transparent),inset 0 1px 0 rgba(255,255,255,.16),inset 0 0 0 1px rgba(255,255,255,.05)}50%{box-shadow:0 0 20px color-mix(in srgb, var(--na-blend) 32%, transparent),0 0 42px color-mix(in srgb, var(--na-blend) 11%, transparent),inset 0 1px 0 rgba(255,255,255,.16),inset 0 0 0 1px rgba(255,255,255,.05)}}
+@keyframes na-shimmer{0%{background-position:-200% center}100%{background-position:200% center}}
+@keyframes na-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes na-ring{0%{transform:scale(.7);opacity:.9}100%{transform:scale(1.9);opacity:0}}
+/* Unchanged, unrelated to the banner rewrite above -- these three still back the per-cell
+   .na-dot indicators inside the matrix table rows, which stay a discrete ok/amb/red signal
+   (each matrix cell has its own distinct band, not a blended one). */
+@keyframes na-dotglow-ok{0%,100%{box-shadow:0 0 3px rgba(16,185,129,.4)}50%{box-shadow:0 0 10px rgba(16,185,129,.9)}}
+@keyframes na-dotglow-amb{0%,100%{box-shadow:0 0 4px rgba(245,158,11,.4)}50%{box-shadow:0 0 12px rgba(245,158,11,.9)}}
+@keyframes na-dotglow-red{0%,100%{box-shadow:0 0 4px rgba(239,68,68,.5)}50%{box-shadow:0 0 12px rgba(239,68,68,1)}}
+@keyframes na-cellglow-ok{0%,100%{box-shadow:0 0 0 rgba(16,185,129,0);border-color:#1a2535}50%{box-shadow:0 0 6px rgba(16,185,129,.15);border-color:rgba(16,185,129,.2)}}
+@keyframes na-cellglow-amb{0%,100%{box-shadow:0 0 0 rgba(245,158,11,0);border-color:#451a00}50%{box-shadow:0 0 10px rgba(245,158,11,.2);border-color:rgba(245,158,11,.5)}}
+@keyframes na-cellglow-red{0%,100%{box-shadow:0 0 0 rgba(239,68,68,0);border-color:#450a0a}50%{box-shadow:0 0 10px rgba(239,68,68,.2);border-color:rgba(239,68,68,.5)}}
+
+/* Fused flush to the panel's own top edge, not floating inside a 14px margin (2026-10-06, on
+   request: "fuse banner to top part of panel" -- same treatment
+   management_dashboard_focus.html's own ".fused-banner2" already settled on: margin:0,
+   border:none, and border-radius rounded on the TOP corners only (matching .na-panel's own
+   14px radius) so the banner reads as the panel's own coloured top strip flowing straight
+   into the matrix table below it, not a separate card floating inside another card. The glow
+   keeps radiating outward fine with no border -- it was always a box-shadow, not a border
+   effect (the border-color half of na-glow's old keyframe is gone too, now that there's no
+   border left to colour). .na-matrix-wrap below keeps its own 14px padding as the panel's
+   "body", same as .fused-body2 does for its own card. */
+.na-banner{margin:0;border-radius:14px 14px 0 0;border:none;padding:14px 16px;position:relative;overflow:hidden;flex:0 0 auto;
+  background:linear-gradient(135deg, color-mix(in srgb, var(--na-blend) 34%, #0a0d12), color-mix(in srgb, var(--na-blend) 16%, #0a0d12));
+  animation:na-glow 2.5s ease-in-out infinite;}
+.na-banner.state-red{animation-duration:1.8s}
+.na-banner.state-amb{animation-duration:2.3s}
+.na-banner.state-ok{animation-duration:3s}
+.na-banner::after{content:'';position:absolute;inset:0;background-size:200% 100%;animation:na-shimmer 4s linear infinite;pointer-events:none;
+  background:linear-gradient(105deg,transparent 30%,color-mix(in srgb, var(--na-blend) 8%, transparent) 50%,transparent 70%)}
+
+.na-banner-top{display:flex;align-items:center;gap:10px;margin-bottom:10px;position:relative;z-index:1;flex-wrap:wrap}
+.na-pulse-wrap{position:relative;width:16px;height:16px;flex-shrink:0}
+.na-pulse-core{position:absolute;inset:3px;border-radius:50%;background:var(--na-blend);animation:na-pulse 1.8s ease-in-out infinite}
+.na-pulse-ring1,.na-pulse-ring2{position:absolute;border-radius:50%}
+.na-pulse-ring1{inset:0;border:2px solid color-mix(in srgb, var(--na-blend) 55%, transparent);animation:na-ring 1.8s ease-in-out infinite}
+.na-pulse-ring2{inset:-5px;border:1px solid color-mix(in srgb, var(--na-blend) 20%, transparent);animation:na-ring 1.8s ease-in-out .35s infinite}
+.na-banner.state-red .na-pulse-core,.na-banner.state-red .na-pulse-ring1,.na-banner.state-red .na-pulse-ring2{animation-duration:1.5s}
+.na-banner.state-ok .na-pulse-core,.na-banner.state-ok .na-pulse-ring1,.na-banner.state-ok .na-pulse-ring2{animation-duration:2s}
+
+/* Title/meta text is plain white, not tinted to the blend (2026-10-06) -- same reasoning the
+   Focus page's own banner already settled on (see that page's own ".ok-banner-contrast" fix):
+   a pastel per-state text colour only ever looked right at the 3 discrete extremes this
+   banner no longer renders at -- at some intermediate blend point a pastel tuned for "pure
+   amber" could land on a background that's actually mostly green, hurting contrast instead of
+   helping it. White against any point along this dark gradient stays reliably legible. */
+.na-banner-title{font-size:14px;font-weight:600;color:#fff}
+.na-banner-meta{margin-left:auto;text-align:right;position:relative;z-index:1}
+.na-banner-meta-line{font-size:10px;line-height:1.6;color:rgba(255,255,255,.75)}
+
+.na-stats{display:flex;gap:8px;position:relative;z-index:1}
+.na-bstat{flex:1;background:#0d1117;border-radius:6px;border:1px solid color-mix(in srgb, var(--na-blend) 35%, transparent);padding:7px 10px;text-align:center}
+.na-bstat-n{font-size:16px;font-weight:700;line-height:1;color:var(--na-blend)}
+.na-bstat-l{font-size:9px;letter-spacing:.05em;text-transform:uppercase;margin-top:3px;color:color-mix(in srgb, var(--na-blend) 70%, #94a3b8)}
+
+.na-matrix-wrap{padding:14px;overflow-x:auto;overflow-y:auto;flex:1 1 auto;min-height:0;scrollbar-width:thin;scrollbar-color:#2a3a50 #0a0f1a}
+/* Same dark-panel scrollbar .na-popup-body already has (2026-10-06, on request: "edit
+   scrolbars to fit the design more" -- this was the one scrollable area on the page still
+   using the browser's own default scrollbar, a light grey bar that reads as a UI-chrome
+   leftover against a panel this deliberately dark and glassy everywhere else). scrollbar-
+   color above is the Firefox path; the three ::-webkit- rules below are the same thing for
+   every Chromium/Edge/Safari browser, which is what this app actually runs in -- same two
+   colours either way, not a second palette to keep in sync. */
+.na-matrix-wrap::-webkit-scrollbar{width:7px;height:7px}
+.na-matrix-wrap::-webkit-scrollbar-track{background:#0a0f1a;border-radius:4px}
+.na-matrix-wrap::-webkit-scrollbar-thumb{background:#2a3a50;border-radius:4px}
+.na-matrix-wrap::-webkit-scrollbar-thumb:hover{background:#3a4d68}
+/* table-layout:fixed + an explicit row-label width (2026-10-05, on request: "fix alignment
+   issues" -- confirmed by screenshot: with the default auto layout, each data column's width
+   was driven by its own header TEXT length, so "Infra · Clusters" (the longest header) forced
+   that one column visibly wider than "Systems"/"Security" -- an uneven, lopsided-looking grid
+   instead of a clean matrix). Fixed layout divides every column WITHOUT an explicit width
+   equally -- the row-label column gets its own fixed 170px (wide enough for "Unreachable
+   components", the longest row label, to fit on one line per its own white-space:nowrap), and
+   the data columns -- none given an explicit width -- now always split the rest evenly
+   regardless of how long any one header's own text happens to be (now 4, not 5, since
+   Infrastructure's two sub-domain columns merged into one -- see _MATRIX_COLUMNS' own
+   comment, 2026-10-06). */
+.na-matrix{width:100%;border-collapse:separate;border-spacing:3px;min-width:650px;table-layout:fixed}
+.na-matrix th.na-corner{background:transparent}
+.na-matrix th.na-col-head{background:#111827;border-radius:5px;color:#64748b;font-size:9px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;padding:9px 6px;text-align:center}
+.na-matrix td{padding:9px 8px;border-radius:5px;text-align:center;vertical-align:middle}
+.na-matrix td.na-row-label{background:transparent;text-align:left;padding-left:2px;white-space:nowrap}
+.na-row-label-inner{font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:#475569}
+.na-matrix td.na-empty{background:#0a0f1a;color:#1a2535;font-size:14px;border:1px solid transparent}
+.na-matrix td.na-c-ok{background:#111827;border:1px solid #1a2535;animation:na-cellglow-ok 3s ease-in-out infinite;cursor:pointer;transition:filter .15s}
+.na-matrix td.na-c-amb{background:#140a00;border:1px solid #451a00;animation:na-cellglow-amb 2.5s ease-in-out infinite;cursor:pointer;transition:filter .15s}
+.na-matrix td.na-c-red{background:#160606;border:1px solid #450a0a;animation:na-cellglow-red 2s ease-in-out infinite;cursor:pointer;transition:filter .15s}
+.na-matrix td.na-c-ok:hover,.na-matrix td.na-c-amb:hover,.na-matrix td.na-c-red:hover{filter:brightness(1.4)}
+.na-cell-val{display:flex;align-items:center;justify-content:center;gap:6px}
+.na-click-hint{font-size:7px;color:#2a3a50;letter-spacing:.04em;text-transform:uppercase;margin-top:3px;display:block}
+.na-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block}
+.na-dot.ok{background:#10b981;animation:na-dotglow-ok 3s ease-in-out infinite}
+.na-dot.amb{background:#f59e0b;animation:na-dotglow-amb 2s ease-in-out infinite}
+.na-dot.red{background:#ef4444;animation:na-dotglow-red 1.5s ease-in-out infinite}
+.na-cell-txt{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.na-n-ok{color:#10b981}.na-n-amb{color:#f59e0b}.na-n-red{color:#ef4444}
+.na-n-sep{color:#1e2a3a;margin:0 1px}.na-n-tot{color:#374151}
+
+@media (prefers-reduced-motion: reduce) {
+  .na-banner,.na-banner::after,.na-pulse-core,.na-pulse-ring1,.na-pulse-ring2,.na-banner-title,
+  .na-matrix td.na-c-ok,.na-matrix td.na-c-amb,.na-matrix td.na-c-red,.na-dot { animation:none; }
+}
+
+.na-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;display:none;align-items:center;justify-content:center;padding:16px}
+.na-overlay.active{display:flex}
+.na-popup{background:#0d1117;border-radius:14px;border:1px solid #1e2a3a;width:100%;max-width:500px;display:flex;flex-direction:column;max-height:80vh}
+.na-popup-header{padding:14px 16px;border-bottom:1px solid #1a2535;flex-shrink:0}
+.na-popup-header-top{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.na-popup-domain-label{font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#475569}
+.na-popup-issue-title{font-size:14px;font-weight:600;color:#f1f5f9;margin-top:1px}
+.na-popup-close{margin-left:auto;width:26px;height:26px;border-radius:6px;background:#1e2a3a;border:none;color:#64748b;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;flex-shrink:0}
+.na-popup-close:hover{background:#2a3a50;color:#f1f5f9}
+.na-popup-tiles{display:flex;gap:6px}
+.na-ptile{flex:1;background:#111827;border-radius:6px;border:1px solid #1e2a3a;padding:6px 8px;text-align:center}
+.na-ptile-n{font-size:14px;font-weight:700;line-height:1}
+.na-ptile-l{font-size:8px;text-transform:uppercase;letter-spacing:.05em;color:#475569;margin-top:2px}
+.na-popup-body{overflow-y:auto;flex:1;padding:10px 12px 12px;max-height:380px;min-height:0;scrollbar-width:thin;scrollbar-color:#2a3a50 #0a0f1a}
+.na-popup-body::-webkit-scrollbar{width:5px}
+.na-popup-body::-webkit-scrollbar-track{background:#0a0f1a;border-radius:4px}
+.na-popup-body::-webkit-scrollbar-thumb{background:#2a3a50;border-radius:4px}
+.na-popup-body::-webkit-scrollbar-thumb:hover{background:#3a4d68}
+.na-popup-section-label{font-size:9px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#334155;margin-bottom:6px;margin-top:4px}
+.na-alert-row{background:#111827;border-radius:8px;border:1px solid #1a2535;padding:10px 12px;margin-bottom:6px}
+.na-alert-row.sev-red{border-color:#450a0a;background:#0f0505}
+.na-alert-row.sev-amb{border-color:#451a00;background:#0c0800}
+.na-alert-row-top{display:flex;align-items:flex-start;gap:8px}
+.na-alert-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:3px;display:inline-block}
+.na-alert-dot.red{background:#ef4444;box-shadow:0 0 5px rgba(239,68,68,.6)}
+.na-alert-dot.amb{background:#f59e0b;box-shadow:0 0 5px rgba(245,158,11,.6)}
+.na-alert-main{flex:1;min-width:0}
+.na-alert-title{font-size:12px;color:#cbd5e1;line-height:1.4}
+.na-alert-title strong{color:#e2e8f0;font-weight:600}
+.na-alert-time{font-size:10px;color:#374151;white-space:nowrap;flex-shrink:0;padding-top:1px}
+.na-alert-pills{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.na-pill{font-size:9px;font-weight:500;padding:2px 7px;border-radius:4px;border:1px solid;background:rgba(148,163,184,.08);border-color:rgba(148,163,184,.25);color:#94a3b8;display:inline-block}
+.na-empty-state{font-size:11px;color:#475569;padding:12px 4px}
+
+/* ============================================================================
+   Domain Health + Live Activity -- same dark glassy panel style as Needs Attention Now
+   (2026-10-05, on request: "apply thid panel style to all other panels") -- these were the
+   two remaining paper/gold panels on this page; re-skinned with the SAME na- palette
+   (#0d1117 panel bg, #111827 card bg, #1e2a3a borders, #f1f5f9/#94a3b8/#64748b text tiers,
+   #10b981/#f59e0b/#ef4444 state colours) rather than inventing a second dark palette.
+   Overrides the existing .exec2 selectors directly (same markup/Django loop, only the colours
+   change) instead of forking new classes/duplicating the domain_grid/chart template logic --
+   zero risk of touching the real data rendering, purely a re-skin. Placed after every other
+   rule in this stylesheet so the cascade favours these without needing !important anywhere
+   except the two spots fighting this page's own light/dark THEME toggle (--ehsurface etc. are
+   deliberately theme-reactive elsewhere on this page; these panels are now always dark
+   regardless of that toggle, matching Needs Attention Now's own already-fixed-dark look, so
+   the few theme-variable-driven rules need overriding outright). */
+.exec2 .health-card2 { background:#0d1117; border:1px solid #1e2a3a; box-shadow:none; scrollbar-width:thin; scrollbar-color:#2a3a50 #0a0f1a; }
+/* Same dark scrollbar as na-matrix-wrap/na-popup-body (2026-10-06, "edit scrolbars to fit the
+   design more") -- this card is one of the two spots this section just overrode to permanent
+   dark above, so its OWN overflow-y:auto (set on the light/paper base rule further up) was
+   still handing it the browser's bare default scrollbar, the same mismatch the matrix had. */
+.exec2 .health-card2::-webkit-scrollbar { width:6px; }
+.exec2 .health-card2::-webkit-scrollbar-track { background:#0a0f1a; border-radius:4px; }
+.exec2 .health-card2::-webkit-scrollbar-thumb { background:#2a3a50; border-radius:4px; }
+.exec2 .health-card2::-webkit-scrollbar-thumb:hover { background:#3a4d68; }
+/* Gradient tint across the whole card, not a flat coloured top border (2026-10-06, on
+   request: "make the red line and green lines on domain panels just a gradient tint on the
+   panel... match the design of the first panel" -- "the first panel" is section 01, Needs
+   Attention Now, whose own .na-banner carries its status as a diagonal
+   linear-gradient(135deg, color-mix(blend, base), color-mix(blend, base)) wash rather than a
+   coloured edge. Same two-stop color-mix recipe here, just against each card's own flat
+   per-state colour instead of the banner's continuous blended one -- these cards show one
+   discrete state (ok/warn/bad/nodata), not a weighted mix, so there is no equivalent
+   continuous value to drive this with. Percentages kept lower than the banner's own 34%/16%
+   (22%/9%) since a card this size carries far more text directly on top of the tint
+   (name/detail/mini-bar) than the banner's own sparse large type does. */
+.exec2 .health-card2.ok { background:linear-gradient(135deg, color-mix(in srgb, #10b981 22%, #0d1117), color-mix(in srgb, #10b981 9%, #0d1117)); border-color:color-mix(in srgb, #10b981 30%, #1e2a3a); }
+.exec2 .health-card2.warn { background:linear-gradient(135deg, color-mix(in srgb, #f59e0b 22%, #0d1117), color-mix(in srgb, #f59e0b 9%, #0d1117)); border-color:color-mix(in srgb, #f59e0b 30%, #1e2a3a); }
+.exec2 .health-card2.bad { background:linear-gradient(135deg, color-mix(in srgb, #ef4444 22%, #0d1117), color-mix(in srgb, #ef4444 9%, #0d1117)); border-color:color-mix(in srgb, #ef4444 30%, #1e2a3a); }
+.exec2 .health-card2.nodata { background:linear-gradient(135deg, color-mix(in srgb, #334155 22%, #0d1117), color-mix(in srgb, #334155 9%, #0d1117)); border-color:#1e2a3a; }
+.exec2 .health-card2 .name2 { font-family:'Segoe UI',system-ui,sans-serif; color:#f1f5f9; font-size:13px; font-weight:600; }
+.exec2 .status-pill2.ok { background:rgba(16,185,129,.1); color:#10b981; border:1px solid rgba(16,185,129,.2); } .exec2 .status-pill2.ok::before { background:#10b981; }
+.exec2 .status-pill2.warn { background:rgba(245,158,11,.1); color:#f59e0b; border:1px solid rgba(245,158,11,.3); } .exec2 .status-pill2.warn::before { background:#f59e0b; }
+.exec2 .status-pill2.bad { background:rgba(239,68,68,.1); color:#ef4444; border:1px solid rgba(239,68,68,.3); } .exec2 .status-pill2.bad::before { background:#ef4444; }
+.exec2 .status-pill2.nodata { background:rgba(100,116,139,.12); color:#64748b; border:1px solid rgba(100,116,139,.25); } .exec2 .status-pill2.nodata::before { background:#64748b; }
+.exec2 .health-card2 .detail2 { color:#94a3b8; }
+.exec2 .health-card2 .detail2 b { color:#cbd5e1; }
+.exec2 .health-card2 .mini-bar2 .track2 { background:#111827; border:1px solid #1a2535; box-shadow:inset 0 1px 2px rgba(0,0,0,.3), 0 0 8px 1px color-mix(in srgb, var(--eh-glow, #10b981) 38%, transparent); }
+.exec2 .health-card2 .mini-bar2 .val2 { color:#64748b; }
+.exec2 .health-card2 .plain-flag2 { color:#94a3b8; }
+/* Hover highlight re-pinned to a fixed light-on-dark tint here, not inherited from the
+   light/paper rule's own var(--ehink) (2026-10-06) -- that var still tracks this page's
+   light/dark THEME toggle, which these permanently-dark cards deliberately no longer do (see
+   this whole section's own opening comment) -- color-mixing it in would make the hover tint
+   itself flip between a light and a dark tone depending on a toggle this card ignores
+   everywhere else. */
+.exec2 .health-card2 .na-bar-click:hover { background-color:rgba(255,255,255,.07); }
+
+.exec2 .chart-card2 { background:#0d1117; border:1px solid #1e2a3a; box-shadow:none; }
+.exec2 .diagram-note2 { color:#64748b; }
+.range-bar2 .range-label2 { color:#64748b; }
+.range-btn2 { border:1px solid #1e2a3a; background:#111827; color:#cbd5e1; }
+.range-btn2[aria-pressed="true"] { border-color:#10b981; background:#10b981; color:#06110d; }
+.range-scroll2 { accent-color:#10b981; }
 </style>
 
 <div class="exec2">
 <div class="wrap2">
 
 <div class="masthead2">
-  <div>
-    <div class="eyebrow2"><span class="dot"></span> RBZ Monitoring Console</div>
-    <h1 class="title2">Executive Dashboard — Focused</h1>
-    <p class="subtitle2">As of {{ generated_at|date:"d M Y, H:i" }} · <a href="{% url 'management_dashboard_full' %}" style="color:var(--ehmuted)">Switch to Full view ›</a></p>
+  <div class="title-row2">
+    <h1 class="title2">Executive Dashboard</h1>
+    <div class="eyebrow2"><span class="dot"></span> As of {{ generated_at|date:"d M Y, H:i" }}{% if can_switch_role %} · <a href="{% url 'role_select' %}" style="color:var(--ehmuted)">‹ Back to role select</a>{% endif %}</div>
   </div>
   <div class="masthead2-actions">
-    {% if can_switch_role %}
-    <a class="back2" href="{% url 'role_select' %}"><span class="care2" aria-hidden="true">‹</span> Back to role select</a>
-    {% endif %}
     <div class="refresh2">
       <label for="refreshRate2">Auto-refresh</label>
       <select id="refreshRate2">
@@ -519,6 +956,9 @@ table.exceptions2 tr:last-child td { border-bottom:none; }
         <option value="900000">15 min</option>
       </select>
     </div>
+    <label class="fit2">
+      <input type="checkbox" id="fitToggle2"> Fit to screen
+    </label>
   </div>
 </div>
 
@@ -534,92 +974,138 @@ table.exceptions2 tr:last-child td { border-bottom:none; }
 <div class="col-a2">
 
 <section class="sec2">
-  <h2><span class="n">02</span> Needs Attention Now</h2>
-  <div class="card2 fused-card2">
-    {% if banner_tier == "bad" %}
-    <div class="banner2 bad fused-banner2">
-      <div class="dot-big"></div>
-      <div class="content2">
-        <h2>Critical — {{ exceptions|length }} exception{{ exceptions|length|pluralize }} flagged, at least one needs attention now</h2>
-      </div>
-      <div class="stamp2">Rolled up from {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}<br>+ live alert feed</div>
-    </div>
-    {% elif banner_tier == "warn" %}
-    <div class="banner2 warn fused-banner2">
-      <div class="dot-big"></div>
-      <div class="content2">
-        <h2>Warning — elevated issues across some domains</h2>
-      </div>
-      <div class="stamp2">Rolled up from {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}<br>+ live alert feed</div>
-    </div>
-    {% else %}
-    <div class="banner2 ok fused-banner2">
-      <div class="dot-big"></div>
-      <div class="content2">
-        <h2>All monitored domains are healthy</h2>
-        <p>No active exceptions across {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}.</p>
-      </div>
-      <div class="stamp2">Rolled up from {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}<br>+ live alert feed</div>
-    </div>
-    {% endif %}
-    <div class="fused-body2">
-    {% if not exceptions %}
-    <p class="empty-note2" style="margin:8px 0">No active exceptions right now.</p>
-    {% else %}
-    <table class="exceptions2">
-      <thead><tr><th></th><th>Domain</th><th>Issue</th><th style="text-align:right">Reading</th></tr></thead>
-      <tbody>
-        {% for e in exceptions %}
-        <tr class="{{ e.band }}{% if e.detail %} clickable2{% endif %}"{% if e.detail %} onclick="ehToggleDetail(this)"{% endif %}>
-          <td><span class="sev2 {{ e.band }}"></span></td>
-          <td class="domain2">{{ e.domain }}</td>
-          <td>{{ e.label }}{% if e.detail %} <span class="detail-hint2">&#9656;</span>{% endif %}</td>
-          <td class="reading2">{{ e.value }}</td>
-        </tr>
-        {% if e.detail %}
-        <tr class="detail-row2" style="display:none">
-          <td></td>
-          <td colspan="3">
-            <div class="detail-list2">
-              {% for d in e.detail %}
-              <div class="detail-item2">
-                <div class="detail-item-head2"><span class="sev2 {{ d.band }}"></span><b>{{ d.system }}</b> — {{ d.headline }}<span class="detail-time2">{{ e.generated_at|date:"d-m-Y, H:i" }} hrs</span></div>
-                {% if d.items %}
-                <div class="detail-chips2">{% for item in d.items %}<span class="detail-chip2">{{ item }}</span>{% endfor %}</div>
-                {% endif %}
-              </div>
-              {% endfor %}
-            </div>
-          </td>
-        </tr>
+  <h2><span class="n">01</span> Needs Attention Now</h2>
+  <div class="na-panel">
+    <div class="na-banner state-{{ matrix.state }}" style="{{ na_blend_style }}">
+      <div class="na-banner-top">
+        <div class="na-pulse-wrap"><div class="na-pulse-core"></div><div class="na-pulse-ring1"></div><div class="na-pulse-ring2"></div></div>
+        {% if matrix.state == "red" %}
+        <div class="na-banner-title">Critical — {{ matrix.n_errors }} error{{ matrix.n_errors|pluralize }} across {{ matrix.n_domains_affected }} domain{{ matrix.n_domains_affected|pluralize }}</div>
+        {% elif matrix.state == "amb" %}
+        <div class="na-banner-title">Warning — elevated issues across some domains</div>
+        {% else %}
+        <div class="na-banner-title">All monitored domains are healthy</div>
         {% endif %}
-        {% endfor %}
-      </tbody>
-    </table>
-    {% endif %}
+        <div class="na-banner-meta">
+          <div class="na-banner-meta-line">Rolled up from {{ report_sections|length }} admin report{{ report_sections|length|pluralize }}</div>
+          <div class="na-banner-meta-line">+ live alert feed</div>
+        </div>
+      </div>
+      <div class="na-stats">
+        <div class="na-bstat"><div class="na-bstat-n">{{ matrix.n_domains_affected }} | {{ matrix.n_domains }}</div><div class="na-bstat-l">Affected domains</div></div>
+        <div class="na-bstat"><div class="na-bstat-n">{{ matrix.n_issue_types_affected }} | {{ matrix.n_issue_types }}</div><div class="na-bstat-l">Issue types</div></div>
+        <div class="na-bstat"><div class="na-bstat-n">{{ matrix.health_pct }}%</div><div class="na-bstat-l">Domain health</div></div>
+      </div>
+    </div>
+
+    <div class="na-matrix-wrap">
+      <table class="na-matrix">
+        {% comment %}
+          colgroup, not a width on .na-row-label itself (2026-10-05) -- table-layout:fixed
+          sizes columns off the FIRST ROW's own cells, which here is <thead>'s row (starting
+          with the empty .na-corner th), not any <tbody> row -- a width declared only on
+          .na-row-label (a tbody cell) would be silently ignored by the fixed-layout algorithm.
+          A <colgroup> is the spec-correct, row-independent way to size fixed-layout columns.
+        {% endcomment %}
+        <colgroup>
+          <col style="width:170px">
+          {% for col in matrix.columns %}<col>{% endfor %}
+        </colgroup>
+        <thead>
+          <tr>
+            <th class="na-corner"></th>
+            {% for col in matrix.columns %}<th class="na-col-head">{{ col.label }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in matrix.rows %}
+          <tr>
+            <td class="na-row-label"><div class="na-row-label-inner">{{ row.label }}</div></td>
+            {% for cell in row.cells %}
+            {% if not cell %}
+            <td class="na-empty">—</td>
+            {% else %}
+            <td class="na-c-{{ cell.band }}" onclick="naOpenPopup('{{ cell.id }}')">
+              <div class="na-cell-val"><span class="na-dot {{ cell.band }}"></span><span class="na-cell-txt"><span class="na-n-{{ cell.band }}">{{ cell.errors }}</span><span class="na-n-sep"> | </span><span class="na-n-tot">{{ cell.total }}</span></span></div>
+              <span class="na-click-hint">tap for detail</span>
+            </td>
+            {% endif %}
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
   </div>
 </section>
+
+{% for row in matrix.rows %}{% for cell in row.cells %}{% if cell %}
+<div class="na-overlay" id="na-ov-{{ cell.id }}" onclick="naCloseOnBackdrop(event, '{{ cell.id }}')">
+  <div class="na-popup">
+    <div class="na-popup-header">
+      <div class="na-popup-header-top">
+        <div>
+          <div class="na-popup-domain-label">{{ cell.domain }}</div>
+          <div class="na-popup-issue-title">{{ cell.label }}</div>
+        </div>
+        <button type="button" class="na-popup-close" onclick="naClosePopup('{{ cell.id }}')">&#10005;</button>
+      </div>
+      <div class="na-popup-tiles">
+        <div class="na-ptile"><div class="na-ptile-n na-n-{{ cell.band }}">{{ cell.errors }}</div><div class="na-ptile-l">Errors</div></div>
+        <div class="na-ptile"><div class="na-ptile-n" style="color:#94a3b8">{{ cell.total }}</div><div class="na-ptile-l">Checked</div></div>
+        <div class="na-ptile"><div class="na-ptile-n na-n-{{ cell.band }}">{{ cell.health_pct }}%</div><div class="na-ptile-l">Health</div></div>
+        <div class="na-ptile"><div class="na-ptile-n" style="color:#94a3b8">{{ cell.alerts|length }}</div><div class="na-ptile-l">Alerts</div></div>
+      </div>
+    </div>
+    <div class="na-popup-body">
+      {% if cell.alerts %}
+      <div class="na-popup-section-label">{{ cell.alerts|length }} alert{{ cell.alerts|length|pluralize }} in this category{% if cell.alerts|length > 4 %} — scroll to see all{% endif %}</div>
+      {% for a in cell.alerts %}
+      <div class="na-alert-row sev-{{ a.sev }}">
+        <div class="na-alert-row-top">
+          <span class="na-alert-dot {{ a.sev }}"></span>
+          <div class="na-alert-main">
+            <div class="na-alert-title"><strong>{{ a.system }}</strong> — {{ a.desc }}</div>
+            {% if a.pills %}
+            <div class="na-alert-pills">{% for p in a.pills %}<span class="na-pill">{{ p }}</span>{% endfor %}</div>
+            {% endif %}
+          </div>
+          <div class="na-alert-time">{{ a.time|date:"d-m-Y, H:i" }} hrs</div>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="na-empty-state">No individual findings matched for this cell right now.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}{% endfor %}{% endfor %}
+
 <script>
-function ehToggleDetail(row) {
+function naOpenPopup(id) {
   "use strict";
-  var next = row.nextElementSibling;
-  if (!next || !next.classList.contains("detail-row2")) return;
-  var open = next.style.display !== "none";
-  if (row._ehTimer) { clearTimeout(row._ehTimer); row._ehTimer = null; }
-  next.style.display = open ? "none" : "table-row";
-  var hint = row.querySelector(".detail-hint2");
-  if (hint) hint.innerHTML = open ? "&#9656;" : "&#9662;";
-  if (!open) {
-    // Auto-close after a minute of no further clicks on this row (2026-09-16, on request:
-    // "a mechanism that automatically closes these boxes if no interaction after 1 minute").
-    row._ehTimer = setTimeout(function () {
-      next.style.display = "none";
-      if (hint) hint.innerHTML = "&#9656;";
-      row._ehTimer = null;
-    }, 60000);
-  }
+  var ov = document.getElementById("na-ov-" + id);
+  if (!ov) return;
+  ov.classList.add("active");
+  var body = ov.querySelector(".na-popup-body");
+  if (body) body.scrollTop = 0;
 }
+function naClosePopup(id) {
+  "use strict";
+  var ov = document.getElementById("na-ov-" + id);
+  if (ov) ov.classList.remove("active");
+}
+function naCloseOnBackdrop(e, id) {
+  "use strict";
+  if (e.target === document.getElementById("na-ov-" + id)) naClosePopup(id);
+}
+document.addEventListener("keydown", function (e) {
+  "use strict";
+  if (e.key !== "Escape") return;
+  var open = document.querySelector(".na-overlay.active");
+  if (open) open.classList.remove("active");
+});
 
 (function () {
   "use strict";
@@ -650,20 +1136,110 @@ function ehToggleDetail(row) {
   });
   schedule();
 })();
+
+(function () {
+  "use strict";
+  // Fit to screen (2026-10-07, default ON -- see the matching CSS comment above .fit2 for the
+  // toggle's own history). Measures .wrap2's own NATURAL size (its normal, un-scaled layout --
+  // which already reflows/narrows somewhat on its own via max-width:min(96vw,1920px) before
+  // this ever runs), picks whichever of width/height is the tighter fit against the real
+  // viewport, and scales the whole thing by that one factor so every widget ends up on screen
+  // with no scrollbar, on any monitor -- not just small ones; a big single monitor scales UP
+  // past 1x too, rather than leaving the page looking small in the middle of the screen.
+  //
+  // "Unless the user starts zooming in" (the request's own wording) is handled by watching
+  // window.devicePixelRatio: a manual browser/pinch zoom changes it, a window resize does not.
+  // If it changes while fit mode is on, this backs off automatically -- turns the toggle back
+  // off, restores normal flow/scrolling -- rather than fighting the zoom by re-scaling against
+  // it on the next resize tick.
+  var KEY = "execDashboardFit";
+  var toggle = document.getElementById("fitToggle2");
+  var wrap = document.querySelector(".exec2 .wrap2");
+  if (!toggle || !wrap) return;
+  var dprAtEnable = null;
+
+  function clearFit() {
+    document.documentElement.classList.remove("fit-active");
+    wrap.style.position = "";
+    wrap.style.left = "";
+    wrap.style.top = "";
+    wrap.style.width = "";
+    wrap.style.transform = "";
+    wrap.style.transformOrigin = "";
+    dprAtEnable = null;
+  }
+
+  function applyFit() {
+    clearFit();
+    var natW = wrap.scrollWidth, natH = wrap.scrollHeight;
+    if (!natW || !natH) return;
+    var availW = window.innerWidth, availH = window.innerHeight;
+    var scale = Math.min(availW / natW, availH / natH);
+    document.documentElement.classList.add("fit-active");
+    wrap.style.width = natW + "px";
+    wrap.style.position = "fixed";
+    wrap.style.transformOrigin = "top left";
+    wrap.style.transform = "scale(" + scale + ")";
+    wrap.style.left = Math.max(0, (availW - natW * scale) / 2) + "px";
+    wrap.style.top = Math.max(0, (availH - natH * scale) / 2) + "px";
+    dprAtEnable = window.devicePixelRatio;
+  }
+
+  function disable() {
+    toggle.checked = false;
+    try { localStorage.setItem(KEY, "0"); } catch (e) { /* ignore */ }
+    clearFit();
+  }
+
+  toggle.addEventListener("change", function () {
+    try { localStorage.setItem(KEY, toggle.checked ? "1" : "0"); } catch (e) { /* ignore */ }
+    if (toggle.checked) applyFit(); else clearFit();
+  });
+
+  window.addEventListener("resize", function () {
+    if (!toggle.checked) return;
+    if (dprAtEnable !== null && window.devicePixelRatio !== dprAtEnable) { disable(); return; }
+    applyFit();
+  });
+
+  // Default ON (2026-10-07, "make the dashboard fit to screen by default" -- was opt-in until
+  // now). Still respects an explicit prior OFF choice (localStorage reads "0" only when the
+  // toggle itself, or the zoom-detection auto-disable above, has set it) -- only a truly first
+  // visit, or storage blocked/private-browsing, defaults on.
+  //
+  // Deferred to window.load (2026-10-07, fixed a real crop bug: "doesnt work when i click
+  // management role the dashboard opens cropped") -- this script tag sits mid-document, well
+  // ABOVE mid-row2/the footer further down the page. Running applyFit() immediately here, the
+  // moment this script executes, measured wrap.scrollHeight BEFORE the parser had even reached
+  // that later HTML -- those nodes didn't exist in the DOM yet, not merely "not yet rendered" --
+  // so the scale it computed was too generous for the page's real, full height, and the actual
+  // content that arrived afterward (Incident Calendar/SWIFT row, footer) rendered below the
+  // viewport with scrolling already suppressed by .fit-active -- genuinely cropped, invisible,
+  // not just visually tight. window.load only fires once the ENTIRE document (everything after
+  // this script tag included) has finished parsing, so the measurement below is always the
+  // real, complete page.
+  function initFit() {
+    try {
+      if (localStorage.getItem(KEY) !== "0") { toggle.checked = true; applyFit(); }
+    } catch (e) { toggle.checked = true; applyFit(); }
+  }
+  if (document.readyState === "complete") initFit();
+  else window.addEventListener("load", initFit);
+})();
 </script>
 
 </div>
 <div class="col-b2">
 
 <section class="sec2">
-  <h2><span class="n">03</span> Domain Health</h2>
+  <h2><span class="n">02</span> Domain Health</h2>
 
   {% comment %}
     Fixed 2x2 grid, always four cells in the same order -- Security, Infrastructure, Network,
     Systems -- regardless of status (2026-09-19, on request: "remove the original domain
     grouping mechanism and just place them in a simple 2x2 grid, starting with security then
     infrastructure then networks then systems"). Replaces the old "No faults detected" /
-    "Needs attention" clean-vs-issues split; domain_grid (views.management_dashboard_focused)
+    "Needs attention" clean-vs-issues split; domain_grid (views._focus_style_context)
     already carries this fixed order, so the template just renders it straight through.
   {% endcomment %}
   <div class="domain-grid2">
@@ -685,23 +1261,88 @@ function ehToggleDetail(row) {
         {% endif %}
         {% for bar in c.bars %}
           {% if bar.pct %}
-          <div class="mini-bar2"><div class="track2" style="--eh-glow:{% if bar.band == 'bad' %}var(--ehred){% else %}var(--ehamber){% endif %}"><div class="seg2" style="width:{{ bar.pct }}%;background:{% if bar.band == 'bad' %}var(--grad-red){% else %}var(--grad-amber){% endif %}"></div></div><div class="val2">{{ bar.label }}</div></div>
+          <div class="mini-bar2 na-bar-click" onclick="event.stopPropagation(); naOpenPopup('{{ bar.id }}')"><div class="track2" style="--eh-glow:{% if bar.band == 'bad' %}var(--ehred){% else %}var(--ehamber){% endif %}"><div class="seg2" style="width:{{ bar.pct }}%;background:{% if bar.band == 'bad' %}var(--grad-red){% else %}var(--grad-amber){% endif %}"></div></div><div class="val2">{{ bar.label }}</div></div>
           {% else %}
-          <div class="plain-flag2">● {{ bar.label }}: {{ bar.value }}</div>
+          <div class="plain-flag2 na-bar-click" onclick="event.stopPropagation(); naOpenPopup('{{ bar.id }}')">● {{ bar.label }}: {{ bar.value }}</div>
           {% endif %}
         {% endfor %}
       {% endif %}
-      <div style="margin-top:8px;font-size:10px"><a href="{% url 'config_alerts' %}" style="color:var(--ehmuted)">View source report ›</a></div>
+      <div style="margin-top:8px;font-size:10px"><a href="{% url 'config_alerts' %}" style="color:#475569">View source report ›</a></div>
     </div>
     {% endfor %}
   </div>
 </section>
 
+{% comment %}
+  Domain Health bar popups (2026-10-06, on request: "make the domain tiles in managerial
+  dashboard make their bar graphs clickable just li[k]e the tiles in needs attention now so we
+  see the actual error") -- reuses the exact same .na-overlay/.na-popup markup and
+  naOpenPopup/naClosePopup/naCloseOnBackdrop JS (defined once, in the Needs Attention Now
+  section's own script block below) the matrix cells already use; id namespace ("bar-...", see
+  views._domain_bars's own comment) never collides with a matrix cell's own ids so both share
+  that one popup system safely. No stat-tile row (matrix cells show Errors/Checked/Health%/
+  Alerts -- a bar doesn't carry the same checked/total shape every bar; some are plain flags
+  with no ratio at all), just the bar's own raw reading plus however many real per-system
+  findings the same best-effort join _needs_attention_matrix's own cells use turned up.
+{% endcomment %}
+{% for c in domain_grid %}{% for bar in c.bars %}
+<div class="na-overlay" id="na-ov-{{ bar.id }}" onclick="naCloseOnBackdrop(event, '{{ bar.id }}')">
+  <div class="na-popup">
+    <div class="na-popup-header">
+      <div class="na-popup-header-top">
+        <div>
+          <div class="na-popup-domain-label">{{ c.name }}</div>
+          <div class="na-popup-issue-title">{{ bar.label }}</div>
+        </div>
+        <button type="button" class="na-popup-close" onclick="naClosePopup('{{ bar.id }}')">&#10005;</button>
+      </div>
+      <div class="na-popup-tiles">
+        <div class="na-ptile" style="flex:2"><div class="na-ptile-n na-n-{% if bar.band == 'bad' %}red{% else %}amb{% endif %}">{{ bar.value }}</div><div class="na-ptile-l">Reading</div></div>
+        <div class="na-ptile"><div class="na-ptile-n" style="color:#94a3b8">{{ bar.alerts|length }}</div><div class="na-ptile-l">Alerts</div></div>
+      </div>
+    </div>
+    <div class="na-popup-body">
+      {% if bar.alerts %}
+      <div class="na-popup-section-label">{{ bar.alerts|length }} alert{{ bar.alerts|length|pluralize }} in this category{% if bar.alerts|length > 4 %} — scroll to see all{% endif %}</div>
+      {% for a in bar.alerts %}
+      <div class="na-alert-row sev-{{ a.sev }}">
+        <div class="na-alert-row-top">
+          <span class="na-alert-dot {{ a.sev }}"></span>
+          <div class="na-alert-main">
+            <div class="na-alert-title"><strong>{{ a.system }}</strong> — {{ a.desc }}</div>
+            {% if a.pills %}
+            <div class="na-alert-pills">{% for p in a.pills %}<span class="na-pill">{{ p }}</span>{% endfor %}</div>
+            {% endif %}
+          </div>
+          <div class="na-alert-time">{{ a.time|date:"d-m-Y, H:i" }} hrs</div>
+        </div>
+      </div>
+      {% endfor %}
+      {% else %}
+      <div class="na-empty-state">No individual findings matched for this category right now.</div>
+      {% endif %}
+    </div>
+  </div>
 </div>
-<div class="col-c2">
+{% endfor %}{% endfor %}
+
+</div>
+</div>
+
+{% comment %}
+  Row 2: 03 Incident Calendar directly under 01 Needs Attention Now, 04 SWIFT Transaction
+  History halved and moved to the right-hand side (2026-10-07, incident-calendar.zip package).
+  col-c2's own CSS rules are left alone, unused now -- harmless, see .mid-row2's own CSS
+  comment below for why this doesn't touch col-a2/col-b2's own real, hard-won width tuning.
+{% endcomment %}
+<div class="mid-row2">
+<div class="col-inc2">
+{% include "reports/_incident_calendar.html" %}
+</div>
+<div class="col-swift2">
 
 <section class="sec2" style="margin-bottom:0">
-  <h2><span class="n">05</span> Live Activity</h2>
+  <h2><span class="n">04</span> SWIFT Transaction History</h2>
   {% comment %}
     One full-width scrollable/zoomable SWIFT chart, not the two side-by-side week-over-week
     compare charts (SWIFT and COB) this section used to end on (2026-09-19, on request: "remove
@@ -713,7 +1354,6 @@ function ehToggleDetail(row) {
   <div class="chart-card2">
     {% if swift_chart %}
       {{ swift_chart|json_script:"swift-data2" }}
-      <div class="note2" style="margin-bottom:6px">SWIFT Transaction History</div>
       <div class="range-bar2" data-metric="swift" role="group" aria-label="Time range for the SWIFT chart">
         <span class="range-label2">Range:</span>
         <button type="button" class="range-btn2" data-range="24h" aria-pressed="false">24h</button>
@@ -938,7 +1578,17 @@ function ehToggleDetail(row) {
             },
           },
         } : {}),
-        scales: { x: { ticks: { maxTicksLimit: 6 } }, y: { beginAtZero: true } },
+        // Explicit light tick/gridline colours (2026-10-05, same request that re-skinned this
+        // card dark -- "apply thid panel style to all other panels"): Chart.js's own defaults
+        // (dark grey text, near-black gridlines) assume a light card background, which this
+        // one no longer has now that .chart-card2 is permanently dark like the rest of this
+        // page -- left unset, the axis labels/gridlines would be all but invisible against
+        // #0d1117. Same muted/line tones the rest of this page's dark palette already uses
+        // (#64748b text, a faint rgba(148,163,184,...) gridline), not a separate colour choice.
+        scales: {
+          x: { ticks: { color: "#64748b", maxTicksLimit: 6 }, grid: { color: "rgba(148,163,184,.08)" } },
+          y: { ticks: { color: "#64748b" }, grid: { color: "rgba(148,163,184,.08)" }, beginAtZero: true },
+        },
       },
     });
 

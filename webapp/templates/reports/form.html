@@ -15,7 +15,7 @@
   data-system and the fields named comment__/fix__ keep their names — they are wire format,
   not prose, and renaming them would break the draft restore in this page's own script.
 {% endcomment %}
-<form method="post" action="{{ generate_url|default:generate_default }}" id="reportForm">
+<form method="post" action="{{ generate_url|default:generate_default }}" id="reportForm" class="xlsx-download-form">
 {% csrf_token %}
 <input type="hidden" name="token" value="{{ token }}">
 
@@ -388,8 +388,6 @@
   "use strict";
   var form = document.getElementById("reportForm");
 
-  var dlBtn = form ? form.querySelector('button[value="download"]') : null;
-  if (dlBtn) dlBtn.addEventListener("click", function () { if (window.skipSpinnerOnce) window.skipSpinnerOnce(); });
   var recHidden = document.getElementById("recipients");
   var recMenu = document.getElementById("recipientsMenu");
   var recDropdown = document.getElementById("recipientsDropdown");

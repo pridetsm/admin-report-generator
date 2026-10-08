@@ -25,8 +25,8 @@ import generate_report as gr   # from send_report/ (on sys.path)
 class FlagVM:
     key: str
     text: str
-    band: str          # "red" | "amber"
-    category: str      # disk | ram | cpu | service | backup | unreachable | untracked
+    band: str          # "red" | "amber" | "note"
+    category: str      # disk | ram | cpu | service | degraded | backup | unreachable | untracked
 
 
 @dataclass
@@ -162,7 +162,17 @@ def build_overview(store, systems, cfg) -> dict:
                            if f["watch_type"] == "queue" and f.get("system") in sysnames]
                           if fw_data else [])
     n_queue = len(queue_folders_here)
-    n_drained = sum(1 for f in queue_folders_here if f["state"] == "idle")
+    # "undrained" means aged PAST the folder monitoring screen's own established amber/red
+    # limit (folders.verdict(), DrainageThresholdConfig) -- NOT merely "not yet idle" (2026-10-07,
+    # on real complaint: "how can you say file undrained after 47 seconds" -- this used to be
+    # `n_queue - n_drained` with n_drained counting only state=="idle", so ANY file still
+    # sitting there counted as undrained the instant it landed, even a few seconds old and
+    # nowhere near its real 5/10-minute amber/red threshold. A "green" folder (files waiting,
+    # all fresh) is the NORMAL in-flight state a queue spends most of its time in, not a
+    # problem -- counting it here contradicted the exact same folders.verdict() this tile is
+    # supposed to be summarising, and the same real distinction
+    # alerting.undrained_folder_flags_by_system already draws (amber/red only, never green).
+    n_undrained = sum(1 for f in queue_folders_here if f["state"] in ("amber", "red"))
 
     linux_pct, win_pct = gr.platform_host_pcts(systems)
     glance = [
@@ -200,8 +210,8 @@ def build_overview(store, systems, cfg) -> dict:
         # the flagged-metric mechanism (reports.alerting.undrained_folder_flags_by_system) --
         # this tile is a glance-level count, not a second independently-computed severity
         # judgement.
-        {"label": "Undrained queues", "value": f"{n_queue - n_drained} | {n_queue}",
-         "sub": "undrained | total", "state": warn(n_queue - n_drained)},
+        {"label": "Undrained queues", "value": f"{n_undrained} | {n_queue}",
+         "sub": "undrained | total", "state": warn(n_undrained)},
     ]
     watch = [
         # Every tile reads "affected | total" so a count can never be mistaken for the whole
@@ -399,6 +409,117 @@ def _scope_links_to_systems(store, systems) -> None:
                    if gr.assign_link(u, systems) is not None}
 
 
+def queue_waiting_folder_flags_by_system(cfg, covered_systems: set) -> Dict[str, list]:
+    """Dashboard-only, NOTE-band Flag objects for a queue folder sitting in folders.py's own
+    "green" state -- files waiting, all of them still fresh, genuinely healthy, NOT the same
+    thing as alerting.undrained_folder_flags_by_system's red/amber output (2026-10-07, on
+    request: "managerial dashboard still not telling us which folder did not drain" -- traced
+    to a real mismatch: the "Undrained queues" dashboard tile counts ANY non-idle queue folder
+    (n_queue - n_drained, services.py's own glance tile, "drained" meaning literally
+    state=="idle"), but the per-system Flag list the dashboard's click-to-expand detail reads
+    from only ever contained red/amber flags -- a green-state folder was never flagged at all,
+    so a tile correctly reading "1 | 5" could expand to an empty popup with no way to see which
+    folder. Confirmed live, 2026-10-07: PAYNET.IN, 6 files, 45 minutes old, state=green,
+    counted in the tile's own "1" but absent from every per-system flag list.
+
+    Deliberately SEPARATE from alerting.undrained_folder_flags_by_system, never merged into it
+    and never called from alerting.py's own run_alert_cycle -- a green/healthy folder must
+    never become a real alert-pipeline flag (band="note" is explicitly excluded from real
+    notification eligibility, same "note" band reasoning network.py's own cluster-discard notes
+    already use) or a Fix-needed item in the xlsx report; this exists ONLY to give the
+    dashboard's own exception-detail popup something real to show for every number the tile
+    itself already claims, via _exception_detail's own word-match against Flag.band/category/
+    text (views.py's own accepted-band set includes "note" for exactly this reason -- see that
+    function's own comment).
+
+    The TILE'S OWN "N | total" count no longer includes green folders at all (same day,
+    separate real bug: "how can you say file undrained after 47 seconds" -- n_queue/n_undrained
+    in build_overview now only count state in amber/red, the same aged-past-its-established-
+    limit test alerting.undrained_folder_flags_by_system already applies, instead of the old
+    n_queue - n_drained which counted anything merely non-idle). This function's own job is
+    now purely "give a curious admin something to see if they open the popup anyway" --
+    it no longer owes the tile's own number an explanation, since the tile never claims a
+    green folder as a problem in the first place."""
+    from . import folders
+
+    eligible = folders.folder_watch_systems(cfg.prometheus_yml) & covered_systems
+    if not eligible:
+        return {}
+    try:
+        data = folders.snapshot()
+    except folders.FolderWatchUnavailable:
+        return {}
+    out: Dict[str, list] = {}
+    for f in data["folders"]:
+        if f["state"] != "green":
+            continue
+        if f["watch_type"] in ("logfiles", "backup", "logs"):
+            continue
+        text = (f"{f['name']} on {f['host']}: {f['files']} file(s) waiting, oldest "
+               f"{f['age_text']} old (fresh, still within normal processing time)")
+        flag = gr.Flag(key=f"undrained_ok:{f['key']}", text=text,
+                       band="note", category="undrained_folders")
+        for sysname in eligible:
+            out.setdefault(sysname, []).append(flag)
+    return out
+
+
+def mute_reason_notes_for_system(sysm_name: str, flags: "List[FlagVM]") -> List[str]:
+    """Automated Comment-box notes explaining WHY a currently-muted finding isn't being raised
+    as a fresh issue here either (2026-10-07, on request: "add automated comments for all
+    issues muted from alerts for recurrance in the system admin report... create a pipe line
+    where all such issues muted will also propagate the mute reason as the comment"). Mirrors
+    backup_policy_notes_for_system/cob_policy_notes_for_system/ram_policy_notes_for_system's
+    own non-actionable shape (never a Flag, just pre-filled explanatory text) -- this is the
+    4th note source folded into capture_snapshot's own `notes` list, not a parallel mechanism.
+
+    Reuses alerting._active_silences()/_silenced() verbatim -- the SAME real matching
+    (exact (system, flag_key), or category-wide with flag_key blank) AND the SAME escalation
+    valve (SILENCE_ESCALATE_AFTER: a silence that stopped self-resolving and has stayed open
+    too long no longer counts as muted) a real AlertGroup's own notification pipeline already
+    uses to decide whether to suppress an e-mail. Deliberately NOT a second, hand-rolled
+    version of "is this silenced" -- the one place that decision is made must stay the one
+    place it's made, or this report and the real alert could disagree about a finding's state.
+
+    One note per DISTINCT silence that actually covers one of THIS system's CURRENT flags, not
+    one note per flag -- several flags sharing one category-wide silence collapse into a
+    single explanatory line, the same "one line per real reason" shape every other note-
+    generator here already uses."""
+    if not flags:
+        return []
+
+    from django.utils import timezone
+
+    from . import alerting
+    from .models import IssueOccurrence
+
+    exact_silences, category_silences = alerting._active_silences()
+    if not exact_silences and not category_silences:
+        return []
+
+    open_started_by_key = {r.flag_key: r.started_at for r in
+                           IssueOccurrence.objects.filter(system=sysm_name, resolved_at__isnull=True)}
+    now = timezone.now()
+
+    covered: Dict[int, tuple] = {}   # silence.pk -> (silence, [flag_text, ...]), first-seen order
+    for f in flags:
+        if not alerting._silenced(sysm_name, f.key, f.category, exact_silences,
+                                  category_silences, open_started_by_key, now):
+            continue
+        silence = exact_silences.get((sysm_name, f.key)) or category_silences.get((sysm_name, f.category))
+        if silence is None:
+            continue
+        covered.setdefault(silence.pk, (silence, []))[1].append(f.text)
+
+    notes = []
+    for silence, flag_texts in covered.values():
+        scope = "; ".join(flag_texts) if silence.flag_key else f"{silence.category} (all components)"
+        reason = silence.reason.strip() or "no reason given"
+        expires = timezone.localtime(silence.expires_at).strftime("%d %b %Y")
+        notes.append(f"{scope} — Muted until {expires}: {reason}")
+    return notes
+
+
 def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = False) -> Snapshot:
     """Load config + topology, capture a FRESH set of live metrics from Prometheus, and compute
     the per-system flagged items. `only` (a set of system names) scopes the capture to just those
@@ -452,6 +573,12 @@ def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = Fa
             folder_flags_by_sys.setdefault(sysname, []).extend(flags)
         for sysname, flags in alerting.backup_uncleared_folder_flags_by_system(cfg, all_names).items():
             folder_flags_by_sys.setdefault(sysname, []).extend(flags)
+        # NOTE-band only (never real alerting) -- see queue_waiting_folder_flags_by_system's
+        # own docstring: gives the "Undrained queues" dashboard tile real detail for the
+        # green-state (healthy, fresh files) folders its own count already includes but
+        # alerting.undrained_folder_flags_by_system above never flags.
+        for sysname, flags in queue_waiting_folder_flags_by_system(cfg, all_names).items():
+            folder_flags_by_sys.setdefault(sysname, []).extend(flags)
 
     svms: List[SystemVM] = []
     for sysm in systems:
@@ -459,7 +586,7 @@ def capture_snapshot(token: str, only: Optional[set] = None, *, infra: bool = Fa
                  for f in gr.flagged_for_system(store, sysm, cfg)
                  + folder_flags_by_sys.get(sysm.name, [])]
         notes = (gr.backup_policy_notes_for_system(store, sysm) + gr.cob_policy_notes_for_system(sysm)
-                 + gr.ram_policy_notes_for_system(sysm))
+                 + gr.ram_policy_notes_for_system(sysm) + mute_reason_notes_for_system(sysm.name, flags))
         if not flags and not notes:   # nothing flagged, nothing policy-explained -- see NO_ISSUES_COMMENT
             notes = [gr.NO_ISSUES_COMMENT]
         svms.append(SystemVM(name=sysm.name, hosts=len(sysm.components), flags=flags, notes=notes))
@@ -659,3 +786,464 @@ def default_os_inventory_filename(when=None) -> str:
 
     when = when or _dt.datetime.now()
     return f"OS Inventory - {when:%Y-%m-%d %H%M}.xlsx"
+
+
+class BackupHistoryUnavailable(RuntimeError):
+    """Raised when NEITHER tier has anything for the requested range -- no instance has ever
+    recorded backup_check_ok/backup_file_count inside it, AND no system_admin ReportSubmission
+    with a "Missing backups" tile exists inside it either (e.g. a range entirely before
+    2026-07-18, when the whole system was first deployed)."""
+
+
+def earliest_backup_metric_date():
+    """The oldest calendar day the per-instance metric tier (reachable / current-backup-
+    available / filename+timestamp) can show anything for -- the real archived start of
+    backup_check_ok, not a guessed/hardcoded constant. None if the archive is completely
+    empty. Internal boundary build_backup_history_report uses to decide, per day, which of
+    its two tiers to use -- see earliest_backup_history_date for the combined, user-facing
+    floor."""
+    from .models import MetricSample
+
+    earliest = (MetricSample.objects.filter(metric_key__startswith="backup_check_ok:")
+               .order_by("taken_at").values_list("taken_at", flat=True).first())
+    return earliest.date() if earliest else None
+
+
+def earliest_backup_snapshot_date():
+    """The oldest calendar day ANY system_admin ReportSubmission carries a real "Missing
+    backups" overview tile -- the coarser report-snapshot fallback tier's own floor (2026-10-06,
+    on request, after the user pointed out this KPI has always been saved: "if everything is
+    captured then so is backup info[,] the field is called missing backups"). Confirmed live:
+    present on the very first system_admin submission ever, 2026-07-18. None if no system_admin
+    submission anywhere carries the tile at all."""
+    from .models import ReportSubmission
+
+    for sub in (ReportSubmission.objects.filter(report_content__kind="system_admin")
+               .order_by("created_at").iterator()):
+        for t in sub.report_content.get("overview", {}).get("immediate", []):
+            if t.get("label") == "Missing backups":
+                return sub.created_at.date()
+    return None
+
+
+def earliest_backup_history_date():
+    """The oldest calendar day the Backup History Report can show ANYTHING for, across BOTH
+    tiers -- single source of truth for the date picker's own floor (views.
+    backup_history_report) and the server-side range check. The per-instance metric tier and
+    the coarser report-snapshot tier have different floors (2026-09-15 vs 2026-07-18 real,
+    confirmed live) -- this is always the EARLIER of the two, since build_backup_history_report
+    itself falls back to the snapshot tier for any day before the metric tier's own floor.
+    None only if NEITHER tier has anything at all."""
+    dates = [d for d in (earliest_backup_metric_date(), earliest_backup_snapshot_date()) if d]
+    return min(dates) if dates else None
+
+
+def _bh_day_bounds(day):
+    """One calendar day's [start, end] as UTC-aware datetimes -- MetricSample.taken_at is
+    stored UTC (metric_history's own capture timestamp), so this is the same convention every
+    archived sample already uses, not a new one invented here."""
+    start = datetime.datetime.combine(day, datetime.time.min, tzinfo=datetime.timezone.utc)
+    end = datetime.datetime.combine(day, datetime.time.max, tzinfo=datetime.timezone.utc)
+    return start, end
+
+
+def _bh_report_for_day(day):
+    """(report_id, status_label, author) for one calendar day -- prefers a real admin-authored
+    ReportSubmission; falls back to the "Automated" one and says so explicitly; says plainly
+    when neither exists. Never silently blank (2026-10-06, on request: "prefer reports
+    generated byt admins but if not possible say this and fallback to automated report")."""
+    from .models import ReportSubmission
+
+    admin_sub = (ReportSubmission.objects.filter(created_at__date=day).exclude(author="Automated")
+                .order_by("created_at").first())
+    if admin_sub:
+        return admin_sub.pk, "Admin-generated", admin_sub.author
+    auto_sub = (ReportSubmission.objects.filter(created_at__date=day, author="Automated")
+               .order_by("created_at").first())
+    if auto_sub:
+        return auto_sub.pk, "No admin report this day — showing automated report instead", "Automated"
+    return None, "No report generated this day", ""
+
+
+def _bh_missing_backups_for_day(day):
+    """(value, state, report_id, report_status, author) from that day's own System Admin
+    Report "Missing backups" overview tile -- the SAME real KPI System Health Report has
+    always shown (generate_report.backup_missing_band), already saved verbatim into every
+    system_admin ReportSubmission.report_content since day one (confirmed live, 2026-10-06:
+    present on the very first submission, 2026-07-18). None if no system_admin report exists
+    that day at all. This is coarser than the metric-archive tier above (one estate-wide
+    count, not per-instance reachable/available, and no filename/timestamp) but genuinely
+    extends real coverage back to 2026-07-18 -- well before the metric archive's own
+    2026-09-15 floor -- using data that was ALREADY captured, not reconstructed or guessed."""
+    from .models import ReportSubmission
+
+    def _tile(sub):
+        for t in sub.report_content.get("overview", {}).get("immediate", []):
+            if t.get("label") == "Missing backups":
+                return t
+        return None
+
+    admin_sub = (ReportSubmission.objects.filter(
+        created_at__date=day, report_content__kind="system_admin").exclude(author="Automated")
+                .order_by("created_at").first())
+    if admin_sub:
+        tile = _tile(admin_sub)
+        if tile:
+            return tile["value"], tile["state"], admin_sub.pk, "Admin-generated", admin_sub.author
+    auto_sub = (ReportSubmission.objects.filter(
+        created_at__date=day, report_content__kind="system_admin", author="Automated")
+               .order_by("created_at").first())
+    if auto_sub:
+        tile = _tile(auto_sub)
+        if tile:
+            return (tile["value"], tile["state"], auto_sub.pk,
+                    "No admin report this day — showing automated report instead", "Automated")
+    return None
+
+
+def build_backup_history_report(date_from, date_to, theme: str = "dark") -> Tuple[bytes, int, int, int, list]:
+    """The Backup History workbook, as bytes, plus (days, no_backup_count, no_report_count,
+    rows) -- `rows` is the FULL computed table, one plain dict per (day, instance), the same
+    data written into the xlsx. The caller saves this verbatim into ReportSubmission.
+    report_content (2026-10-06, on request, stated repeatedly: "the postgres db should be the
+    hub for every report created, automatic or otherwise[,] the whole report as is should be
+    recreatable" -- see every OTHER report's own report_content docstring for the same
+    standing contract; a report_content of only {"kind", "date_from", "date_to"} would NOT
+    satisfy this, since it points back at the archive instead of holding the report itself).
+
+    date_from/date_to are inclusive datetime.date values. TWO tiers, chosen per day:
+
+    Tier 1 (day >= earliest_backup_metric_date()) -- one row per (day, instance), for every
+    instance the archive has EVER recorded backup_check_ok/backup_file_count for inside this
+    range (discovered from the archive itself -- reports/metric_registry.py's own
+    backup_check_ok/backup_file_count entries -- never a hardcoded topology list, so a host
+    added or retired later is handled honestly with no manual update here). Two separate,
+    deliberately NOT-conflated facts per day (confirmed live, 2026-10-06, by reading
+    backup_monitor/check_backup_bsa.ps1 directly): "reachable" (backup_check_ok -- could the
+    checker even see the backup folder/share) and "backup available" (backup_file_count > 0 --
+    did a CURRENT backup, per that host's own configured policy, actually exist). A host can
+    be fully reachable with zero fresh backups; collapsing the two into one flag would hide
+    exactly that case. Filenames/timestamps come from the `backup_file` registry entry added
+    alongside this report -- no retroactive history before whenever that entry first started
+    capturing, so any day before ITS OWN earliest row is labelled "Not archived for this date"
+    rather than a misleading blank/"missing" cell.
+
+    Tier 2 (day < earliest_backup_metric_date()) -- one coarser, estate-wide row per day,
+    from that day's own System Admin Report "Missing backups" snapshot (see
+    _bh_missing_backups_for_day). Real data, already captured since day one (2026-07-18,
+    confirmed live) -- added 2026-10-06 after the user pointed out this KPI has always existed
+    ("if everything is captured then so is backup info[,] the field is called missing
+    backups"). No per-instance breakdown and no filename/timestamp at this tier -- said
+    plainly in the row itself, never faked to look like Tier 1's own detail.
+    """
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    from .models import MetricSample
+
+    metric_floor = earliest_backup_metric_date()
+    snapshot_floor = earliest_backup_snapshot_date()
+    if (metric_floor is None or metric_floor > date_to) and (snapshot_floor is None or snapshot_floor > date_to):
+        raise BackupHistoryUnavailable(
+            "No backup data exists for this date range at all — not in the metric archive "
+            f"({'starts ' + metric_floor.isoformat() if metric_floor else 'empty'}) or in any "
+            f"report snapshot ({'starts ' + snapshot_floor.isoformat() if snapshot_floor else 'empty'}).")
+
+    # The per-instance metric tier only covers the part of the range on/after its own floor --
+    # discover instances from THAT sub-range only, so a range entirely before it (handled
+    # below by the coarser report-snapshot tier instead) doesn't wrongly come up empty here.
+    metric_tier_start = max(date_from, metric_floor) if metric_floor else None
+    instances = []
+    if metric_tier_start and metric_tier_start <= date_to:
+        range_start, _ = _bh_day_bounds(metric_tier_start)
+        _, range_end = _bh_day_bounds(date_to)
+        instances = sorted({
+            key.split(":", 1)[1]
+            for key in MetricSample.objects.filter(
+                metric_key__startswith="backup_check_ok:", taken_at__gte=range_start, taken_at__lte=range_end,
+            ).values_list("metric_key", flat=True).distinct()
+        })
+
+    # Real system/component labels off the SAME topology every other report already resolves
+    # against (2026-10-06, on request: "use system topology to better identify and label this
+    # ... refered to individual host as if there where systems") -- instance:port alone reads
+    # as network trivia; "RTGS — Backend" is what the rest of the app already calls this host
+    # everywhere else. scope="all" since a backup-checked instance can belong to any of the
+    # three estates (business/infra/AD), not just System Admin's own. Falls back to the raw
+    # instance string (never hidden) for anything genuinely outside this topology (e.g. a
+    # device this estate-wide YAML doesn't cover at all) -- labelled honestly, not guessed.
+    cfg = gr.load_config()
+    instance_labels = {
+        c.instance: f"{sysm.name} — {c.label}"
+        for sysm in gr.load_topology(cfg.prometheus_yml, scope="all")
+        for c in sysm.components
+    }
+
+    def _instance_label(instance):
+        label = instance_labels.get(instance)
+        return f"{label} ({instance})" if label else instance
+
+    instances.sort(key=_instance_label)   # group/display by real system name, not raw IP order
+
+    earliest_file_row = (MetricSample.objects.filter(metric_key__startswith="backup_file:")
+                         .order_by("taken_at").values_list("taken_at", flat=True).first())
+    rollout_date = earliest_file_row.date() if earliest_file_row else None
+
+    def _last_value(key, instance, day):
+        # Reads the Postgres archive ONLY, never live Prometheus (2026-10-06, on request:
+        # "stop using prometheus as a database" -- historical_query.series() falls back to a
+        # live prom.query_range() for anything inside the last live_window_days, which is
+        # exactly the dependency this report must not have; a day's reading here is only ever
+        # as fresh as the last hourly capture into MetricSample, never fresher).
+        start, end = _bh_day_bounds(day)
+        return (MetricSample.objects.filter(
+            metric_key=f"{key}:{instance}", taken_at__gte=start, taken_at__lte=end,
+        ).order_by("-taken_at").values_list("value", flat=True).first())
+
+    def _files_for(instance, day):
+        # Strip the KNOWN prefix rather than splitting generically -- historical_query.py's own
+        # docstring flags exactly this hazard: instance can itself contain a colon ("host:port"),
+        # so a blind key.split(":") would cut the instance's own colon instead of the one
+        # separating it from the filename.
+        start, end = _bh_day_bounds(day)
+        prefix = f"backup_file:{instance}:"
+        rows = (MetricSample.objects.filter(
+            metric_key__startswith=prefix, taken_at__gte=start, taken_at__lte=end,
+        ).values_list("metric_key", "value"))
+        seen = {}
+        for key, mtime in rows:
+            filename = key[len(prefix):]
+            seen[filename] = mtime        # last-written mtime wins if it somehow changed intraday
+        return sorted(seen.items())
+
+    rows = []
+    no_backup_count = 0
+    no_report_count = 0
+
+    with gr.palette(theme if theme in gr.PALETTES else "dark"):
+        Theme = gr.Theme
+        thin = Side(style="thin", color=Theme.BORDER)
+        cell_border = Border(thin, thin, thin, thin)
+
+        def _cell(ws, r, c, v="", font=None, bg=None, al="left", bordered=False,
+                 wrap=False, valign="center"):
+            x = ws.cell(row=r, column=c)
+            x.value = v
+            x.font = font or Theme.font()
+            x.fill = Theme.fill(bg if bg is not None else Theme.BG)
+            x.alignment = Alignment(horizontal=al, vertical=valign, wrap_text=wrap)
+            if bordered:
+                x.border = cell_border
+            return x
+
+        def _merge(ws, r, c1, c2, v, font, bg=None, al="left"):
+            for c in range(c1, c2 + 1):
+                _cell(ws, r, c, v if c == c1 else "", font, bg, al)
+            ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
+
+        def _chip(ws, r, c, text, band, valign="center"):
+            # band is "green"/"amber"/"red" (Theme.CHIP's own vocabulary) or None for a
+            # genuinely unknown/not-applicable reading -- plain muted text, no colour, since
+            # "we don't know" is not the same claim as "red" and must never look like one.
+            if band is None:
+                _cell(ws, r, c, text, Theme.font(9, False, Theme.SUB), bg=Theme.CARD,
+                     al="center", bordered=True, valign=valign)
+            else:
+                fg, bg = Theme.CHIP[band]
+                _cell(ws, r, c, text, Theme.font(9, True, fg), bg=bg, al="center",
+                     bordered=True, valign=valign)
+
+        def _report_header_text(date_str, report_id, report_status, report_author):
+            # "Generated by:" is ALWAYS present and ALWAYS labelled (2026-10-06, on request,
+            # after the admin name was only shown conditionally before: "you did not include
+            # the name of the admin that generated the report") -- never a bare report_status
+            # sentence that happens to omit the word "admin" on an automated day; the reader
+            # should never have to infer whether this field exists from its absence.
+            if report_id is None:
+                return f"{date_str}  ·  No report generated this day"
+            who = report_author if (report_author and report_author != "Automated") else "Automated"
+            return f"{date_str}  ·  Report #{report_id}  ·  Generated by: {who}"
+
+        COLS = ["System", "Reachable", "Backup available", "Filename(s)", "Last backup timestamp"]
+        LEFT, RIGHT = 2, 2 + len(COLS) - 1   # margin column A reserved, content starts at B
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Backup History"
+        ws.sheet_view.showGridLines = False
+        ws.column_dimensions["A"].width = 3
+        widths = [38, 11, 16, 34, 20]
+        for letter, w in zip([get_column_letter(c) for c in range(LEFT, RIGHT + 1)], widths):
+            ws.column_dimensions[letter].width = w
+
+        day = date_from
+        row_i = 0
+
+        def _blank_row(ws, r, span_to=14):
+            for c in range(1, span_to):
+                _cell(ws, r, c)
+
+        while day <= date_to:
+            date_str = day.strftime("%Y-%m-%d")
+            if metric_floor is not None and day >= metric_floor:
+                # Tier 1: per-instance, from the continuous metric archive.
+                report_id, report_status, report_author = _bh_report_for_day(day)
+                if report_id is None:
+                    no_report_count += 1
+
+                row_i += 1
+                _cell(ws, row_i, 1)
+                _merge(ws, row_i, LEFT, RIGHT,
+                      _report_header_text(date_str, report_id, report_status, report_author),
+                      Theme.font(13, True, Theme.CYAN), bg=Theme.HDR)
+                ws.row_dimensions[row_i].height = 22
+
+                row_i += 1
+                _cell(ws, row_i, 1)
+                for i, h in enumerate(COLS):
+                    _cell(ws, row_i, LEFT + i, h, Theme.font(9, True, Theme.CYAN),
+                         bg=Theme.HDR, al="center", bordered=True)
+                head_row = row_i
+
+                for instance in instances:
+                    row_i += 1
+                    _cell(ws, row_i, 1)
+                    reachable = _last_value("backup_check_ok", instance, day)
+                    available = _last_value("backup_file_count", instance, day)
+                    if available is not None and available <= 0:
+                        no_backup_count += 1
+
+                    file_count = 1
+                    if rollout_date is None or day < rollout_date:
+                        filenames_text, ts_text = "Not archived for this date", ""
+                    else:
+                        files = _files_for(instance, day)
+                        if files:
+                            # Stacked top-down, one file per line (2026-10-06, on request:
+                            # "you cant just list all backup file sequentially the xlsx cells
+                            # do not stretch that far ahead....list top down instead") -- a
+                            # single "; "-joined line was the original bug: it just runs off
+                            # the edge of the cell instead of wrapping, however many files a
+                            # busy day happened to produce. wrap_text + a row height sized to
+                            # the real count (set below) is what actually makes this readable.
+                            filenames_text = "\n".join(name for name, _mtime in files)
+                            ts_text = "\n".join(
+                                datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+                                .strftime("%Y-%m-%d %H:%M") for _name, mtime in files)
+                            file_count = len(files)
+                        else:
+                            filenames_text, ts_text = "No fresh file recorded", ""
+
+                    reachable_text = "Yes" if reachable and reachable >= 1 else ("No" if reachable is not None else "No data")
+                    reachable_band = None if reachable is None else ("green" if reachable >= 1 else "red")
+                    available_text = ("Yes" if (available is not None and available > 0) else
+                                      ("No" if available is not None else "No data"))
+                    available_band = None if available is None else ("green" if available > 0 else "red")
+                    system_label = _instance_label(instance)
+                    rows.append({
+                        "date": date_str, "instance": instance, "system_label": system_label,
+                        "reachable": reachable_text, "backup_available": available_text,
+                        "filenames": filenames_text, "timestamps": ts_text,
+                        "report_id": report_id, "report_status": report_status,
+                        "report_author": report_author,
+                    })
+
+                    zebra = Theme.CARD if (row_i - head_row) % 2 == 0 else Theme.BG
+                    _cell(ws, row_i, LEFT, system_label, Theme.font(9), bg=zebra,
+                         bordered=True, valign="top")
+                    _chip(ws, row_i, LEFT + 1, reachable_text, reachable_band, valign="top")
+                    _chip(ws, row_i, LEFT + 2, available_text, available_band, valign="top")
+                    _cell(ws, row_i, LEFT + 3, filenames_text, Theme.font(9, False, Theme.GREY),
+                         bg=zebra, bordered=True, wrap=True, valign="top")
+                    _cell(ws, row_i, LEFT + 4, ts_text, Theme.font(9, False, Theme.GREY),
+                         bg=zebra, bordered=True, wrap=True, valign="top")
+                    # Tall enough for every file's own line, capped so one unusually busy day
+                    # can't blow the sheet's own proportions out -- 10 lines visible, "+N more"
+                    # said plainly rather than silently truncating the real list.
+                    visible = min(file_count, 10)
+                    ws.row_dimensions[row_i].height = max(14, visible * 14)
+                    if file_count > 10:
+                        extra = file_count - 10
+                        filenames_text = filenames_text + f"\n…(+{extra} more)"
+                        ws.cell(row=row_i, column=LEFT + 3).value = filenames_text
+            else:
+                # Tier 2: coarser, estate-wide fallback from that day's own System Admin
+                # Report "Missing backups" snapshot -- see _bh_missing_backups_for_day's own
+                # docstring for why (real data, already captured, back to 2026-07-18 -- well
+                # before the metric archive's 2026-09-15 floor). One row per day, not per
+                # instance: this tier has no per-system breakdown and no filename/timestamp,
+                # said plainly rather than faked to look like Tier 1's own detail.
+                snap = _bh_missing_backups_for_day(day)
+                if snap is None:
+                    no_report_count += 1
+                    available_text, available_band = "No data", None
+                    report_id, report_status, report_author = None, "No report generated this day", ""
+                else:
+                    value, state, report_id, report_status, report_author = snap
+                    available_text = f"{value} missing (estate-wide count)"
+                    available_band = {"good": "green", "bad": "red"}.get(state, "amber")
+                    if state != "good":
+                        no_backup_count += 1
+
+                row_i += 1
+                _cell(ws, row_i, 1)
+                _merge(ws, row_i, LEFT, RIGHT,
+                      _report_header_text(date_str, report_id, report_status, report_author),
+                      Theme.font(13, True, Theme.CYAN), bg=Theme.HDR)
+                ws.row_dimensions[row_i].height = 22
+
+                row_i += 1
+                _cell(ws, row_i, 1)
+                for i, h in enumerate(COLS):
+                    _cell(ws, row_i, LEFT + i, h, Theme.font(9, True, Theme.CYAN),
+                         bg=Theme.HDR, al="center", bordered=True)
+
+                row_i += 1
+                _cell(ws, row_i, 1)
+                rows.append({
+                    "date": date_str, "instance": "(estate-wide total)",
+                    "reachable": "—", "backup_available": available_text,
+                    "filenames": "Not tracked at this grain (pre-archive snapshot only)", "timestamps": "",
+                    "report_id": report_id, "report_status": report_status,
+                    "report_author": report_author,
+                })
+                _cell(ws, row_i, LEFT, "(estate-wide total)", Theme.font(9), bg=Theme.CARD, bordered=True)
+                _chip(ws, row_i, LEFT + 1, "—", None)
+                _chip(ws, row_i, LEFT + 2, available_text, available_band)
+                _cell(ws, row_i, LEFT + 3, "Not tracked at this grain (pre-archive snapshot only)",
+                     Theme.font(9, False, Theme.GREY), bg=Theme.CARD, bordered=True)
+                _cell(ws, row_i, LEFT + 4, "", Theme.font(9, False, Theme.GREY), bg=Theme.CARD, bordered=True)
+
+            row_i += 1
+            _blank_row(ws, row_i)
+            day += datetime.timedelta(days=1)
+
+        ws.freeze_panes = None
+
+        buf = io.BytesIO()
+        wb.save(buf)
+
+    days_count = (date_to - date_from).days + 1
+    return buf.getvalue(), days_count, no_backup_count, no_report_count, rows
+
+
+def default_backup_history_filename(when=None) -> str:
+    import datetime as _dt
+
+    when = when or _dt.datetime.now()
+    return f"Backup History Report - {when:%Y-%m-%d %H%M}.xlsx"
+
+
+def mark_xlsx_download(response):
+    """Sets the short-lived cookie static/js/app.js's download-spinner polls for (2026-10-06,
+    on request: "the system acts as if nothing is happening... we need an actual spinner" --
+    see that file's own comment for why a plain cookie-poll, not a JS event, is the only
+    reliable way to detect a form-POST-triggered file download reaching the browser). Call on
+    every xlsx HttpResponse right before returning it. 20s max-age matches the JS poll's own
+    give-up timeout -- stale on purpose, so a cookie left over from an aborted/slow previous
+    download can never be mistaken for the current one finishing instantly."""
+    response.set_cookie("xlsx_dl_done", "1", max_age=20, path="/", samesite="Lax")
+    return response

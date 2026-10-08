@@ -89,6 +89,41 @@
     });
   }
 
+  // ---- xlsx/report download spinner ----
+  // A form POST that comes back with Content-Disposition: attachment never fires
+  // beforeunload or pageshow (the page never actually unloads -- a download just happens
+  // alongside it), which is exactly why every xlsx-generating form on this site has always
+  // called skipSpinnerOnce() to keep the navigation spinner above from showing and then
+  // getting stuck forever with no event left to hide it on. The problem users actually hit
+  // (2026-10-06, "the system acts as if nothing is happening... we need an actual spinner")
+  // is the gap that left: NOTHING shows during the real wait while a report (sometimes a
+  // genuinely slow multi-day query) renders.
+  //
+  // Fix: a form opts in with class="xlsx-download-form"; the matching view sets a short-
+  // lived cookie on the SAME response that streams the file (see services._mark_xlsx_
+  // download). The browser applies a Set-Cookie header even though JS can never read a
+  // download's response body, so polling for that cookie to appear is the standard, cross-
+  // browser-reliable way to detect "the file actually reached the browser" from a plain
+  // form submit -- there is no native JS event for it.
+  var DL_COOKIE = "xlsx_dl_done";
+  function hasDlCookie() { return document.cookie.indexOf(DL_COOKIE + "=") !== -1; }
+  function clearDlCookie() { document.cookie = DL_COOKIE + "=; Max-Age=0; path=/"; }
+  document.addEventListener("submit", function (e) {
+    var form = e.target.closest && e.target.closest("form.xlsx-download-form");
+    if (!form || !spinner) return;
+    clearDlCookie();
+    showSpinner();
+    var elapsed = 0;
+    var poll = setInterval(function () {
+      elapsed += 250;
+      if (hasDlCookie() || elapsed > 20000) {   // 20s give-up, matches the cookie's own max-age
+        clearInterval(poll);
+        hideSpinner();
+        clearDlCookie();
+      }
+    }, 250);
+  });
+
   // ---- navigation drawer (opened from the app title) ----
   var drawer = document.getElementById("drawer");
   var backdrop = document.getElementById("drawerBackdrop");

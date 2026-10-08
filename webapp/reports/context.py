@@ -58,6 +58,8 @@ _NAV_PARENT = {
     "wireless_controller_report": "wireless_controller_form",
     "access_switches_form": "reports",
     "access_switches_report": "access_switches_form",
+    "firewalls_form": "reports",
+    "firewalls_report": "firewalls_form",
     "os_inventory": "reports",
     "automated_reports": "reports",
     # Both child screens map straight back to the top tile rather than to each other: their
@@ -158,14 +160,18 @@ _NAV_PARENT = {
     # plays for every other estate -- it has to lead straight to Role Select for the same
     # reason configuration/report_form/network_dashboard/infra_form do: otherwise the
     # ROLE_HOME fallback below resolves "Management's home" to this very page and Back points
-    # at the screen you're already standing on. Executive - Full and Executive - Analytical
-    # both hang off Focused rather than off Role Select directly (2026-09-16 for Full,
-    # 2026-09-19 for Analytical -- the former Focused page, preserved under its own URL when
-    # Focused itself was redesigned) -- same "detail page off its own landing page" shape as
-    # infra_report/infra_form above, just with Focused playing infra_form's part.
-    "management_dashboard_focused": "role_select",
-    "management_dashboard_full": "management_dashboard_focused",
-    "management_dashboard_analytical": "management_dashboard_focused",
+    # at the screen you're already standing on. Executive - Full, Executive - Analytical and
+    # Executive - Focus all hang off Pretty rather than off Role Select directly (2026-09-16
+    # for Full, 2026-09-19 for Analytical, 2026-10-05 for Focus -- each one a FORMER landing
+    # page, preserved under its own URL the moment something newer took over that slot) -- same
+    # "detail page off its own landing page" shape as infra_report/infra_form above, just with
+    # Pretty playing infra_form's part now.
+    "management_dashboard_pretty": "role_select",
+    "management_dashboard_full": "management_dashboard_pretty",
+    "management_dashboard_analytical": "management_dashboard_pretty",
+    "management_dashboard_alerts": "management_dashboard_pretty",
+    "management_dashboard_focus": "management_dashboard_pretty",
+    "management_dashboard_pretty_analytical": "management_dashboard_pretty",
 }
 #: the tree's root — a parent of everything, so never marked as "the branch you are in"
 _NAV_ROOT = "report_form"
@@ -195,6 +201,8 @@ _NAV_LABEL = {
     "wireless_controller_report": "Wireless Controller Report",
     "access_switches_form": "Access Switches Picker",
     "access_switches_report": "Access Switches Report",
+    "firewalls_form": "Firewall Picker",
+    "firewalls_report": "Firewall Report",
     "history": "History",
     "roles_console": "Role assignments",
     "config_roles": "Roles",
@@ -220,9 +228,12 @@ _NAV_LABEL = {
     "config_create_user": "Add stakeholder",
     "config_edit_user": "Edit account",
     "profile": "Profile",
-    "management_dashboard_focused": "Executive - Focused",
+    "management_dashboard_pretty": "Executive Dashboard",
+    "management_dashboard_focus": "Executive - Focus",
     "management_dashboard_full": "Executive - Full",
     "management_dashboard_analytical": "Executive - Analytical",
+    "management_dashboard_alerts": "Executive - Alerts",
+    "management_dashboard_pretty_analytical": "Executive - Pretty Analytical",
 }
 
 
@@ -280,17 +291,20 @@ def _back_nav(request):
     on_the_open_report = name in ("report", "infra_report",
                                   "active_directory_report",
                                   "core_switches_report", "routers_report",
-                                  "wireless_controller_report", "access_switches_report")
+                                  "wireless_controller_report", "access_switches_report",
+                                  "firewalls_report")
     on_a_picker = name in ("report_form", "infra_form",
                            "active_directory_form",
                            "core_switches_form", "routers_form",
-                           "wireless_controller_form", "access_switches_form")
+                           "wireless_controller_form", "access_switches_form",
+                           "firewalls_form")
     # A picker's Back steps OUT of the estate, so the open-report override does not apply
     # there — the picker already offers "Continue that report" in its own widget, and having
     # Back do the same thing would leave no way up at all.
     if (parent in ("report_form", "infra_form", "active_directory_form",
                    "core_switches_form", "routers_form",
-                   "wireless_controller_form", "access_switches_form")
+                   "wireless_controller_form", "access_switches_form",
+                   "firewalls_form")
             and not on_the_open_report and not on_a_picker):
         if "Infrastructure Admin" in scope and request.session.get("infra_report_systems"):
             try:
@@ -315,6 +329,7 @@ def _back_nav(request):
             ("routers_devices", "routers_report"),
             ("wireless_controller_devices", "wireless_controller_report"),
             ("access_switches_devices", "access_switches_report"),
+            ("firewalls_devices", "firewalls_report"),
         ):
             if (("Network Admin" in scope or "Infrastructure Admin" in scope)
                     and request.session.get(devices_key)):
@@ -420,6 +435,11 @@ def role_flags(request):
         # never disagree about whether the current scope may see either page.
         "history_in_scope": page_in_scope(request, "history") if user is not None else True,
         "connect_in_scope": page_in_scope(request, "connect") if user is not None else True,
+        # Alert Dashboard (2026-10-01, moved off Management onto the five estate/admin roles --
+        # see roles.can_view_alert_dashboard's own docstring). Same page_in_scope pattern as
+        # History/Connect just above: a single shared-screen flag, not nested in any one role's
+        # own drawer section, since it does not belong to any single estate.
+        "alert_dashboard_in_scope": page_in_scope(request, "management_dashboard_alerts") if user is not None else True,
         "active_role": active_role(request) if user is not None else "",
         # Only offer "switch role" to someone who has somewhere to switch to. The canvas
         # Back button is the one-role holder's route to the picker (see _back_nav).

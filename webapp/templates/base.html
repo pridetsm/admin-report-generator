@@ -12,6 +12,25 @@
       var t = localStorage.getItem("pageTheme");
       if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
     })();
+    {% if "management_dashboard" in current_page %}
+    {% comment %}
+      Applied on <html> here, before <body> (and the chrome inside it) ever paints -- same
+      flash-prevention reason the theme attribute just above does it this way, not
+      document.body.classList further down in the page (2026-10-06, on request: "add back the
+      app bar on top but add a special button for all dashboad screens to hide it and bring it
+      back... a button works better... covers touch navigation as well"). Gated to dashboard
+      pages only (current_page starting "management_dashboard_", the 5 Executive dashboard
+      URLs and no others) -- the localStorage flag itself is one shared global preference, but
+      it must never take visible effect on a page that doesn't also render the toggle button
+      near the end of this file, or a user who hides chrome here would land on some other,
+      non-dashboard screen with no chrome AND no button left to bring it back.
+    {% endcomment %}
+    (function () {
+      var h = null;
+      try { h = localStorage.getItem("dashChromeHidden"); } catch (e) {}
+      if (h === "1") document.documentElement.classList.add("dash-chrome-hidden");
+    })();
+    {% endif %}
   </script>
   <style>
     
@@ -265,30 +284,113 @@
     </div>
     {% endif %}
     {% comment %}
-      Management's own three screens (2026-09-16, Full; 2026-09-19, Analytical -- the former
+      Management's own four screens (2026-09-16, Full; 2026-09-19, Analytical -- the former
       Focused page, preserved under its own URL when Focused itself was redesigned into a plain
-      2x2 domain grid) -- Executive - Focused is its LANDING page (see ROLE_HOME), the same
-      role Configuration plays for Administrator, so it's the top-level entry here; Full and
-      Analytical hang off it as children, the same shape SOD Checklist/Temenos/Roles hang off
+      2x2 domain grid; 2026-10-05, Focus -- the former Focused page AGAIN, preserved once more
+      when Pretty's cosmetic Needs Attention Now matrix redesign took over the landing slot) --
+      Executive Dashboard (Pretty) is the LANDING page (see ROLE_HOME), the same role
+      Configuration plays for Administrator, so it's the top-level entry here; Full, Analytical
+      and Focus hang off it as children, the same shape SOD Checklist/Temenos/Roles hang off
       their own parent entries above.
     {% endcomment %}
     {% if is_management %}
-    <a href="{% url 'management_dashboard_focused' %}"{% if current_page == 'management_dashboard_focused' %} class="is-current" aria-current="page"{% elif 'management_dashboard_focused' in current_ancestors %} class="is-ancestor"{% endif %}>Executive Dashboard</a>
+    <a href="{% url 'management_dashboard_pretty' %}"{% if current_page == 'management_dashboard_pretty' %} class="is-current" aria-current="page"{% elif 'management_dashboard_pretty' in current_ancestors %} class="is-ancestor"{% endif %}>Executive Dashboard</a>
     <div class="drawer-children">
       <a href="{% url 'management_dashboard_full' %}" class="drawer-child{% if current_page == 'management_dashboard_full' %} is-current{% endif %}"{% if current_page == 'management_dashboard_full' %} aria-current="page"{% endif %}>Executive - Full</a>
       <a href="{% url 'management_dashboard_analytical' %}" class="drawer-child{% if current_page == 'management_dashboard_analytical' %} is-current{% endif %}"{% if current_page == 'management_dashboard_analytical' %} aria-current="page"{% endif %}>Executive - Analytical</a>
+      <a href="{% url 'management_dashboard_focus' %}" class="drawer-child{% if current_page == 'management_dashboard_focus' %} is-current{% endif %}"{% if current_page == 'management_dashboard_focus' %} aria-current="page"{% endif %}>Executive - Focus</a>
+      <a href="{% url 'management_dashboard_pretty_analytical' %}" class="drawer-child{% if current_page == 'management_dashboard_pretty_analytical' %} is-current{% endif %}"{% if current_page == 'management_dashboard_pretty_analytical' %} aria-current="page"{% endif %}>Executive - Pretty Analytical</a>
     </div>
+    {% endif %}
+    {% comment %}
+      Alert Dashboard (2026-10-01, moved off Management entirely onto the five estate/admin
+      roles -- "remove the dashboard from the management role and add it to all other roles").
+      A shared screen, not nested under any one role's own section -- same pattern History/
+      Connect already use (alert_dashboard_in_scope mirrors history_in_scope/connect_in_scope
+      exactly, see context.py's own comment).
+    {% endcomment %}
+    {% if alert_dashboard_in_scope %}
+    <a href="{% url 'management_dashboard_alerts' %}"{% if current_page == 'management_dashboard_alerts' %} class="is-current" aria-current="page"{% elif 'management_dashboard_alerts' in current_ancestors %} class="is-ancestor"{% endif %}>Alert Dashboard</a>
     {% endif %}
   </nav>
 
-  {# ---- canvas back button: walks ONE level up the nav hierarchy (child -> parent -> home) ---- #}
-  {% if back_url %}
+  {% comment %}
+    ---- canvas back button: walks ONE level up the nav hierarchy (child -> parent -> home) ----
+    Suppressed on the wide Executive dashboards (2026-09-30, confirmed live via screenshot: the
+    fixed-position gutter this pill floats in -- see .backnav's own CSS comment, "mirrors the
+    countdown on the right" -- assumes a ~1360px centred container. Full/Analytical/Alerts use a
+    near-fullscreen one instead (.wrap2's min(96vw,1920px), .adk's full-bleed dark canvas), which
+    leaves no such gutter, so the pill was landing ON TOP of page content -- confirmed on BOTH
+    Executive - Full (covering its own title) and the new Executive - Alerts (covering its stat
+    tiles), not something introduced by either page individually. These three already carry
+    equivalent navigation of their own (the drawer's own entry for each -- Full/Analytical under
+    "Executive Dashboard", Alerts now its own standalone entry since 2026-10-01 -- plus Full's
+    own inline "Switch to ... view" links) so dropping the redundant floating pill here loses
+    nothing -- cheaper and lower-risk than reworking the shared gutter formula to be
+    container-aware. ----
+
+    Focus and Pretty join this list (2026-10-06, found while re-verifying Pretty's own chrome
+    restoration: screenshotting it live showed this exact SAME collision -- the pill landing on
+    top of "Executive Dashboard"'s own title -- and checking Focus the same way turned up the
+    identical bug there too, pre-existing, just never caught because Focus wasn't being
+    screenshotted this closely until now). Both use the same near-fullscreen .wrap2/.exec2
+    container as Full/Analytical, so the same root cause applies, and both already carry their
+    OWN inline "‹ Back to role select" link in their own masthead (.masthead2-actions'
+    ".back2"/".eyebrow2"), so -- same as the original three -- suppressing the redundant
+    floating pill here loses no real navigation.
+  {% endcomment %}
+  {% if back_url and current_page != "management_dashboard_full" and current_page != "management_dashboard_analytical" and current_page != "management_dashboard_alerts" and current_page != "management_dashboard_focus" and current_page != "management_dashboard_pretty" and current_page != "management_dashboard_pretty_analytical" %}
   <a class="backnav" href="{{ back_url }}" title="Back to {{ back_label }}" aria-label="Back to {{ back_label }}">
     <span class="backnav-arrow" aria-hidden="true">‹</span><span class="backnav-text">{{ back_label }}</span>
   </a>
   {% endif %}
 {% endif %}
 {% endblock %}
+
+{% comment %}
+  Chrome hide/show toggle for the Executive dashboard family (2026-10-06, on request: "add
+  back the app bar on top but add a special button for all dashboad screens to hide it and to
+  bring it back... i thing a button works better because it covers touch navigation as well").
+  Deliberately OUTSIDE {% templatetag openblock %}block chrome{% templatetag closeblock %}
+  itself -- a page that overrides that block to empty (role_select, folders) would otherwise
+  take this button down with it, and the whole point is that it survives even when the chrome
+  it controls is hidden. Gated the same way the <html> class is in this file's own early
+  <head> script -- current_page starting "management_dashboard_" is every one of the 5
+  Executive dashboard URLs and nothing else, so this never appears (and the class it toggles
+  never takes effect, see that script's own comment) on a page with no matching button.
+{% endcomment %}
+{% if "management_dashboard" in current_page %}
+<button type="button" id="dashChromeToggle" class="dash-chrome-toggle" aria-pressed="false">
+  <span class="dct-arrow" aria-hidden="true">&#9652;</span><span class="dct-label">Hide nav</span>
+</button>
+<script>
+  (function () {
+    var KEY = "dashChromeHidden";
+    var btn = document.getElementById("dashChromeToggle");
+    var label = btn.querySelector(".dct-label");
+    var arrow = btn.querySelector(".dct-arrow");
+    function apply(hidden) {
+      document.documentElement.classList.toggle("dash-chrome-hidden", hidden);
+      btn.setAttribute("aria-pressed", hidden ? "true" : "false");
+      btn.title = hidden ? "Show navigation bar" : "Hide navigation bar";
+      label.textContent = hidden ? "Show nav" : "Hide nav";
+      arrow.innerHTML = hidden ? "&#9662;" : "&#9652;";
+    }
+    // Re-read rather than trust the <html> class the <head> script may already have set --
+    // this keeps the button's own label/arrow/aria-pressed in sync even on a page where that
+    // early script didn't run (there is none today, both are gated identically, but this way
+    // the button is never the thing that goes stale if that ever changes).
+    var stored = null;
+    try { stored = localStorage.getItem(KEY); } catch (e) {}
+    apply(stored === "1");
+    btn.addEventListener("click", function () {
+      var hidden = !document.documentElement.classList.contains("dash-chrome-hidden");
+      apply(hidden);
+      try { localStorage.setItem(KEY, hidden ? "1" : "0"); } catch (e) {}
+    });
+  })();
+</script>
+{% endif %}
 
 {% if messages %}
   <div class="container" style="padding-bottom:0">

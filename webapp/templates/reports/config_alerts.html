@@ -69,7 +69,7 @@
       <div class="card"><div class="body" style="padding:14px 18px">
         <div style="display:flex;flex-wrap:wrap;gap:10px">
           {% for row in health_rows %}
-          <button type="button" class="live-chip {% if row.is_live %}is-live{% else %}is-broken{% endif %}"
+          <button type="button" class="live-chip {% if row.is_live %}is-live{% elif row.is_unconfirmed %}is-unconfirmed{% else %}is-broken{% endif %}"
                   data-detail="live-detail-{{ forloop.counter }}"
                   {% if not row.is_live %}data-href="{% url 'config_alert_group_edit' row.group.pk %}"{% endif %}>
             {{ row.group.name }}
@@ -78,9 +78,9 @@
         </div>
         <div id="liveDetailBox" class="cfg-note" style="margin:12px 0 0;display:none"></div>
         {% for row in health_rows %}
-        <template id="live-detail-{{ forloop.counter }}">{% if row.is_live %}This alert is live — it's fully configured and will fire.{% else %}Not live yet:{% for p in row.problems %} {{ p }}{% endfor %} Taking you to its config…{% endif %}</template>
+        <template id="live-detail-{{ forloop.counter }}">{% if row.is_live %}This alert is live — it's fully configured and will fire.{% elif row.is_unconfirmed %}Configured correctly, but hasn't actually sent anything yet:{% for p in row.problems %} {{ p }}{% endfor %}{% else %}Not live yet:{% for p in row.problems %} {{ p }}{% endfor %} Taking you to its config…{% endif %}</template>
         {% endfor %}
-        <small class="cfg-hint" style="display:block;margin-top:10px">Green = fully configured and will fire. Red = click it to see exactly what's missing, then jump straight to that group's config to fix it.</small>
+        <small class="cfg-hint" style="display:block;margin-top:10px">Green = fully configured AND has actually sent at least once. Amber = correctly configured but never confirmed sending yet. Red = click it to see exactly what's missing, then jump straight to that group's config to fix it.</small>
       </div></div>
       {% endif %}
 
@@ -479,12 +479,16 @@
         {% if alert_silences %}
         <div class="cfg-scroll-list">
         <table class="hist">
-          <thead><tr><th>System</th><th>Flag key</th><th>Group</th><th>Reason</th><th>Expires</th><th></th><th></th></tr></thead>
+          <thead><tr><th>System</th><th>Category</th><th>Component</th><th>Group</th><th>Reason</th><th>Expires</th><th></th><th></th></tr></thead>
           <tbody>
           {% for s in alert_silences %}
             <tr{% if not s.active %} style="opacity:.55"{% endif %}>
               <td><b>{{ s.system }}</b></td>
-              <td style="color:var(--muted);font-family:var(--mono, monospace);font-size:12px">{{ s.flag_key }}</td>
+              <td style="color:var(--muted)">{{ s.get_category_display }}</td>
+              <td style="color:var(--muted);font-size:12px">
+                {% if s.flag_key %}<span style="font-family:var(--mono, monospace)">{{ s.flag_key }}</span>
+                {% else %}<span class="chip" style="background:var(--panel-2);color:var(--muted)">All (current + future)</span>{% endif %}
+              </td>
               <td style="color:var(--muted)">{{ s.group.name }}</td>
               <td style="color:var(--muted);font-size:12px">{{ s.reason|default:"—" }}</td>
               <td style="color:var(--muted);font-size:12px">{{ s.expires_at|date:"d M Y" }}</td>
@@ -513,15 +517,24 @@
           <div class="cfg-grid4">
             <label class="field">
               <span>System</span>
-              <select name="system" required>
+              <select name="system" id="silenceSystem" required>
                 <option value="">Choose…</option>
                 {% for s in topology_systems %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
               </select>
             </label>
             <label class="field">
-              <span>Flag key</span>
-              <input type="text" name="flag_key" placeholder="disk:Database:/u01" required>
-              <small class="cfg-hint">Copy it from a fired alert e-mail or the System Admin Report's own flag list — there's no picker for this yet.</small>
+              <span>Category</span>
+              <select name="category" id="silenceCategory" required>
+                <option value="">Choose…</option>
+                {% for cat, label in category_choices %}<option value="{{ cat }}">{{ label }}</option>{% endfor %}
+              </select>
+            </label>
+            <label class="field">
+              <span>Component</span>
+              <select name="flag_key" id="silenceFlagKey">
+                <option value="">All (whole category — current + future)</option>
+              </select>
+              <small class="cfg-hint" id="silenceFlagKeyHint">Pick one system and category first.</small>
             </label>
             <label class="field">
               <span>Digest goes to</span>
@@ -544,6 +557,7 @@
           </div>
           <button class="btn primary cfg-add" type="submit">＋ Silence</button>
         </form>
+        {{ silence_component_map|json_script:"silenceComponentMap" }}
       </div></div>
 
     </div>
@@ -610,6 +624,51 @@
   if (!typeSel || !subtypeField) { return; }
   function sync() { subtypeField.style.display = (typeSel.value === "system") ? "" : "none"; }
   typeSel.addEventListener("change", sync);
+  sync();
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  // Component picker for Alert Silencing (2026-09-30, on request: "in config allow to select
+  // which mount or component before muting") -- flag_key options are derived from real
+  // IssueOccurrence history (silence_component_map, built in config_alerts' own view), not
+  // typed free text. "All" (empty value) is always first and always available -- that's what
+  // silences the WHOLE category, current and future components alike.
+  var sysSel = document.getElementById("silenceSystem");
+  var catSel = document.getElementById("silenceCategory");
+  var flagSel = document.getElementById("silenceFlagKey");
+  var hint = document.getElementById("silenceFlagKeyHint");
+  if (!sysSel || !catSel || !flagSel) { return; }
+
+  var mapEl = document.getElementById("silenceComponentMap");
+  var map = {};
+  try { map = mapEl ? JSON.parse(mapEl.textContent) : {}; } catch (e) { map = {}; }
+
+  function sync() {
+    var components = ((map[sysSel.value] || {})[catSel.value]) || [];
+    flagSel.innerHTML = "";
+    var allOpt = document.createElement("option");
+    allOpt.value = "";
+    allOpt.textContent = "All (whole category — current + future)";
+    flagSel.appendChild(allOpt);
+    components.forEach(function (key) {
+      var opt = document.createElement("option");
+      opt.value = key;
+      opt.textContent = key;
+      flagSel.appendChild(opt);
+    });
+    if (!sysSel.value || !catSel.value) {
+      hint.textContent = "Pick a system and category to see which components have actually fired recently, or leave “All” selected.";
+    } else if (components.length) {
+      hint.textContent = components.length + " component(s) seen in the last 90 days — pick one to silence just that mount, or leave “All” for the whole category.";
+    } else {
+      hint.textContent = "No component under this category has fired for " + sysSel.value + " in the last 90 days yet — “All” still silences the category going forward.";
+    }
+  }
+  sysSel.addEventListener("change", sync);
+  catSel.addEventListener("change", sync);
   sync();
 })();
 </script>
